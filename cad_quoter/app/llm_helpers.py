@@ -12,7 +12,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any, Callable, Dict
 
-from cad_quoter.app import runtime as _runtime
+from cad_quoter.app import runner as _runtime
 
 # Runtime helpers that callers historically imported from ``appV5``.  Expose
 # them here so the large UI module can stay focused on presentation logic.

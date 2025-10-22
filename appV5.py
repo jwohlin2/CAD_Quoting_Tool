@@ -1,4 +1,4 @@
-﻿# -*- coding: utf-8 -*-
+# -*- coding: utf-8 -*-
 # app_gui_occ_flow_v8_single_autollm.py
 r"""
 Single-file CAD Quoter (v8)
@@ -101,7 +101,7 @@ def _coerce_positive_float(value: _AnyForCoerce) -> float | None:
 
 
 _MM_DIM_TOKEN = re.compile(
-    r"(?:Ø|⌀|DIA|REF)?\s*((?:\d+\s*/\s*\d+)|(?:\d+(?:\.\d+)?))\s*(?:MM|MILLIM(?:E|E)T(?:E|)RS?)",
+    r"(?:�|?|DIA|REF)?\s*((?:\d+\s*/\s*\d+)|(?:\d+(?:\.\d+)?))\s*(?:MM|MILLIM(?:E|E)T(?:E|)RS?)",
     re.IGNORECASE,
 )
 
@@ -917,7 +917,7 @@ def _emit_hole_table_ops_cards(
 
         tap_total_min = _render_ops_card(
             lambda text: _push(lines, text),
-            title="Material Removal – Tapping",
+            title="Material Removal � Tapping",
             rows=tap_rows,
         )
 
@@ -1117,9 +1117,12 @@ from cad_quoter.utils.geometry import (
     normalize_scrap_pct,
 )
 from cad_quoter.utils.rendering import ascii_table, draw_kv_table
-from cad_quoter.app.planner_helpers import _process_plan_job
 from cad_quoter.app.env_flags import FORCE_PLANNER
-from cad_quoter.app.planner_adapter import resolve_planner, resolve_pricing_source_value
+from cad_quoter.app.planner_support import (
+    _process_plan_job,
+    resolve_planner,
+    resolve_pricing_source_value,
+)
 
 from cad_quoter.resources.loading import load_json, load_text
 
@@ -1174,9 +1177,9 @@ from cad_quoter.utils.rendering import (
 
 
 
-# ──────────────────────────────────────────────────────────────────────────────
+# ------------------------------------------------------------------------------
 # Helpers: formatting + removal card + per-hole lines (no material per line)
-# ──────────────────────────────────────────────────────────────────────────────
+# ------------------------------------------------------------------------------
 def _render_removal_card(
     lines: list[str],
     *,
@@ -1200,7 +1203,7 @@ def _render_removal_card(
     toolchange_min_deep: float,
     toolchange_min_std: float,
 ) -> None:
-    _push(lines, "MATERIAL REMOVAL – DRILLING")
+    _push(lines, "MATERIAL REMOVAL � DRILLING")
     _push(lines, "=" * 64)
     # Inputs
     _push(lines, "Inputs")
@@ -1210,9 +1213,9 @@ def _render_removal_card(
         rg = str(row_group).upper()
         mg = str(mat_group or "").upper()
         mismatch = (rg != mg and (rg and mg))
-        note = "   (!) mismatch – used row from different group" if mismatch else ""
+        note = "   (!) mismatch � used row from different group" if mismatch else ""
         _push(lines, f"  CSV row group ..... {row_group}{note}")
-    _push(lines, "  Operations ........ Deep-Drill (L/D ≥ 3), Drill")
+    _push(lines, "  Operations ........ Deep-Drill (L/D = 3), Drill")
     _push(
         lines,
         f"  Holes ............. {int(holes_deep)} deep + {int(holes_std)} std  = {int(holes_deep + holes_std)}"
@@ -1256,7 +1259,7 @@ def _render_time_per_hole(
     peck_min_std: float,
     extra_map: MutableMapping[str, Any] | None = None,
 ) -> tuple[float, bool, bool, list[dict[str, Any]]]:
-    _push(lines, "TIME PER HOLE – DRILL GROUPS")
+    _push(lines, "TIME PER HOLE � DRILL GROUPS")
     _push(lines, "-" * 66)
     subtotal_minutes = 0.0
     drill_groups: list[dict[str, Any]] = []
@@ -1310,7 +1313,7 @@ def _render_time_per_hole(
                 f"[removal/drill-line] dia={dia_in:.4f} depth_in={depth_in:.4f} "
                 f"ipr={ipr:.4f} rpm={rpm:.1f} ipm={ipm:.3f} "
                 f"t_cut_min={t_cut_min:.4f} index={float(index_min):.3f} "
-                f"peck={peck_min:.3f}×{n_pecks} t_hole_min={t_hole_min:.4f} "
+                f"peck={peck_min:.3f}�{n_pecks} t_hole_min={t_hole_min:.4f} "
                 f"qty={qty} t_group={t_group:.4f}"
             )
             groups_processed += 1
@@ -1327,9 +1330,9 @@ def _render_time_per_hole(
             )
             _push(
                 lines,
-                f'Dia {dia_in:.3f}" × {qty}  | depth {depth_in:.3f}" | {int(round(sfm))} sfm | '
+                f'Dia {dia_in:.3f}" � {qty}  | depth {depth_in:.3f}" | {int(round(sfm))} sfm | '
                 f'{ipr:.4f} ipr | t/hole {t_hole_min:.2f} min | '
-                f'group {qty}×{t_hole_min:.2f} = {t_group:.2f} min'
+                f'group {qty}�{t_hole_min:.2f} = {t_group:.2f} min'
             )
         except Exception:
             continue
@@ -1536,11 +1539,11 @@ def _render_ops_card(
                 depth_display = "-"
         feed_fmt = r.get("feed_fmt", "-")
         append_line(
-            f'{r.get("label", r.get("desc", "?"))} × {qty}  '
+            f'{r.get("label", r.get("desc", "?"))} � {qty}  '
             f'({(r.get("side", "") or "").upper() or "FRONT"}) | '
             f'depth {depth_display} | '
             f'{feed_fmt} | '
-            f't/hole {t_ph:.2f} min | group {qty}×{t_ph:.2f} = {grp:.2f} min'
+            f't/hole {t_ph:.2f} min | group {qty}�{t_ph:.2f} = {grp:.2f} min'
         )
     append_line("")
     return round(total_min, 2)
@@ -1570,8 +1573,8 @@ def summarize_actions(removal_lines: list[str], planner_ops: list[dict]) -> None
     total = defaultdict(int)
     by_side = defaultdict(lambda: defaultdict(int))
 
-    drill_re = re.compile(r'^Dia\s+[\d\.]+" × (\d+).*(\(.*?\))?', re.IGNORECASE)
-    tap_re = re.compile(r'^\s*#?\d.*\bTAP\b.*×\s+(\d+).*(\(.*?\))?', re.IGNORECASE)
+    drill_re = re.compile(r'^Dia\s+[\d\.]+" � (\d+).*(\(.*?\))?', re.IGNORECASE)
+    tap_re = re.compile(r'^\s*#?\d.*\bTAP\b.*�\s+(\d+).*(\(.*?\))?', re.IGNORECASE)
 
     for ln in removal_lines or []:
         if not isinstance(ln, str):
@@ -1672,7 +1675,7 @@ def _render_milling_removal_card(
         for entry in lines:
             if not isinstance(entry, str):
                 continue
-            if entry.strip().upper().startswith("MATERIAL REMOVAL – MILLING"):
+            if entry.strip().upper().startswith("MATERIAL REMOVAL � MILLING"):
                 existing = True
                 break
     if existing:
@@ -1736,7 +1739,7 @@ def _render_milling_removal_card(
             + max(0.0, toolchanges_min)
         )
 
-    append_line("MATERIAL REMOVAL – MILLING")
+    append_line("MATERIAL REMOVAL � MILLING")
     append_line("-" * 66)
     append_line(
         "FACE TOP | passes {passes} | {rpm} rpm | {ipm:.1f} ipm | t  {minutes:.2f} min".format(
@@ -1988,15 +1991,15 @@ def _compute_drilling_removal_section(
                 }
             )
         if sanitized_rows:
-            lines.append("MATERIAL REMOVAL – DRILLING")
+            lines.append("MATERIAL REMOVAL � DRILLING")
             lines.append("=" * 64)
-            lines.append("TIME PER HOLE – DRILL GROUPS")
+            lines.append("TIME PER HOLE � DRILL GROUPS")
             lines.append("-" * 66)
             for row in sanitized_rows:
                 lines.append(
-                    f'Dia {row["diameter_in"]:.3f}" × {row["qty"]}  | depth {row["depth_in"]:.3f}" | '
+                    f'Dia {row["diameter_in"]:.3f}" � {row["qty"]}  | depth {row["depth_in"]:.3f}" | '
                     f"{int(round(row['sfm']))} sfm | {row['ipr']:.4f} ipr | t/hole {row['minutes_per_hole']:.2f} min | "
-                    f"group {row['qty']}×{row['minutes_per_hole']:.2f} = {row['group_minutes']:.2f} min"
+                    f"group {row['qty']}�{row['minutes_per_hole']:.2f} = {row['group_minutes']:.2f} min"
                 )
             lines.append("")
 
@@ -2061,7 +2064,7 @@ def _compute_drilling_removal_section(
             _push(lines, f"[DEBUG] drilling_minutes_total={drill_minutes_total:.2f} min")
             _push(
                 lines,
-                f"Subtotal (per-hole × qty) . {drill_minutes_subtotal:.2f} min  ("
+                f"Subtotal (per-hole � qty) . {drill_minutes_subtotal:.2f} min  ("
                 f"{fmt_hours(minutes_to_hours(drill_minutes_subtotal))})",
             )
             _push(
@@ -2696,9 +2699,9 @@ APP_ENV = AppEnvironment.from_env()
 EXTRA_DETAIL_RE = re.compile(r"^includes\b.*extras\b", re.IGNORECASE)
 
 
-# ──────────────────────────────────────────────────────────────────────────────
+# ------------------------------------------------------------------------------
 # Helpers: formatting + removal card + per-hole lines (no material per line)
-# ──────────────────────────────────────────────────────────────────────────────
+# ------------------------------------------------------------------------------
 
 def _ensure_list(value: Any, fallback: Iterable[Any] | None = None) -> list[Any]:
     """Return ``value`` coerced to a list with an optional fallback."""
@@ -2958,9 +2961,9 @@ def _is_pandas_dataframe(obj: Any) -> TypeGuard[PandasDataFrame]:
     except Exception:
         return False
 
-# ───────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------
 # Sync the estimator's drilling hours into all rendered views
-# ───────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------
 T = TypeVar("T")
 def _count_recognized_ops(plan_summary: Mapping[str, Any] | None) -> int:
     """Return a conservative count of recognized planner operations."""
@@ -3318,7 +3321,7 @@ except Exception:
     fitz = None  # type: ignore[assignment]
     _HAS_PYMUPDF = False
 
-DIM_RE = re.compile(r"(?:[Øø⌀]|DIAM|DIA)\s*([0-9.+-]+)|R\s*([0-9.+-]+)|([0-9.+-]+)\s*[xX]\s*([0-9.+-]+)")
+DIM_RE = re.compile(r"(?:[��?]|DIAM|DIA)\s*([0-9.+-]+)|R\s*([0-9.+-]+)|([0-9.+-]+)\s*[xX]\s*([0-9.+-]+)")
 
 def load_drawing(path: Path) -> Drawing:
     ezdxf_mod = typing.cast(_EzdxfModule, _require_ezdxf())
@@ -3693,7 +3696,7 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
     material = material_block
     material_detail_for_breakdown = material
 
-    MATERIAL_WARNING_LABEL = "⚠ MATERIALS MISSING"
+    MATERIAL_WARNING_LABEL = "? MATERIALS MISSING"
     material_warning_entries: list[Mapping[str, Any]] = []
     cost_breakdown_entries: list[tuple[str, float]] = []
 
@@ -3939,7 +3942,7 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
     # Shipping is displayed in exactly one section of the quote to avoid
     # conflicting totals.  Prefer the pass-through value when available and
     # otherwise fall back to a material-specific entry before rendering.
-    shipping_pipeline = "pass_through"  # pipeline (a) – display under Pass-Through
+    shipping_pipeline = "pass_through"  # pipeline (a) � display under Pass-Through
     shipping_source = "pass_through"
     shipping_raw_value: Any = pass_through.get("Shipping")
     if not shipping_raw_value:
@@ -5274,7 +5277,7 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
     app_meta = result.setdefault("app_meta", {})
     # Only surface drill debug when LLM debug is enabled for this quote.
     if drill_debug_entries and llm_debug_enabled_flag:
-        # Order so legacy per-bin “OK …” lines appear first, then tables/summary.
+        # Order so legacy per-bin �OK �� lines appear first, then tables/summary.
         def _dbg_sort(a: str, b: str) -> int:
             a_ok = a.strip().lower().startswith("ok ")
             b_ok = b.strip().lower().startswith("ok ")
@@ -5317,7 +5320,7 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
             _push(lines, "Red Flags")
             _push(lines, divider)
             for flag in display_red_flags:
-                write_wrapped(f"⚠️ {flag}", "  ")
+                write_wrapped(f"?? {flag}", "  ")
     _push(lines, "")
 
     narrative = result.get("narrative") or breakdown.get("narrative")
@@ -5354,7 +5357,7 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
             label = _sanitize_render_text(entry.get("label")).strip()
             detail = _sanitize_render_text(entry.get("detail")).strip()
             if label and detail:
-                combined = f"{label} — {detail}"
+                combined = f"{label} � {detail}"
             else:
                 combined = label or detail
             combined = combined.strip()
@@ -5870,7 +5873,7 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
 
             if need_len and need_wid and need_thk:
                 blank_lines.append(
-                    f"  Required blank (w/ margins): {need_len:.2f} × {need_wid:.2f} × {need_thk:.2f} in"
+                    f"  Required blank (w/ margins): {need_len:.2f} � {need_wid:.2f} � {need_thk:.2f} in"
                 )
 
             source_tag = None
@@ -5887,10 +5890,10 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
                 part_label = ""
                 if isinstance(result, Mapping):
                     part_label = str(result.get("mcmaster_part") or "").strip()
-                part_display = part_label or "—"
+                part_display = part_label or "�"
                 stock_line = (
                     "  Rounded to catalog: "
-                    f"{stock_len_val:.2f} × {stock_wid_val:.2f} × {stock_thk_val:.3f} in"
+                    f"{stock_len_val:.2f} � {stock_wid_val:.2f} � {stock_thk_val:.3f} in"
                     f" (McMaster, {part_display})"
                 )
                 if source_tag:
@@ -6143,7 +6146,7 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
                 ):
                     scrap_credit_lines.append(
                         "    based on "
-                        f"{_format_weight_lb_oz(scrap_mass_val)} × {fmt_money(scrap_credit_unit_price_lb, currency)} / lb"
+                        f"{_format_weight_lb_oz(scrap_mass_val)} � {fmt_money(scrap_credit_unit_price_lb, currency)} / lb"
                     )
             if scrap_credit_lines:
                 detail_lines.extend(scrap_credit_lines)
@@ -6297,7 +6300,7 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
             if stock_L_val and stock_W_val and stock_T_val:
                 stock_dims_candidate = (float(stock_L_val), float(stock_W_val), float(stock_T_val))
             if stock_L_val and stock_W_val and stock_T_val:
-                stock_line = f"{float(stock_L_val):.2f} × {float(stock_W_val):.2f} × {float(stock_T_val):.3f} in"
+                stock_line = f"{float(stock_L_val):.2f} � {float(stock_W_val):.2f} � {float(stock_T_val):.3f} in"
             else:
                 inferred_dims = infer_plate_lw_in(g)
                 L_disp = stock_L_val
@@ -6313,12 +6316,12 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
                 if T_disp_val is None and isinstance(g, dict):
                     T_disp_val = _coerce_float_or_none(g.get("thickness_in_guess"))
                 if L_disp and W_disp and T_disp_val:
-                    stock_line = f"{float(L_disp):.2f} × {float(W_disp):.2f} × {float(T_disp_val):.3f} in"
+                    stock_line = f"{float(L_disp):.2f} � {float(W_disp):.2f} � {float(T_disp_val):.3f} in"
                 else:
-                    T_disp = "—"
+                    T_disp = "�"
                     if T_disp_val is not None:
                         T_disp = f"{float(T_disp_val):.3f}"
-                    stock_line = f"— × — × {T_disp} in"
+                    stock_line = f"� � � � {T_disp} in"
             if isinstance(mat_info, dict):
                 mat_info["stock_size_display"] = stock_line
             if detail_lines:
@@ -7572,7 +7575,7 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
         process_meta=process_meta,
     )
 
-    # 1a) minutes→$ for planner buckets that have minutes but no dollars
+    # 1a) minutes?$ for planner buckets that have minutes but no dollars
     for k, meta in (canonical_bucket_summary or {}).items():
         minutes = float(meta.get("minutes") or 0.0)
         have_amount = float(process_costs_for_render.get(k) or 0.0)
@@ -7585,7 +7588,7 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
                 if label:
                     bucket_minutes_detail[label] = minutes
 
-    # 1b) minutes→$ for the drilling minutes engine (if planner didn’t emit a drilling bucket)
+    # 1b) minutes?$ for the drilling minutes engine (if planner didn�t emit a drilling bucket)
     drill_summary_source: Mapping[str, Any] | None = None
     if isinstance(process_plan_summary_local, _MappingABC):
         candidate = process_plan_summary_local.get("drilling")
@@ -7984,7 +7987,7 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
         ]
         if top_summary:
             summary_bits.append("largest bucket(s): " + ", ".join(top_summary))
-        bucket_why_summary_line = "Process buckets — " + "; ".join(summary_bits)
+        bucket_why_summary_line = "Process buckets � " + "; ".join(summary_bits)
     if proc_total_rendered or hrs_total_rendered:
         for offset, text in enumerate(lines[process_section_start:]):
             stripped = str(text or "").strip()
@@ -8571,7 +8574,7 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
     # NOTE: Patch 3 keeps the hole-table hook active so downstream cards continue to render.
     append_lines(removal_card_lines)
 
-    removal_drill_heading = "MATERIAL REMOVAL – DRILLING"
+    removal_drill_heading = "MATERIAL REMOVAL � DRILLING"
     removal_card_has_drill = False
     for line_text in removal_card_lines:
         if isinstance(line_text, str) and line_text.strip().upper().startswith(
@@ -8667,9 +8670,9 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
                 t_hole = float(group.get("t_hole_min", 0.0))
                 t_group = float(group.get("t_group_min", qty * t_hole))
                 append_line(
-                    f'Dia {dia:.3f}" × {qty}  | depth {depth:.3f}" | '
+                    f'Dia {dia:.3f}" � {qty}  | depth {depth:.3f}" | '
                     f"{int(round(sfm))} sfm | {ipr:.4f} ipr | "
-                    f"t/hole {t_hole:.2f} min | group {qty}×{t_hole:.2f} = {t_group:.2f} min"
+                    f"t/hole {t_hole:.2f} min | group {qty}�{t_hole:.2f} = {t_group:.2f} min"
                 )
             subtotal_minutes_raw = 0.0
             for group in drill_groups_render:
@@ -8776,7 +8779,7 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
 
             append_line("-" * 66)
             append_line(
-                f"Subtotal (per-hole × qty) . {drill_minutes_subtotal:.2f} min  ("
+                f"Subtotal (per-hole � qty) . {drill_minutes_subtotal:.2f} min  ("
                 f"{fmt_hours(minutes_to_hours(drill_minutes_subtotal))})"
             )
             append_line(
@@ -9469,7 +9472,7 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
                 if delta_float < -0.01:
                     delta_prefix = "-"
                 elif abs(delta_float) <= 0.01:
-                    delta_prefix = "±"
+                    delta_prefix = "�"
                 else:
                     delta_prefix = "+"
                 delta_text = fmt_money(abs(delta_float), entry.get("currency", currency))
@@ -9478,7 +9481,7 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
                 base_line = f"  {label_text}: {amount_text}"
             detail_text = str(entry.get("detail") or "").strip()
             if detail_text:
-                base_line = f"{base_line} — {detail_text}"
+                base_line = f"{base_line} � {detail_text}"
             quick_section_lines.append(base_line)
 
     while quick_section_lines and quick_section_lines[-1] == "":
@@ -9620,14 +9623,14 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
         # Append the compact removal debug table (if available)
         append_removal_debug_if_enabled(lines, removal_summary_for_display)
 
-    # ──────────────────────────────────────────────────────────────────────────
+    # --------------------------------------------------------------------------
     # Nice, compact sanity check at the very end (only when debug is enabled)
     # Shows whether drilling hours are consistent across views:
     #  - planner bucket minutes
     #  - canonical bucket rollup (minutes)
     #  - hour summary entry
     #  - process_meta['drilling']['hr']
-    # ──────────────────────────────────────────────────────────────────────────
+    # --------------------------------------------------------------------------
     try:
         _llm_dbg = _resolve_llm_debug_enabled(result, breakdown, params, {"llm_debug_enabled": True})
     except Exception:
@@ -9651,7 +9654,7 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
             if isinstance(_canon, _MappingABC):
                 _canon_min = _coerce_float_or_none(_canon.get("drilling"))
                 if _canon_min is not None:
-                    _canon_min = round(float(_canon_min) * 60.0, 1)  # hours→minutes
+                    _canon_min = round(float(_canon_min) * 60.0, 1)  # hours?minutes
 
             _hsum = locals().get("hour_summary_entries")
             if isinstance(_hsum, _MappingABC):
@@ -9665,10 +9668,10 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
             if isinstance(_pmeta, _MappingABC):
                 _meta_hr = _coerce_float_or_none((_pmeta.get("drilling") or {}).get("hr"))
 
-            _push(lines, "DEBUG — Drilling sanity")
+            _push(lines, "DEBUG � Drilling sanity")
             _push(lines, divider)
             def _fmt(x, unit):
-                return "—" if x is None or not math.isfinite(float(x)) else f"{float(x):.2f} {unit}"
+                return "�" if x is None or not math.isfinite(float(x)) else f"{float(x):.2f} {unit}"
             _push(lines, 
                 "  bucket(planner): "
                 + _fmt(_planner_min, "min")
@@ -9999,7 +10002,7 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
     doc = doc_builder.build_doc()
     text = render_quote_doc(doc, divider=divider)
 
-    # ASCII-sanitize output to avoid mojibake like '×' on some Windows setups
+    # ASCII-sanitize output to avoid mojibake like '�' on some Windows setups
     text = _sanitize_render_text(text)
 
     return text
@@ -10086,10 +10089,10 @@ if not str(PARAMS_DEFAULT.get("SpeedsFeedsCSVPath", "")).strip():
 TIME_RE = r"\b(?:hours?|hrs?|hr|time|min(?:ute)?s?)\b"
 
 _TOLERANCE_VALUE_RE = re.compile(
-    r"(?:±|\+/-|\+-)?\s*(?P<value>(?:\d+)?\.?\d+)\s*(?P<unit>mm|millimeters?|µm|um|in|inch(?:es)?|\"|thou|thousandths)?",
+    r"(?:�|\+/-|\+-)?\s*(?P<value>(?:\d+)?\.?\d+)\s*(?P<unit>mm|millimeters?|�m|um|in|inch(?:es)?|\"|thou|thousandths)?",
     re.IGNORECASE,
 )
-_TIGHT_TOL_TRIGGER_RE = re.compile(r"(±\s*0\.000[12])|(tight\s*tolerance)", re.IGNORECASE)
+_TIGHT_TOL_TRIGGER_RE = re.compile(r"(�\s*0\.000[12])|(tight\s*tolerance)", re.IGNORECASE)
 
 def _tolerance_values_from_any(value: Any) -> list[float]:
     """Return tolerance magnitudes (inches) parsed from an arbitrary input value."""
@@ -10125,7 +10128,7 @@ def _tolerance_values_from_any(value: Any) -> list[float]:
             continue
         if unit in {"mm", "millimeter", "millimeters"}:
             magnitude /= 25.4
-        elif unit in {"µm", "um"}:
+        elif unit in {"�m", "um"}:
             magnitude /= 1000.0  # to mm
             magnitude /= 25.4
         elif unit in {"thou", "thousandths"}:
@@ -12641,7 +12644,7 @@ def extract_2d_features_from_pdf_vector(pdf_path: str) -> dict:
     text = str(page_any.get_text("text") or "").lower()
     drawings = page_any.get_drawings()
 
-    # perimeter from vector segments (points are in PostScript points; 1 pt = 0.352777… mm)
+    # perimeter from vector segments (points are in PostScript points; 1 pt = 0.352777� mm)
     pt_to_mm = 0.352777778
     per_pts = 0.0
 
@@ -12876,26 +12879,26 @@ RE_THICK  = RE_DEPTH
 
 
 RE_MAT    = re.compile(r"\b(MATL?|MATERIAL)\b\s*[:=\-]?\s*([A-Z0-9 \-\+/\.]+)", re.I)
-RE_HARDNESS = re.compile(r"(\d+(?:\.\d+)?)\s*(?:[-–]\s*(\d+(?:\.\d+)?))?\s*HRC", re.I)
+RE_HARDNESS = re.compile(r"(\d+(?:\.\d+)?)\s*(?:[-�]\s*(\d+(?:\.\d+)?))?\s*HRC", re.I)
 RE_HEAT_TREAT = re.compile(r"HEAT\s*TREAT(?:ED|\s+TO)?|\bQUENCH\b|\bTEMPER\b", re.I)
 RE_COAT   = re.compile(
     r"\b(ANODIZE(?:\s*(?:CLR|BLACK|BLK))?|BLACK OXIDE|ZINC PLATE|NICKEL PLATE|PASSIVATE|CHEM FILM|IRIDITE|ALODINE|POWDER COAT|E-?COAT|PAINT)\b",
     re.I,
 )
-RE_TOL    = re.compile(r"\bUNLESS OTHERWISE SPECIFIED\b.*?([±\+\-]\s*\d+\.\d+)", re.I | re.S)
+RE_TOL    = re.compile(r"\bUNLESS OTHERWISE SPECIFIED\b.*?([�\+\-]\s*\d+\.\d+)", re.I | re.S)
 RE_FLIP_CALL  = re.compile(r"OP\.\s*\d+\s*FLIP|FLIP\s+PART", re.I)
 RE_JIG_GRIND  = re.compile(r"\bJIG\s*GRIND\b", re.I)
 RE_REAM       = re.compile(r"\bREAM(?:ING)?\b", re.I)
-RE_TIGHT_TOL  = re.compile(r"±\s*0\.000[12]", re.I)
+RE_TIGHT_TOL  = re.compile(r"�\s*0\.000[12]", re.I)
 RE_FIT_CLASS  = re.compile(r"\bH\d\s*/\s*G\d\b", re.I)
-RE_CSK_ANGLE  = re.compile(r"(60|82|90|100|110|120)\s*°", re.I)
+RE_CSK_ANGLE  = re.compile(r"(60|82|90|100|110|120)\s*�", re.I)
 RE_SLOT_NOTE  = re.compile(r"SLOT[^\n]*?(\d+(?:\.\d+)?)\s*(?:WIDE|WIDTH)?", re.I)
 RE_HARDWARE_LINE = re.compile(r"\((\d+)\)\s*([A-Z0-9][A-Z0-9 \-/#\.]+)", re.I)
 
 RE_COORD_HDR = re.compile(r"\bLIST\s+OF\s+COORDINATES\b", re.I)
 RE_COORD_ROW = re.compile(r"([A-Z]\d+)\s+([\-+]?\d+(?:\.\d+)?)\s+([\-+]?\d+(?:\.\d+)?)")
 RE_FINISH_STRONG = re.compile(r"\b(ANODIZE(?:\s+BLACK|\s+CLEAR)?|BLACK OXIDE|ZINC PLATE|NICKEL PLATE|PASSIVATE|PHOSPHATE|ECOAT|E-?COAT)\b", re.I)
-RE_HEAT_TREAT_STRONG = re.compile(r"\b(A2|D2|O1|H13|4140|4340|S7|A36)\b.*?(HRC\s*\d{2}|\d{2}[-–]\d{2}\s*HRC)?", re.I)
+RE_HEAT_TREAT_STRONG = re.compile(r"\b(A2|D2|O1|H13|4140|4340|S7|A36)\b.*?(HRC\s*\d{2}|\d{2}[-�]\d{2}\s*HRC)?", re.I)
 RE_MAT_STRONG = re.compile(r"\b(MATERIAL|MAT)\b[:\s]*([A-Z0-9\-\s/\.]+)")
 RE_TAP_TOKEN = re.compile(
     r"(#\d{1,2}-\d+|\d+/\d+-\d+|M\d+(?:\.\d+)?x\d+(?:\.\d+)?|\d+/\d+\s*-\s*NPT|N\.?P\.?T)",
@@ -13305,7 +13308,7 @@ def harvest_gdt(doc) -> dict[str, Any]:
     upper = "\n".join(texts).upper()
     return {
         "gdt": {
-            "true_position": len(re.findall(r"\bTRUE\s*POSITION\b|⌀\s*POS", upper)),
+            "true_position": len(re.findall(r"\bTRUE\s*POSITION\b|?\s*POS", upper)),
             "flatness": len(re.findall(r"\bFLATNESS\b", upper)),
             "parallelism": len(re.findall(r"\bPARALLELISM\b", upper)),
             "profile": len(re.findall(r"\bPROFILE\b", upper)),
@@ -13364,9 +13367,9 @@ def _iter_table_text(doc):
 # Aggregated totals live in geo["ops_summary"] with per-row detail for auditing.
 
 _OP_WORDS = {
-    "cbore": r"(?:C['’]?\s*BORE|CBORE|COUNTER\s*BORE)",
-    "csk": r"(?:C['’]?\s*SINK|CSK|COUNTER\s*SINK)",
-    "cdrill": r"(?:C['’]?\s*DRILL|CENTER\s*DRILL|SPOT\s*DRILL|SPOT)",
+    "cbore": r"(?:C['�]?\s*BORE|CBORE|COUNTER\s*BORE)",
+    "csk": r"(?:C['�]?\s*SINK|CSK|COUNTER\s*SINK)",
+    "cdrill": r"(?:C['�]?\s*DRILL|CENTER\s*DRILL|SPOT\s*DRILL|SPOT)",
     "tap": r"\bTAP\b",
     "thru": r"\bTHRU\b",
     "jig": r"\bJIG\s*GRIND\b",
@@ -13378,7 +13381,7 @@ _SIDE_FRONT = re.compile(r"\b(?:FROM\s+)?FRONT\b", re.I)
 
 
 def _norm_txt(s: str) -> str:
-    s = (s or "").replace("\u00D8", "Ø").replace("’", "'").upper()
+    s = (s or "").replace("\u00D8", "�").replace("�", "'").upper()
     s = re.sub(r"\s+", " ", s).strip()
     return s
 
@@ -13636,14 +13639,14 @@ def _iter_text_with_xy(doc):
 
 
 def _normalize(s: str) -> str:
-    return " ".join((s or "").replace("\u00D8", "Ø").replace("ø", "Ø").split())
+    return " ".join((s or "").replace("\u00D8", "�").replace("�", "�").split())
 
 
 def _looks_like_hole_header(s: str) -> bool:
     U = s.upper()
     return (
         ("HOLE" in U)
-        and ("REF" in U or "Ø" in U or "DIA" in U)
+        and ("REF" in U or "�" in U or "DIA" in U)
         and ("QTY" in U)
         and ("DESC" in U or "DESCRIPTION" in U)
     )
@@ -13676,7 +13679,7 @@ def extract_hole_table_from_text(doc, y_tol: float = 0.04, min_rows: int = 5):
             xs: dict[str, float] = {}
             for s, x, _ in by_y[y]:
                 U = s.upper()
-                if "REF" in U or "Ø" in U or "DIA" in U:
+                if "REF" in U or "�" in U or "DIA" in U:
                     xs["REF"] = x
                 elif "QTY" in U or "QUANTITY" in U:
                     xs["QTY"] = x
@@ -13748,7 +13751,7 @@ def extract_hole_table_from_text(doc, y_tol: float = 0.04, min_rows: int = 5):
             return int(m.group()) if m else 0
 
     def parse_dia_inch(s: str) -> float | None:
-        s = (s or "").strip().lstrip("Ø⌀\u00D8 ").strip()
+        s = (s or "").strip().lstrip("�?\u00D8 ").strip()
         if re.fullmatch(r"\d+/\d+", s):
             try:
                 return float(Fraction(s))
@@ -13768,7 +13771,7 @@ def extract_hole_table_from_text(doc, y_tol: float = 0.04, min_rows: int = 5):
             continue
         d = parse_dia_inch(r["ref"])
         if d is None:
-            mm = re.search(r"[Ø⌀\u00D8]?\s*((?:\d+)?\.\d+|\d+/\d+|\d+(?:\.\d+)?)", r["desc"])
+            mm = re.search(r"[�?\u00D8]?\s*((?:\d+)?\.\d+|\d+/\d+|\d+(?:\.\d+)?)", r["desc"])
             d = parse_dia_inch(mm.group(1)) if mm else None
         if d is None:
             continue
@@ -13867,7 +13870,7 @@ def hole_count_from_acad_table(doc) -> dict[str, Any]:
         if c_ref is None:
             c_ref = find_col("DIA")
         if c_ref is None:
-            c_ref = find_col("Ø")
+            c_ref = find_col("�")
 
         c_hole = find_col("HOLE")
 
@@ -13932,7 +13935,7 @@ def hole_count_from_acad_table(doc) -> dict[str, Any]:
 
             def _parse_diam(s: str):
                 s = s.strip().upper()
-                m = re.search(r"(\d+(?:\.\d+)?)\s*(?:±\s*\d+(?:\.\d+)?)?$", s) or re.search(
+                m = re.search(r"(\d+(?:\.\d+)?)\s*(?:�\s*\d+(?:\.\d+)?)?$", s) or re.search(
                     r"(\d+)\s*/\s*(\d+)", s
                 )
                 if m:
@@ -13945,7 +13948,7 @@ def hole_count_from_acad_table(doc) -> dict[str, Any]:
                         return float(m.group(1))
                     except Exception:
                         return None
-                m = re.search(r"[Ø⌀]\s*(\d+(?:\.\d+)?)", s)
+                m = re.search(r"[�?]\s*(\d+(?:\.\d+)?)", s)
                 return float(m.group(1)) if m else None
 
             d = _parse_diam(ref_txt) or _parse_diam(desc)
@@ -14045,9 +14048,9 @@ def hole_count_from_text_table(doc, lines: Sequence[str] | None = None) -> tuple
         else:
             q = None
 
-        mref = re.search(r"\bREF\s*[Ø⌀]?\s*(\d+(?:\.\d+)?)", u)
+        mref = re.search(r"\bREF\s*[�?]?\s*(\d+(?:\.\d+)?)", u)
         if not mref:
-            mref = re.search(r"[Ø⌀]\s*(\d+(?:\.\d+)?)", u)
+            mref = re.search(r"[�?]\s*(\d+(?:\.\d+)?)", u)
         if mref and mqty:
             d = round(float(mref.group(1)), 4)
             fam[d] = fam.get(d, 0) + int(mqty.group(1))
@@ -14123,7 +14126,7 @@ def derive_inference_knobs(
         int(geometry_hole_count or 0),
     )
     if hole_count_hint:
-        fixture_signals.append(f"Hole count ≈ {hole_count_hint}")
+        fixture_signals.append(f"Hole count � {hole_count_hint}")
         hole_component = max(0.0, min(8.0, hole_count_hint / 16.0))
         if hole_component > 0:
             fixture_components["hole_population_hr"] = round(hole_component, 3)
@@ -14139,7 +14142,7 @@ def derive_inference_knobs(
     if thickness_in is None and stock_plan:
         thickness_in = stock_plan.get("stock_thk_in")
     if isinstance(thickness_in, (int, float)) and thickness_in > 0:
-        fixture_signals.append(f"Thickness ≈ {float(thickness_in):.2f} in")
+        fixture_signals.append(f"Thickness � {float(thickness_in):.2f} in")
         if thickness_in >= 2.0:
             thick_component = 1.0
         elif thickness_in >= 1.25:
@@ -14153,7 +14156,7 @@ def derive_inference_knobs(
     stock_len = float(stock_plan.get("stock_len_in") or 0.0) if stock_plan else 0.0
     stock_wid = float(stock_plan.get("stock_wid_in") or 0.0) if stock_plan else 0.0
     if stock_len and stock_wid:
-        fixture_signals.append(f"Stock blank ≈ {stock_len:.1f}×{stock_wid:.1f} in")
+        fixture_signals.append(f"Stock blank � {stock_len:.1f}�{stock_wid:.1f} in")
         blank_area = stock_len * stock_wid
         if blank_area >= 400:
             area_component = 1.2
@@ -14167,7 +14170,7 @@ def derive_inference_knobs(
 
     part_mass_lb = float(stock_plan.get("part_mass_lb") or 0.0) if stock_plan else 0.0
     if part_mass_lb:
-        fixture_signals.append(f"Part mass ≈ {part_mass_lb:.1f} lb")
+        fixture_signals.append(f"Part mass � {part_mass_lb:.1f} lb")
         if part_mass_lb >= 45:
             mass_component = 1.5
         elif part_mass_lb >= 25:
@@ -14216,7 +14219,7 @@ def derive_inference_knobs(
                 qty = 0
             spec = detail.get("spec") or ""
             if qty and spec:
-                tap_signals.append(f"{qty}×{spec}")
+                tap_signals.append(f"{qty}�{spec}")
         if not tap_signals and combined_agg.get("tap_qty"):
             tap_signals.append(f"Tap qty {combined_agg.get('tap_qty')}")
         npt_inspection_hr = 0.0
@@ -14266,7 +14269,7 @@ def derive_inference_knobs(
             csk_signals.append("Countersink FRONT/BACK callout")
         angle_matches = sorted({match.group(1) for match in RE_CSK_ANGLE.finditer(tokens_upper)})
         if angle_matches:
-            csk_signals.append(f"Countersink angles {', '.join(angle_matches)}°")
+            csk_signals.append(f"Countersink angles {', '.join(angle_matches)}�")
         knobs["countersink"] = {
             "confidence": "high",
             "signals": csk_signals,
@@ -14286,13 +14289,13 @@ def derive_inference_knobs(
     fit_matches = list(RE_FIT_CLASS.finditer(tokens_upper))
     precision_signals: list[str] = []
     if jig_matches:
-        precision_signals.append(f"JIG GRIND callouts ×{len(jig_matches)}")
+        precision_signals.append(f"JIG GRIND callouts �{len(jig_matches)}")
     if ream_matches:
-        precision_signals.append(f"REAM instructions ×{len(ream_matches)}")
+        precision_signals.append(f"REAM instructions �{len(ream_matches)}")
     if tight_tol_matches:
-        precision_signals.append(f"±0.0002 tolerance mentions ×{len(tight_tol_matches)}")
+        precision_signals.append(f"�0.0002 tolerance mentions �{len(tight_tol_matches)}")
     if fit_matches:
-        precision_signals.append(f"Fit classes (H/G) ×{len(fit_matches)}")
+        precision_signals.append(f"Fit classes (H/G) �{len(fit_matches)}")
     if precision_signals:
         jig_hr = len(jig_matches) * (JIG_GRIND_MIN_PER_FEATURE / 60.0)
         ream_hr = len(ream_matches) * (REAM_MIN_PER_FEATURE / 60.0)
@@ -14333,7 +14336,7 @@ def derive_inference_knobs(
             material_signals.append(line)
         if hardness_range:
             lo, hi = hardness_range
-            material_signals.append(f"Hardness target {lo:.0f}–{hi:.0f} HRC" if lo != hi else f"Hardness target {lo:.0f} HRC")
+            material_signals.append(f"Hardness target {lo:.0f}�{hi:.0f} HRC" if lo != hi else f"Hardness target {lo:.0f} HRC")
         if heat_treat_required and "HEAT TREAT" not in material_signals:
             material_signals.append("HEAT TREAT callout")
     if material_signals:
@@ -14417,7 +14420,7 @@ def derive_inference_knobs(
         if tap_family_count:
             tool_signals.append(f"Tap sizes {tap_family_count}")
         if csk_angles:
-            tool_signals.append(f"CSK angles {', '.join(csk_angles)}°")
+            tool_signals.append(f"CSK angles {', '.join(csk_angles)}�")
         knobs["toolchange_families"] = {
             "confidence": "high",
             "signals": tool_signals,
@@ -14448,7 +14451,7 @@ def derive_inference_knobs(
         milling_adder = max(0.1 if pocket_area or slot_signals else 0.0, min(milling_adder, 2.0))
         knob_signals = []
         if pocket_area:
-            knob_signals.append(f"Pocket area ~{pocket_area:.2f} in² across {pocket_count} loops")
+            knob_signals.append(f"Pocket area ~{pocket_area:.2f} in� across {pocket_count} loops")
         knob_signals.extend(slot_signals)
         knobs["pocketing_slotting"] = {
             "confidence": "medium",
@@ -14495,9 +14498,9 @@ def derive_inference_knobs(
         stock_wid = stock_plan.get("stock_wid_in")
         stock_thk = stock_plan.get("stock_thk_in")
         if stock_len and stock_wid and stock_thk:
-            stock_signals.append(f"Stock {stock_len}×{stock_wid}×{stock_thk} in")
+            stock_signals.append(f"Stock {stock_len}�{stock_wid}�{stock_thk} in")
         if stock_plan.get("part_mass_lb"):
-            stock_signals.append(f"Net mass ≈ {stock_plan['part_mass_lb']:.2f} lb")
+            stock_signals.append(f"Net mass � {stock_plan['part_mass_lb']:.2f} lb")
         if stock_signals:
             knobs["stock_selection"] = {
                 "confidence": "high",
@@ -15527,7 +15530,7 @@ def extract_2d_features_from_dxf_or_dwg(path: str | Path) -> dict[str, Any]:
     # Keep provenance explicit with the tuned mm thresholds
     geo.setdefault("provenance", {})["holes"] = (
         "GEOM (concentric-dedup, center="
-        f"{CENTER_BIN_MM:.3f} mm, prox={CENTER_PROX_MM:.3f} mm, Î”≥{MIN_DD_MM:.2f} mm)"
+        f"{CENTER_BIN_MM:.3f} mm, prox={CENTER_PROX_MM:.3f} mm, Δ={MIN_DD_MM:.2f} mm)"
     )
 
     if table_info.get("hole_count"):
@@ -16435,9 +16438,9 @@ class App(tk.Tk):
         limit: int | None = None
         try:
             limit = self._sync_llm_thread_limit(persist=False)
-            status = "Loading Vision LLM (GPU)…"
+            status = "Loading Vision LLM (GPU)�"
             if limit:
-                status = f"Loading Vision LLM (GPU, {limit} CPU threads)…"
+                status = f"Loading Vision LLM (GPU, {limit} CPU threads)�"
             self.status_var.set(status)
             self.update_idletasks()
         except Exception:
@@ -16453,9 +16456,9 @@ class App(tk.Tk):
             self._llm_load_error = exc
             try:
                 limit = self._sync_llm_thread_limit(persist=False)
-                msg = f"Vision LLM GPU load failed ({exc}); retrying CPU mode…"
+                msg = f"Vision LLM GPU load failed ({exc}); retrying CPU mode�"
                 if limit:
-                    msg = f"{msg[:-1]} with {limit} CPU threads…)"
+                    msg = f"{msg[:-1]} with {limit} CPU threads�)"
                 self.status_var.set(msg)
                 self.update_idletasks()
             except Exception:
@@ -16655,7 +16658,7 @@ class App(tk.Tk):
             if full_row is not None and "Variable ID" in full_row:
                 var_id = str(full_row.get("Variable ID", "") or "").strip()
                 if var_id:
-                    label_text = f"{var_id} • {label_text}"
+                    label_text = f"{var_id} � {label_text}"
             display_hint = control_spec.display_label.strip()
             if display_hint and display_hint.lower() not in {"number", "text"}:
                 label_text = f"{label_text}\n[{display_hint}]"
@@ -16691,7 +16694,7 @@ class App(tk.Tk):
                 if info_indicator is None:
                     info_indicator = ttk.Label(
                         control_container,
-                        text="ⓘ",
+                        text="?",
                         padding=(4, 0),
                         cursor="question_arrow",  # show question cursor while keeping tooltip
                         takefocus=0,
@@ -17229,7 +17232,7 @@ class App(tk.Tk):
     # ----- Full flow: CAD ? GEO ? LLM ? Quote -----
     def action_full_flow(self):
         # ---------- choose file ----------
-        self.status_var.set("Opening CAD/Drawing…")
+        self.status_var.set("Opening CAD/Drawing�")
         path = filedialog.askopenfilename(
             title="Select CAD/Drawing",
             filetypes=[
@@ -17242,7 +17245,7 @@ class App(tk.Tk):
             return
 
         ext = Path(path).suffix.lower()
-        self.status_var.set(f"Processing {os.path.basename(path)}…")
+        self.status_var.set(f"Processing {os.path.basename(path)}�")
 
         # ---------- 2D branch: PDF / DWG / DXF ----------
         if ext in (".pdf", ".dwg", ".dxf"):
@@ -17427,7 +17430,7 @@ class App(tk.Tk):
             return
 
         # LLM hour estimation
-        self.status_var.set("Estimating hours with LLM…")
+        self.status_var.set("Estimating hours with LLM�")
         self._reset_llm_logs()
         decision_log = {}
         client = None
@@ -17696,7 +17699,7 @@ class App(tk.Tk):
                 f"[{timestamp}] gen_quote: invoked (reuse_suggestions={reuse_suggestions})",
             )
             try:
-                self.status_var.set("Generating quote…")
+                self.status_var.set("Generating quote�")
                 self.update_idletasks()
             except Exception:
                 pass
@@ -17949,7 +17952,7 @@ class App(tk.Tk):
 def main(argv: Sequence[str] | None = None) -> int:
     """Entry point so ``python appV5.py`` mirrors the CLI launcher."""
 
-    from cad_quoter.app.cli import main as _cli_main
+    from cad_quoter.app.runner import main as _cli_main
 
     if typing.TYPE_CHECKING:
         from cad_quoter.pricing import (

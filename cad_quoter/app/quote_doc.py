@@ -114,8 +114,8 @@ def _resolve_pricing_source_value(
             return fallback_text
         return "planner"
 
-    # Delegate planner signal detection to the adapter helper
-    from cad_quoter.app.planner_adapter import (
+    # Delegate planner signal detection to the consolidated planner helpers
+    from cad_quoter.app.planner_support import (
         _planner_signals_present as _planner_signals_present_helper,
     )
 
