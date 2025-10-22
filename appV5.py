@@ -6199,6 +6199,140 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
         for segment in re.split(r";\s*", str(detail)):
             write_wrapped(segment, indent)
 
+    def _format_qty_display(value: Any) -> str:
+        try:
+            numeric = float(value)
+        except Exception:
+            return str(value)
+        if not math.isfinite(numeric):
+            return str(value)
+        if math.isclose(numeric, round(numeric)):
+            return str(int(round(numeric)))
+        text = f"{numeric:.2f}".rstrip("0").rstrip(".")
+        return text or "0"
+
+    def _percent_label(value: float) -> str:
+        label = format_percent(value)
+        if label.endswith(".0%"):
+            label = label[:-3] + "%"
+        return label
+
+    def _format_dotted_row(label: str, amount: float, *, indent: str = "") -> str:
+        left = f"{indent}{label}"
+        right = fmt_money(amount, currency)
+        space = page_width - len(left) - len(right) - 1
+        if space < 1:
+            space = 1
+        dots = "." * space
+        return f"{left} {dots}{right}"
+
+    quick_margin_slider_entries: list[dict[str, Any]] = []
+    quick_qty_break_entries: list[dict[str, Any]] = []
+    quick_whatif_qty_value: float | None = None
+    quick_whatif_expedite_pct: float = 0.0
+
+    def _compute_quick_whatifs_data(
+        qty_value: Any,
+        *,
+        subtotal_before_margin: float,
+        margin_pct: float,
+        labor_per_part: float,
+        direct_per_part: float,
+        amortized_nre_per_part: float,
+        expedite_per_part: float,
+        expedite_pct: float,
+    ) -> tuple[list[dict[str, Any]], list[dict[str, Any]], float, float]:
+        def _coerce_non_negative(value: Any) -> float:
+            try:
+                numeric = float(value)
+            except Exception:
+                return 0.0
+            if not math.isfinite(numeric) or numeric < 0:
+                return 0.0
+            return numeric
+
+        base_qty = _coerce_non_negative(qty_value)
+        if base_qty <= 0:
+            base_qty = 1.0
+
+        subtotal_val = round(_coerce_non_negative(subtotal_before_margin), 2)
+        margin_pct_val = _coerce_non_negative(margin_pct)
+        labor_per_part_val = round(_coerce_non_negative(labor_per_part), 2)
+        direct_per_part_val = round(_coerce_non_negative(direct_per_part), 2)
+        amortized_per_part_val = round(_coerce_non_negative(amortized_nre_per_part), 2)
+        expedite_per_part_val = round(_coerce_non_negative(expedite_per_part), 2)
+        expedite_pct_val = _coerce_non_negative(expedite_pct)
+
+        subtotal_pre_expedite = max(0.0, subtotal_val - expedite_per_part_val)
+        if (
+            (expedite_pct_val <= 0 or not math.isfinite(expedite_pct_val))
+            and subtotal_pre_expedite > 0
+            and expedite_per_part_val > 0
+        ):
+            inferred_pct = expedite_per_part_val / subtotal_pre_expedite
+            if math.isfinite(inferred_pct) and inferred_pct > 0:
+                expedite_pct_val = min(max(inferred_pct, 0.0), 10.0)
+
+        labor_variable = max(0.0, labor_per_part_val - amortized_per_part_val)
+        amortized_per_lot = amortized_per_part_val * base_qty if base_qty > 0 else amortized_per_part_val
+
+        slider_candidates: list[float] = []
+        for candidate in (0.10, margin_pct_val, 0.20, 0.25):
+            if not math.isfinite(candidate) or candidate < 0:
+                continue
+            if all(not math.isclose(candidate, existing, rel_tol=0.0, abs_tol=5e-4) for existing in slider_candidates):
+                slider_candidates.append(candidate)
+        slider_candidates.sort()
+
+        slider_rows: list[dict[str, Any]] = []
+        if subtotal_val > 0:
+            for pct in slider_candidates:
+                final_price = round(subtotal_val * (1.0 + pct), 2)
+                slider_rows.append(
+                    {
+                        "margin_pct": pct,
+                        "final_price": final_price,
+                        "is_current": math.isclose(pct, margin_pct_val, rel_tol=0.0, abs_tol=5e-4),
+                        "label": _percent_label(pct),
+                    }
+                )
+
+        qty_candidates_raw = [1.0, 2.0, 5.0, 10.0, base_qty]
+        qty_targets: list[float] = []
+        for candidate in qty_candidates_raw:
+            numeric = _coerce_non_negative(candidate)
+            if numeric <= 0:
+                continue
+            if all(not math.isclose(numeric, existing, rel_tol=0.0, abs_tol=1e-6) for existing in qty_targets):
+                qty_targets.append(numeric)
+        qty_targets.sort()
+
+        qty_rows: list[dict[str, Any]] = []
+        for qty_candidate in qty_targets:
+            q_val = qty_candidate
+            amortized_for_qty = amortized_per_part_val
+            if amortized_per_lot > 0 and q_val > 0:
+                amortized_for_qty = amortized_per_lot / q_val
+            labor_q = max(0.0, labor_variable + amortized_for_qty)
+            subtotal_pre_expedite_q = labor_q + direct_per_part_val
+            expedite_q = round(subtotal_pre_expedite_q * expedite_pct_val, 2)
+            direct_with_expedite_q = round(direct_per_part_val + expedite_q, 2)
+            subtotal_before_margin_q = round(labor_q + direct_with_expedite_q, 2)
+            final_price_q = round(subtotal_before_margin_q * (1.0 + margin_pct_val), 2)
+            qty_rows.append(
+                {
+                    "qty_numeric": q_val,
+                    "qty_display": _format_qty_display(q_val),
+                    "labor_per_part": round(labor_q, 2),
+                    "directs_per_part": direct_with_expedite_q,
+                    "subtotal_before_margin": subtotal_before_margin_q,
+                    "final_price": final_price_q,
+                    "expedite_per_part": expedite_q,
+                }
+            )
+
+        return slider_rows, qty_rows, base_qty, expedite_pct_val
+
     global SHOW_BUCKET_DIAGNOSTICS_OVERRIDE
 
     bucket_diag_env = os.getenv("SHOW_BUCKET_DIAGNOSTICS")
@@ -10610,7 +10744,70 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
         row(f"+ Expedite ({_pct(applied_pcts.get('ExpeditePct'))}):", expedite_cost)
     row("= Subtotal before Margin:", subtotal_before_margin)
     row(f"Final Price with Margin ({_pct(applied_pcts.get('MarginPct'))}):", price)
+
+    (
+        quick_margin_slider_entries,
+        quick_qty_break_entries,
+        quick_whatif_qty_value,
+        quick_whatif_expedite_pct,
+    ) = _compute_quick_whatifs_data(
+        qty,
+        subtotal_before_margin=subtotal_before_margin,
+        margin_pct=margin_pct_value,
+        labor_per_part=ladder_labor,
+        direct_per_part=ladder_directs,
+        amortized_nre_per_part=float(amortized_nre_total or 0.0),
+        expedite_per_part=float(expedite_cost or 0.0),
+        expedite_pct=float(expedite_pct_value or 0.0),
+    )
+
     append_line("")
+
+    if quick_margin_slider_entries or quick_qty_break_entries:
+        append_line("QUICK WHAT-IFS (INTERNAL KNOBS)")
+        append_line(divider)
+
+        if quick_margin_slider_entries:
+            qty_display_text = _format_qty_display(
+                quick_whatif_qty_value if quick_whatif_qty_value is not None else qty
+            )
+            append_line(f"A) Margin slider (Qty = {qty_display_text})")
+            for entry in quick_margin_slider_entries:
+                pct_label = entry.get("label") or _percent_label(entry.get("margin_pct", 0.0))
+                row_label = f"{pct_label} margin"
+                if entry.get("is_current"):
+                    row_label += " (current)"
+                append_line(
+                    _format_dotted_row(
+                        row_label,
+                        float(entry.get("final_price", 0.0)),
+                        indent="  ",
+                    )
+                )
+
+        if quick_qty_break_entries:
+            if quick_margin_slider_entries:
+                append_line("")
+            margin_label = _percent_label(margin_pct_value)
+            append_line(
+                "B) Qty break (assumes same ops; programming amortized; "
+                f"{margin_label} margin)"
+            )
+            append_line("  Qty, Labor $/part, Directs $/part, Subtotal, Final")
+            for entry in quick_qty_break_entries:
+                qty_display = entry.get("qty_display") or _format_qty_display(
+                    entry.get("qty_numeric")
+                )
+                labor_text = fmt_money(entry.get("labor_per_part", 0.0), currency)
+                directs_text = fmt_money(entry.get("directs_per_part", 0.0), currency)
+                subtotal_text = fmt_money(entry.get("subtotal_before_margin", 0.0), currency)
+                final_text = fmt_money(entry.get("final_price", 0.0), currency)
+                append_line(
+                    f"  {qty_display:>3},   {labor_text:>10}, {directs_text:>11}, "
+                    f"{subtotal_text:>11}, {final_text:>11}"
+                )
+
+        append_line("")
 
     # ---- LLM adjustments bullets (optional) ---------------------------------
     if llm_notes:
@@ -11021,12 +11218,90 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
             }
         )
 
+    def _append_process_from_canon(canon_key: str) -> None:
+        if any(entry.get("label") == _display_bucket_label(canon_key, label_overrides) for entry in processes_entries):
+            return
+        metrics = canonical_bucket_summary.get(canon_key)
+        if not isinstance(metrics, _MappingABC):
+            return
+        amount_val = _safe_float(metrics.get("total"), 0.0)
+        if amount_val <= 0 and not show_zeros:
+            return
+        label = _display_bucket_label(canon_key, label_overrides)
+        if not label:
+            return
+        hours_val = _safe_float(metrics.get("hours"), 0.0)
+        minutes_val = _safe_float(metrics.get("minutes"), 0.0)
+        labor_val = _safe_float(metrics.get("labor"), 0.0)
+        machine_val = _safe_float(metrics.get("machine"), 0.0)
+        rate_val = 0.0
+        if hours_val > 0:
+            try:
+                rate_val = round(amount_val / hours_val, 2)
+            except Exception:
+                rate_val = 0.0
+        processes_entries.append(
+            {
+                "label": label,
+                "amount": round(amount_val, 2),
+                "hours": round(hours_val, 2),
+                "minutes": round(minutes_val, 2),
+                "labor_amount": round(labor_val, 2),
+                "machine_amount": round(machine_val, 2),
+                "rate": rate_val if rate_val else 0.0,
+            }
+        )
+
+    for canon_key in ("programming_amortized", "fixture_build_amortized"):
+        _append_process_from_canon(canon_key)
+
+    quick_whatifs_payload: dict[str, Any] | None = None
+    if quick_margin_slider_entries or quick_qty_break_entries:
+        quick_whatifs_payload = {
+            "qty": quick_whatif_qty_value,
+            "margin_pct": float(margin_pct_value),
+            "expedite_pct": float(quick_whatif_expedite_pct),
+            "margin_slider": [
+                {
+                    "margin_pct": float(entry.get("margin_pct", 0.0)),
+                    "final_price": round(float(entry.get("final_price", 0.0)), 2),
+                    "is_current": bool(entry.get("is_current")),
+                    "label": entry.get("label")
+                    or _percent_label(entry.get("margin_pct", 0.0)),
+                }
+                for entry in quick_margin_slider_entries
+            ],
+            "qty_breaks": [],
+        }
+
+        for entry in quick_qty_break_entries:
+            qty_numeric = entry.get("qty_numeric")
+            try:
+                qty_numeric_val = float(qty_numeric)
+            except Exception:
+                qty_numeric_val = None
+            quick_whatifs_payload["qty_breaks"].append(
+                {
+                    "qty": qty_numeric_val,
+                    "label": entry.get("qty_display")
+                    or _format_qty_display(qty_numeric_val),
+                    "labor_per_part": round(float(entry.get("labor_per_part", 0.0)), 2),
+                    "directs_per_part": round(float(entry.get("directs_per_part", 0.0)), 2),
+                    "subtotal_before_margin": round(
+                        float(entry.get("subtotal_before_margin", 0.0)), 2
+                    ),
+                    "final_price": round(float(entry.get("final_price", 0.0)), 2),
+                    "expedite_per_part": round(float(entry.get("expedite_per_part", 0.0)), 2),
+                }
+            )
+
     render_payload = {
         "summary": summary_payload,
         "price_drivers": price_drivers_payload,
         "cost_breakdown": cost_breakdown_payload,
         "materials": materials_entries,
         "materials_direct": round(direct_total_amount, 2),
+        "labor_total_amount": round(labor_total_amount, 2),
         "processes": processes_entries,
         "ladder": {
             "labor_total": round(labor_total_amount, 2),
@@ -11037,6 +11312,9 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
             "final_price": round(final_price_val, 2),
         },
     }
+
+    if quick_whatifs_payload:
+        render_payload["quick_whatifs"] = quick_whatifs_payload
 
     if isinstance(result, _MutableMappingABC):
         result.setdefault("render_payload", render_payload)

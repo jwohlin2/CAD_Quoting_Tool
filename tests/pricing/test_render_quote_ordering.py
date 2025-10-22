@@ -224,9 +224,15 @@ def test_render_payload_obeys_pricing_math_guards() -> None:
     materials_direct = payload.get("materials_direct")
     assert materials_direct is not None
 
-    processes = payload.get("processes", [])
-    labor_sum = sum(float(entry.get("amount", 0.0) or 0.0) for entry in processes)
-    assert math.isclose(subtotal_before_margin, materials_direct + labor_sum, abs_tol=0.01)
+    ladder = payload.get("ladder", {})
+    labor_total = ladder.get("labor_total")
+    direct_total = ladder.get("direct_total")
+    ladder_subtotal = ladder.get("subtotal_before_margin")
+    assert labor_total is not None
+    assert direct_total is not None
+    assert ladder_subtotal is not None
+    assert math.isclose(ladder_subtotal, labor_total + direct_total, abs_tol=0.01)
+    assert math.isclose(materials_direct, direct_total, abs_tol=0.01)
 
     margin_pct = summary.get("margin_pct")
     final_price = summary.get("final_price")
@@ -236,7 +242,7 @@ def test_render_payload_obeys_pricing_math_guards() -> None:
 
     reported_labor_total = payload.get("labor_total_amount")
     assert reported_labor_total is not None
-    assert math.isclose(reported_labor_total, labor_sum, abs_tol=0.01)
+    assert math.isclose(reported_labor_total, labor_total, abs_tol=0.01)
 
 
 def test_explain_quote_reports_drilling_minutes_from_removal_card() -> None:
@@ -259,3 +265,53 @@ def test_explain_quote_reports_no_drilling_when_minutes_absent() -> None:
 
     assert "No drilling accounted." in explanation
     assert "Drilling time comes from removal-card math" not in explanation
+
+
+def test_render_quote_includes_quick_whatifs_section() -> None:
+    result = {
+        "price": 230.0,
+        "qty": 1,
+        "breakdown": {
+            "qty": 1,
+            "totals": {
+                "labor_cost": 120.0,
+                "direct_costs": 80.0,
+                "subtotal": 200.0,
+                "with_expedite": 200.0,
+                "with_margin": 230.0,
+            },
+            "total_direct_costs": 80.0,
+            "nre_detail": {},
+            "nre": {"programming_per_part": 30.0},
+            "material": {"material_cost": 80.0, "total_material_cost": 80.0},
+            "process_costs": {"machining": 90.0},
+            "process_meta": {},
+            "pass_through": {"Material": 80.0},
+            "applied_pcts": {"MarginPct": 0.15},
+            "rates": {},
+            "params": {},
+            "labor_cost_details": {"Programming (amortized)": 30.0},
+            "direct_cost_details": {"Material": "$80"},
+        },
+    }
+
+    rendered = appV5.render_quote(result, currency="$")
+
+    assert "QUICK WHAT-IFS (INTERNAL KNOBS)" in rendered
+    assert "A) Margin slider (Qty = 1)" in rendered
+    assert "10% margin" in rendered
+    assert "B) Qty break (assumes same ops; programming amortized; 15% margin)" in rendered
+    assert "2,      $105.00,      $80.00,     $185.00,     $212.75" in rendered
+
+    breakdown = result["breakdown"]
+    payload = breakdown["render_payload"]
+    quick = payload["quick_whatifs"]
+
+    slider_prices = [entry["final_price"] for entry in quick["margin_slider"]]
+    assert slider_prices == [220.0, 230.0, 240.0, 250.0]
+
+    qty_breaks = quick["qty_breaks"]
+    assert [entry["label"] for entry in qty_breaks] == ["1", "2", "5", "10"]
+    assert math.isclose(qty_breaks[1]["final_price"], 212.75, rel_tol=1e-6)
+    assert math.isclose(qty_breaks[2]["labor_per_part"], 96.0, rel_tol=1e-6)
+    assert all(math.isclose(entry["expedite_per_part"], 0.0, rel_tol=1e-6) for entry in qty_breaks)
