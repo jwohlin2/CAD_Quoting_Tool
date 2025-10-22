@@ -64,6 +64,22 @@ def _clamp_minutes(value: Any, lo: float = 0.0, hi: float = 10000.0) -> float:
     return minutes_val
 
 
+def sane_minutes_or_zero(x: Any, cap: float = 24 * 60 * 8) -> float:
+    try:
+        minutes = float(x)
+    except Exception:
+        return 0.0
+
+    if not math.isfinite(minutes):
+        return 0.0
+
+    if minutes < 0 or minutes > cap:
+        print(f"[WARNING] [unit/clamp] minutes out-of-range; dropping. raw={minutes}")
+        return 0.0
+
+    return minutes
+
+
 def _pick_drill_minutes(
     process_plan_summary: Mapping[str, Any] | None,
     extras: Mapping[str, Any] | None,
@@ -72,12 +88,13 @@ def _pick_drill_minutes(
         (((process_plan_summary or {}).get("drilling") or {}).get("total_minutes_billed")),
         0.0,
     )
-    removal_min = _as_float((extras or {}).get("drill_total_minutes"), 0.0)
+    removal_min_raw = _as_float((extras or {}).get("drill_total_minutes"), 0.0)
+    removal_min = sane_minutes_or_zero(removal_min_raw)
 
     if removal_min > 0:
         chosen, src = removal_min, "removal_card"
     else:
-        chosen, src = meta_min, "planner_meta"
+        chosen, src = sane_minutes_or_zero(meta_min), "planner_meta"
 
     chosen_c = _clamp_minutes(chosen)
     if chosen_c != chosen:

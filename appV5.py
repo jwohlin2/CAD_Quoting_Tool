@@ -459,6 +459,24 @@ def _clamp_minutes(v: Any, lo: float = 0.0, hi: float = 10000.0) -> float:
     return minutes_val
 
 
+def sane_minutes_or_zero(x: Any, cap: float = 24 * 60 * 8) -> float:
+    """Return a float minutes value or 0.0 when outside sane bounds."""
+
+    try:
+        minutes = float(x)
+    except Exception:
+        return 0.0
+
+    if not math.isfinite(minutes):
+        return 0.0
+
+    if minutes < 0 or minutes > cap:
+        print(f"[WARNING] [unit/clamp] minutes out-of-range; dropping. raw={minutes}")
+        return 0.0
+
+    return minutes
+
+
 def _pick_drill_minutes(
     process_plan_summary: Mapping[str, Any] | None,
     extras: Mapping[str, Any] | None,
@@ -468,13 +486,14 @@ def _pick_drill_minutes(
         (((process_plan_summary or {}).get("drilling") or {}).get("total_minutes_billed")),
         0.0,
     )
-    removal_min = _as_float((extras or {}).get("drill_total_minutes"), 0.0)
+    removal_min_raw = _as_float((extras or {}).get("drill_total_minutes"), 0.0)
+    removal_min = sane_minutes_or_zero(removal_min_raw)
 
     if removal_min > 0:
         chosen = removal_min
         src = "removal_card"
     else:
-        chosen = meta_min
+        chosen = sane_minutes_or_zero(meta_min)
         src = "planner_meta"
 
     chosen_clamped = _clamp_minutes(chosen)
@@ -1442,7 +1461,7 @@ def _compute_drilling_removal_section(
             )
             if total_minutes_val is None:
                 total_minutes_val = drill_minutes_subtotal_raw + total_tool_minutes
-            total_minutes_val = float(total_minutes_val or 0.0)
+            total_minutes_val = sane_minutes_or_zero(total_minutes_val)
 
             drill_minutes_total = round(float(total_minutes_val or 0.0), 2)
             _push(lines, f"[DEBUG] drilling_minutes_total={drill_minutes_total:.2f} min")
