@@ -4707,19 +4707,6 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
                                 else "mcmaster_api"
                             )
                     result["stock_source"] = source_hint
-            elif (
-                material_lookup_for_pick
-                and "mic6" in material_lookup_for_pick.lower()
-                and need_len
-                and need_wid
-                and need_thk
-            ):
-                blank_lines.append(
-                    "  NOTE: No McMaster MIC6 plate found for "
-                    f"{float(need_len):.2f}×{float(need_wid):.2f}×{float(need_thk):.3f} in"
-                    " with exact thickness"
-                )
-
             if (need_len is None or need_wid is None or need_thk is None) and isinstance(g, dict):
                 plan_guess = g.get("stock_plan_guess")
                 if isinstance(plan_guess, _MappingABC):
@@ -5192,7 +5179,6 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
                     stock_line = f"— × — × {T_disp} in"
             if isinstance(mat_info, dict):
                 mat_info["stock_size_display"] = stock_line
-            _push(lines, f"  Stock used: {stock_line}")
             if detail_lines:
                 append_lines(detail_lines)
             mc: Mapping[str, Any] | None = material_cost_components
