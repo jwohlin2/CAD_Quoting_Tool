@@ -314,14 +314,53 @@ from cad_quoter.pricing.vendor_csv import (
     pick_from_stdgrid as _pick_from_stdgrid,
     pick_plate_from_mcmaster as _pick_plate_from_mcmaster,
 )
-from cad_quoter.pricing.process_view import (
-    _ProcessCostTableRecorder,
-    _ProcessRowRecord,
-    _merge_process_meta,
-    _fold_process_meta,
-    _fold_applied_process,
-    _lookup_process_meta,
-)
+if typing.TYPE_CHECKING:
+    from cad_quoter.pricing.process_view import (
+        _ProcessCostTableRecorder as _ProcessCostTableRecorderType,
+        _ProcessRowRecord as _ProcessRowRecordType,
+        _merge_process_meta as _merge_process_meta_fn,
+        _fold_process_meta as _fold_process_meta_fn,
+        _fold_applied_process as _fold_applied_process_fn,
+        _lookup_process_meta as _lookup_process_meta_fn,
+    )
+else:
+    _ProcessCostTableRecorderType = typing.Any  # type: ignore[assignment]
+    _ProcessRowRecordType = typing.Any  # type: ignore[assignment]
+    _merge_process_meta_fn = typing.Callable[..., typing.Any]
+    _fold_process_meta_fn = typing.Callable[..., typing.Any]
+    _fold_applied_process_fn = typing.Callable[..., typing.Any]
+    _lookup_process_meta_fn = typing.Callable[..., typing.Any]
+
+
+@lru_cache(maxsize=1)
+def _load_process_view_module():
+    import cad_quoter.pricing.process_view as _process_view_module
+
+    return _process_view_module
+
+
+def _ProcessCostTableRecorder(*args, **kwargs):
+    return _load_process_view_module()._ProcessCostTableRecorder(*args, **kwargs)
+
+
+def _ProcessRowRecord(*args, **kwargs):
+    return _load_process_view_module()._ProcessRowRecord(*args, **kwargs)
+
+
+def _merge_process_meta(*args, **kwargs):
+    return _load_process_view_module()._merge_process_meta(*args, **kwargs)
+
+
+def _fold_process_meta(*args, **kwargs):
+    return _load_process_view_module()._fold_process_meta(*args, **kwargs)
+
+
+def _fold_applied_process(*args, **kwargs):
+    return _load_process_view_module()._fold_applied_process(*args, **kwargs)
+
+
+def _lookup_process_meta(*args, **kwargs):
+    return _load_process_view_module()._lookup_process_meta(*args, **kwargs)
 
 
 # ==== BUCKET SEEDING (single source of truth) ===========================
@@ -7820,9 +7859,9 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
                         hours=hours_numeric,
                         rate=rate_numeric,
                         total=total_numeric,
-                        labor=labor_numeric,
-                        machine=machine_numeric,
-                        canon_key=canon_key or str(label_val),
+    rows: tuple[_ProcessRowRecordType, ...] = tuple(getattr(process_table, "rows", ()))
+    def _process_row_canon(record: _ProcessRowRecordType) -> str:
+    def _find_process_row(target_canon: str) -> _ProcessRowRecordType | None:
                         minutes=minutes_numeric,
                     )
                 )
