@@ -995,10 +995,10 @@ def _emit_hole_table_ops_cards(
             or _lookup_bucket_rate("machine", rates)
             or 45.0
         )
-        tap_lrate = (
-            _lookup_bucket_rate("tapping_labor", rates)
-            or _lookup_bucket_rate("labor", rates)
-            or 45.0
+        tap_lrate = max(
+            _lookup_bucket_rate("tapping_labor", rates),
+            _lookup_bucket_rate("labor", rates),
+            45.0,
         )
 
         _set_bucket_minutes_cost(
@@ -2397,6 +2397,72 @@ def _diameter_from_ops_row(entry: Mapping[str, Any]) -> float | None:
 def _drilling_groups_from_ops_summary(
     geo: Mapping[str, Any] | None,
 ) -> tuple[list[dict[str, Any]], int]:
+    # Prefer grouped totals from ops_summary when available (parser_rules_v2 path).
+    for ctx in _iter_geo_dicts_for_context(geo):
+        ops_summary = ctx.get("ops_summary") if isinstance(ctx, _MappingABC) else None
+        if not isinstance(ops_summary, _MappingABC):
+            continue
+        grouped = ops_summary.get("group_totals")
+        if not isinstance(grouped, _MappingABC):
+            continue
+        drill_map = grouped.get("drill") or grouped.get("drilling")
+        if not isinstance(drill_map, _MappingABC):
+            continue
+        groups: dict[float, dict[str, Any]] = {}
+        total_qty = 0
+        for ref_key, side_map in drill_map.items():
+            if not isinstance(side_map, _MappingABC):
+                continue
+            qty_sum = 0
+            dia_val: float | None = None
+            depth_candidates: list[float] = []
+            for side_info in side_map.values():
+                if not isinstance(side_info, _MappingABC):
+                    continue
+                qty_val = _coerce_int_or_zero(side_info.get("qty"))
+                if qty_val <= 0:
+                    continue
+                qty_sum += qty_val
+                if dia_val is None:
+                    dia_candidate = _coerce_float_or_none(side_info.get("diameter_in"))
+                    if dia_candidate is None:
+                        dia_candidate = _coerce_float_or_none(side_info.get("ref_dia_in"))
+                    if dia_candidate is None and isinstance(ref_key, str):
+                        dia_candidate = _coerce_float_or_none(_parse_ref_to_inch(ref_key))
+                    if dia_candidate is not None and math.isfinite(dia_candidate):
+                        dia_val = float(dia_candidate)
+                depth_val = (
+                    _coerce_float_or_none(side_info.get("depth_in_max"))
+                    or _coerce_float_or_none(side_info.get("depth_in_avg"))
+                    or _coerce_float_or_none(side_info.get("depth_in_min"))
+                )
+                if depth_val is not None and math.isfinite(depth_val):
+                    depth_candidates.append(float(depth_val))
+            if qty_sum <= 0 or dia_val is None:
+                continue
+            key = round(float(dia_val), 4)
+            entry = groups.setdefault(
+                key,
+                {
+                    "diameter_in": float(round(float(dia_val), 4)),
+                    "qty": 0,
+                },
+            )
+            entry["qty"] += int(qty_sum)
+            if depth_candidates:
+                entry["depth_in"] = max(depth_candidates)
+            total_qty += qty_sum
+        if groups:
+            ordered = [
+                {"diameter_in": data["diameter_in"], "qty": data["qty"], **(
+                    {"depth_in": data["depth_in"]}
+                    if "depth_in" in data
+                    else {}
+                )}
+                for _, data in sorted(groups.items())
+            ]
+            return ordered, int(total_qty)
+
     table_groups: dict[float, dict[str, Any]] = {}
     for ctx in _iter_geo_dicts_for_context(geo):
         families = ctx.get("hole_table_families_in")
@@ -2629,6 +2695,12 @@ def _estimate_drilling_minutes_from_meta(
                 continue
             entry_copy = dict(entry)
             entry_copy["qty"] = int(group_info.get("qty") or 0)
+            depth_hint = (
+                _coerce_float_or_none(group_info.get("depth_in"))
+                or _coerce_float_or_none(group_info.get("depth_in_max"))
+            )
+            if depth_hint is not None and depth_hint > 0:
+                entry_copy["depth_in"] = float(depth_hint)
             filtered_bins.append(entry_copy)
         seen_keys: set[float] = set()
         for entry in filtered_bins:
@@ -2641,6 +2713,10 @@ def _estimate_drilling_minutes_from_meta(
             dia_in = _safe_float(group_info.get("diameter_in"))
             if dia_in <= 0:
                 continue
+            depth_hint = (
+                _coerce_float_or_none(group_info.get("depth_in"))
+                or _coerce_float_or_none(group_info.get("depth_in_max"))
+            )
             filtered_bins.append(
                 {
                     "op": "drill",
@@ -2648,6 +2724,9 @@ def _estimate_drilling_minutes_from_meta(
                     "diameter_in": dia_in,
                     "diameter_mm": float(dia_in * 25.4),
                     "qty": int(group_info.get("qty") or 0),
+                    "depth_in": float(depth_hint)
+                    if depth_hint is not None and depth_hint > 0
+                    else _safe_float(group_info.get("depth_in")),
                     "sfm": 80.0,
                     "ipr": 0.0060,
                 }
@@ -13727,7 +13806,9 @@ def parse_ops_per_hole(desc: str) -> dict[str, int]:
     return dict(ops)
 
 
-def aggregate_ops(rows: list[dict[str, Any]]) -> dict[str, Any]:
+def _aggregate_ops_legacy(rows: list[dict[str, Any]]) -> dict[str, Any]:
+    """Legacy aggregate implementation (regex-based) preserved for fallback."""
+
     totals: defaultdict[str, int] = defaultdict(int)
     rows_simple: list[dict[str, Any]] = []
     detail: list[dict[str, Any]] = []
@@ -13769,13 +13850,396 @@ def aggregate_ops(rows: list[dict[str, Any]]) -> dict[str, Any]:
     built_rows = _count_ops_card_rows(simple_rows)
     return {
         "totals": dict(totals),
-        "rows": simple_rows,
+        "rows": rows_simple,
         "rows_detail": detail,
         "actions_total": int(actions_total),
         "back_ops_total": int(back_ops_total),
         "flip_required": bool(flip_required),
         "built_rows": int(built_rows),
     }
+
+
+def _parser_rules_v2_enabled() -> bool:
+    """Return True when parser_rules_v2 feature flag is enabled."""
+
+    env_val = os.getenv("PARSER_RULES_V2")
+    if env_val is not None:
+        normalized = str(env_val).strip().lower()
+        if normalized in {"", "0", "false", "off", "no"}:
+            return False
+        return True
+    try:
+        params_obj = PARAMS_DEFAULT  # type: ignore[name-defined]
+    except NameError:
+        params_obj = {}
+    try:
+        if isinstance(params_obj, _MappingABC):
+            for key in ("parser_rules_v2", "ParserRulesV2", "parserRulesV2"):
+                if key in params_obj:
+                    normalized = str(params_obj.get(key)).strip().lower()
+                    if normalized in {"", "0", "false", "off", "no"}:
+                        return False
+                    return True
+    except Exception:
+        pass
+    return False
+
+
+def _normalize_ops_entries(
+    ops_entries: Iterable[Mapping[str, Any]] | None,
+) -> list[dict[str, Any]]:
+    """Normalize chart-derived operation entries into a consistent schema."""
+
+    normalized: list[dict[str, Any]] = []
+    if not ops_entries:
+        return normalized
+
+    def _truthy_flag(value: Any) -> bool:
+        try:
+            if isinstance(value, bool):
+                return value
+            if value is None:
+                return False
+            text = str(value).strip().lower()
+            if not text:
+                return False
+            return text not in {"0", "false", "off", "no", "n"}
+        except Exception:
+            return False
+
+    for entry in ops_entries:
+        if not isinstance(entry, _MappingABC):
+            continue
+        raw_type = str(entry.get("type") or entry.get("op") or "").strip().lower()
+        derived_ops: list[tuple[str, Mapping[str, Any]]] = []
+
+        ops_payload = entry.get("ops")
+        if isinstance(ops_payload, Iterable):
+            for op_payload in ops_payload:
+                if not isinstance(op_payload, _MappingABC):
+                    continue
+                payload_type = str(
+                    op_payload.get("type") or op_payload.get("op") or ""
+                ).strip()
+                if not payload_type:
+                    continue
+                derived_ops.append((payload_type, op_payload))
+
+        if not derived_ops:
+            if raw_type:
+                derived_ops.append((raw_type, entry))
+            else:
+                if entry.get("tap"):
+                    derived_ops.append(("tap", entry))
+                if _truthy_flag(entry.get("cbore")):
+                    derived_ops.append(("cbore", entry))
+                if _truthy_flag(entry.get("csk")):
+                    derived_ops.append(("csk", entry))
+                if _truthy_flag(entry.get("thru")):
+                    derived_ops.append(("drill", entry))
+                if _truthy_flag(entry.get("jig_grind")):
+                    derived_ops.append(("jig_grind", entry))
+
+        for derived_type, payload in derived_ops:
+            op = dict(entry)
+            op.pop("ops", None)
+            if isinstance(payload, _MappingABC) and payload is not entry:
+                for key, value in payload.items():
+                    op[key] = value
+            op_type_raw = derived_type.strip().lower()
+            if op_type_raw in {"counterbore", "c'bore"}:
+                op_type = "cbore"
+            elif op_type_raw in {"countersink", "csink", "c'sink", "csk"}:
+                op_type = "csk"
+            elif op_type_raw in {"spot", "spot_drill", "center_drill", "c'drill"}:
+                op_type = "spot"
+            elif op_type_raw in {"jig", "jig_grind", "jig-grind"}:
+                op_type = "jig_grind"
+            elif op_type_raw in {"tapping", "tap"}:
+                op_type = "tap"
+            elif op_type_raw in {"drill", "deep_drill"}:
+                op_type = "drill"
+            else:
+                op_type = op_type_raw
+
+            qty = _coerce_int_or_zero(op.get("qty"))
+            if qty <= 0:
+                continue
+
+            side_raw = str(op.get("side") or op.get("face") or "").strip()
+            from_face = str(entry.get("from_face") or "").strip()
+            if not side_raw and from_face:
+                side_raw = from_face
+            side_upper = side_raw.upper()
+            double_sided = _truthy_flag(op.get("double_sided")) or side_upper in {
+                "FRONT & BACK",
+                "FRONT AND BACK",
+                "BOTH",
+                "BOTH SIDES",
+                "2 SIDES",
+                "TWO SIDES",
+            }
+            if side_upper == "BACK" or _truthy_flag(op.get("from_back")):
+                base_side = "BACK"
+            elif side_upper == "FRONT":
+                base_side = "FRONT"
+            else:
+                base_side = "FRONT"
+            sides = ["FRONT", "BACK"] if double_sided else [base_side]
+
+            ref = str(op.get("ref") or op.get("hole") or "").strip()
+            thread = str(op.get("thread") or op.get("tap") or "").strip()
+
+            depth_in = _coerce_float_or_none(op.get("depth_in"))
+            if depth_in is None:
+                depth_mm = _coerce_float_or_none(op.get("depth_mm"))
+                if depth_mm is not None:
+                    depth_in = float(depth_mm) / 25.4
+
+            dia_in = _coerce_float_or_none(op.get("dia_in"))
+            if dia_in is None:
+                dia_in = _coerce_float_or_none(op.get("diameter_in"))
+            if dia_in is None:
+                dia_mm = _coerce_float_or_none(op.get("dia_mm"))
+                if dia_mm is not None:
+                    dia_in = float(dia_mm) / 25.4
+            if dia_in is None:
+                major_mm = _coerce_float_or_none(op.get("major_mm"))
+                if major_mm is not None:
+                    dia_in = float(major_mm) / 25.4
+            if dia_in is None:
+                dia_in = _coerce_float_or_none(op.get("ref_dia_in"))
+            if dia_in is None and ref:
+                ref_in = _parse_ref_to_inch(ref)
+                if ref_in is not None:
+                    dia_in = ref_in
+
+            if thread and dia_in is None:
+                dia_in = _coerce_float_or_none(entry.get("major_dia_in"))
+
+            ref_label: str
+            if thread:
+                ref_label = thread
+            elif dia_in is not None:
+                ref_label = f"Ø{dia_in:.4f}"
+            else:
+                ref_label = ref
+
+            normalized.append(
+                {
+                    "type": op_type,
+                    "qty": int(qty),
+                    "sides": sides,
+                    "side": sides[0] if sides else "",
+                    "double_sided": bool(double_sided),
+                    "ref": ref,
+                    "ref_label": ref_label,
+                    "thread": thread,
+                    "ref_dia_in": float(dia_in) if dia_in is not None else None,
+                    "depth_in": float(depth_in) if depth_in is not None else None,
+                    "thru": bool(_truthy_flag(entry.get("thru"))),
+                    "source": entry.get("source"),
+                }
+            )
+
+    return normalized
+
+
+def aggregate_ops(
+    rows: list[dict[str, Any]],
+    ops_entries: Iterable[Mapping[str, Any]] | None = None,
+) -> dict[str, Any]:
+    legacy_summary = _aggregate_ops_legacy(rows)
+    normalized_ops = _normalize_ops_entries(ops_entries)
+    if not normalized_ops:
+        return legacy_summary
+
+    totals: defaultdict[str, int] = defaultdict(int)
+    group_totals: defaultdict[str, dict[str, dict[str, dict[str, Any]]]] = defaultdict(dict)
+    detail: list[dict[str, Any]] = []
+
+    rows_simple = list(legacy_summary.get("rows") or [])
+    built_rows = int(legacy_summary.get("built_rows") or _count_ops_card_rows(rows_simple))
+
+    def _group_entry(
+        type_key: str,
+        ref_key: str,
+        side_key: str,
+        *,
+        ref_label: str,
+        ref_text: str,
+        diameter_in: float | None,
+    ) -> dict[str, Any]:
+        type_bucket = group_totals.setdefault(type_key, {})
+        ref_bucket = type_bucket.setdefault(ref_key, {})
+        entry = ref_bucket.get(side_key)
+        if entry is None:
+            entry = {
+                "type": type_key,
+                "ref": ref_text,
+                "ref_label": ref_label,
+                "diameter_in": float(diameter_in) if diameter_in is not None else None,
+                "qty": 0,
+                "sources": [],
+                "_depths": [],
+            }
+            ref_bucket[side_key] = entry
+        return entry
+
+    for op in normalized_ops:
+        op_type = op["type"]
+        qty = int(op.get("qty") or 0)
+        if qty <= 0:
+            continue
+        sides = list(op.get("sides") or []) or ["FRONT"]
+        ref_dia = _coerce_float_or_none(op.get("ref_dia_in"))
+        ref_label = str(op.get("ref_label") or op.get("ref") or "").strip()
+        if ref_dia is not None:
+            ref_key = f"{ref_dia:.4f}"
+        elif op.get("thread"):
+            ref_key = str(op.get("thread")).strip()
+        elif ref_label:
+            ref_key = ref_label
+        else:
+            ref_key = op_type
+
+        detail_entry = {
+            "type": op_type,
+            "qty": qty,
+            "sides": sides,
+            "side": sides[0] if sides else "",
+            "double_sided": bool(op.get("double_sided")),
+            "ref": str(op.get("ref") or ""),
+            "ref_label": ref_label,
+            "ref_dia_in": float(ref_dia) if ref_dia is not None else None,
+            "depth_in": _coerce_float_or_none(op.get("depth_in")),
+            "thread": str(op.get("thread") or op.get("tap") or ""),
+            "thru": bool(op.get("thru")),
+            "source": op.get("source"),
+        }
+        detail.append(detail_entry)
+
+        for side_key in sides:
+            side_norm = "BACK" if side_key.upper() == "BACK" else "FRONT"
+            bucket = _group_entry(
+                op_type,
+                ref_key,
+                side_norm,
+                ref_label=ref_label,
+                ref_text=str(op.get("ref") or ""),
+                diameter_in=ref_dia,
+            )
+            bucket["qty"] = int(bucket.get("qty", 0)) + qty
+            depth_val = _coerce_float_or_none(op.get("depth_in"))
+            if depth_val is not None:
+                bucket.setdefault("_depths", []).append(float(depth_val))
+            source_val = op.get("source")
+            if source_val:
+                try:
+                    source_text = str(source_val)
+                except Exception:
+                    source_text = None
+                if source_text and source_text not in bucket["sources"]:
+                    bucket["sources"].append(source_text)
+
+            if op_type == "tap":
+                totals[f"tap_{'back' if side_norm == 'BACK' else 'front'}"] += qty
+            elif op_type == "cbore":
+                totals[f"cbore_{'back' if side_norm == 'BACK' else 'front'}"] += qty
+            elif op_type == "csk":
+                totals[f"csk_{'back' if side_norm == 'BACK' else 'front'}"] += qty
+            elif op_type == "spot":
+                totals[f"spot_{'back' if side_norm == 'BACK' else 'front'}"] += qty
+        if op_type == "drill":
+            totals["drill"] += qty
+        elif op_type == "jig_grind":
+            totals["jig_grind"] += qty
+
+    totals["tap_total"] = totals.get("tap_front", 0) + totals.get("tap_back", 0)
+    totals["cbore_total"] = totals.get("cbore_front", 0) + totals.get("cbore_back", 0)
+    totals["csk_total"] = totals.get("csk_front", 0) + totals.get("csk_back", 0)
+    totals["spot_total"] = totals.get("spot_front", 0) + totals.get("spot_back", 0)
+
+    actions_total = (
+        totals.get("drill", 0)
+        + totals.get("tap_front", 0)
+        + totals.get("tap_back", 0)
+        + totals.get("cbore_front", 0)
+        + totals.get("cbore_back", 0)
+        + totals.get("csk_front", 0)
+        + totals.get("csk_back", 0)
+        + totals.get("spot_front", 0)
+        + totals.get("spot_back", 0)
+        + totals.get("jig_grind", 0)
+    )
+
+    back_ops_total = (
+        totals.get("cbore_back", 0)
+        + totals.get("csk_back", 0)
+        + totals.get("tap_back", 0)
+        + totals.get("spot_back", 0)
+    )
+
+    grouped_final: dict[str, dict[str, dict[str, dict[str, Any]]]] = {}
+    for type_key, ref_map in group_totals.items():
+        grouped_final[type_key] = {}
+        for ref_key, side_map in ref_map.items():
+            grouped_final[type_key][ref_key] = {}
+            for side_key, payload in side_map.items():
+                depths = payload.pop("_depths", [])
+                depth_vals = [
+                    _coerce_float_or_none(val)
+                    for val in depths
+                    if _coerce_float_or_none(val) is not None
+                ]
+                if depth_vals:
+                    depth_clean = [float(val) for val in depth_vals if val is not None]
+                    if depth_clean:
+                        payload["depth_in_avg"] = sum(depth_clean) / len(depth_clean)
+                        payload["depth_in_max"] = max(depth_clean)
+                        payload["depth_in_min"] = min(depth_clean)
+                if not payload.get("sources"):
+                    payload.pop("sources", None)
+                grouped_final[type_key][ref_key][side_key] = payload
+
+    summary = {
+        "totals": {key: int(totals.get(key, 0)) for key in (
+            "drill",
+            "tap_front",
+            "tap_back",
+            "tap_total",
+            "cbore_front",
+            "cbore_back",
+            "cbore_total",
+            "csk_front",
+            "csk_back",
+            "csk_total",
+            "spot_front",
+            "spot_back",
+            "spot_total",
+            "jig_grind",
+        )},
+        "rows": rows_simple,
+        "rows_detail": detail,
+        "actions_total": int(actions_total),
+        "back_ops_total": int(back_ops_total),
+        "flip_required": bool(back_ops_total > 0),
+        "built_rows": int(built_rows),
+        "group_totals": grouped_final,
+    }
+
+    if _parser_rules_v2_enabled():
+        legacy_totals = (legacy_summary or {}).get("totals") or {}
+        try:
+            logging.info(
+                "[counts] legacy=%s new=%s",
+                {k: int(legacy_totals.get(k, 0)) for k in sorted(legacy_totals.keys())},
+                summary["totals"],
+            )
+        except Exception:
+            pass
+
+    return summary
 
 
 # --- NEW: parse HOLE TABLE that's drawn with text + lines (no ACAD TABLE)
@@ -13995,7 +14459,32 @@ def extract_hole_table_from_text(doc, y_tol: float = 0.04, min_rows: int = 5):
     if total <= 0:
         return {}
 
-    ops_summary = aggregate_ops(clean_rows) if clean_rows else {}
+    ops_entries: list[dict[str, Any]] = []
+    for row in clean_rows:
+        try:
+            qty_val = int(row.get("qty") or 0)
+        except Exception:
+            qty_val = 0
+        ref_text = str(row.get("ref") or "")
+        desc_text = str(row.get("desc") or "")
+        line_parts = []
+        if qty_val > 0:
+            line_parts.append(f"QTY {qty_val}")
+        if ref_text:
+            line_parts.append(ref_text)
+        if desc_text:
+            line_parts.append(desc_text)
+        line_text = " ".join(line_parts).strip()
+        entry = _parse_hole_line(line_text, 1.0, source="TEXT_TABLE") if line_text else None
+        if entry:
+            if qty_val > 0:
+                entry["qty"] = qty_val
+            if row.get("diameter_in") is not None:
+                entry.setdefault("ref_dia_in", row.get("diameter_in"))
+            entry.setdefault("ref", ref_text)
+            ops_entries.append(entry)
+
+    ops_summary = aggregate_ops(clean_rows, ops_entries=ops_entries) if clean_rows else {}
 
     result = {
         "hole_count": total,
@@ -14201,7 +14690,33 @@ def hole_count_from_acad_table(doc) -> dict[str, Any]:
             families_formatted = {
                 f'{diam:.4f}"': count for diam, count in sorted(families.items())
             }
-            ops_summary = aggregate_ops(rows_norm) if rows_norm else {}
+            ops_entries: list[dict[str, Any]] = []
+            for row in rows_norm:
+                try:
+                    qty_val = int(row.get("qty") or 0)
+                except Exception:
+                    qty_val = 0
+                ref_val = str(row.get("ref") or "")
+                desc_val = str(row.get("desc") or "")
+                line_parts = []
+                if qty_val > 0:
+                    line_parts.append(f"QTY {qty_val}")
+                if ref_val:
+                    line_parts.append(ref_val)
+                if desc_val:
+                    line_parts.append(desc_val)
+                line_text = " ".join(line_parts).strip()
+                entry = _parse_hole_line(line_text, 1.0, source="ACAD_TABLE") if line_text else None
+                if entry:
+                    if qty_val > 0:
+                        entry["qty"] = qty_val
+                    if row.get("diameter_in") is not None:
+                        entry.setdefault("ref_dia_in", row.get("diameter_in"))
+                    entry.setdefault("ref", ref_val)
+                    ops_entries.append(entry)
+            ops_summary = (
+                aggregate_ops(rows_norm, ops_entries=ops_entries) if rows_norm else {}
+            )
             result = {
                 "hole_count": total,
                 "hole_diam_families_in": families_formatted,

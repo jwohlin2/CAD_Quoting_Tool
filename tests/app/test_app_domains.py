@@ -588,13 +588,22 @@ def _run_ops_summary_rows(_: pytest.FixtureRequest) -> None:
             "desc": "4X TAP 1/4-20 THRU",
         }
     ]
+    ops_entries = [
+        appV5._parse_hole_line("QTY 4 0.201 1/4-20 TAP THRU", 1.0, source="TABLE")
+    ]
 
-    summary = appV5.aggregate_ops(rows)
+    summary = appV5.aggregate_ops(rows, ops_entries=ops_entries)
 
     assert summary["rows"] == [
         {"hole": "H1", "ref": "0.201", "qty": 4, "desc": "4X TAP 1/4-20 THRU"}
     ]
-    assert summary["rows_detail"][0]["per_hole"].get("tap_front") == 1
+    detail_entry = summary["rows_detail"][0]
+    assert detail_entry["type"] == "tap"
+    assert detail_entry["qty"] == 4
+    assert detail_entry["sides"] == ["FRONT"]
+    grouped = summary["group_totals"].get("tap")
+    assert grouped is not None
+    assert grouped["1/4-20"]["FRONT"]["qty"] == 4
 
 
 @pytest.mark.parametrize("case", [Case("ops_summary_rows", _run_ops_summary_rows)], ids=lambda c: c.name)
@@ -699,9 +708,80 @@ def _run_aggregate_ops_sets_built(_: pytest.FixtureRequest) -> None:
         {"hole": "A2", "ref": "", "qty": 2, "desc": "1/4-20 TAP THRU"},
     ]
 
-    summary = appV5.aggregate_ops(rows)
+    ops_entries = [
+        appV5._parse_hole_line("QTY 4 Ø0.257 THRU", 1.0, source="TABLE"),
+        appV5._parse_hole_line("QTY 2 1/4-20 TAP THRU", 1.0, source="TABLE"),
+    ]
+
+    summary = appV5.aggregate_ops(rows, ops_entries=ops_entries)
 
     assert summary.get("built_rows") == 2
+
+
+def test_parser_rules_v2_ops_summary_and_minutes(monkeypatch: pytest.MonkeyPatch) -> None:
+    import appV5
+
+    monkeypatch.setenv("PARSER_RULES_V2", "1")
+
+    rows = [
+        {"hole": "D1", "ref": "Ø0.531", "qty": 22, "desc": "Ø0.531 THRU"},
+        {"hole": "D2", "ref": "Ø0.201", "qty": 61, "desc": "Ø0.201 THRU"},
+        {"hole": "D3", "ref": "Ø0.159", "qty": 2, "desc": "Ø0.159 THRU"},
+        {"hole": "T1", "ref": "0.201", "qty": 21, "desc": "1/4-20 TAP THRU"},
+        {"hole": "C1", "ref": "Ø0.750", "qty": 30, "desc": "Ø0.750 CBORE × 0.25\" FRONT & BACK"},
+    ]
+
+    ops_entries = [
+        {"type": "drill", "qty": 22, "dia_in": 0.531, "depth_in": 2.0, "ref": "Ø0.531"},
+        {"type": "drill", "qty": 61, "dia_in": 0.201, "depth_in": 2.0, "ref": "Ø0.201"},
+        {"type": "drill", "qty": 2, "dia_in": 0.159, "depth_in": 2.0, "ref": "Ø0.159"},
+        {"type": "tap", "qty": 21, "thread": "1/4-20", "ref": "0.201", "depth_in": 0.5, "side": "FRONT"},
+        {
+            "type": "cbore",
+            "qty": 30,
+            "dia_in": 0.75,
+            "depth_in": 0.25,
+            "double_sided": True,
+            "ref": "Ø0.750",
+        },
+        {"type": "spot", "qty": 10, "depth_in": 0.1, "ref": "Ø0.531"},
+    ]
+
+    summary = appV5.aggregate_ops(rows, ops_entries=ops_entries)
+    totals = summary["totals"]
+
+    assert totals["drill"] == 85
+    assert totals["tap_front"] == 21
+    assert totals["cbore_front"] == 30
+    assert totals["cbore_back"] == 30
+    assert totals["cbore_total"] == 60
+    assert totals["spot_total"] == 10
+
+    geo = {"ops_summary": summary}
+    drilling_meta = {
+        "index_min_per_hole": 2.12608593,
+        "peck_min_per_hole_vals": [0.0, 0.0],
+        "toolchange_min_deep": 0.0,
+        "toolchange_min_std": 0.0,
+        "bins_list": [
+            {"op": "drill", "op_name": "drill", "diameter_in": 0.531, "depth_in": 2.0, "qty": 1},
+            {"op": "drill", "op_name": "drill", "diameter_in": 0.201, "depth_in": 2.0, "qty": 1},
+            {"op": "drill", "op_name": "drill", "diameter_in": 0.159, "depth_in": 2.0, "qty": 1},
+        ],
+    }
+
+    subtotal_min, tool_min, total_min, detail = appV5._estimate_drilling_minutes_from_meta(
+        drilling_meta, geo
+    )
+
+    assert subtotal_min == pytest.approx(207.18, rel=1e-3)
+    assert tool_min == pytest.approx(0.0, abs=1e-6)
+    assert total_min == pytest.approx(207.18, rel=1e-3)
+
+    bins_out = detail.get("bins") if isinstance(detail, dict) else None
+    assert bins_out is not None
+    qty_sum = sum(int(appV5._coerce_int_or_zero(entry.get("qty"))) for entry in bins_out)
+    assert qty_sum == 85
 
 
 @pytest.mark.parametrize(
