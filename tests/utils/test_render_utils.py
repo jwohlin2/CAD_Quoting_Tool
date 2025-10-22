@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import pytest
 
-from cad_quoter.utils.render_utils import (
+from cad_quoter.utils.rendering import (
     QuoteDocRecorder,
     QuoteDoc,
     QuoteRow,
