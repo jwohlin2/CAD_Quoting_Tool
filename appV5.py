@@ -6222,26 +6222,6 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
                 scrap_credit_mass_lb = None
                 material_detail_for_breakdown.pop("scrap_credit_mass_lb", None)
 
-            legacy_weight_lines: list[str] = []
-            if (starting_mass_val and starting_mass_val > 0) or show_zeros:
-                legacy_weight_lines.append(
-                    f"  Weight Reference: Start {_format_weight_lb_oz(starting_mass_val)}"
-                )
-            if (net_mass_val and net_mass_val > 0) or show_zeros:
-                legacy_weight_lines.append(
-                    f"  Weight Reference: Net {_format_weight_lb_oz(net_mass_val)}"
-                )
-            if scrap_mass_val is not None:
-                if scrap_mass_val > 0 or show_zeros:
-                    legacy_weight_lines.append(
-                        f"  Weight Reference: Scrap {_format_weight_lb_oz(scrap_mass_val)}"
-                    )
-            elif show_zeros:
-                legacy_weight_lines.append("  Weight Reference: Scrap 0 oz")
-
-            if legacy_weight_lines:
-                detail_lines.extend(legacy_weight_lines)
-
             weight_lines: list[str] = []
             if (starting_mass_val and starting_mass_val > 0) or show_zeros:
                 weight_lines.append(
