@@ -53,12 +53,20 @@ def test_render_quote_emits_structured_sections() -> None:
     assert math.isclose(summary["margin_pct"], 0.15, rel_tol=1e-6)
     assert math.isclose(summary["final_price"], result["price"], rel_tol=1e-6)
 
-    assert "QUICK WHAT-IFS" not in rendered_text
-    assert "Margin slider" not in rendered_text
+    assert "Quick What-Ifs" in rendered_text
+    assert "Margin Slider" in rendered_text
 
-    assert not payload.get("quick_what_ifs")
-    assert payload.get("margin_slider") is None
-    assert not payload.get("qty_breaks")
+    quick_entries = payload.get("quick_what_ifs")
+    assert isinstance(quick_entries, list) and quick_entries
+
+    slider_payload = payload.get("margin_slider")
+    assert isinstance(slider_payload, Mapping)
+    assert slider_payload.get("points")
+    assert math.isclose(
+        float(slider_payload.get("current_pct", 0.0)),
+        summary["margin_pct"],
+        rel_tol=1e-6,
+    )
 
     drivers = payload.get("price_drivers", [])
     assert any("Tight tolerance" in driver.get("detail", "") for driver in drivers)
@@ -99,9 +107,11 @@ def test_render_quote_shows_expedite_toggle_when_applicable() -> None:
 
     rendered_text, payload = _render_payload(result)
 
-    assert "QUICK WHAT-IFS" not in rendered_text
-    assert "Remove expedite" not in rendered_text
-    assert not payload.get("quick_what_ifs")
+    assert "QUICK WHAT-IFS (INTERNAL KNOBS)" in rendered_text
+    assert "Other quick toggles" in rendered_text
+    assert "Remove expedite" in rendered_text
+    assert "Margin 10%:" not in rendered_text
+    assert payload.get("quick_what_ifs")
 
 
 def test_render_quote_cost_breakdown_prefers_pricing_totals() -> None:
