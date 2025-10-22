@@ -1,9 +1,8 @@
 """Estimator modules exposed for backwards-compatible imports."""
 
-from . import base, drilling, drilling_legacy
+from . import base, drilling
 
 __all__ = [
     "base",
     "drilling",
-    "drilling_legacy",
 ]

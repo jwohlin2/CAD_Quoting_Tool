@@ -982,9 +982,9 @@ def _emit_hole_table_ops_cards(
         _push(lines, f"[DEBUG] tapping_emit_skipped={exc.__class__.__name__}: {exc}")
         return
 if TYPE_CHECKING:
-    from cad_quoter_pkg.src.cad_quoter.estimators import drilling_legacy as _drilling_legacy
+    from cad_quoter_pkg.src.cad_quoter.estimators import drilling as _drilling
 else:
-    from cad_quoter.estimators import drilling_legacy as _drilling_legacy
+    from cad_quoter.estimators import drilling as _drilling
 from cad_quoter.estimators.base import SpeedsFeedsUnavailableError
 from cad_quoter.llm_overrides import (
     _plate_mass_properties,
@@ -3200,13 +3200,13 @@ except Exception:  # pragma: no cover - defensive
 
 _normalize_lookup_key = normalize_material_key
 
-_clean_hole_groups = _drilling_legacy._clean_hole_groups
-_coerce_overhead_dataclass = _drilling_legacy._coerce_overhead_dataclass
-_drill_overhead_from_params = _drilling_legacy._drill_overhead_from_params
-_machine_params_from_params = _drilling_legacy._machine_params_from_params
-_legacy_estimate_drilling_hours = _drilling_legacy.legacy_estimate_drilling_hours
-_apply_drill_minutes_clamp = _drilling_legacy._apply_drill_minutes_clamp
-_drill_minutes_per_hole_bounds = _drilling_legacy._drill_minutes_per_hole_bounds
+_clean_hole_groups = _drilling._clean_hole_groups
+_coerce_overhead_dataclass = _drilling._coerce_overhead_dataclass
+_drill_overhead_from_params = _drilling._drill_overhead_from_params
+_machine_params_from_params = _drilling._machine_params_from_params
+_legacy_estimate_drilling_hours = _drilling.legacy_estimate_drilling_hours
+_apply_drill_minutes_clamp = _drilling._apply_drill_minutes_clamp
+_drill_minutes_per_hole_bounds = _drilling._drill_minutes_per_hole_bounds
 
 _CANONICAL_MIC6_DISPLAY = "Aluminum MIC6"
 _MIC6_NORMALIZED_KEY = _normalize_lookup_key(_CANONICAL_MIC6_DISPLAY)
