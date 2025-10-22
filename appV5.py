@@ -9024,7 +9024,7 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
 
     quick_what_if_entries: list[dict[str, Any]] = []
     margin_slider_payload: dict[str, Any] | None = None
-    margin_slider_display_lines: list[str] = []
+    slider_sample_points: list[dict[str, Any]] = []
 
     def _pct_label(value: float) -> str:
         try:
@@ -9315,10 +9315,6 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
                 "currency": currency,
             }
 
-            margin_slider_display_lines.append(
-                f"Current margin {_pct_label(margin_pct_value)} → {fmt_money(final_price_val, currency)}"
-            )
-
             sample_points: list[dict[str, Any]] = []
             min_point = slider_points[0]
             max_point = slider_points[-1]
@@ -9340,16 +9336,24 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
             if max_point not in sample_points:
                 sample_points.append(max_point)
 
-            formatted_samples = " · ".join(
-                f"{point['label']}: {fmt_money(point['unit_price'], currency)}" for point in sample_points
-            )
-            if formatted_samples:
-                margin_slider_display_lines.append(formatted_samples)
-
-            step_display = max(1, int(round(slider_step_pct * 100)))
-            margin_slider_display_lines.append(
-                f"Range {_pct_label(slider_min_pct)}–{_pct_label(slider_max_pct)} (step {step_display}%)."
-            )
+            seen_points: set[float] = set()
+            for point in sample_points:
+                pct_val = float(point.get("margin_pct", 0.0))
+                rounded_key = round(pct_val, 4)
+                if rounded_key in seen_points:
+                    continue
+                seen_points.add(rounded_key)
+                slider_sample_points.append(
+                    {
+                        "margin_pct": pct_val,
+                        "label": str(point.get("label") or _pct_label(pct_val)),
+                        "unit_price": float(point.get("unit_price", 0.0)),
+                        "currency": str(point.get("currency") or currency),
+                        "is_current": bool(
+                            math.isclose(pct_val, margin_pct_value, rel_tol=0.0, abs_tol=1e-6)
+                        ),
+                    }
+                )
 
     row("Subtotal (Labor + Directs):", subtotal)
     if applied_pcts.get("ExpeditePct"):
@@ -9362,14 +9366,110 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
         if lines and lines[-1] != "":
             _push(lines, "")
 
+    def _format_dotted_line(label: str, value_text: str, *, indent: str = "  ") -> str:
+        base = f"{indent}{label}"
+        try:
+            total_width = int(page_width)
+        except Exception:
+            total_width = 74
+        total_width = max(32, min(120, total_width))
+        spacing = total_width - len(base) - len(value_text) - 1
+        if spacing < 2:
+            return f"{base} {value_text}"
+        return f"{base}{'.' * spacing} {value_text}"
+
+    section_counter = 0
+    quick_section_lines: list[str] = []
+
+    def _append_section_heading(title: str) -> None:
+        nonlocal section_counter
+        if section_counter > 0 and (not quick_section_lines or quick_section_lines[-1] != ""):
+            quick_section_lines.append("")
+        heading = f"{chr(ord('A') + section_counter)}) {title}"
+        section_counter += 1
+        quick_section_lines.append(heading)
+
+    if slider_sample_points:
+        qty_display: str
+        if isinstance(qty, int) and qty > 0:
+            qty_display = str(qty)
+        else:
+            qty_display = str(max(1, int(round(_safe_float(qty, 1.0)))))
+        _append_section_heading(f"Margin Slider (Qty = {qty_display})")
+        for point in sorted(slider_sample_points, key=lambda p: p.get("margin_pct", 0.0)):
+            label_text = f"{str(point.get('label') or '')} margin".strip()
+            if not label_text:
+                label_text = "Margin"
+            if point.get("is_current"):
+                label_text = f"{label_text} (current)"
+            amount_text = fmt_money(_safe_float(point.get("unit_price"), 0.0), point.get("currency", currency))
+            quick_section_lines.append(_format_dotted_line(label_text, amount_text))
+
+    current_qty = qty if isinstance(qty, int) and qty > 0 else max(1, int(round(_safe_float(qty, 1.0))))
+    direct_per_part = max(0.0, _safe_float(directs, 0.0))
+    labor_machine_per_part = max(0.0, _safe_float(machine_labor_total, 0.0))
+    amortized_per_part = max(0.0, _safe_float(nre_per_part, 0.0))
+    amortized_per_lot = amortized_per_part * max(1, current_qty)
+    pass_through_lot = max(0.0, _safe_float(pass_through_total, 0.0))
+    vendor_items_lot = max(0.0, _safe_float(vendor_items_total, 0.0))
+    direct_fixed_lot = pass_through_lot + vendor_items_lot
+    divisor = max(1, current_qty)
+    direct_variable_per_part = max(0.0, direct_per_part - (direct_fixed_lot / divisor))
+
+    qty_candidates_raw = [1, 2, 5, 10]
+    if current_qty not in qty_candidates_raw:
+        qty_candidates_raw.append(current_qty)
+    qty_candidates = sorted({q for q in qty_candidates_raw if isinstance(q, int) and q > 0})
+
+    qty_break_rows: list[tuple[int, float, float, float, float]] = []
+    for candidate_qty in qty_candidates:
+        labor_part = labor_machine_per_part + (amortized_per_lot / candidate_qty if candidate_qty > 0 else 0.0)
+        direct_part = direct_variable_per_part + (direct_fixed_lot / candidate_qty if candidate_qty > 0 else 0.0)
+        base_subtotal_candidate = labor_part + direct_part
+        subtotal_with_expedite = base_subtotal_candidate * (1.0 + max(0.0, expedite_pct_value))
+        final_candidate = subtotal_with_expedite * (1.0 + max(0.0, margin_pct_value))
+        qty_break_rows.append(
+            (
+                candidate_qty,
+                round(labor_part, 2),
+                round(direct_part, 2),
+                round(subtotal_with_expedite, 2),
+                round(final_candidate, 2),
+            )
+        )
+
+    if qty_break_rows:
+        heading_text = f"Qty break (assumes same ops; programming amortized; {_pct_label(margin_pct_value)} margin"
+        if expedite_pct_value > 0:
+            heading_text += f"; expedite {_pct_label(expedite_pct_value)}"
+        heading_text += ")"
+        _append_section_heading(heading_text)
+        quick_section_lines.append("  Qty, Labor $/part, Directs $/part, Subtotal, Final")
+        for row_qty, labor_val, direct_val, subtotal_val, final_val in qty_break_rows:
+            qty_field = str(row_qty).rjust(3)
+            labor_field = fmt_money(labor_val, currency).rjust(12)
+            direct_field = fmt_money(direct_val, currency).rjust(12)
+            subtotal_field = fmt_money(subtotal_val, currency).rjust(12)
+            final_field = fmt_money(final_val, currency).rjust(12)
+            quick_section_lines.append(
+                f"  {qty_field},   {labor_field}, {direct_field}, {subtotal_field}, {final_field}"
+            )
+
+    other_quick_entries: list[dict[str, Any]] = []
     if quick_what_if_entries:
-        _ensure_blank_line()
-        _push(lines, "Quick What-Ifs")
-        _push(lines, divider)
         for entry in quick_what_if_entries:
+            margin_present = entry.get("margin_pct") is not None
+            label_lower = str(entry.get("label") or "").strip().lower()
+            if slider_sample_points and margin_present and "margin" in label_lower:
+                continue
+            other_quick_entries.append(entry)
+
+    if other_quick_entries:
+        _append_section_heading("Other quick toggles")
+        for entry in other_quick_entries:
             label_text = str(entry.get("label") or "").strip() or "Scenario"
             amount_val = _safe_float(entry.get("unit_price"), 0.0)
-            amount_text = fmt_money(amount_val, currency)
+            amount_text = fmt_money(amount_val, entry.get("currency", currency))
             delta_val = entry.get("delta")
             if delta_val is not None:
                 delta_float = _safe_float(delta_val, 0.0)
@@ -9379,21 +9479,24 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
                     delta_prefix = "±"
                 else:
                     delta_prefix = "+"
-                delta_text = fmt_money(abs(delta_float), currency)
-                base_line = f"{label_text}: {amount_text} ({delta_prefix}{delta_text})"
+                delta_text = fmt_money(abs(delta_float), entry.get("currency", currency))
+                base_line = f"  {label_text}: {amount_text} ({delta_prefix}{delta_text})"
             else:
-                base_line = f"{label_text}: {amount_text}"
+                base_line = f"  {label_text}: {amount_text}"
             detail_text = str(entry.get("detail") or "").strip()
             if detail_text:
                 base_line = f"{base_line} — {detail_text}"
-            _push(lines, base_line)
-        _ensure_blank_line()
+            quick_section_lines.append(base_line)
 
-    if margin_slider_display_lines:
+    while quick_section_lines and quick_section_lines[-1] == "":
+        quick_section_lines.pop()
+
+    if quick_section_lines:
         _ensure_blank_line()
-        _push(lines, "Margin Slider")
+        _push(lines, "QUICK WHAT-IFS (INTERNAL KNOBS)")
         _push(lines, divider)
-        for text_line in margin_slider_display_lines:
+        _push(lines, "Quick What-Ifs")
+        for text_line in quick_section_lines:
             _push(lines, text_line)
         _ensure_blank_line()
 
