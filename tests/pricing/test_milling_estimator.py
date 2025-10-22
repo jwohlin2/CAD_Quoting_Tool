@@ -1,3 +1,5 @@
+import math
+
 import pytest
 
 from cad_quoter.pricing.milling_estimator import estimate_milling_minutes_from_geometry
@@ -66,3 +68,56 @@ def test_face_stepover_scales_with_tool_diameter(aluminum_profile_row: dict) -> 
     effective_length = geom["plate_area_in2"] / stepover_in
     expected_minutes = (effective_length / face_feed) * 60.0
     assert result["minutes"] == pytest.approx(expected_minutes, rel=1e-6, abs=1e-6)
+
+
+def test_milling_paths_bucket_uses_csv_defaults() -> None:
+    geom = {
+        "material": "Aluminum MIC6",
+        "milling_paths": [
+            {"tool_dia_in": 0.5, "flutes": 3, "length_in": 100.0},
+            {
+                "tool_dia_in": 0.25,
+                "flutes": 2,
+                "length_in": 50.0,
+                "entry_count": 5,
+                "overhead_sec": 6.0,
+            },
+        ],
+    }
+
+    result = estimate_milling_minutes_from_geometry(
+        geom=geom,
+        sf_df=None,
+        material_group="N1",
+        rates=None,
+    )
+
+    assert result is not None
+
+    sfm = 600.0
+    rpm_primary = (sfm * 12.0) / (math.pi * 0.5)
+    rpm_secondary = (sfm * 12.0) / (math.pi * 0.25)
+    ipm_primary = rpm_primary * 0.006 * 3
+    ipm_secondary = rpm_secondary * 0.004 * 2
+    minutes_primary = (100.0 / ipm_primary) * 60.0
+    minutes_secondary_cut = (50.0 / ipm_secondary) * 60.0
+    minutes_secondary = minutes_secondary_cut + ((5 * 2.0 + 6.0) / 60.0)
+    total_minutes = minutes_primary + minutes_secondary
+
+    expected_minutes = round(total_minutes, 2)
+    expected_machine = round((total_minutes / 60.0) * 90.0, 2)
+    expected_labor = round((total_minutes / 60.0) * 45.0, 2)
+
+    assert result["minutes"] == pytest.approx(expected_minutes, abs=1e-2)
+    assert result["machine$"] == pytest.approx(expected_machine, abs=1e-2)
+    assert result["labor$"] == pytest.approx(expected_labor, abs=1e-2)
+
+    detail = result.get("detail") or {}
+    paths = detail.get("paths") if isinstance(detail, dict) else None
+    assert paths is not None
+    assert len(paths) == 2
+    assert sum(path.get("minutes", 0.0) for path in paths) == pytest.approx(
+        total_minutes, rel=1e-6
+    )
+    assert all(path.get("rpm", 0.0) > 0.0 for path in paths)
+    assert any(path.get("source") for path in paths)

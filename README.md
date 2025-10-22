@@ -66,8 +66,19 @@ Automated checks live under `tests/`.  Run the suite with:
 pytest
 ```
 
-The repository also includes a `docs/` directory with deployment notes and
-integration guides for downstream teams.
+### Documentation
+
+All internal documentation now lives on the company wiki (requires SSO
+access).  Use the links below to open the migrated pages:
+
+* [App settings overrides](https://wiki.company.com/display/CAD/CAD+Quoting+Tool+-+App+Settings+Overrides)
+* [AppKit inventory](https://wiki.company.com/display/CAD/CAD+Quoting+Tool+-+AppKit+Inventory)
+* [AppV5 simplification plan](https://wiki.company.com/display/CAD/CAD+Quoting+Tool+-+AppV5+Simplification+Plan)
+* [Consolidation opportunities](https://wiki.company.com/display/CAD/CAD+Quoting+Tool+-+Consolidation+Opportunities)
+* [Deployment guide](https://wiki.company.com/display/CAD/CAD+Quoting+Tool+-+Deployment+Guide)
+* [Internal workflow reference](https://wiki.company.com/display/CAD/CAD+Quoting+Tool+-+Internal+Workflow+Reference)
+* [NRE costs](https://wiki.company.com/display/CAD/CAD+Quoting+Tool+-+NRE+Costs)
+* [Planner pricing migration](https://wiki.company.com/display/CAD/CAD+Quoting+Tool+-+Planner+Pricing+Migration)
 
 ## Troubleshooting
 
@@ -186,6 +197,23 @@ catalog helper:
 ```
 python -m cad_quoter.vendors.mcmaster_stock --part 86825K956
 ```
+
+## Deployment helpers
+
+The legacy `git-auto-pull` scripts have been replaced with a small Python
+utility that bundles the common operational workflows.  Invoke the helper with
+`python -m deploy <command>` from the repository root.  Key sub-commands
+include:
+
+* `pull` – fast-forward the local checkout from the remote.  This replaces the
+  old Git auto-pull hooks.
+* `bootstrap` – install runtime dependencies from `requirements.txt`.  Pass
+  `--upgrade-pip` to refresh `pip` beforehand.
+* `check` – run the default pytest suite before promoting a build.
+* `print-env` – proxy to `python appV5.py --print-env` for quick configuration
+  audits.
+
+Run `python -m deploy --help` for the complete command reference.
 
 The command honours `--qty` to pick the relevant pricing tier and will fall
 back to the interactive catalog flow when `--part` is omitted.

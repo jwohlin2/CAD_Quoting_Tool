@@ -1,5 +1,6 @@
 import json
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -44,19 +45,22 @@ def test_load_default_rates_returns_two_buckets() -> None:
 
     assert set(rates.keys()) == {"labor", "machine"}
     assert rates["labor"]["Programmer"] == pytest.approx(90.0)
-    assert rates["machine"]["WireEDM"] == pytest.approx(90.0)
+    assert rates["machine"]["WireEDM"] == pytest.approx(130.0)
 
 
 def test_load_default_rates_migrates_flat_schema(monkeypatch: pytest.MonkeyPatch) -> None:
-    def _fake_loader(name: str, version: int) -> dict[str, float]:
-        assert name == "rates"
+    def _fake_settings() -> dict[str, Any]:
         return {
-            "ProgrammingRate": 110.0,
-            "WireEDMRate": 150.0,
-            "SurfaceGrindRate": 120.0,
+            "pricing_defaults": {
+                "rates": {
+                    "ProgrammingRate": 110.0,
+                    "WireEDMRate": 150.0,
+                    "SurfaceGrindRate": 120.0,
+                }
+            }
         }
 
-    monkeypatch.setattr(config, "load_named_config", _fake_loader)
+    monkeypatch.setattr(config, "load_app_settings", lambda reload=False: _fake_settings())
 
     migrated = config.load_default_rates()
 
