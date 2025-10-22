@@ -169,6 +169,7 @@ def _sanitize_drill_removal_minutes(minutes_value: Any) -> float:
 from cad_quoter.app.chart_lines import (
     collect_chart_lines_context as _collect_chart_lines_context,
 )
+from ops_audit import audit_operations
 from cad_quoter.app.hole_ops import (
     CBORE_MIN_PER_SIDE_MIN,
     CSK_MIN_PER_SIDE_MIN,
@@ -9095,6 +9096,47 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
     except Exception as e:
         _push(lines, f"[DEBUG] material_removal_emit_skipped={e.__class__.__name__}: {e}")
     # ========================================================================
+
+    planner_ops_rows_for_audit: Any
+    if isinstance(ops_summary_map, _MappingABC):
+        planner_ops_rows_for_audit = ops_summary_map
+    else:
+        planner_ops_rows_for_audit = ops_rows
+
+    removal_sections_text = "\n".join(
+        str(line)
+        for line in removal_summary_lines
+        if isinstance(line, str)
+    )
+
+    ops_counts = audit_operations(planner_ops_rows_for_audit, removal_sections_text)
+
+    print(
+        f"[ops-audit] drills={ops_counts.get('drills', 0)} "
+        f"taps_total={ops_counts.get('taps_total', 0)} "
+        f"(F={ops_counts.get('taps_front', 0)}, B={ops_counts.get('taps_back', 0)}) "
+        f"cbore_total={ops_counts.get('counterbores_total', 0)} "
+        f"(F={ops_counts.get('counterbores_front', 0)}, B={ops_counts.get('counterbores_back', 0)}) "
+        f"spot={ops_counts.get('spot', 0)} "
+        f"jig_grind={ops_counts.get('jig_grind', 0)} "
+        f"actions={ops_counts.get('actions_total', 0)}"
+    )
+
+    lines.append("OPERATION AUDIT – Action counts")
+    lines.append("-" * 66)
+    lines.append(f" Drills:        {ops_counts.get('drills', 0)}")
+    lines.append(
+        " Taps:          "
+        f"{ops_counts.get('taps_total', 0)}  (Front {ops_counts.get('taps_front', 0)} / Back {ops_counts.get('taps_back', 0)})"
+    )
+    lines.append(
+        " Counterbores:  "
+        f"{ops_counts.get('counterbores_total', 0)}  (Front {ops_counts.get('counterbores_front', 0)} / Back {ops_counts.get('counterbores_back', 0)})"
+    )
+    lines.append(f" Spot:          {ops_counts.get('spot', 0)}")
+    lines.append(f" Jig-grind:     {ops_counts.get('jig_grind', 0)}")
+    lines.append(f" Actions total: {ops_counts.get('actions_total', 0)}")
+    lines.append("")
 
     # ---- Pricing ladder ------------------------------------------------------
     _push(lines, "Pricing Ladder")
