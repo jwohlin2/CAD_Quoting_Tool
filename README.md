@@ -198,5 +198,22 @@ catalog helper:
 python -m cad_quoter.vendors.mcmaster_stock --part 86825K956
 ```
 
+## Deployment helpers
+
+The legacy `git-auto-pull` scripts have been replaced with a small Python
+utility that bundles the common operational workflows.  Invoke the helper with
+`python -m deploy <command>` from the repository root.  Key sub-commands
+include:
+
+* `pull` – fast-forward the local checkout from the remote.  This replaces the
+  old Git auto-pull hooks.
+* `bootstrap` – install runtime dependencies from `requirements.txt`.  Pass
+  `--upgrade-pip` to refresh `pip` beforehand.
+* `check` – run the default pytest suite before promoting a build.
+* `print-env` – proxy to `python appV5.py --print-env` for quick configuration
+  audits.
+
+Run `python -m deploy --help` for the complete command reference.
+
 The command honours `--qty` to pick the relevant pricing tier and will fall
 back to the interactive catalog flow when `--part` is omitted.
