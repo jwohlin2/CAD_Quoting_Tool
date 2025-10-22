@@ -4523,39 +4523,43 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
                 prog_total,
             )
 
-        def _canonical_label(value: Any) -> str:
-            value_str = str(value)
-            return (
-                _canonical_bucket_key(value_str)
-                or _normalize_bucket_key(value_str)
-                or value_str
+        def _consume_entry(canon_key: str) -> None:
+            entry = canonical_entries.pop(canon_key, None)
+            if not entry:
+                return
+            minutes_val = entry.get("minutes", 0.0)
+            machine_val = entry.get("machine$", 0.0)
+            labor_val = entry.get("labor$", 0.0)
+            total_val = entry.get("total$", 0.0)
+            _append_process_row(
+                rows,
+                _label_for_bucket(canon_key),
+                minutes_val,
+                machine_val,
+                labor_val,
+                total_val,
             )
 
-        def _bucket_snapshot(target: str) -> dict[str, float]:
-            target_canon = _canonical_label(target)
-            for label, minutes_val, machine_val, labor_val, total_val in table_rows:
-                if _canonical_label(label) == target_canon:
-                    return {
-                        "minutes": round(float(minutes_val or 0.0), 2),
-                        "machine$": round(float(machine_val or 0.0), 2),
-                        "labor$": round(float(labor_val or 0.0), 2),
-                        "total$": round(float(total_val or 0.0), 2),
-                    }
-            return {}
+        for bucket_key in order:
+            _consume_entry(bucket_key)
 
-        mb = _bucket_snapshot("milling")
-        db = _bucket_snapshot("drilling")
-        print(f"[INFO] [bucket/milling] {mb}")
-        print(f"[INFO] [bucket/drilling] {db}")
-
-        rows = list(table_rows)
-        print(
-            f"[CHECK/process-sum] machine$={sum(float(r[2]) for r in rows):.2f} "
-            f"labor$={sum(float(r[3]) for r in rows):.2f} "
-            f"total$={sum(float(r[4]) for r in rows):.2f}"
-        )
-
-        total_cost = sum(row[4] for row in table_rows)
+        if canonical_entries:
+            for canon_key, entry in sorted(
+                canonical_entries.items(),
+                key=lambda item: _label_for_bucket(item[0]).lower(),
+            ):
+                minutes_val = entry.get("minutes", 0.0)
+                machine_val = entry.get("machine$", 0.0)
+                labor_val = entry.get("labor$", 0.0)
+                total_val = entry.get("total$", 0.0)
+                _append_process_row(
+                    rows,
+                    _label_for_bucket(canon_key),
+                    minutes_val,
+                    machine_val,
+                    labor_val,
+                    total_val,
+                )
 
         total_cost = sum(row[4] for row in rows)
         total_minutes = sum(row[1] for row in rows)
