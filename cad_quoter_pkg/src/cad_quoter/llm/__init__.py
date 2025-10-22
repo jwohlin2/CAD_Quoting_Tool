@@ -1229,24 +1229,44 @@ def explain_quote(
     if scrap_text and coerce_float(breakdown.get("scrap_pct")):
         scrap_line = f"Includes a {scrap_text} scrap allowance."
 
-    labor_machine_total = 0.0
-    labor_labor_total = 0.0
-    if isinstance(bucket_view_obj, Mapping):
-        buckets_obj = bucket_view_obj.get("buckets")
+    def _collect_bucket_entries(view: Any) -> dict[str, Mapping[str, Any]]:
+        if not isinstance(view, Mapping):
+            return {}
+
+        buckets_obj = view.get("buckets")
         if isinstance(buckets_obj, Mapping):
-            for raw_value in buckets_obj.values():
+            items = buckets_obj.items()
+        else:
+            fallback: list[tuple[str, Mapping[str, Any]]] = []
+            for raw_key, raw_value in view.items():
                 if not isinstance(raw_value, Mapping):
                     continue
-                labor_machine_total += _as_float(raw_value.get("machine$"), 0.0)
-                labor_labor_total += _as_float(raw_value.get("labor$"), 0.0)
+                if any(key in raw_value for key in ("total$", "labor$", "machine$", "minutes")):
+                    fallback.append((raw_key, raw_value))
+            items = fallback
 
-    labor_total = labor_machine_total + labor_labor_total
+        collected: dict[str, Mapping[str, Any]] = {}
+        for raw_key, raw_entry in items:
+            if not isinstance(raw_entry, Mapping):
+                continue
+            key_text = str(raw_key or "").strip()
+            if not key_text:
+                key_text = str(raw_key)
+            collected[key_text] = raw_entry
+        return collected
+
+    buckets = _collect_bucket_entries(bucket_view_obj)
+
+    machine_total = sum(_as_float(bucket.get("machine$"), 0.0) for bucket in buckets.values())
+    labor_total = sum(_as_float(bucket.get("labor$"), 0.0) for bucket in buckets.values())
+    grand_labor = machine_total + labor_total
+
+    grand_labor_text = _format_money(grand_labor)
+    machine_total_text = _format_money(machine_total)
     labor_total_text = _format_money(labor_total)
-    labor_machine_text = _format_money(labor_machine_total)
-    labor_labor_text = _format_money(labor_labor_total)
-    labor_totals_present = labor_total > 1e-2 and bool(labor_total_text)
-    if labor_totals_present and labor_total_text:
-        cost_makeup_parts.append(f"labor & machine {labor_total_text}")
+    labor_totals_present = grand_labor > 1e-2 and bool(grand_labor_text)
+    if labor_totals_present and grand_labor_text:
+        cost_makeup_parts.append(f"labor & machine {grand_labor_text}")
 
     if cost_makeup_parts:
         lines.append("Cost makeup: " + "; ".join(cost_makeup_parts) + ".")
@@ -1254,28 +1274,11 @@ def explain_quote(
     if scrap_line:
         lines.append(scrap_line)
 
-    def _top_drivers(bucket_view_obj: Any, n: int = 3) -> list[tuple[str, float]]:
-        if not isinstance(bucket_view_obj, Mapping):
-            return []
-
-        def _iter_bucket_items(
-            container: Mapping[str, Any]
-        ) -> Iterable[tuple[str, Mapping[str, Any]]]:
-            buckets_obj = container.get("buckets") if isinstance(container, Mapping) else None
-            if isinstance(buckets_obj, Mapping):
-                return buckets_obj.items()
-            fallback: list[tuple[str, Mapping[str, Any]]] = []
-            for raw_key, raw_value in container.items():
-                if not isinstance(raw_value, Mapping):
-                    continue
-                if any(key in raw_value for key in ("total$", "labor$", "machine$", "minutes")):
-                    fallback.append((raw_key, raw_value))
-            return fallback
-
+    def _top_drivers(
+        bucket_entries: Mapping[str, Mapping[str, Any]], n: int = 3
+    ) -> list[tuple[str, float]]:
         items: list[tuple[str, float]] = []
-        for raw_key, raw_entry in _iter_bucket_items(bucket_view_obj):
-            if not isinstance(raw_entry, Mapping):
-                continue
+        for raw_key, raw_entry in bucket_entries.items():
             total = _as_float(raw_entry.get("total$"), 0.0)
             if total <= 0.0:
                 labor_val = _as_float(raw_entry.get("labor$"), 0.0)
@@ -1283,7 +1286,8 @@ def explain_quote(
                 total = labor_val + machine_val
             if total <= 0.0:
                 continue
-            key_text = str(raw_key or "").strip()
+            label_candidate = raw_entry.get("label") or raw_entry.get("name")
+            key_text = str(label_candidate or raw_key or "").strip()
             if not key_text:
                 continue
             items.append((key_text, total))
@@ -1291,25 +1295,25 @@ def explain_quote(
         items.sort(key=lambda x: x[1], reverse=True)
         return items[:n]
 
-    drivers = _top_drivers(bucket_view_obj)
+    drivers = _top_drivers(buckets)
     lines.append("Why this price")
     lines.append("-" * 74)
     if drivers:
         txt = ", ".join(f"{k.replace('_', ' ').title()} ${v:,.2f}" for k, v in drivers)
         lines.append(f"  Main cost drivers: {txt}.")
     else:
-        lines.append("  Main cost drivers derive from planner buckets; none dominate.")
-    if labor_totals_present and labor_total_text:
+        lines.append("  Main cost drivers derive from bucket totals; none dominate.")
+    if labor_totals_present and grand_labor_text:
         detail_parts: list[str] = []
-        if labor_machine_total > 1e-2 and labor_machine_text:
-            detail_parts.append(f"machine {labor_machine_text}")
-        if labor_labor_total > 1e-2 and labor_labor_text:
-            detail_parts.append(f"manual labor {labor_labor_text}")
+        if machine_total > 1e-2 and machine_total_text:
+            detail_parts.append(f"machine {machine_total_text}")
+        if labor_total > 1e-2 and labor_total_text:
+            detail_parts.append(f"manual labor {labor_total_text}")
         if detail_parts:
             detail_text = "; ".join(detail_parts)
-            lines.append(f"  Buckets allocate {labor_total_text} across {detail_text}.")
+            lines.append(f"  Buckets allocate {grand_labor_text} across {detail_text}.")
         else:
-            lines.append(f"  Buckets allocate {labor_total_text} of labor & machine work.")
+            lines.append(f"  Buckets allocate {grand_labor_text} of labor & machine work.")
     lines.append("")
 
     def _iter_named_values(values: Any) -> Iterable[tuple[str, float]]:
@@ -1340,27 +1344,13 @@ def explain_quote(
             lines.append(f"{prefix} → " + "; ".join(top) + ".")
 
     def _iter_bucket_totals(
-        view: Any,
+        entries: Mapping[str, Mapping[str, Any]],
     ) -> Iterable[tuple[str, float]]:
-        if not isinstance(view, Mapping):
+        if not isinstance(entries, Mapping):
             return []
 
-        def _iter_entries(source: Mapping[str, Any]) -> Iterable[tuple[str, Mapping[str, Any]]]:
-            buckets_obj = source.get("buckets") if isinstance(source, Mapping) else None
-            if isinstance(buckets_obj, Mapping):
-                return buckets_obj.items()
-            fallback: list[tuple[str, Mapping[str, Any]]] = []
-            for raw_key, raw_value in source.items():
-                if not isinstance(raw_value, Mapping):
-                    continue
-                if any(key in raw_value for key in ("total$", "labor$", "machine$", "minutes")):
-                    fallback.append((raw_key, raw_value))
-            return fallback
-
-        entries: list[tuple[str, float]] = []
-        for raw_key, raw_entry in _iter_entries(view):
-            if not isinstance(raw_entry, Mapping):
-                continue
+        results: list[tuple[str, float]] = []
+        for raw_key, raw_entry in entries.items():
             total = _as_float(raw_entry.get("total$"), 0.0)
             if total <= 0.0:
                 labor_val = _as_float(raw_entry.get("labor$"), 0.0)
@@ -1372,10 +1362,10 @@ def explain_quote(
             label_text = str(label_candidate or raw_key or "").strip()
             if not label_text:
                 label_text = str(raw_key or "")
-            entries.append((label_text, total))
-        return entries
+            results.append((label_text, total))
+        return results
 
-    process_entries = list(_iter_bucket_totals(bucket_view_obj))
+    process_entries = list(_iter_bucket_totals(buckets))
     ranked_process_entries = sorted(process_entries, key=lambda item: item[1], reverse=True)
     top_procs: list[str] = []
     for label, _ in ranked_process_entries[:3]:
