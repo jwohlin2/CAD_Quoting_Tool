@@ -4481,11 +4481,31 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
             return 0.0
 
     separate_labor_cfg = bool(getattr(cfg, "separate_machine_labor", False)) if cfg else False
+    default_flat_rates: Mapping[str, Any] = RATES_DEFAULT if isinstance(RATES_DEFAULT, Mapping) else {}
+
+    def _default_rate(*keys: str) -> float:
+        for key in keys:
+            if not key:
+                continue
+            try:
+                value = default_flat_rates.get(key)
+            except Exception:
+                value = None
+            numeric = _coerce_rate_value(value)
+            if numeric > 0.0:
+                return numeric
+        return 0.0
+
+    default_machine_rate_value = _default_rate("MachineRate", "MillingRate", "CNC_Mill")
+    default_labor_rate_value = _default_rate("LaborRate", "Machinist", "DefaultLaborRate")
+    default_programmer_rate_value = _default_rate("ProgrammingRate", "Programmer")
+    default_inspector_rate_value = _default_rate("InspectionRate", "Inspector")
+
     cfg_labor_rate_value = 0.0
     if separate_labor_cfg:
         cfg_labor_rate_value = _coerce_rate_value(getattr(cfg, "labor_rate_per_hr", 0.0))
         if cfg_labor_rate_value <= 0.0:
-            cfg_labor_rate_value = 45.0
+            cfg_labor_rate_value = default_labor_rate_value or 45.0
 
     if "ShopRate" not in rates:
         fallback_shop = _coerce_rate_value(rates.get("MillingRate"))
@@ -4503,7 +4523,7 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
     if labor_rate_value <= 0:
         labor_rate_value = _coerce_rate_value(rates.get("ShopLaborRate"))
     if labor_rate_value <= 0:
-        labor_rate_value = 85.0
+        labor_rate_value = default_labor_rate_value or 45.0
     if separate_labor_cfg and cfg_labor_rate_value > 0.0:
         labor_rate_value = cfg_labor_rate_value
     rates["LaborRate"] = labor_rate_value
@@ -4512,14 +4532,14 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
     if machine_rate_value <= 0:
         machine_rate_value = _coerce_rate_value(rates.get("ShopMachineRate"))
     if machine_rate_value <= 0:
-        machine_rate_value = 90.0
+        machine_rate_value = default_machine_rate_value or labor_rate_value
     rates["MachineRate"] = machine_rate_value
 
     cfg_programmer_rate: float | None = None
     if cfg and getattr(cfg, "separate_machine_labor", False):
         cfg_programmer_rate = _coerce_rate_value(getattr(cfg, "labor_rate_per_hr", None))
         if cfg_programmer_rate <= 0:
-            cfg_programmer_rate = 45.0
+            cfg_programmer_rate = default_programmer_rate_value or default_labor_rate_value or 45.0
 
     if cfg_programmer_rate is not None and cfg_programmer_rate > 0:
         programmer_rate_value = float(cfg_programmer_rate)
@@ -4534,9 +4554,9 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
             if programmer_fallback <= 0:
                 programmer_fallback = _coerce_rate_value(rates.get("LaborRate"))
             if programmer_fallback <= 0:
-                programmer_fallback = 90.0
-            if programmer_fallback > 0:
-                programmer_fallback = max(programmer_fallback, 90.0)
+                programmer_fallback = default_programmer_rate_value or default_labor_rate_value
+            if programmer_fallback > 0 and default_programmer_rate_value > 0:
+                programmer_fallback = max(programmer_fallback, default_programmer_rate_value)
             rates.setdefault("ProgrammerRate", programmer_fallback)
 
         programmer_rate_value = _coerce_rate_value(rates.get("ProgrammerRate"))
@@ -4551,9 +4571,9 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
         if programmer_rate_value <= 0:
             programmer_rate_value = labor_rate_value
         if programmer_rate_value <= 0:
-            programmer_rate_value = 90.0
-        if programmer_rate_value > 0:
-            programmer_rate_value = max(programmer_rate_value, 90.0)
+            programmer_rate_value = default_programmer_rate_value or default_labor_rate_value
+        if programmer_rate_value > 0 and default_programmer_rate_value > 0:
+            programmer_rate_value = max(programmer_rate_value, default_programmer_rate_value)
 
         programming_rate_value = _coerce_rate_value(rates.get("ProgrammingRate"))
         if programming_rate_value <= 0:
@@ -4561,9 +4581,9 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
         if programming_rate_value <= 0:
             programming_rate_value = labor_rate_value
         if programming_rate_value <= 0:
-            programming_rate_value = 90.0
-        if programming_rate_value > 0:
-            programming_rate_value = max(programming_rate_value, 90.0)
+            programming_rate_value = default_programmer_rate_value or programmer_rate_value
+        if programming_rate_value > 0 and default_programmer_rate_value > 0:
+            programming_rate_value = max(programming_rate_value, default_programmer_rate_value)
 
     rates["ProgrammerRate"] = programmer_rate_value
     rates["ProgrammingRate"] = programming_rate_value
@@ -4572,9 +4592,9 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
     if inspector_rate_value <= 0:
         inspector_rate_value = labor_rate_value
     if inspector_rate_value <= 0:
-        inspector_rate_value = 85.0
-    if inspector_rate_value > 0:
-        inspector_rate_value = max(inspector_rate_value, 85.0)
+        inspector_rate_value = default_inspector_rate_value or default_labor_rate_value
+    if inspector_rate_value > 0 and default_inspector_rate_value > 0:
+        inspector_rate_value = max(inspector_rate_value, default_inspector_rate_value)
     rates["InspectorRate"] = inspector_rate_value
 
     inspection_rate_value = _coerce_rate_value(rates.get("InspectionRate"))
@@ -4583,13 +4603,19 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
     if inspection_rate_value <= 0:
         inspection_rate_value = labor_rate_value
     if inspection_rate_value <= 0:
-        inspection_rate_value = 85.0
-    if inspection_rate_value > 0:
-        inspection_rate_value = max(inspection_rate_value, 85.0)
+        inspection_rate_value = default_inspector_rate_value or default_labor_rate_value
+    if inspection_rate_value > 0 and default_inspector_rate_value > 0:
+        inspection_rate_value = max(inspection_rate_value, default_inspector_rate_value)
     rates["InspectionRate"] = inspection_rate_value
 
-    rates.setdefault("LaborRate", 85.0)
-    rates.setdefault("MachineRate", 90.0)
+    if default_labor_rate_value > 0:
+        rates.setdefault("LaborRate", default_labor_rate_value)
+    else:
+        rates.setdefault("LaborRate", 45.0)
+    if default_machine_rate_value > 0:
+        rates.setdefault("MachineRate", default_machine_rate_value)
+    else:
+        rates.setdefault("MachineRate", labor_rate_value or 45.0)
     rates.setdefault("ProgrammingRate", rates.get("ProgrammerRate", rates["LaborRate"]))
     rates.setdefault("InspectionRate", rates.get("InspectorRate", rates["LaborRate"]))
 
@@ -5738,22 +5764,58 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
 
         if canonical_minutes > 0.0 and canon_for_notes in {"milling", "drilling", "inspection"}:
             hours_val = canonical_minutes / 60.0
-            machine_rate = 0.0
-            labor_rate = 0.0
-            labor_component = 0.0
-            if isinstance(bucket_entry, _MappingABC):
-                labor_component = _safe_float(bucket_entry.get("labor$"), default=0.0)
+            machine_component_val = machine_component if "machine_component" in locals() else 0.0
+            labor_component_val = labor_component if "labor_component" in locals() else 0.0
+
+            def _bucket_rate_value(
+                bucket_key: str,
+                *,
+                mode: str,
+                component: float,
+                rate_key: str | None,
+                fallback_keys: tuple[str, ...],
+            ) -> float:
+                if hours_val > 0.0 and component > 0.0:
+                    rate_val = component / hours_val
+                    if rate_val > 0.0:
+                        return rate_val
+                source_map: Mapping[str, Any] | None = None
+                try:
+                    source_map = merged_two_bucket_rates.get(mode, {})
+                except Exception:
+                    source_map = None
+                if isinstance(source_map, Mapping):
+                    for candidate in (
+                        bucket_key,
+                        _normalize_bucket_key(bucket_key),
+                        _display_bucket_label(bucket_key, None),
+                    ):
+                        if not candidate:
+                            continue
+                        resolved = _safe_float(source_map.get(candidate), default=0.0)
+                        if resolved > 0.0:
+                            return resolved
+                raw = rates.get(rate_key) if rate_key else None
+                return _resolve_rate_with_fallback(raw, *fallback_keys)
 
             if canon_for_notes == "milling":
-                machine_rate = _resolve_rate_with_fallback(
-                    rates.get("MillingRate"), "MachineRate", "machine_rate", "machine"
+                machine_rate = _bucket_rate_value(
+                    "milling",
+                    mode="machine",
+                    component=machine_component_val,
+                    rate_key="MillingRate",
+                    fallback_keys=("MachineRate", "machine_rate", "machine"),
                 )
                 if machine_rate <= 0.0:
                     cfg_machine = _cfg_rate_fallback("machine_rate_per_hr")
                     if cfg_machine > 0.0:
                         machine_rate = cfg_machine
-                labor_rate = _resolve_rate_with_fallback(
-                    rates.get("MillingLaborRate"), "LaborRate", "labor_rate", "labor"
+                labor_rate = _bucket_rate_value(
+                    "milling",
+                    mode="labor",
+                    component=labor_component_val,
+                    rate_key="MillingLaborRate",
+                    fallback_keys=("LaborRate", "labor_rate", "labor"),
                 )
                 if labor_rate <= 0.0:
                     cfg_labor = _cfg_rate_fallback("labor_rate_per_hr")
@@ -5764,21 +5826,29 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
                     line += f" @ ${machine_rate:.2f}/hr (machine)"
                 else:
                     line += " (machine)"
-                if labor_component > 0.0 and labor_rate > 0.0:
+                if labor_component_val > 0.0 and labor_rate > 0.0:
                     line += f" + ${labor_rate:.2f}/hr (labor)"
                 write_line(line, indent)
                 return
 
             if canon_for_notes == "drilling":
-                machine_rate = _resolve_rate_with_fallback(
-                    rates.get("DrillingRate"), "MachineRate", "machine_rate", "machine"
+                machine_rate = _bucket_rate_value(
+                    "drilling",
+                    mode="machine",
+                    component=machine_component_val,
+                    rate_key="DrillingRate",
+                    fallback_keys=("MachineRate", "machine_rate", "machine"),
                 )
                 if machine_rate <= 0.0:
                     cfg_machine = _cfg_rate_fallback("machine_rate_per_hr")
                     if cfg_machine > 0.0:
                         machine_rate = cfg_machine
-                labor_rate = _resolve_rate_with_fallback(
-                    rates.get("DrillingLaborRate"), "LaborRate", "labor_rate", "labor"
+                labor_rate = _bucket_rate_value(
+                    "drilling",
+                    mode="labor",
+                    component=labor_component_val,
+                    rate_key="DrillingLaborRate",
+                    fallback_keys=("LaborRate", "labor_rate", "labor"),
                 )
                 if labor_rate <= 0.0:
                     cfg_labor = _cfg_rate_fallback("labor_rate_per_hr")
@@ -5789,14 +5859,18 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
                     line += f" @ ${machine_rate:.2f}/hr (machine)"
                 else:
                     line += " (machine)"
-                if labor_component > 0.0 and labor_rate > 0.0:
+                if labor_component_val > 0.0 and labor_rate > 0.0:
                     line += f" + ${labor_rate:.2f}/hr (labor)"
                 write_line(line, indent)
                 return
 
             if canon_for_notes == "inspection":
-                labor_rate = _resolve_rate_with_fallback(
-                    rates.get("InspectionRate"), "LaborRate", "labor_rate", "labor"
+                labor_rate = _bucket_rate_value(
+                    "inspection",
+                    mode="labor",
+                    component=labor_component_val,
+                    rate_key="InspectionRate",
+                    fallback_keys=("LaborRate", "labor_rate", "labor"),
                 )
                 if labor_rate <= 0.0:
                     cfg_labor = _cfg_rate_fallback("labor_rate_per_hr")
