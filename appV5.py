@@ -4448,6 +4448,38 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
                 )
             )
 
+        def _canonical_label(value: Any) -> str:
+            value_str = str(value)
+            return (
+                _canonical_bucket_key(value_str)
+                or _normalize_bucket_key(value_str)
+                or value_str
+            )
+
+        def _bucket_snapshot(target: str) -> dict[str, float]:
+            target_canon = _canonical_label(target)
+            for label, minutes_val, machine_val, labor_val, total_val in table_rows:
+                if _canonical_label(label) == target_canon:
+                    return {
+                        "minutes": round(float(minutes_val or 0.0), 2),
+                        "machine$": round(float(machine_val or 0.0), 2),
+                        "labor$": round(float(labor_val or 0.0), 2),
+                        "total$": round(float(total_val or 0.0), 2),
+                    }
+            return {}
+
+        mb = _bucket_snapshot("milling")
+        db = _bucket_snapshot("drilling")
+        print(f"[INFO] [bucket/milling] {mb}")
+        print(f"[INFO] [bucket/drilling] {db}")
+
+        rows = list(table_rows)
+        print(
+            f"[CHECK/process-sum] machine$={sum(float(r[2]) for r in rows):.2f} "
+            f"labor$={sum(float(r[3]) for r in rows):.2f} "
+            f"total$={sum(float(r[4]) for r in rows):.2f}"
+        )
+
         total_cost = sum(row[4] for row in table_rows)
 
         if table_rows:
