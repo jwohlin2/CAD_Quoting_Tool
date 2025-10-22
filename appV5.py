@@ -1617,8 +1617,27 @@ def summarize_actions(removal_lines: list[str], planner_ops: list[dict]) -> None
             total["jig_grind"] += qty
             by_side["jig_grind"][side] += qty
 
-    actions_total = sum(total.values())
-    print(f"[ACTIONS] totals={dict(total)} total={actions_total}")
+    drill_count = int(total.get("drill", 0))
+    tap_count = int(total.get("tap", 0))
+    cbor_count = int(total.get("counterbore", 0))
+    spot_count = int(total.get("spot", 0))
+    jig_count = int(total.get("jig_grind", 0))
+
+    actions = {
+        "Drills": drill_count,
+        "Taps": tap_count,
+        "Counterbores": cbor_count,
+        "Spot": spot_count,
+        "Jig-grind": jig_count,
+    }
+    actions_total = sum(actions.values())
+
+    print("Operation Counts")
+    print("--------------------------------------------------------------------------")
+    for k, v in actions.items():
+        print(f"  {k:<14} {v}")
+    print(f"  {'Actions total':<14} {actions_total}")
+
     for k, sides in by_side.items():
         print(f"[ACTIONS/{k}] by_side={dict(sides)}")
 
