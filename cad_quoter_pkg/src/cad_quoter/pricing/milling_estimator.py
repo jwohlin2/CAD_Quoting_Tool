@@ -193,14 +193,22 @@ def estimate_milling_minutes_from_geometry(
     if total_minutes <= 0.0:
         return None
 
-    machine_rate = _lookup_rate(rates, "MillingRate", "CNC_Mill", default=95.0)
-    labor_rate = _lookup_rate(rates, "MillingLaborRate", "LaborRate", default=0.0)
+    mach_rate = float(_lookup_rate(rates, "MillingRate", "CNC_Mill", default=95.0))
+    labor_rate = float(_lookup_rate(rates, "MillingLaborRate", "LaborRate", default=45.0))
 
-    machine_cost = machine_rate * (total_minutes / 60.0)
-    labor_cost = labor_rate * 0.0  # Milling bucket treated as machine-only here.
+    milling_minutes = float(total_minutes)
+    milling_attended_minutes = 0.0
+
+    machine_cost = (milling_minutes / 60.0) * mach_rate
+    labor_cost = (milling_attended_minutes / 60.0) * labor_rate
+
+    print(
+        f"[CHECK/mill-rate] min={milling_minutes:.2f} hr={milling_minutes / 60.0:.2f} "
+        f"mach_rate={mach_rate:.2f}/hr => machine$={machine_cost:.2f}"
+    )
 
     return {
-        "minutes": total_minutes,
+        "minutes": milling_minutes,
         "machine$": machine_cost,
         "labor$": labor_cost,
         "total$": machine_cost + labor_cost,

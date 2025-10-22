@@ -757,18 +757,24 @@ def estimate_milling_minutes_from_geometry(
                     return float(val)
         return default
 
-    machine_rate = _rate_from_mapping(
-        ("machine_per_hour", "machine_rate", "milling_rate", "milling"),
-        45.0,
+    mach_rate = float(
+        _rate_from_mapping(("machine_per_hour", "machine_rate", "milling_rate", "milling"), 90.0)
     )
-    labor_rate = _rate_from_mapping(
-        ("labor_per_hour", "labor_rate", "milling_labor_rate", "labor"),
-        0.0,
+    labor_rate = float(
+        _rate_from_mapping(("labor_per_hour", "labor_rate", "milling_labor_rate", "labor"), 45.0)
     )
 
-    machine_cost = (total_min / 60.0) * machine_rate
-    labor_cost = (total_min / 60.0) * labor_rate * 0.0
+    milling_minutes = float(total_min)
+    milling_attended_minutes = max(toolchanges_min, 0.0)
+
+    machine_cost = (milling_minutes / 60.0) * mach_rate
+    labor_cost = (milling_attended_minutes / 60.0) * labor_rate
     total_cost = machine_cost + labor_cost
+
+    print(
+        f"[CHECK/mill-rate] min={milling_minutes:.2f} hr={milling_minutes / 60.0:.2f} "
+        f"mach_rate={mach_rate:.2f}/hr => machine$={machine_cost:.2f}"
+    )
 
     logging.info(
         "[INFO] [milling] face_top=%.2fmin face_bot=%.2fmin rough_perim=%.2fmin "
