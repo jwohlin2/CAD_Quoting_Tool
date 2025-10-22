@@ -4863,6 +4863,57 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
                 return resolved
         return 0.0
 
+    def _two_bucket_rate(kind: str, *bucket_keys: str | None) -> float:
+        """Look up a machine or labor rate from the two-bucket defaults."""
+
+        try:
+            mapping_candidate = fallback_two_bucket_rates.get(kind, {})
+        except Exception:
+            mapping_candidate = {}
+
+        if isinstance(mapping_candidate, _MappingABC):
+            mapping: dict[str, Any] = {str(k): v for k, v in mapping_candidate.items()}
+        elif isinstance(mapping_candidate, dict):
+            mapping = mapping_candidate
+        else:
+            mapping = {}
+
+        seen: set[str] = set()
+        for raw_key in bucket_keys:
+            if raw_key in (None, ""):
+                continue
+            raw_text = str(raw_key).strip()
+            if not raw_text:
+                continue
+
+            candidates = [raw_text]
+            canon = _canonical_bucket_key(raw_text)
+            if canon:
+                candidates.append(str(canon))
+            normalized = _normalize_bucket_key(raw_text)
+            if normalized:
+                candidates.append(str(normalized))
+            lowered = raw_text.lower()
+            if lowered:
+                candidates.append(lowered)
+
+            for candidate in candidates:
+                candidate_clean = candidate.strip()
+                if not candidate_clean or candidate_clean in seen:
+                    continue
+                seen.add(candidate_clean)
+                value = mapping.get(candidate_clean)
+                if value in (None, ""):
+                    continue
+                try:
+                    numeric = float(value)
+                except Exception:
+                    continue
+                if numeric > 0.0:
+                    return numeric
+
+        return 0.0
+
     def _pct(x) -> str:
         return format_percent(x)
 
@@ -5745,16 +5796,20 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
                 labor_component = _safe_float(bucket_entry.get("labor$"), default=0.0)
 
             if canon_for_notes == "milling":
-                machine_rate = _resolve_rate_with_fallback(
-                    rates.get("MillingRate"), "MachineRate", "machine_rate", "machine"
-                )
+                machine_rate = _two_bucket_rate("machine", canon_for_notes)
+                if machine_rate <= 0.0:
+                    machine_rate = _resolve_rate_with_fallback(
+                        rates.get("MillingRate"), "MachineRate", "machine_rate", "machine"
+                    )
                 if machine_rate <= 0.0:
                     cfg_machine = _cfg_rate_fallback("machine_rate_per_hr")
                     if cfg_machine > 0.0:
                         machine_rate = cfg_machine
-                labor_rate = _resolve_rate_with_fallback(
-                    rates.get("MillingLaborRate"), "LaborRate", "labor_rate", "labor"
-                )
+                labor_rate = _two_bucket_rate("labor", canon_for_notes)
+                if labor_rate <= 0.0:
+                    labor_rate = _resolve_rate_with_fallback(
+                        rates.get("MillingLaborRate"), "LaborRate", "labor_rate", "labor"
+                    )
                 if labor_rate <= 0.0:
                     cfg_labor = _cfg_rate_fallback("labor_rate_per_hr")
                     if cfg_labor > 0.0:
@@ -5764,22 +5819,26 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
                     line += f" @ ${machine_rate:.2f}/hr (machine)"
                 else:
                     line += " (machine)"
-                if labor_component > 0.0 and labor_rate > 0.0:
+                if labor_rate > 0.0:
                     line += f" + ${labor_rate:.2f}/hr (labor)"
                 write_line(line, indent)
                 return
 
             if canon_for_notes == "drilling":
-                machine_rate = _resolve_rate_with_fallback(
-                    rates.get("DrillingRate"), "MachineRate", "machine_rate", "machine"
-                )
+                machine_rate = _two_bucket_rate("machine", canon_for_notes, "milling")
+                if machine_rate <= 0.0:
+                    machine_rate = _resolve_rate_with_fallback(
+                        rates.get("DrillingRate"), "MachineRate", "machine_rate", "machine"
+                    )
                 if machine_rate <= 0.0:
                     cfg_machine = _cfg_rate_fallback("machine_rate_per_hr")
                     if cfg_machine > 0.0:
                         machine_rate = cfg_machine
-                labor_rate = _resolve_rate_with_fallback(
-                    rates.get("DrillingLaborRate"), "LaborRate", "labor_rate", "labor"
-                )
+                labor_rate = _two_bucket_rate("labor", canon_for_notes, "milling")
+                if labor_rate <= 0.0:
+                    labor_rate = _resolve_rate_with_fallback(
+                        rates.get("DrillingLaborRate"), "LaborRate", "labor_rate", "labor"
+                    )
                 if labor_rate <= 0.0:
                     cfg_labor = _cfg_rate_fallback("labor_rate_per_hr")
                     if cfg_labor > 0.0:
@@ -5789,15 +5848,17 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
                     line += f" @ ${machine_rate:.2f}/hr (machine)"
                 else:
                     line += " (machine)"
-                if labor_component > 0.0 and labor_rate > 0.0:
+                if labor_rate > 0.0:
                     line += f" + ${labor_rate:.2f}/hr (labor)"
                 write_line(line, indent)
                 return
 
             if canon_for_notes == "inspection":
-                labor_rate = _resolve_rate_with_fallback(
-                    rates.get("InspectionRate"), "LaborRate", "labor_rate", "labor"
-                )
+                labor_rate = _two_bucket_rate("labor", canon_for_notes)
+                if labor_rate <= 0.0:
+                    labor_rate = _resolve_rate_with_fallback(
+                        rates.get("InspectionRate"), "LaborRate", "labor_rate", "labor"
+                    )
                 if labor_rate <= 0.0:
                     cfg_labor = _cfg_rate_fallback("labor_rate_per_hr")
                     if cfg_labor > 0.0:
