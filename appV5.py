@@ -3439,8 +3439,9 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
     overrides = (
         ("prefer_removal_drilling_hours", True),
         ("separate_machine_labor", True),
-        ("machine_rate_per_hr", 45.0),
+        ("machine_rate_per_hr", 90.0),
         ("labor_rate_per_hr", 45.0),
+        ("milling_attended_fraction", 1.0),
     )
 
     cfg_obj: QuoteConfiguration | Any = cfg or QuoteConfiguration(
@@ -4634,7 +4635,7 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
                         break
 
                 if attended_frac is None:
-                    attended_frac = 0.0
+                    attended_frac = 1.0
                 attended_frac = max(0.0, min(attended_frac, 1.0))
                 milling_labor_hours = milling_hours * attended_frac
 

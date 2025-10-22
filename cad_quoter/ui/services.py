@@ -238,9 +238,9 @@ class QuoteConfiguration:
     round_tol_in: float = 0.05
     stock_rounding_mode: str = "per_axis_min_area"
     separate_machine_labor: bool = True
-    machine_rate_per_hr: float = 45.0
+    machine_rate_per_hr: float = 90.0
     labor_rate_per_hr: float = 45.0
-    milling_attended_fraction: float = 0.0
+    milling_attended_fraction: float = 1.0
     hole_source_preference: str = "table"  # "table" | "geometry" | "auto"
     hole_merge_tol_diam_in: float = 0.001
     hole_merge_tol_depth_in: float = 0.01
