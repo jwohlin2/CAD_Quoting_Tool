@@ -24,6 +24,10 @@ from cad_quoter.pricing.process_buckets import (
 from cad_quoter.pricing.process_cost_renderer import (
     canonicalize_costs as _shared_canonicalize_costs,
 )
+from cad_quoter.pricing.process_rates import (
+    labor_rate as _process_labor_rate,
+    machine_rate as _process_machine_rate,
+)
 from cad_quoter.utils import sdict
 from cad_quoter.utils.render_utils import fmt_hours, fmt_money
 
@@ -34,6 +38,9 @@ from .services import QuoteConfiguration
 
 PROGRAMMING_PER_PART_LABEL = "Programming (per part)"
 PROGRAMMING_AMORTIZED_LABEL = "Programming (amortized)"
+
+_MILLING_MACHINE_RATE = _process_machine_rate("milling")
+_MILLING_LABOR_RATE = _process_labor_rate("milling")
 
 # Heuristic fallbacks mirrored from appV5 for spot drill and jig grind minutes.
 SPOT_DRILL_MIN_PER_SIDE_MIN = 0.1
@@ -64,6 +71,22 @@ def _clamp_minutes(value: Any, lo: float = 0.0, hi: float = 10000.0) -> float:
     return minutes_val
 
 
+def sane_minutes_or_zero(x: Any, cap: float = 24 * 60 * 8) -> float:
+    try:
+        minutes = float(x)
+    except Exception:
+        return 0.0
+
+    if not math.isfinite(minutes):
+        return 0.0
+
+    if minutes < 0 or minutes > cap:
+        print(f"[WARNING] [unit/clamp] minutes out-of-range; dropping. raw={minutes}")
+        return 0.0
+
+    return minutes
+
+
 def _pick_drill_minutes(
     process_plan_summary: Mapping[str, Any] | None,
     extras: Mapping[str, Any] | None,
@@ -72,12 +95,13 @@ def _pick_drill_minutes(
         (((process_plan_summary or {}).get("drilling") or {}).get("total_minutes_billed")),
         0.0,
     )
-    removal_min = _as_float((extras or {}).get("drill_total_minutes"), 0.0)
+    removal_min_raw = _as_float((extras or {}).get("drill_total_minutes"), 0.0)
+    removal_min = sane_minutes_or_zero(removal_min_raw)
 
     if removal_min > 0:
         chosen, src = removal_min, "removal_card"
     else:
-        chosen, src = meta_min, "planner_meta"
+        chosen, src = sane_minutes_or_zero(meta_min), "planner_meta"
 
     chosen_c = _clamp_minutes(chosen)
     if chosen_c != chosen:
@@ -203,7 +227,7 @@ def _bucket_cost_mode(key: str | None) -> str:
 def _normalize_buckets(
     bucket_view_obj: Mapping[str, Any] | _MutableMappingABC[str, Any] | None,
 ) -> None:
-    if bucket_view_obj is None:
+    if not isinstance(bucket_view_obj, (_MutableMappingABC, dict)):
         return
 
     alias = {
@@ -215,70 +239,40 @@ def _normalize_buckets(
     }
 
     try:
-        buckets_obj = bucket_view_obj.get("buckets") if isinstance(bucket_view_obj, _MappingABC) else None
+        buckets_obj = bucket_view_obj.get("buckets")
     except Exception:
         buckets_obj = None
 
     if isinstance(buckets_obj, dict):
-        source_items = list(buckets_obj.items())
+        source_items = buckets_obj.items()
     elif isinstance(buckets_obj, _MappingABC):
-        try:
-            source_items = list(buckets_obj.items())
-        except Exception:
-            return
-        buckets_obj = dict(buckets_obj)
+        source_items = buckets_obj.items()
     else:
-        return
+        source_items = ()
 
-    normalized: dict[str, dict[str, float]] = {}
-    for raw_key, raw_entry in source_items:
+    norm: dict[str, dict[str, float]] = {}
+    for raw_key, entry in source_items:
         try:
             key = str(raw_key or "")
         except Exception:
             key = ""
         if not key:
             continue
-        norm_key = alias.get(key, key)
-
-        entry: Mapping[str, Any] | None
-        if isinstance(raw_entry, dict):
-            entry = raw_entry
-        elif isinstance(raw_entry, _MappingABC):
-            entry = raw_entry
-        else:
-            entry = None
-
-        minutes = machine_cost = labor_cost = 0.0
-        if entry is not None:
-            try:
-                minutes = float(entry.get("minutes", 0.0) or 0.0)
-            except Exception:
-                minutes = 0.0
-            try:
-                machine_cost = float(entry.get("machine$", 0.0) or 0.0)
-            except Exception:
-                machine_cost = 0.0
-            try:
-                labor_cost = float(entry.get("labor$", 0.0) or 0.0)
-            except Exception:
-                labor_cost = 0.0
-
-        target = normalized.setdefault(
-            norm_key,
+        nk = alias.get(key, key)
+        dst = norm.setdefault(
+            nk,
             {"minutes": 0.0, "machine$": 0.0, "labor$": 0.0, "total$": 0.0},
         )
-        target["minutes"] = float(target.get("minutes", 0.0)) + minutes
-        target["machine$"] = float(target.get("machine$", 0.0)) + machine_cost
-        target["labor$"] = float(target.get("labor$", 0.0)) + labor_cost
-        target["total$"] = round(target["machine$"] + target["labor$"], 2)
+        if isinstance(entry, _MappingABC):
+            minutes_val = _as_float(entry.get("minutes"), 0.0)
+            machine_val = _as_float(entry.get("machine$"), 0.0)
+            labor_val = _as_float(entry.get("labor$"), 0.0)
+            dst["minutes"] += minutes_val
+            dst["machine$"] += machine_val
+            dst["labor$"] += labor_val
+            dst["total$"] = round(dst["machine$"] + dst["labor$"], 2)
 
-    try:
-        if isinstance(bucket_view_obj, (_MutableMappingABC, dict)):
-            bucket_view_obj["buckets"] = normalized  # type: ignore[index]
-        else:
-            cast(_MutableMappingABC[str, Any], bucket_view_obj)["buckets"] = normalized
-    except Exception:
-        return
+    bucket_view_obj["buckets"] = norm
 
 
 def _lookup_bucket_rate(
@@ -423,9 +417,6 @@ def _build_planner_bucket_render_state(
     drill_total_minutes: float | None = None,
 ) -> PlannerBucketRenderState:
     state = PlannerBucketRenderState()
-    bucket_rate_detail: dict[str, dict[str, float]] = state.extra.setdefault(
-        "bucket_rate_detail", {}
-    )
 
     def _flatten_rate_map(value: Any) -> dict[str, float]:
         flat: dict[str, float] = {}
@@ -588,10 +579,6 @@ def _build_planner_bucket_render_state(
         split_machine_hours = 0.0
         split_labor_hours = 0.0
         used_split = False
-        machine_hours_used = 0.0
-        labor_hours_used = 0.0
-        machine_rate_used = 0.0
-        labor_rate_used = 0.0
         if cfg and getattr(cfg, "separate_machine_labor", False):
             split_machine_hours, split_labor_hours = _split_hours_for_bucket(
                 canon_key, hours_raw, state, cfg
@@ -602,17 +589,11 @@ def _build_planner_bucket_render_state(
                 machine_raw = float(split_machine_hours) * float(cfg.machine_rate_per_hr)
                 labor_raw = float(split_labor_hours) * float(cfg.labor_rate_per_hr)
                 used_split = True
-                machine_hours_used = max(0.0, float(split_machine_hours or 0.0))
-                labor_hours_used = max(0.0, float(split_labor_hours or 0.0))
-                machine_rate_used = float(cfg.machine_rate_per_hr or 0.0)
-                labor_rate_used = float(cfg.labor_rate_per_hr or 0.0)
         else:
             total_existing = orig_labor + orig_machine
             if hours_raw <= 0.0:
                 labor_raw = 0.0
                 machine_raw = 0.0
-                machine_hours_used = 0.0
-                labor_hours_used = 0.0
             else:
                 default_machine_rate = machine_rate_lookup
                 if default_machine_rate <= 0.0 and orig_machine > 0.0:
@@ -622,7 +603,7 @@ def _build_planner_bucket_render_state(
                 if default_machine_rate <= 0.0 and cfg_machine_rate > 0.0:
                     default_machine_rate = cfg_machine_rate
                 if default_machine_rate <= 0.0:
-                    default_machine_rate = 90.0
+                    default_machine_rate = _MILLING_MACHINE_RATE
 
                 default_labor_rate = labor_rate_lookup
                 labor_existing_hours = hours_raw
@@ -636,22 +617,14 @@ def _build_planner_bucket_render_state(
                 if default_labor_rate <= 0.0 and cfg_labor_rate > 0.0:
                     default_labor_rate = cfg_labor_rate
                 if default_labor_rate <= 0.0:
-                    default_labor_rate = 45.0
+                    default_labor_rate = _MILLING_LABOR_RATE
 
                 if bucket_mode == "labor":
                     labor_raw = hours_raw * max(default_labor_rate, 0.0)
                     machine_raw = 0.0
-                    labor_hours_used = max(hours_raw, 0.0)
-                    labor_rate_used = max(default_labor_rate, 0.0)
-                    machine_hours_used = 0.0
-                    machine_rate_used = 0.0
                 elif bucket_mode == "machine":
                     machine_raw = hours_raw * max(default_machine_rate, 0.0)
                     labor_raw = 0.0
-                    machine_hours_used = max(hours_raw, 0.0)
-                    machine_rate_used = max(default_machine_rate, 0.0)
-                    labor_hours_used = 0.0
-                    labor_rate_used = 0.0
                 else:
                     if total_existing > 0.0:
                         machine_fraction = orig_machine / total_existing
@@ -687,10 +660,6 @@ def _build_planner_bucket_render_state(
 
                     machine_raw = machine_hours * max(machine_rate, 0.0)
                     labor_raw = labor_hours * max(labor_rate, 0.0)
-                    machine_hours_used = max(machine_hours, 0.0)
-                    labor_hours_used = max(labor_hours, 0.0)
-                    machine_rate_used = max(machine_rate, 0.0)
-                    labor_rate_used = max(labor_rate, 0.0)
 
         total_raw = labor_raw + machine_raw
 
@@ -701,17 +670,9 @@ def _build_planner_bucket_render_state(
                 if _bucket_cost_mode(canon_key) == "labor":
                     labor_raw = injected_total
                     machine_raw = 0.0
-                    labor_rate_used = inferred_rate
-                    labor_hours_used = max(labor_hours_used, minutes_val / 60.0)
-                    machine_rate_used = 0.0
-                    machine_hours_used = 0.0
                 else:
                     machine_raw = injected_total
                     labor_raw = 0.0
-                    machine_rate_used = inferred_rate
-                    machine_hours_used = max(machine_hours_used, minutes_val / 60.0)
-                    labor_rate_used = 0.0
-                    labor_hours_used = 0.0
                 total_raw = labor_raw + machine_raw
 
         if total_raw <= 0.01 and hours_raw <= 0.01:
@@ -740,18 +701,6 @@ def _build_planner_bucket_render_state(
         state.display_labor_total += labor_raw
         state.display_machine_total += machine_raw
         state.hour_entries[label] = (hours_val, True)
-
-        detail_entry: dict[str, float] = {}
-        if machine_rate_used > 0.0:
-            detail_entry["machine_rate"] = float(machine_rate_used)
-            if machine_hours_used > 0.0:
-                detail_entry["machine_hours"] = float(machine_hours_used)
-        if labor_rate_used > 0.0:
-            detail_entry["labor_rate"] = float(labor_rate_used)
-            if labor_hours_used > 0.0:
-                detail_entry["labor_hours"] = float(labor_hours_used)
-        if detail_entry:
-            bucket_rate_detail[canon_key] = detail_entry
 
         split_detail_line: str | None = None
         if cfg and getattr(cfg, "separate_machine_labor", False):
@@ -815,51 +764,15 @@ def _display_rate_for_row(
 ) -> str:
     total_hours = max(0.0, float(hours or 0.0))
     cfg_obj = cfg
-    detail_entry: Mapping[str, Any] | None = None
-    if isinstance(render_state, PlannerBucketRenderState):
-        extra_payload = getattr(render_state, "extra", None)
-        if isinstance(extra_payload, _MappingABC):
-            rate_detail_map = extra_payload.get("bucket_rate_detail")
-            if isinstance(rate_detail_map, _MappingABC):
-                search_keys: list[str] = []
-                canon_key = _canonical_bucket_key(label)
-                if canon_key:
-                    search_keys.append(canon_key)
-                normalized_key = _normalize_bucket_key(label)
-                if normalized_key:
-                    search_keys.append(normalized_key)
-                key_str = str(label or "").strip()
-                if key_str:
-                    search_keys.append(key_str)
-                for key in search_keys:
-                    if not key:
-                        continue
-                    entry = rate_detail_map.get(key)
-                    if isinstance(entry, _MappingABC):
-                        detail_entry = entry
-                        break
     if cfg_obj and getattr(cfg_obj, "separate_machine_labor", True):
         machine_hours, labor_hours = _split_hours_for_bucket(
             label, total_hours, render_state, cfg_obj
         )
         pieces: list[str] = []
-        machine_rate_val = 0.0
-        labor_rate_val = 0.0
-        if isinstance(detail_entry, _MappingABC):
-            machine_rate_val = _safe_float(detail_entry.get("machine_rate"), default=0.0)
-            labor_rate_val = _safe_float(detail_entry.get("labor_rate"), default=0.0)
-        if machine_hours > 0 or machine_rate_val > 0:
-            rate_val = machine_rate_val
-            if rate_val <= 0.0:
-                rate_val = float(getattr(cfg_obj, "machine_rate_per_hr", 0.0) or 0.0)
-            if rate_val > 0.0:
-                pieces.append(f"mach ${rate_val:.2f}/hr")
-        if labor_hours > 0 or labor_rate_val > 0:
-            rate_val = labor_rate_val
-            if rate_val <= 0.0:
-                rate_val = float(getattr(cfg_obj, "labor_rate_per_hr", 0.0) or 0.0)
-            if rate_val > 0.0:
-                pieces.append(f"labor ${rate_val:.2f}/hr")
+        if machine_hours > 0:
+            pieces.append(f"mach ${float(cfg_obj.machine_rate_per_hr):.2f}/hr")
+        if labor_hours > 0:
+            pieces.append(f"labor ${float(cfg_obj.labor_rate_per_hr):.2f}/hr")
         if pieces:
             return " / ".join(pieces)
         fallback_rate = float(getattr(cfg_obj, "labor_rate_per_hr", 0.0) or 0.0)
