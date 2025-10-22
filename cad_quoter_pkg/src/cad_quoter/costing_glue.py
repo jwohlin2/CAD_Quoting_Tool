@@ -4,7 +4,8 @@ from __future__ import annotations
 
 from typing import Any, Dict
 
-from cad_quoter.rates import OP_TO_LABOR, OP_TO_MACHINE, default_process_rate
+from cad_quoter.pricing.rate_defaults import default_process_rate
+from cad_quoter.rates import OP_TO_LABOR, OP_TO_MACHINE
 
 
 def op_cost(op: Dict[str, Any], rates: Dict[str, Dict[str, float]], minutes: float) -> float:
