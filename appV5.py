@@ -1533,22 +1533,37 @@ def _compute_drilling_removal_section(
                     buckets_for_cleanup = None
 
             drilling_bucket_entry: MutableMapping[str, Any] | dict[str, Any] | None = None
+            milling_bucket_entry: MutableMapping[str, Any] | dict[str, Any] | None = None
             if isinstance(buckets_for_cleanup, _MutableMappingABC):
                 candidate = buckets_for_cleanup.get("drilling")
                 if isinstance(candidate, _MutableMappingABC):
                     drilling_bucket_entry = typing.cast(MutableMapping[str, Any], candidate)
                 elif isinstance(candidate, dict):
                     drilling_bucket_entry = candidate
+                milling_candidate = buckets_for_cleanup.get("milling")
+                if isinstance(milling_candidate, _MutableMappingABC):
+                    milling_bucket_entry = typing.cast(MutableMapping[str, Any], milling_candidate)
+                elif isinstance(milling_candidate, dict):
+                    milling_bucket_entry = milling_candidate
             elif isinstance(buckets_for_cleanup, dict):
                 candidate = buckets_for_cleanup.get("drilling")
                 if isinstance(candidate, dict):
                     drilling_bucket_entry = candidate
                 elif isinstance(candidate, _MutableMappingABC):
                     drilling_bucket_entry = typing.cast(MutableMapping[str, Any], candidate)
+                milling_candidate = buckets_for_cleanup.get("milling")
+                if isinstance(milling_candidate, dict):
+                    milling_bucket_entry = milling_candidate
+                elif isinstance(milling_candidate, _MutableMappingABC):
+                    milling_bucket_entry = typing.cast(MutableMapping[str, Any], milling_candidate)
 
             if isinstance(drilling_bucket_entry, (_MutableMappingABC, dict)):
                 drilling_bucket_entry.pop("synced_minutes", None)
                 drilling_bucket_entry.pop("synced_hours", None)
+
+            if isinstance(milling_bucket_entry, (_MutableMappingABC, dict)):
+                milling_bucket_entry.pop("synced_minutes", None)
+                milling_bucket_entry.pop("synced_hours", None)
 
             drilling_bucket = None
             if isinstance(bucket_view_obj, (_MappingABC, dict)):
@@ -3409,6 +3424,7 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
             continue
     labor_costs_display: dict[str, float] = {}
     hour_summary_entries: dict[str, tuple[float, bool]] = {}
+    bucket_entries_for_totals_map: dict[str, Mapping[str, Any]] = {}
     prog_hr: float = 0.0
     direct_cost_details = breakdown.get("direct_cost_details", {}) or {}
     material_net_cost: float | None = None
@@ -3950,8 +3966,55 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
             if stored_entry is not None:
                 stored_hours, stored_rate, stored_cost = stored_entry
 
+        bucket_minutes_val = 0.0
+        bucket_entry: Mapping[str, Any] | None = None
+        spec_for_bucket: Any = None
+        lookup_candidates: list[str] = []
+        if canon_key:
+            lookup_candidates.append(canon_key)
+        normalized_key = _normalize_bucket_key(key)
+        if normalized_key:
+            lookup_candidates.append(normalized_key)
+        key_str = str(key or "").strip()
+        if key_str:
+            lookup_candidates.append(key_str)
+        display_label = (
+            _display_bucket_label(canon_key, label_overrides)
+            if canon_key
+            else key_str
+        )
+        if display_label:
+            lookup_candidates.append(display_label)
+
+        for candidate in lookup_candidates:
+            if bucket_minutes_val <= 0.0 and candidate in bucket_minutes_detail:
+                bucket_minutes_val = _safe_float(
+                    bucket_minutes_detail.get(candidate), default=0.0
+                )
+            if bucket_entry is None and candidate in bucket_entries_for_totals_map:
+                bucket_entry = typing.cast(
+                    Mapping[str, Any], bucket_entries_for_totals_map[candidate]
+                )
+            if spec_for_bucket is None:
+                spec_candidate = None
+                try:
+                    spec_candidate = bucket_specs_by_canon.get(candidate)  # type: ignore[name-defined]
+                except Exception:
+                    spec_candidate = None
+                if not spec_candidate:
+                    try:
+                        spec_candidate = bucket_specs_for_render.get(candidate)  # type: ignore[name-defined]
+                    except Exception:
+                        spec_candidate = None
+                if spec_candidate is not None:
+                    spec_for_bucket = spec_candidate
+
         meta = _lookup_process_meta(process_meta, key) or {}
-        hr_val = stored_hours
+        hr_val = 0.0
+        if bucket_minutes_val > 0.0:
+            hr_val = bucket_minutes_val / 60.0
+        else:
+            hr_val = stored_hours
         if hr_val <= 0:
             try:
                 hr_val = float(meta.get("hr", 0.0) or 0.0)
@@ -3989,6 +4052,23 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
                     rate_float = float(rates.get(rate_key, 0.0) or 0.0)
                 except Exception:
                     rate_float = 0.0
+
+        total_from_bucket = 0.0
+        if isinstance(bucket_entry, _MappingABC):
+            machine_component = _safe_float(bucket_entry.get("machine$"), default=0.0)
+            labor_component = _safe_float(bucket_entry.get("labor$"), default=0.0)
+            total_from_bucket = _safe_float(bucket_entry.get("total$"), default=0.0)
+            if total_from_bucket <= 0.0:
+                total_from_bucket = machine_component + labor_component
+        if total_from_bucket <= 0.0 and spec_for_bucket is not None:
+            try:
+                total_from_bucket = float(getattr(spec_for_bucket, "total", 0.0) or 0.0)
+            except Exception:
+                total_from_bucket = 0.0
+        if total_from_bucket > 0.0 and hr_val > 0.0:
+            rate_float = total_from_bucket / hr_val
+            stored_cost = total_from_bucket
+
         try:
             base_extra_val = float(meta.get("base_extra", 0.0) or 0.0)
         except Exception:
@@ -4181,6 +4261,7 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
     narrative = result.get("narrative") or breakdown.get("narrative")
     why_parts: list[str] = []
     why_lines: list[str] = []
+    bucket_why_summary_line: str | None = None
     material_total_for_why = 0.0
     if narrative:
         if isinstance(narrative, str):
@@ -6057,16 +6138,34 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
     bucket_minutes_source = getattr(bucket_state, "bucket_minutes_detail", None)
     if isinstance(bucket_minutes_source, _MappingABC):
         for key, minutes in bucket_minutes_source.items():
-            bucket_minutes_detail[str(key)] = _safe_float(minutes, default=0.0)
+            minutes_val = _safe_float(minutes, default=0.0)
+            key_str = str(key)
+            bucket_minutes_detail[key_str] = minutes_val
+            canon = _canonical_bucket_key(key_str) or _normalize_bucket_key(key_str)
+            if canon:
+                bucket_minutes_detail[canon] = minutes_val
+                label = _display_bucket_label(canon, label_overrides)
+                if label:
+                    bucket_minutes_detail[label] = minutes_val
     else:
         for canon_key, metrics in canonical_bucket_summary.items():
-            bucket_minutes_detail[canon_key] = _safe_float(
-                metrics.get("minutes"), default=0.0
-            )
+            minutes_val = _safe_float(metrics.get("minutes"), default=0.0)
+            bucket_minutes_detail[canon_key] = minutes_val
+            label = _display_bucket_label(canon_key, label_overrides)
+            if label:
+                bucket_minutes_detail[label] = minutes_val
     extra_bucket_minutes_detail = breakdown.get("bucket_minutes_detail")
     if isinstance(extra_bucket_minutes_detail, _MappingABC):
         for key, minutes in extra_bucket_minutes_detail.items():
-            bucket_minutes_detail[str(key)] = _safe_float(minutes, default=0.0)
+            minutes_val = _safe_float(minutes, default=0.0)
+            key_str = str(key)
+            bucket_minutes_detail[key_str] = minutes_val
+            canon = _canonical_bucket_key(key_str) or _normalize_bucket_key(key_str)
+            if canon:
+                bucket_minutes_detail[canon] = minutes_val
+                label = _display_bucket_label(canon, label_overrides)
+                if label:
+                    bucket_minutes_detail[label] = minutes_val
 
     bucket_hour_summary: dict[str, tuple[float, bool]] = {}
     for raw_key, minutes in bucket_minutes_detail.items():
@@ -6270,6 +6369,8 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
         process_costs_for_render[canon_key] = amount_val
         if minutes_val > 0:
             bucket_minutes_detail[canon_key] = minutes_val
+            if label:
+                bucket_minutes_detail[label] = minutes_val
         label = _display_bucket_label(canon_key, label_overrides)
         label_to_canon.setdefault(label, canon_key)
         canon_to_display_label.setdefault(canon_key, label)
@@ -6380,6 +6481,9 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
             if r > 0:
                 process_costs_for_render[k] = round((minutes / 60.0) * r, 2)
                 bucket_minutes_detail[k] = minutes
+                label = _display_bucket_label(k, label_overrides)
+                if label:
+                    bucket_minutes_detail[label] = minutes
 
     # 1b) minutes→$ for the drilling minutes engine (if planner didn’t emit a drilling bucket)
     drill_summary_source: Mapping[str, Any] | None = None
@@ -6414,6 +6518,9 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
     if bill_min > 0:
         process_costs_for_render["drilling"] = drill_cost
         bucket_minutes_detail["drilling"] = bill_min
+        drill_label = _display_bucket_label("drilling", label_overrides)
+        if drill_label:
+            bucket_minutes_detail[drill_label] = bill_min
         drill_summary_entry = canonical_bucket_summary.setdefault("drilling", {})
         drill_summary_entry["minutes"] = float(bill_min)
         drill_summary_entry["hours"] = float(bill_min / 60.0)
@@ -6485,7 +6592,11 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
         canon_key = spec.canon_key
         if canon_key:
             process_costs_for_render[canon_key] = _safe_float(spec.total, default=0.0)
-            bucket_minutes_detail[canon_key] = _safe_float(spec.minutes, default=0.0)
+            minutes_val = _safe_float(spec.minutes, default=0.0)
+            bucket_minutes_detail[canon_key] = minutes_val
+            label = _display_bucket_label(canon_key, label_overrides)
+            if label:
+                bucket_minutes_detail[label] = minutes_val
         process_table.add_row(spec.label, spec.hours, spec.rate, spec.total)
 
     bucket_specs_for_render: dict[str, _BucketRowSpec] = {
@@ -6700,6 +6811,11 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
     if bucket_entries_for_totals is None:
         bucket_entries_for_totals = {}
 
+    bucket_entries_for_totals_map = {}
+    bucket_machine_total_sum = 0.0
+    bucket_labor_total_sum = 0.0
+    bucket_totals_for_summary: list[tuple[str, float]] = []
+
     preferred_bucket_order = [
         "programming",
         "milling",
@@ -6721,10 +6837,75 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
         if not isinstance(entry, _MappingABC) or bucket_key in seen_bucket_keys:
             continue
         seen_bucket_keys.add(bucket_key)
-        proc_total_rendered += _as_float(entry.get("total$"), 0.0)
+
+        canon_key = (
+            _canonical_bucket_key(bucket_key)
+            or _normalize_bucket_key(bucket_key)
+            or str(bucket_key)
+        )
+        normalized_key = _normalize_bucket_key(bucket_key)
+        display_label = _display_bucket_label(canon_key, label_overrides)
+
+        machine_val = _safe_float(entry.get("machine$"), default=0.0)
+        labor_val = _safe_float(entry.get("labor$"), default=0.0)
+        total_val = _safe_float(entry.get("total$"), default=0.0)
+        if total_val <= 0.0:
+            total_val = machine_val + labor_val
+        if machine_val <= 0.0 and labor_val <= 0.0 and total_val > 0.0:
+            bucket_mode = _bucket_cost_mode(canon_key)
+            if bucket_mode == "labor":
+                labor_val = total_val
+            elif bucket_mode == "machine":
+                machine_val = total_val
+            else:
+                labor_val = total_val
+
+        proc_total_rendered += total_val
+        bucket_machine_total_sum += machine_val
+        bucket_labor_total_sum += labor_val
+        bucket_totals_for_summary.append((display_label or str(bucket_key), total_val))
+
+        lookup_keys = {
+            str(bucket_key),
+            canon_key,
+            normalized_key,
+            display_label,
+        }
+        for lookup_key in lookup_keys:
+            if lookup_key:
+                bucket_entries_for_totals_map[str(lookup_key)] = entry
+
         hours_val = _minutes_to_hours(entry.get("minutes", 0.0))
         if hours_val > 0:
             hrs_total_rendered += hours_val
+
+    if bucket_totals_for_summary:
+        top_total = max(total for _, total in bucket_totals_for_summary)
+        summary_bits: list[str] = []
+        summary_bits.append(f"Machine {_m(bucket_machine_total_sum)}")
+        summary_bits.append(f"Labor {_m(bucket_labor_total_sum)}")
+        largest_bucket_parts: list[str] = []
+        if top_total > 0:
+            sorted_totals = sorted(
+                bucket_totals_for_summary,
+                key=lambda item: item[1],
+                reverse=True,
+            )
+            tolerance = max(0.01, top_total * 0.01)
+            for label, amount in sorted_totals:
+                if amount <= 0:
+                    continue
+                if amount + tolerance < top_total and len(largest_bucket_parts) >= 3:
+                    break
+                if top_total - amount > tolerance and largest_bucket_parts:
+                    break
+                label_text = str(label or "Process")
+                largest_bucket_parts.append(f"{label_text} {_m(amount)}")
+            if largest_bucket_parts:
+                summary_bits.append(
+                    "largest bucket(s): " + ", ".join(largest_bucket_parts)
+                )
+        bucket_why_summary_line = "Process buckets — " + "; ".join(summary_bits)
 
     _render_process_and_hours_from_buckets(
         lines,
@@ -7784,6 +7965,11 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
         why_lines.extend(explanation_lines)
     if why_lines:
         why_parts.extend(why_lines)
+
+    if bucket_why_summary_line:
+        summary_text = bucket_why_summary_line.strip()
+        if summary_text and summary_text not in why_parts:
+            why_parts.append(summary_text)
 
     if why_parts:
         if lines and lines[-1]:
