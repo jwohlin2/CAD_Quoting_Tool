@@ -1619,6 +1619,7 @@ def summarize_actions(removal_lines: list[str], planner_ops: list[dict]) -> None
 
     actions_total = sum(total.values())
     print(f"[ACTIONS] totals={dict(total)} total={actions_total}")
+
     for k, sides in by_side.items():
         print(f"[ACTIONS/{k}] by_side={dict(sides)}")
 
