@@ -2,6 +2,29 @@
 """Runtime shim exposing the packaged planner render helpers."""
 from __future__ import annotations
 
+from dataclasses import dataclass, field
+import logging
+import math
+import re
+from typing import Any, Iterable, Mapping, MutableMapping, TypedDict
+from collections.abc import (
+    Mapping as _MappingABC,
+    MutableMapping as _MutableMappingABC,
+    Sequence,
+)
+import typing
+
+from cad_quoter.pricing.process_buckets import (
+    PLANNER_BUCKET_ORDER,
+    PLANNER_META,
+    BUCKET_ROLE,
+    canonical_bucket_key as _shared_canonical_bucket_key_impl,
+    flatten_rates as _shared_flatten_rates_impl,
+    lookup_rate as _shared_lookup_rate_impl,
+    normalize_bucket_key as _shared_normalize_bucket_key_impl,
+)
+from cad_quoter.pricing.process_cost_renderer import canonicalize_costs as _shared_canonicalize_costs
+
 from cad_quoter_pkg.src.cad_quoter.ui import planner_render as _planner_render_impl
 
 globals().update(
@@ -17,7 +40,7 @@ __all__ = getattr(
     "__all__",
     [name for name in globals().keys() if not name.startswith("__")],
 )
-<=
+ 
 from cad_quoter.rates import (
     default_labor_rate as _process_labor_rate,
     default_machine_rate as _process_machine_rate,
@@ -42,6 +65,60 @@ _MILLING_LABOR_RATE = _process_labor_rate("milling")
 # Heuristic fallbacks mirrored from appV5 for spot drill and jig grind minutes.
 SPOT_DRILL_MIN_PER_SIDE_MIN = 0.1
 JIG_GRIND_MIN_PER_FEATURE = 15.0
+
+
+def _shared_normalize_bucket_key(name: str | None, default: str = "") -> str:
+    normalized = _shared_normalize_bucket_key_impl(name)
+    if normalized:
+        return normalized
+    return str(default or "").strip()
+
+
+def _shared_canonical_bucket_key(name: str | None, default: str = "") -> str:
+    canon = _shared_canonical_bucket_key_impl(name, default=default or "")
+    if canon:
+        return str(canon)
+    normalized = _shared_normalize_bucket_key_impl(name)
+    if normalized:
+        return normalized
+    return str(default or "").strip()
+
+
+def _shared_lookup_rate(
+    key: str,
+    flat_rates: Mapping[str, float] | None,
+    normalized_rates: Mapping[str, float] | None,
+    *,
+    fallbacks: Iterable[str] | None = None,
+    mode: str | None = None,
+    bucket_role: str | None = None,
+) -> float:
+    return float(
+        _shared_lookup_rate_impl(
+            key,
+            flat_rates,
+            normalized_rates,
+            fallbacks=fallbacks,
+            mode=mode,
+            bucket_role=bucket_role,
+        )
+        or 0.0
+    )
+
+
+def _flatten_rates(rates: Mapping[str, Any] | None) -> tuple[dict[str, float], dict[str, float]]:
+    flat, normalized = _shared_flatten_rates_impl(rates)
+    return dict(flat), dict(normalized)
+
+
+def _coerce_float_or_none(value: Any) -> float | None:
+    try:
+        number = float(value)
+    except Exception:
+        return None
+    if not math.isfinite(number):
+        return None
+    return number
 
 
 def _safe_float(value: Any, default: float = 0.0) -> float:
@@ -1714,5 +1791,4 @@ __all__ = [
     "_extract_bucket_map",
 ]
 
->:cad_quoter_pkg/src/cad_quoter/ui/planner_render.py
 

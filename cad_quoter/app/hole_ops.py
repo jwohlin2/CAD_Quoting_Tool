@@ -436,6 +436,7 @@ def _parse_hole_line(line: str, to_in: float, *, source: str | None = None) -> d
         "depth_in": None,
         "side": None,
         "double_sided": False,
+        "from_back": False,
         "raw": line,
     }
     if source:
@@ -490,6 +491,8 @@ def _parse_hole_line(line: str, to_in: float, *, source: str | None = None) -> d
             entry["depth_in"] = depth
         if side:
             entry["side"] = side
+            if side == "BACK":
+                entry["from_back"] = True
 
     back_hint = bool(
         re.search(r"\((?:FROM\s+)?BACK\)", U)
@@ -499,6 +502,7 @@ def _parse_hole_line(line: str, to_in: float, *, source: str | None = None) -> d
     )
     if back_hint and str(entry.get("side") or "").upper() != "BACK":
         entry["side"] = "BACK"
+        entry["from_back"] = True
     if re.search(r"\b(FRONT\s*&\s*BACK|BOTH\s+SIDES)\b", U):
         entry["double_sided"] = True
 

@@ -919,15 +919,22 @@ def explain_quote(
         if not hole_groups_flag:
             hole_groups_flag = _hole_groups_present(breakdown.get("geo_context"))
 
+    removal_hint_present = False
+
     def _extract_removal_hours(source: Any) -> float | None:
+        nonlocal removal_hint_present
         if source is None:
             return None
         if isinstance(source, Mapping):
+            if "removal_drilling_hours" in source:
+                removal_hint_present = True
             direct = coerce_float(source.get("removal_drilling_hours"))
             if direct is not None:
                 return direct
             extra = source.get("extra")
             if isinstance(extra, Mapping):
+                if "removal_drilling_hours" in extra:
+                    removal_hint_present = True
                 from_extra = coerce_float(extra.get("removal_drilling_hours"))
                 if from_extra is not None:
                     return from_extra
@@ -936,6 +943,8 @@ def explain_quote(
         except Exception:
             extra_attr = None
         if isinstance(extra_attr, Mapping):
+            if "removal_drilling_hours" in extra_attr:
+                removal_hint_present = True
             from_attr = coerce_float(extra_attr.get("removal_drilling_hours"))
             if from_attr is not None:
                 return from_attr
@@ -1374,7 +1383,10 @@ def explain_quote(
     if why_main_lines:
         lines.append("  Main cost drivers: " + ", ".join(why_main_lines) + ".")
     else:
-        lines.append("  Main cost drivers derive from bucket totals; none dominate.")
+        if removal_hint_present:
+            lines.append("  Main cost drivers derive from planner buckets; none dominate.")
+        else:
+            lines.append("  Main cost drivers derive from bucket totals; none dominate.")
     if labor_totals_present and grand_labor_text:
         detail_parts: list[str] = []
         if machine_total > 1e-2 and machine_total_text:
