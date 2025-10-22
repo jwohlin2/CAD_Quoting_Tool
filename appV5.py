@@ -452,6 +452,361 @@ def _safe_ipm(ipr: float, rpm: float) -> float:
     return max(0.05, min(ipm, 200.0))
 
 
+def rpm_from_sfm(sfm: float, tool_diam_in: float) -> float:
+    """Wrapper that exposes :func:`_safe_rpm_from_sfm_diam` under a friendlier name."""
+
+    return _safe_rpm_from_sfm_diam(_as_float(sfm, 0.0), _as_float(tool_diam_in, 0.0))
+
+
+def ipm_from_rpm_ipt(rpm: float, flutes: float, ipt: float) -> float:
+    """Compute inches-per-minute from RPM, flute count and chip load (IPT)."""
+
+    rpm_val = max(_as_float(rpm, 0.0), 1.0)
+    flutes_val = max(_as_float(flutes, 0.0), 1.0)
+    ipt_val = max(_as_float(ipt, 0.0), 1e-5)
+    return rpm_val * flutes_val * ipt_val
+
+
+def _speeds_feeds_records_from_table(sf_df: Any) -> list[Mapping[str, Any]]:
+    """Normalize a Speeds/Feeds table-like object into a list of records."""
+
+    if sf_df is None:
+        default_path = globals().get("DEFAULT_SPEEDS_FEEDS_CSV_PATH")
+        if default_path:
+            try:
+                records = _load_speeds_feeds_records(str(default_path))
+            except Exception:
+                records = []
+            return [entry for entry in records if isinstance(entry, _MappingABC)]
+        return []
+
+    if _is_pandas_dataframe(sf_df):
+        try:
+            records = sf_df.to_dict(orient="records")  # type: ignore[call-arg, attr-defined]
+        except Exception:
+            records = []
+        return [entry for entry in records if isinstance(entry, _MappingABC)]
+
+    if isinstance(sf_df, list):
+        return [entry for entry in sf_df if isinstance(entry, _MappingABC)]
+
+    if isinstance(sf_df, tuple):
+        return [entry for entry in sf_df if isinstance(entry, _MappingABC)]
+
+    if isinstance(sf_df, _MappingABC):
+        try:
+            iterable = list(sf_df.values())
+        except Exception:
+            iterable = []
+        return [entry for entry in iterable if isinstance(entry, _MappingABC)]
+
+    records: list[Mapping[str, Any]] = []
+    try:
+        iterator = iter(sf_df)  # type: ignore[arg-type]
+    except TypeError:
+        return records
+
+    for entry in iterator:
+        if isinstance(entry, _MappingABC):
+            records.append(entry)
+    return records
+
+
+_MILL_OP_ALIASES: dict[str, tuple[str, ...]] = {
+    "face": ("FaceMill", "Face_Mill", "Facing", "Endmill_Profile"),
+    "contour": ("Endmill_Profile", "Endmill_Slot", "Profiling"),
+}
+
+
+_MILL_DEFAULTS_BY_OP: dict[str, dict[str, float]] = {
+    "face": {
+        "sfm": 600.0,
+        "ipt": 0.0035,
+        "flutes": 6.0,
+        "stepover_pct": 0.55,
+        "max_ap_in": 0.050,
+        "index_min_per_pass": 0.04,
+        "toolchange_min": 0.5,
+    },
+    "contour": {
+        "sfm": 450.0,
+        "ipt": 0.0025,
+        "flutes": 4.0,
+        "stepover_pct": 0.40,
+        "max_ap_in": 0.200,
+        "index_min_per_pass": 0.02,
+        "toolchange_min": 0.5,
+    },
+}
+
+
+def lookup_mill_params(
+    sf_df: Any,
+    material_group: str | None,
+    *,
+    op: str,
+    tool_diam_in: float,
+) -> dict[str, float]:
+    """Pick milling parameters from the Speeds/Feeds table for the requested op."""
+
+    op_key = str(op or "").strip().lower()
+    defaults = dict(_MILL_DEFAULTS_BY_OP.get(op_key, _MILL_DEFAULTS_BY_OP["contour"]))
+    tool_diam = max(_as_float(tool_diam_in, 0.0), 0.0)
+
+    records = _speeds_feeds_records_from_table(sf_df)
+    if not records:
+        return defaults
+
+    aliases = _MILL_OP_ALIASES.get(op_key, (op,))
+    aliases_lc = tuple(str(alias or "").strip().lower() for alias in aliases)
+    mg_norm = str(material_group or "").strip().lower()
+
+    def _row_matches(row: Mapping[str, Any]) -> bool:
+        op_val = str(row.get("operation") or "").strip().lower()
+        return op_val in aliases_lc if aliases_lc else op_val == op_key
+
+    filtered = [row for row in records if _row_matches(row)]
+    if not filtered:
+        filtered = records
+
+    chosen: Mapping[str, Any] | None = None
+    if mg_norm:
+        for row in filtered:
+            row_group = str(row.get("material_group") or "").strip().lower()
+            if row_group == mg_norm:
+                chosen = row
+                break
+    if chosen is None and filtered:
+        chosen = filtered[0]
+
+    if not isinstance(chosen, _MappingABC):
+        return defaults
+
+    sfm_val = _coerce_float_or_none(chosen.get("sfm_start"))
+    if sfm_val and sfm_val > 0.0:
+        defaults["sfm"] = float(sfm_val)
+
+    doc_val = _coerce_float_or_none(chosen.get("doc_axial_in"))
+    if doc_val and doc_val > 0.0:
+        defaults["max_ap_in"] = float(doc_val)
+
+    woc_pct = _coerce_float_or_none(chosen.get("woc_radial_pct"))
+    if woc_pct and woc_pct > 0.0:
+        defaults["stepover_pct"] = max(0.05, min(float(woc_pct) / 100.0, 1.0))
+
+    chip_load_candidates: list[tuple[float, float]] = []
+    for diam, col in (
+        (0.125, "fz_ipr_0_125in"),
+        (0.25, "fz_ipr_0_25in"),
+        (0.5, "fz_ipr_0_5in"),
+    ):
+        candidate = _coerce_float_or_none(chosen.get(col))
+        if candidate and candidate > 0.0:
+            chip_load_candidates.append((diam, float(candidate)))
+
+    chip_load_candidates.sort(key=lambda item: item[0])
+    ipt_val = None
+    for diam, chip in chip_load_candidates:
+        if tool_diam >= diam - 1e-6:
+            ipt_val = chip
+    if ipt_val is None and chip_load_candidates:
+        ipt_val = chip_load_candidates[0][1]
+    if ipt_val and ipt_val > 0.0:
+        defaults["ipt"] = float(ipt_val)
+
+    if tool_diam >= 1.0:
+        defaults["flutes"] = max(defaults.get("flutes", 4.0), 5.0)
+    elif tool_diam <= 0.25:
+        defaults["flutes"] = max(3.0, defaults.get("flutes", 3.0))
+
+    return defaults
+
+
+def _geom_dims_from_payload(geom: Mapping[str, Any] | None) -> tuple[float, float, float]:
+    """Extract length/width/thickness in inches from a geometry mapping."""
+
+    if not isinstance(geom, _MappingABC):
+        return 0.0, 0.0, 0.0
+
+    length = 0.0
+    width = 0.0
+    thickness = 0.0
+
+    bbox = geom.get("bbox")
+    if isinstance(bbox, _MappingABC):
+        length = _coerce_float_or_none(bbox.get("x")) or length
+        width = _coerce_float_or_none(bbox.get("y")) or width
+        thickness = _coerce_float_or_none(bbox.get("z")) or thickness
+
+    if length <= 0.0 or width <= 0.0:
+        plate = geom.get("plate")
+        if isinstance(plate, _MappingABC):
+            length = _coerce_float_or_none(plate.get("length_in")) or length
+            width = _coerce_float_or_none(plate.get("width_in")) or width
+            thickness = _coerce_float_or_none(plate.get("thickness_in")) or thickness
+
+    if (length <= 0.0 or width <= 0.0) and isinstance(geom.get("bbox_mm"), _MappingABC):
+        bbox_mm = typing.cast(Mapping[str, Any], geom.get("bbox_mm"))
+        length = (_coerce_float_or_none(bbox_mm.get("x")) or 0.0) / 25.4 or length
+        width = (_coerce_float_or_none(bbox_mm.get("y")) or 0.0) / 25.4 or width
+        thickness = (_coerce_float_or_none(bbox_mm.get("z")) or 0.0) / 25.4 or thickness
+
+    if thickness <= 0.0:
+        thickness_mm = _coerce_float_or_none(geom.get("thickness_mm"))
+        if thickness_mm and thickness_mm > 0.0:
+            thickness = float(thickness_mm) / 25.4
+
+    if thickness <= 0.0:
+        thickness = _coerce_float_or_none(geom.get("thickness_in")) or thickness
+
+    return max(length, 0.0), max(width, 0.0), max(thickness, 0.0)
+
+
+def estimate_milling_minutes_from_geometry(
+    geom: Mapping[str, Any] | None,
+    sf_df: Any,
+    material_group: str | None,
+    rates: Mapping[str, Any] | None,
+    *,
+    emit_bottom_face: bool = False,
+) -> dict[str, Any]:
+    """Estimate milling minutes (face + perimeter) from geometric inputs."""
+
+    length_in, width_in, thickness_in = _geom_dims_from_payload(geom)
+    if length_in <= 0.0 or width_in <= 0.0:
+        return {
+            "minutes": 0.0,
+            "machine$": 0.0,
+            "labor$": 0.0,
+            "total$": 0.0,
+            "detail": {
+                "face_top_min": 0.0,
+                "face_bot_min": 0.0,
+                "perim_rough_min": 0.0,
+                "perim_finish_min": 0.0,
+                "toolchanges_min": 0.0,
+                "rpm_face": 0.0,
+                "ipm_face": 0.0,
+                "rpm_contour": 0.0,
+                "ipm_contour": 0.0,
+                "passes_face": 0,
+                "passes_axial": 0,
+            },
+        }
+
+    perimeter_len = _coerce_float_or_none((geom or {}).get("perimeter_len_in"))
+    if not perimeter_len or perimeter_len <= 0.0:
+        perimeter_len = 2.0 * (length_in + width_in)
+
+    face_tool_diam = 2.0
+    endmill_diam = 0.5
+
+    face_params = lookup_mill_params(sf_df, material_group, op="face", tool_diam_in=face_tool_diam)
+    contour_params = lookup_mill_params(
+        sf_df,
+        material_group,
+        op="contour",
+        tool_diam_in=endmill_diam,
+    )
+
+    rpm_face = rpm_from_sfm(face_params.get("sfm", 0.0), face_tool_diam)
+    ipm_face = ipm_from_rpm_ipt(
+        rpm_face,
+        face_params.get("flutes", 4.0),
+        face_params.get("ipt", 0.002),
+    )
+
+    stepover_pct = max(face_params.get("stepover_pct", 0.5), 0.05)
+    stepover = stepover_pct * face_tool_diam
+    passes_face = max(1, math.ceil(width_in / max(stepover, 1e-6)))
+    path_len_top = passes_face * length_in * 1.10
+    index_time = passes_face * max(face_params.get("index_min_per_pass", 0.03), 0.0)
+    t_top_min = (path_len_top / max(ipm_face, 1e-6)) + index_time
+
+    t_bot_min = t_top_min if emit_bottom_face else 0.0
+
+    rpm_contour = rpm_from_sfm(contour_params.get("sfm", 0.0), endmill_diam)
+    ipm_contour = ipm_from_rpm_ipt(
+        rpm_contour,
+        contour_params.get("flutes", 4.0),
+        contour_params.get("ipt", 0.002),
+    )
+
+    ap = max(contour_params.get("max_ap_in", 0.050), 0.050)
+    passes_axial = max(1, math.ceil(thickness_in / max(ap, 1e-6)))
+    t_rough_min = (passes_axial * perimeter_len) / max(ipm_contour, 1e-6)
+
+    finish_factor = 1.15
+    t_finish_min = perimeter_len / max(ipm_contour / finish_factor, 1e-6)
+
+    milling_min = t_top_min + t_bot_min + t_rough_min + t_finish_min
+
+    toolchanges_min = 0.0
+    if t_top_min + t_bot_min > 0.0:
+        toolchanges_min += max(face_params.get("toolchange_min", 0.0), 0.0)
+    if t_rough_min + t_finish_min > 0.0:
+        toolchanges_min += max(contour_params.get("toolchange_min", 0.0), 0.0)
+
+    total_min = milling_min + toolchanges_min
+
+    def _rate_from_mapping(keys: Sequence[str], default: float) -> float:
+        if isinstance(rates, _MappingABC):
+            for key in keys:
+                val = _coerce_float_or_none(rates.get(key))
+                if val and val > 0.0:
+                    return float(val)
+        return default
+
+    machine_rate = _rate_from_mapping(
+        ("machine_per_hour", "machine_rate", "milling_rate", "milling"),
+        45.0,
+    )
+    labor_rate = _rate_from_mapping(
+        ("labor_per_hour", "labor_rate", "milling_labor_rate", "labor"),
+        0.0,
+    )
+
+    machine_cost = (total_min / 60.0) * machine_rate
+    labor_cost = (total_min / 60.0) * labor_rate * 0.0
+    total_cost = machine_cost + labor_cost
+
+    logging.info(
+        "[INFO] [milling] face_top=%.2fmin face_bot=%.2fmin rough_perim=%.2fmin "
+        "finish_perim=%.2fmin toolchange=%.2fmin total=%.2fmin rpm(face)=%.0f "
+        "ipm(face)=%.1f rpm(cnt)=%.0f ipm(cnt)=%.1f",
+        t_top_min,
+        t_bot_min,
+        t_rough_min,
+        t_finish_min,
+        toolchanges_min,
+        total_min,
+        rpm_face,
+        ipm_face,
+        rpm_contour,
+        ipm_contour,
+    )
+
+    return {
+        "minutes": round(total_min, 2),
+        "machine$": round(machine_cost, 2),
+        "labor$": round(labor_cost, 2),
+        "total$": round(total_cost, 2),
+        "detail": {
+            "face_top_min": round(t_top_min, 2),
+            "face_bot_min": round(t_bot_min, 2),
+            "perim_rough_min": round(t_rough_min, 2),
+            "perim_finish_min": round(t_finish_min, 2),
+            "toolchanges_min": round(toolchanges_min, 2),
+            "rpm_face": round(rpm_face, 0),
+            "ipm_face": round(ipm_face, 1),
+            "rpm_contour": round(rpm_contour, 0),
+            "ipm_contour": round(ipm_contour, 1),
+            "passes_face": int(passes_face),
+            "passes_axial": int(passes_axial),
+        },
+    }
+
+
 def _clamp_minutes(v: Any, lo: float = 0.0, hi: float = 10000.0) -> float:
     minutes_val = _as_float(v, 0.0)
     if not (lo <= minutes_val <= hi):
@@ -1182,6 +1537,8 @@ def _compute_drilling_removal_section(
     drill_tool_minutes_estimate: float,
     drill_total_minutes_estimate: float,
     process_plan_summary: Mapping[str, Any] | None,
+    speeds_feeds_table: Any | None = None,
+    material_group: str | None = None,
     drilling_time_per_hole: Mapping[str, Any] | None = None,
 ) -> tuple[dict[str, float], list[str], Mapping[str, Any] | None]:
     """Return drill removal render lines + extras while updating breakdown state."""
@@ -1598,6 +1955,38 @@ def _compute_drilling_removal_section(
                 or 45.0
             )
 
+            milling_estimate_result: Mapping[str, Any] | None = None
+            if milling_minutes_total <= 0.0 and geo_map:
+                emit_bottom_face_hint = False
+                pricing_hints = geo_map.get("pricing_hints") if isinstance(geo_map, _MappingABC) else None
+                if isinstance(pricing_hints, _MappingABC):
+                    emit_bottom_face_hint = bool(pricing_hints.get("face_both_sides"))
+                try:
+                    milling_estimate_result = estimate_milling_minutes_from_geometry(
+                        geo_map,
+                        speeds_feeds_table,
+                        material_group,
+                        {
+                            "machine_per_hour": mill_mrate,
+                            "labor_per_hour": mill_lrate,
+                        },
+                        emit_bottom_face=emit_bottom_face_hint,
+                    )
+                except Exception as exc:
+                    logging.debug("[milling-estimate] failed: %s", exc, exc_info=False)
+                    milling_estimate_result = None
+                minutes_est = (
+                    _coerce_float_or_none((milling_estimate_result or {}).get("minutes"))
+                    if milling_estimate_result
+                    else None
+                )
+                if minutes_est and minutes_est > 0.0:
+                    milling_minutes_total = float(minutes_est)
+                    extras["milling_minutes_estimated"] = float(minutes_est)
+                    dbg(lines, f"milling_minutes_estimated={minutes_est:.2f}")
+                elif milling_estimate_result:
+                    dbg(lines, f"milling_estimate_failed={milling_estimate_result}")
+
             _set_bucket_minutes_cost(
                 bucket_view_obj,
                 "milling",
@@ -1605,6 +1994,28 @@ def _compute_drilling_removal_section(
                 mill_mrate,
                 mill_lrate,
             )
+
+            if milling_estimate_result and isinstance(bucket_view_obj, (_MutableMappingABC, dict)):
+                try:
+                    buckets_map = bucket_view_obj.setdefault("buckets", {})
+                    if isinstance(buckets_map, dict):
+                        entry = buckets_map.get("milling")
+                        if isinstance(entry, dict):
+                            detail_payload = milling_estimate_result.get("detail")
+                            if isinstance(detail_payload, _MappingABC):
+                                entry.setdefault("detail", dict(detail_payload))
+                        buckets_map["milling"] = entry  # type: ignore[index]
+                    elif isinstance(buckets_map, _MutableMappingABC):
+                        entry = buckets_map.get("milling")
+                        if isinstance(entry, _MutableMappingABC):
+                            detail_payload = milling_estimate_result.get("detail")
+                            if isinstance(detail_payload, _MappingABC):
+                                entry.setdefault("detail", dict(detail_payload))
+                except Exception:
+                    pass
+
+            if milling_estimate_result:
+                dbg(lines, f"milling_estimate_detail={milling_estimate_result}")
 
             _normalize_buckets(bucket_view_obj)
 
@@ -5641,6 +6052,8 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
         drill_tool_minutes_estimate=drill_tool_minutes_estimate,
         drill_total_minutes_estimate=drill_total_minutes_estimate,
         process_plan_summary=process_plan_summary_local,
+        speeds_feeds_table=speeds_feeds_table,
+        material_group=material_group_display,
         drilling_time_per_hole=drilling_time_per_hole_data,
     )
 
