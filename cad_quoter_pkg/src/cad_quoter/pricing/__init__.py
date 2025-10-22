@@ -22,6 +22,11 @@ from .process_cost_renderer import (
     canonicalize_costs,
     render_process_costs,
 )
+from .machining_report import (
+    render_counterbore_section,
+    render_drilling_section,
+    render_tapping_section,
+)
 from .vendor_csv import VendorCSV
 from .speeds_feeds_selector import (
     load_csv_as_records,
@@ -200,6 +205,9 @@ __all__ = [
     "ORDER",
     "canonicalize_costs",
     "render_process_costs",
+    "render_drilling_section",
+    "render_tapping_section",
+    "render_counterbore_section",
     "create_default_registry",
     "load_csv_as_records",
     "pick_speeds_row",
