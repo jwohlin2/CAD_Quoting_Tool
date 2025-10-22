@@ -1,1 +1,1 @@
-# Marker file to treat tests.app as a package for pytest collection.
+"""Test package for application-level integration tests."""

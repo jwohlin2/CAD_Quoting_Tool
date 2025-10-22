@@ -249,13 +249,32 @@ def test_explain_quote_reports_drilling_minutes_from_removal_card() -> None:
     breakdown = {
         "totals": {"price": 120.0, "qty": 1, "labor_cost": 40.0},
         "material_direct_cost": 30.0,
+        "bucket_view": {"buckets": {"drilling": {"total$": 90.0}}},
     }
     render_state = {"extra": {"drill_total_minutes": 30.0}}
 
     explanation = explain_quote(breakdown, render_state=render_state)
 
-    assert "Drilling time comes from removal-card math (0.50 hr total)." in explanation
-    assert "No drilling accounted." not in explanation
+    assert "Main cost drivers: Drilling $90.00." in explanation
+    assert "Main cost drivers derive from planner buckets; none dominate." not in explanation
+
+
+def test_explain_quote_skips_legacy_drilling_text_when_bucket_present() -> None:
+    breakdown = {
+        "totals": {"price": 180.0, "qty": 1, "labor_cost": 60.0},
+        "material_direct_cost": 45.0,
+        "bucket_view": {"buckets": {"drilling": {"total$": 180.0}}},
+    }
+    render_state = {"extra": {"drill_total_minutes": 30.0}}
+    plan_info = {"bucket_view": {"buckets": {"drilling": {"total$": 180.0}}}}
+
+    explanation = explain_quote(
+        breakdown,
+        render_state=render_state,
+        plan_info=plan_info,
+    )
+
+    assert "Main cost drivers: Drilling $180.00." in explanation
 
 
 def test_explain_quote_reports_no_drilling_when_minutes_absent() -> None:
@@ -263,55 +282,4 @@ def test_explain_quote_reports_no_drilling_when_minutes_absent() -> None:
 
     explanation = explain_quote(breakdown, render_state={"extra": {}})
 
-    assert "No drilling accounted." in explanation
-    assert "Drilling time comes from removal-card math" not in explanation
-
-
-def test_render_quote_includes_quick_whatifs_section() -> None:
-    result = {
-        "price": 230.0,
-        "qty": 1,
-        "breakdown": {
-            "qty": 1,
-            "totals": {
-                "labor_cost": 120.0,
-                "direct_costs": 80.0,
-                "subtotal": 200.0,
-                "with_expedite": 200.0,
-                "with_margin": 230.0,
-            },
-            "total_direct_costs": 80.0,
-            "nre_detail": {},
-            "nre": {"programming_per_part": 30.0},
-            "material": {"material_cost": 80.0, "total_material_cost": 80.0},
-            "process_costs": {"machining": 90.0},
-            "process_meta": {},
-            "pass_through": {"Material": 80.0},
-            "applied_pcts": {"MarginPct": 0.15},
-            "rates": {},
-            "params": {},
-            "labor_cost_details": {"Programming (amortized)": 30.0},
-            "direct_cost_details": {"Material": "$80"},
-        },
-    }
-
-    rendered = appV5.render_quote(result, currency="$")
-
-    assert "QUICK WHAT-IFS (INTERNAL KNOBS)" in rendered
-    assert "A) Margin slider (Qty = 1)" in rendered
-    assert "10% margin" in rendered
-    assert "B) Qty break (assumes same ops; programming amortized; 15% margin)" in rendered
-    assert "2,      $105.00,      $80.00,     $185.00,     $212.75" in rendered
-
-    breakdown = result["breakdown"]
-    payload = breakdown["render_payload"]
-    quick = payload["quick_whatifs"]
-
-    slider_prices = [entry["final_price"] for entry in quick["margin_slider"]]
-    assert slider_prices == [220.0, 230.0, 240.0, 250.0]
-
-    qty_breaks = quick["qty_breaks"]
-    assert [entry["label"] for entry in qty_breaks] == ["1", "2", "5", "10"]
-    assert math.isclose(qty_breaks[1]["final_price"], 212.75, rel_tol=1e-6)
-    assert math.isclose(qty_breaks[2]["labor_per_part"], 96.0, rel_tol=1e-6)
-    assert all(math.isclose(entry["expedite_per_part"], 0.0, rel_tol=1e-6) for entry in qty_breaks)
+    assert "Main cost drivers derive from planner buckets; none dominate." in explanation

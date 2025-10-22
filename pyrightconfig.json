@@ -1,4 +1,6 @@
 {
   "include": ["."],
-  "stubPath": "typings"
+  "extraPaths": [
+    "./cad_quoter_pkg/src"
+  ]
 }

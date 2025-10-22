@@ -13,66 +13,58 @@ for _module_name in ("requests", "bs4", "lxml"):
         stub.__spec__ = importlib.machinery.ModuleSpec(_module_name, loader=None)
         sys.modules[_module_name] = stub
 
-import appV5
-import materials
+import cad_quoter.pricing.materials as materials
 
 
-class _FailingPricingEngine:
-    def get_usd_per_kg(self, *args, **kwargs):  # noqa: D401 - simple stub
+def test_resolve_price_per_lb_prefers_mcmaster_before_resolver(monkeypatch):
+    module = types.ModuleType("metals_api")
+
+    def _raise(_material_key: str) -> float:
         raise RuntimeError("metals api unavailable")
 
+    module.price_per_lb_for_material = _raise  # type: ignore[attr-defined]
+    monkeypatch.setitem(sys.modules, "metals_api", module)
 
-def test_compute_material_cost_prefers_mcmaster_before_wieland(monkeypatch):
     def _fake_mcmaster(name: str, *, unit: str = "kg") -> tuple[float, str]:
-        assert unit == "kg"
+        assert unit == "lb"
         return 123.45, "mcmaster:aluminum"
 
-    def _fail_wieland(_keys):
-        raise AssertionError("wieland lookup should not run when McMaster succeeds")
+    def _fail_resolver(name: str, *, unit: str = "kg") -> tuple[float, str]:
+        raise AssertionError("resolver should not run when McMaster succeeds")
 
-    monkeypatch.setattr(appV5, "_get_mcmaster_unit_price", _fake_mcmaster)
-    monkeypatch.setattr(appV5, "lookup_wieland_price", _fail_wieland)
+    monkeypatch.setattr(materials, "get_mcmaster_unit_price", _fake_mcmaster, raising=False)
+    monkeypatch.setattr(materials, "_resolve_material_unit_price", _fail_resolver, raising=False)
 
-    cost, detail = appV5.compute_material_cost(
-        material_name="Aluminum",
-        mass_kg=1.0,
-        scrap_frac=0.0,
-        overrides={},
-        vendor_csv=None,
-        pricing=_FailingPricingEngine(),
-    )
+    price, source = materials._resolve_price_per_lb("aluminum", "Aluminum")
 
-    assert cost == pytest.approx(123.45)
-    assert detail["unit_price_usd_per_kg"] == pytest.approx(123.45)
-    assert detail["unit_price_source"] == "mcmaster:aluminum"
-    assert detail["source"] == "mcmaster:aluminum"
+    assert price == pytest.approx(123.45)
+    assert source == "mcmaster:aluminum"
 
+    wieland_module = types.ModuleType("cad_quoter.pricing.wieland_scraper")
 
-def test_compute_material_cost_uses_resolver_when_providers_fail(monkeypatch):
-    monkeypatch.setattr(appV5, "lookup_wieland_price", lambda _keys: (None, None))
+def test_resolve_price_per_lb_uses_resolver_when_providers_fail(monkeypatch):
+    module = types.ModuleType("metals_api")
+    module.price_per_lb_for_material = lambda _material_key: None  # type: ignore[attr-defined]
+    monkeypatch.setitem(sys.modules, "metals_api", module)
 
-    fallback_calls: list[tuple[str, str]] = []
+    wieland_module.get_live_material_price = _fail_live_price  # type: ignore[attr-defined]
+    monkeypatch.setitem(sys.modules, "cad_quoter.pricing.wieland_scraper", wieland_module)
+
+    def _failing_mcmaster(_name: str, *, unit: str = "kg") -> tuple[float | None, str]:
+        return None, ""
 
     def _fake_resolver(name: str, *, unit: str = "kg") -> tuple[float, str]:
         fallback_calls.append((name, unit))
         return 321.0, "backup_csv"
 
-    monkeypatch.setattr(appV5, "_resolve_material_unit_price", _fake_resolver)
+    monkeypatch.setattr(materials, "get_mcmaster_unit_price", _failing_mcmaster, raising=False)
+    monkeypatch.setattr(materials, "_resolve_material_unit_price", _fake_resolver, raising=False)
 
-    cost, detail = appV5.compute_material_cost(
-        material_name="6061",
-        mass_kg=1.0,
-        scrap_frac=0.0,
-        overrides={},
-        vendor_csv=None,
-        pricing=_FailingPricingEngine(),
-    )
+    price, source = materials._resolve_price_per_lb("6061", "6061")
 
-    assert fallback_calls == [("6061", "kg")]
-    assert cost == pytest.approx(321.0)
-    assert detail["unit_price_usd_per_kg"] == pytest.approx(321.0)
-    assert detail["unit_price_source"] == "backup_csv"
-    assert detail["source"] == "backup_csv"
+    assert fallback_calls == [("6061", "lb")]
+    assert price == pytest.approx(321.0)
+    assert source == "backup_csv"
 
 
 def test_material_price_helper_returns_fallback_price(monkeypatch):
@@ -80,9 +72,9 @@ def test_material_price_helper_returns_fallback_price(monkeypatch):
         assert unit == "kg"
         return 400.0, "backup_csv"
 
-    monkeypatch.setattr(appV5, "_resolve_material_unit_price", _fake_resolver)
+    monkeypatch.setattr(materials, "_resolve_material_unit_price", _fake_resolver, raising=False)
 
-    price_per_g, source = appV5._material_price_per_g_from_choice("Stainless Steel", {})
+    price_per_g, source = materials._material_price_per_g_from_choice("Stainless Steel", {})
 
     assert price_per_g == pytest.approx(0.4)
     assert source == "backup_csv"
@@ -104,7 +96,7 @@ def test_compute_material_block_uses_price_resolver(monkeypatch):
         assert unit == "lb"
         return 10.0, "resolver"
 
-    monkeypatch.setattr(appV5, "_resolve_material_unit_price", _fake_resolver)
+    monkeypatch.setattr(materials, "_resolve_material_unit_price", _fake_resolver, raising=False)
 
     geo_ctx = {
         "material_display": "Aluminum 6061",
@@ -112,7 +104,7 @@ def test_compute_material_block_uses_price_resolver(monkeypatch):
         "outline_bbox": {"plate_len_in": 2.0, "plate_wid_in": 3.0},
     }
 
-    block = appV5._compute_material_block(geo_ctx, "aluminum", 2.70, 0.1)
+    block = materials._compute_material_block(geo_ctx, "aluminum", 2.70, 0.1)
 
     assert calls == [("Aluminum 6061", "lb")]
     assert block["price_per_lb"] == pytest.approx(10.0)
@@ -137,7 +129,7 @@ def test_compute_material_block_applies_supplier_min(monkeypatch):
         "supplier_min$": 75.0,
     }
 
-    block = appV5._compute_material_block(geo_ctx, "steel", 7.85, 0.2)
+    block = materials._compute_material_block(geo_ctx, "steel", 7.85, 0.2)
 
     assert block["supplier_min$"] == pytest.approx(75.0)
     assert block["price_per_lb"] == pytest.approx(2.0)
@@ -157,7 +149,7 @@ def test_material_cost_components_prefers_stock_piece():
     }
     overrides = {"scrap_recovery_pct": 0.9}
 
-    components = appV5._material_cost_components(block, overrides=overrides, cfg=None)
+    components = materials._material_cost_components(block, overrides=overrides, cfg=None)
 
     assert components["base_usd"] == pytest.approx(20.0)
     assert components["base_source"] == "McMaster API (qty=1, part=4936K451)"
@@ -177,7 +169,7 @@ def test_material_cost_components_handles_per_lb_pricing():
         "material_tax": 0.75,
     }
 
-    components = appV5._material_cost_components(block, overrides={}, cfg=None)
+    components = materials._material_cost_components(block, overrides={}, cfg=None)
 
     start_lb = 500.0 * 0.00220462262
     expected_base = round(start_lb * 6.0, 2)
@@ -200,7 +192,7 @@ def test_material_cost_components_respects_explicit_credit():
         "material_scrap_credit": 12.34,
     }
 
-    components = appV5._material_cost_components(block, overrides={}, cfg=None)
+    components = materials._material_cost_components(block, overrides={}, cfg=None)
 
     assert components["scrap_credit_usd"] == pytest.approx(12.34)
     assert components["total_usd"] == pytest.approx(37.66)
@@ -229,31 +221,41 @@ def test_plan_stock_blank_uses_configured_tolerance():
 def test_vendor_catalog_prefers_exact_thickness(monkeypatch):
     from cad_quoter.pricing import vendor_csv
 
-    norm = vendor_csv._normalise_material_label("Aluminum MIC6")
     rows = [
         {
-            "material": norm,
-            "thk_in": 3.5,
-            "len_in": 12.0,
-            "wid_in": 24.0,
+            "material": "Aluminum MIC6",
+            "thickness_in": "3.5",
+            "length_in": "12",
+            "width_in": "24",
             "vendor": "McMaster",
-            "part_no": "86825K626",
-            "price_usd": None,
-            "min_charge_usd": None,
+            "part": "86825K626",
         },
         {
-            "material": norm,
-            "thk_in": 2.0,
-            "len_in": 12.0,
-            "wid_in": 24.0,
+            "material": "Aluminum MIC6",
+            "thickness_in": "2",
+            "length_in": "12",
+            "width_in": "24",
             "vendor": "McMaster",
-            "part_no": "86825K954",
-            "price_usd": None,
-            "min_charge_usd": None,
+            "part": "86825K954",
         },
     ]
 
-    monkeypatch.setattr(vendor_csv, "_load_catalog_rows", lambda _path=None: rows)
+    calls: list[float] = []
+
+    def fake_pick(L, W, T, *, material_key, catalog_rows):
+        calls.append(T)
+        assert catalog_rows is rows
+        if pytest.approx(T, abs=1e-6) == pytest.approx(2.0):
+            return {
+                "len_in": 24.0,
+                "wid_in": 12.0,
+                "thk_in": T,
+                "mcmaster_part": "86825K954",
+            }
+        return None
+
+    monkeypatch.setattr(vendor_csv, "load_mcmaster_catalog_rows", lambda _path=None: rows)
+    monkeypatch.setattr(vendor_csv, "pick_mcmaster_plate_sku", fake_pick)
 
     picked = vendor_csv.pick_plate_from_mcmaster(
         "Aluminum MIC6",
@@ -265,6 +267,7 @@ def test_vendor_catalog_prefers_exact_thickness(monkeypatch):
         thickness_tolerance=0.02,
     )
 
+    assert calls, "helper should be consulted"
     assert picked is not None
     assert picked["thk_in"] == pytest.approx(2.0)
     assert picked["part_no"] == "86825K954"

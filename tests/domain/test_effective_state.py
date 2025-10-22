@@ -4,13 +4,27 @@ import pytest
 
 from cad_quoter.domain import (
     QuoteState,
+    apply_suggestions,
     compute_effective_state,
-    effective_to_overrides,
-    merge_effective,
     reprice_with_effective,
 )
-from appV5 import apply_suggestions
+from cad_quoter.app.effective import effective_to_overrides
+from cad_quoter.app.merge_utils import merge_effective
 
+import cad_quoter.geometry as _geometry
+
+_geometry_fallbacks = {
+    "FACE_OF": lambda obj: obj,
+    "ensure_face": lambda obj: obj,
+    "face_surface": lambda *_args, **_kwargs: None,
+    "iter_faces": lambda *_args, **_kwargs: iter(()),
+    "linear_properties": lambda *_args, **_kwargs: None,
+    "map_shapes_and_ancestors": lambda *_args, **_kwargs: {},
+}
+
+for _name, _stub in _geometry_fallbacks.items():
+    if not hasattr(_geometry, _name):
+        setattr(_geometry, _name, _stub)
 
 def test_merge_effective_clamps_and_tracks_sources() -> None:
     baseline = {

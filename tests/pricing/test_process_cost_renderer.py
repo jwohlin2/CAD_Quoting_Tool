@@ -1,6 +1,7 @@
 import pytest
 
-from cad_quoter.pricing import ORDER, canonicalize_costs, render_process_costs
+from cad_quoter.pricing.process_buckets import ORDER, PROCESS_BUCKETS, bucket_aliases
+from cad_quoter.pricing.process_cost_renderer import canonicalize_costs, render_process_costs
 
 
 class TableCollector:
@@ -37,6 +38,28 @@ def test_canonicalize_costs_groups_aliases_and_skips_planner_total() -> None:
     assert canon["wire_edm"] == pytest.approx(23.0)
     assert canon["sinker_edm"] == pytest.approx(22.0)
     assert "planner_total" not in canon
+    assert "deep_drill" in bucket_aliases("drilling")
+    assert {"planner_total", "misc"}.issubset(PROCESS_BUCKETS.hide_in_cost)
+
+
+def test_canonicalize_costs_can_skip_planner_meta_and_misc(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("DEBUG_MISC", raising=False)
+
+    costs = {
+        "Milling": 40.0,
+        "Deburr": 12.0,
+        "Misc": 10.0,
+        "Planner Total": 500.0,
+        "Planner Labor": 75.0,
+        "planner_misc": 5.0,
+    }
+
+    canon = canonicalize_costs(costs, skip_planner_meta=True, hide_misc_under=50.0)
+
+    assert set(canon) == {"milling", "finishing_deburr"}
+    assert canon["milling"] == pytest.approx(40.0)
+    assert canon["finishing_deburr"] == pytest.approx(12.0)
+    assert "misc" not in canon
 
 
 def test_render_process_costs_orders_rows_and_rates(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -66,25 +89,25 @@ def test_render_process_costs_orders_rows_and_rates(monkeypatch: pytest.MonkeyPa
     labels = [row["label"] for row in table.rows]
     assert labels == [
         "Milling",
-        "Drilling",
+        "Countersink",
         "Finishing/Deburr",
     ]
-    assert total == pytest.approx(201.25)
+    assert total == pytest.approx(135.0)
 
     expected_hours = {
         "Milling": 2.0,
-        "Drilling": 0.25,
+        "Countersink": 0.25,
         "Finishing/Deburr": 1.5,
     }
     expected_rates = {
         "Milling": 60.0,
-        "Drilling": 55.0,
+        "Countersink": 55.0,
         "Finishing/Deburr": 45.0,
     }
     expected_costs = {
-        "Milling": 120.0,
-        "Drilling": 13.75,
-        "Finishing/Deburr": 67.5,
+        "Milling": 100.0,
+        "Countersink": 5.0,
+        "Finishing/Deburr": 30.0,
     }
 
     for row in table.rows:
@@ -144,7 +167,7 @@ def test_render_process_costs_hides_misc_even_when_debug(
     monkeypatch.delenv("DEBUG_MISC", raising=False)
 
 
-def test_render_process_costs_prefers_planner_drilling_minutes(
+def test_render_process_costs_uses_bucket_minutes_for_drilling(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.delenv("DEBUG_MISC", raising=False)
@@ -153,20 +176,18 @@ def test_render_process_costs_prefers_planner_drilling_minutes(
     process_costs = {"Drilling": 12.5}
     minutes_detail = {"Drilling": 24.0}
     rates = {"machine": {"cnc_vertical": 75.0}}
-    process_plan = {"drilling": {"total_minutes_billed": 440.0}}
-
     total = render_process_costs(
         table,
         process_costs,
         rates=rates,
         minutes_detail=minutes_detail,
-        process_plan=process_plan,
+        process_plan=None,
     )
 
     assert len(table.rows) == 1
     row = table.rows[0]
-    expected_hours = 440.0 / 60.0
-    expected_cost = round(expected_hours * 75.0, 2)
+    expected_hours = 24.0 / 60.0
+    expected_cost = 12.5
 
     assert row["label"] == "Drilling"
     assert row["hours"] == pytest.approx(expected_hours)

@@ -82,7 +82,7 @@ def test_scrape_wieland_prices_from_structured_payload(monkeypatch: pytest.Monke
 
         # USD/lb conversion sanity check
         assert data["england_usd_per_lb"]["Copper Rod"] == pytest.approx(
-            wieland_scraper._usdkg_to_usdlb(data["england_usd_per_kg"]["Copper Rod"]), rel=1e-6
+            wieland_scraper.usdkg_to_usdlb(data["england_usd_per_kg"]["Copper Rod"]), rel=1e-6
         )
     finally:
         wieland_scraper._MEM_CACHE.clear()

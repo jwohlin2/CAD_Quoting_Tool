@@ -1,6 +1,9 @@
 # Core runtime dependencies for appV5.py
+cad-quoter>=0.1.0
 beautifulsoup4>=4.12
 lxml>=4.9
+types-beautifulsoup4>=4.12
+types-lxml>=2024.2.16
 requests>=2.31
 requests-pkcs12>=1.22
 truststore>=0.9.2
@@ -11,3 +14,9 @@ OCP>=7.7
 trimesh>=3.22
 ezdxf>=1.0
 llama-cpp-python>=0.2.0
+
+# Type information shims for optional dependencies
+pandas-stubs==2.2.2.240514
+types-ezdxf==1.0.0
+types-pythonocc-core==7.7.0.1
+types-PyMuPDF==1.24.3.20240525

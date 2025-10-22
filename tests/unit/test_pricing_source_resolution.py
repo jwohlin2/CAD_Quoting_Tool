@@ -1,6 +1,6 @@
 import pytest
 
-from appV5 import _resolve_pricing_source_value
+from cad_quoter.app.planner_adapter import resolve_pricing_source_value
 
 
 @pytest.mark.parametrize(
@@ -8,7 +8,7 @@ from appV5 import _resolve_pricing_source_value
     ["Estimator", "Manual", "  Estimator  "]
 )
 def test_explicit_pricing_source_is_preserved(explicit_value):
-    result = _resolve_pricing_source_value(
+    result = resolve_pricing_source_value(
         explicit_value,
         used_planner=True,
         breakdown={"process_minutes": 12},
@@ -17,12 +17,12 @@ def test_explicit_pricing_source_is_preserved(explicit_value):
 
 
 def test_explicit_planner_value_still_normalizes():
-    result = _resolve_pricing_source_value("Planner", used_planner=False)
+    result = resolve_pricing_source_value("Planner", used_planner=False)
     assert result == "planner"
 
 
 def test_planner_detected_when_no_explicit_value():
-    result = _resolve_pricing_source_value(
+    result = resolve_pricing_source_value(
         None,
         used_planner=False,
         breakdown={"process_minutes": 5},

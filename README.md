@@ -14,7 +14,8 @@ before export.
 * Optional: locally downloaded Qwen2.5-VL GGUF weights for LLM-assisted quoting
 
 > **Tip:** The runtime checks for a few third-party Python packages at startup
-> (`requests`, `beautifulsoup4` and `lxml`).  Install them with the provided
+> (`requests`, `beautifulsoup4`, `lxml`, and the shared `cad-quoter` package).
+> Configure `pip` to see your private package index and install the contents of
 > `requirements.txt` before launching the UI.
 
 ## Setup
@@ -24,7 +25,8 @@ before export.
    python -m venv .venv
    source .venv/bin/activate  # Windows: .venv\Scripts\activate
    ```
-2. Install the runtime dependencies:
+2. Install the runtime dependencies (make sure your private index hosting
+   `cad-quoter` is available via `PIP_EXTRA_INDEX_URL` or `--extra-index-url`):
    ```bash
    pip install -r requirements.txt
    ```
@@ -37,10 +39,11 @@ before export.
 ### Packaged resources
 
 The default variables sheet, McMaster-Carr catalog export and UI configuration
-template now live under `cad_quoter/resources/`.  At runtime the application
-uses the packaged copies automatically, but you can still override them by
-pointing the relevant environment variables (for example
-`CATALOG_CSV_PATH`) to your own files.
+template now ship with the external `cad_quoter` package. At runtime the
+application uses the packaged copies automatically via
+`cad_quoter.resources`, but you can still override them by pointing the
+relevant environment variables (for example `CATALOG_CSV_PATH`) to your own
+files.
 
 ## Running the application
 
@@ -144,9 +147,9 @@ The repository includes `mcmaster_api.py`, a simple CLI that authenticates to
 McMaster-Carr’s official API using mutual TLS (client PFX certificate) and
 prints price tiers for a given part number.
 
-The quoting helpers under `mcmaster_stock.py` consume the same API to resolve
-sheet SKUs and price-per-unit estimates programmatically, so no legacy web
-scrapers are required.
+The quoting helpers under `cad_quoter.vendors.mcmaster_stock` consume the same
+API to resolve sheet SKUs and price-per-unit estimates programmatically, so no
+legacy web scrapers are required.
 
 Setup:
 

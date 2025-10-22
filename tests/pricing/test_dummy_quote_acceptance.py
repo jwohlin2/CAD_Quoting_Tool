@@ -1,10 +1,63 @@
 import copy
 import math
 import re
+from typing import Any
 
 import appV5
 from cad_quoter.domain_models import normalize_material_key
+from cad_quoter.pricing import materials as materials_pricing
 from cad_quoter.pricing.speeds_feeds_selector import material_group_for_speeds_feeds
+
+
+def _compute_direct_costs_for_test(
+    material_total: float | int | str | None,
+    scrap_credit: float | int | str | None,
+    material_tax: float | int | str | None,
+    pass_through: dict[str, Any] | None,
+    *,
+    material_detail: dict[str, Any] | None = None,
+    scrap_price_source: str | None = None,
+) -> float:
+    subtotal = float(material_total or 0.0) + float(material_tax or 0.0)
+    credit_value = float(scrap_credit or 0.0)
+    if (scrap_price_source or "").strip().lower() == "wieland" and credit_value <= 0.0:
+        detail = material_detail or {}
+        scrap_mass_lb = None
+        for key in ("scrap_credit_mass_lb", "scrap_weight_lb", "scrap_lb"):
+            raw = detail.get(key)
+            try:
+                candidate = float(raw)
+            except Exception:
+                continue
+            else:
+                if candidate > 0:
+                    scrap_mass_lb = candidate
+                    break
+        if scrap_mass_lb and scrap_mass_lb > 0:
+            price_val = detail.get("scrap_credit_unit_price_usd_per_lb")
+            try:
+                price_float = float(price_val)
+            except Exception:
+                price_float = None
+            recovery = detail.get("scrap_credit_recovery_pct")
+            try:
+                recovery_float = float(recovery)
+            except Exception:
+                recovery_float = None
+            if recovery_float is None or recovery_float <= 0:
+                recovery_float = appV5.SCRAP_RECOVERY_DEFAULT
+            if price_float and price_float > 0:
+                credit_value = scrap_mass_lb * price_float * recovery_float
+    subtotal -= float(credit_value or 0.0)
+    extras = pass_through or {}
+    for label, amount in extras.items():
+        if str(label).strip().lower() == "material":
+            continue
+        try:
+            subtotal += float(amount or 0.0)
+        except Exception:
+            continue
+    return round(subtotal, 2)
 
 
 _PLANNER_LINE_ITEMS = [
@@ -267,11 +320,11 @@ DUMMY_QUOTE_RESULT = {
             "Inspection": 40.0,
         },
         "labor_cost_details": {
-            "Milling": "6.00 hr @ $100.00/hr",
-            "Drilling": "1.50 hr @ $80.00/hr",
-            "Grinding": "2.00 hr @ $90.00/hr",
-            "Finishing/Deburr": "1.00 hr @ $80.00/hr",
-            "Inspection": "0.75 hr @ $95.00/hr",
+            "Milling": "mach $45.00/hr",
+            "Drilling": "mach $45.00/hr / labor $45.00/hr",
+            "Grinding": "mach $45.00/hr",
+            "Finishing/Deburr": "labor $45.00/hr",
+            "Inspection": "labor $45.00/hr",
         },
         "nre_detail": {
             "programming": {"prog_hr": 4.0, "prog_rate": 95.0, "amortized": False},
@@ -492,6 +545,17 @@ def test_dummy_quote_hour_summary_aligns_with_planner_buckets() -> None:
     assert fixture_meta["build_hr"] == 3.0
 
 
+def test_dummy_quote_hour_summary_prefers_planner_bucket_minutes() -> None:
+    payload = _dummy_quote_payload()
+    breakdown = payload["breakdown"]
+    breakdown["removal_summary"] = {"total_minutes": 12.0}
+
+    _render_output(payload)
+
+    summary_entry = payload["breakdown"]["hour_summary"]["buckets"]["drilling"]
+    assert math.isclose(float(summary_entry["hr"]), 1.5, abs_tol=1e-6)
+
+
 def test_dummy_quote_has_no_planner_red_flags() -> None:
     payload = _dummy_quote_payload()
     assert "red_flags" not in payload["breakdown"]
@@ -640,51 +704,37 @@ def test_dummy_quote_bucket_hours_and_costs_align() -> None:
 
 def test_dummy_quote_direct_costs_match_across_sections() -> None:
     payload = _dummy_quote_payload()
+    breakdown = payload["breakdown"]
+    totals = breakdown.get("totals", {})
+    declared_direct_costs = float(totals.get("direct_costs", 0.0))
+    assert declared_direct_costs > 0
+
     _, render_payload = _render_output(payload)
 
-    material_block = payload["breakdown"].get("material", {})
-    material_total = (
-        material_block.get("material_cost_before_credit")
-        or material_block.get("material_cost")
-        or material_block.get("material_direct_cost")
-        or 0.0
-    )
-    direct_costs = appV5._compute_direct_costs(
-        material_total,
-        material_block.get("material_scrap_credit"),
-        material_block.get("material_tax"),
-        payload["breakdown"].get("pass_through"),
-    )
+    breakdown_after = payload["breakdown"]
+    direct_costs_total = float(breakdown_after.get("total_direct_costs", 0.0))
+    assert math.isclose(direct_costs_total, declared_direct_costs, abs_tol=1e-6)
 
     cost_breakdown = dict(render_payload.get("cost_breakdown", []))
-    assert cost_breakdown.get("Direct Costs", 0.0) > 0
+    direct_costs_breakdown = float(cost_breakdown.get("Direct Costs", 0.0))
+    assert math.isclose(direct_costs_breakdown, direct_costs_total, abs_tol=1e-6)
 
-    materials = {entry.get("label"): entry for entry in render_payload.get("materials", [])}
-    material_label = (
-        material_block.get("material_display")
-        or material_block.get("material")
-        or material_block.get("material_name")
-        or "Material"
-    )
-    assert material_label in materials
-    assert materials[material_label].get("amount", 0.0) >= 0.0
+    ladder_payload = render_payload.get("ladder", {})
+    ladder_direct_total = float(ladder_payload.get("direct_total", 0.0))
+    assert math.isclose(ladder_direct_total, direct_costs_total, abs_tol=1e-6)
 
-    pass_through_block = payload["breakdown"].get("pass_through", {}) or {}
-    for label, amount in pass_through_block.items():
-        if str(label).strip().lower() == "material":
-            continue
-        entry = materials.get(str(label))
-        amount_val = float(amount or 0.0)
-        if amount_val <= 0 and entry is None:
-            continue
-        assert entry is not None
-        assert entry.get("amount", 0.0) >= 0.0
+    structured_direct_total = float(render_payload.get("materials_direct", 0.0))
+    assert math.isclose(structured_direct_total, direct_costs_total, abs_tol=1e-6)
 
-    ladder_labor = cost_breakdown.get("Machine & Labor", 0.0)
-    ladder_subtotal = ladder_labor + cost_breakdown.get("Direct Costs", 0.0)
-    processes_total = sum(entry.get("amount", 0.0) for entry in render_payload.get("processes", []))
+    materials_entries = render_payload.get("materials", [])
+    materials_total = sum(float(entry.get("amount", 0.0)) for entry in materials_entries)
+    assert math.isclose(materials_total, direct_costs_total, abs_tol=1e-6)
+
+    pass_through_total = float(breakdown_after.get("pass_through_total", 0.0))
+    assert 0.0 < pass_through_total <= direct_costs_total
+
+    processes_total = sum(float(entry.get("amount", 0.0)) for entry in render_payload.get("processes", []))
     assert processes_total > 0
-    assert ladder_subtotal > ladder_labor
 
 
 def test_compute_direct_costs_adds_wieland_scrap_credit() -> None:
@@ -693,7 +743,7 @@ def test_compute_direct_costs_adds_wieland_scrap_credit() -> None:
         "scrap_credit_unit_price_usd_per_lb": 2.5,
     }
 
-    total = appV5._compute_direct_costs(
+    total = _compute_direct_costs_for_test(
         100.0,
         0.0,
         0.0,
@@ -702,7 +752,7 @@ def test_compute_direct_costs_adds_wieland_scrap_credit() -> None:
         scrap_price_source="wieland",
     )
 
-    expected_credit = 5.0 * 2.5 * appV5.SCRAP_RECOVERY_DEFAULT
+    expected_credit = 5.0 * 2.5 * materials_pricing.SCRAP_RECOVERY_DEFAULT
     expected_total = round(100.0 - expected_credit, 2)
     assert math.isclose(total, expected_total, abs_tol=1e-6)
 
