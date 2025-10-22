@@ -432,6 +432,20 @@ def _build_planner_bucket_render_state(
         return flat
 
     state.rates = _flatten_rate_map(rates)
+    flat_rates, normalized_rates = _flatten_rates(rates)
+
+    def _rate_from(search_key: str, fallbacks: tuple[str, ...]) -> float:
+        if not search_key:
+            return 0.0
+        return float(
+            _shared_lookup_rate(
+                search_key,
+                flat_rates,
+                normalized_rates,
+                fallbacks=fallbacks,
+            )
+            or 0.0
+        )
 
     # The canonical bucket view is the single source of truth for the Process & Labor table.
     # Start with an empty structure and allow the canonical buckets to populate it below,
@@ -544,7 +558,16 @@ def _build_planner_bucket_render_state(
         labor_raw = _safe_float(info.get("labor$"), default=0.0)
         machine_raw = _safe_float(info.get("machine$"), default=0.0)
 
+        orig_labor = labor_raw
+        orig_machine = machine_raw
+
         hours_raw = minutes_val / 60.0 if minutes_val else 0.0
+        bucket_mode = _bucket_cost_mode(canon_key)
+        search_key = str(canon_key or "")
+        machine_rate_lookup = _rate_from(search_key, ("MachineRate", "machine_rate", "machine"))
+        labor_rate_lookup = _rate_from(search_key, ("LaborRate", "labor_rate", "labor"))
+        cfg_machine_rate = float(getattr(cfg, "machine_rate_per_hr", 0.0) or 0.0) if cfg else 0.0
+        cfg_labor_rate = float(getattr(cfg, "labor_rate_per_hr", 0.0) or 0.0) if cfg else 0.0
 
         split_machine_hours = 0.0
         split_labor_hours = 0.0
@@ -559,6 +582,77 @@ def _build_planner_bucket_render_state(
                 machine_raw = float(split_machine_hours) * float(cfg.machine_rate_per_hr)
                 labor_raw = float(split_labor_hours) * float(cfg.labor_rate_per_hr)
                 used_split = True
+        else:
+            total_existing = orig_labor + orig_machine
+            if hours_raw <= 0.0:
+                labor_raw = 0.0
+                machine_raw = 0.0
+            else:
+                default_machine_rate = machine_rate_lookup
+                if default_machine_rate <= 0.0 and orig_machine > 0.0:
+                    default_machine_rate = orig_machine / hours_raw
+                if default_machine_rate <= 0.0 and total_existing > 0.0:
+                    default_machine_rate = total_existing / hours_raw
+                if default_machine_rate <= 0.0 and cfg_machine_rate > 0.0:
+                    default_machine_rate = cfg_machine_rate
+                if default_machine_rate <= 0.0:
+                    default_machine_rate = 90.0
+
+                default_labor_rate = labor_rate_lookup
+                labor_existing_hours = hours_raw
+                if bucket_mode == "split":
+                    if total_existing > 0.0:
+                        labor_existing_hours = hours_raw * (orig_labor / total_existing)
+                    else:
+                        labor_existing_hours = 0.0
+                if default_labor_rate <= 0.0 and orig_labor > 0.0 and labor_existing_hours > 0.0:
+                    default_labor_rate = orig_labor / labor_existing_hours
+                if default_labor_rate <= 0.0 and cfg_labor_rate > 0.0:
+                    default_labor_rate = cfg_labor_rate
+                if default_labor_rate <= 0.0:
+                    default_labor_rate = 45.0
+
+                if bucket_mode == "labor":
+                    labor_raw = hours_raw * max(default_labor_rate, 0.0)
+                    machine_raw = 0.0
+                elif bucket_mode == "machine":
+                    machine_raw = hours_raw * max(default_machine_rate, 0.0)
+                    labor_raw = 0.0
+                else:
+                    if total_existing > 0.0:
+                        machine_fraction = orig_machine / total_existing
+                        labor_fraction = orig_labor / total_existing
+                    else:
+                        machine_fraction = 1.0
+                        labor_fraction = 0.0
+                    attended_fraction = 0.0
+                    if canon_key == "milling":
+                        attended_fraction = max(
+                            0.0,
+                            float(getattr(cfg, "milling_attended_fraction", 0.0) or 0.0)
+                            if cfg
+                            else 0.0,
+                        )
+                        labor_hours = hours_raw * attended_fraction
+                        machine_hours = hours_raw
+                    else:
+                        labor_hours = hours_raw * labor_fraction
+                        machine_hours = hours_raw * machine_fraction
+
+                    machine_rate = machine_rate_lookup if machine_rate_lookup > 0.0 else default_machine_rate
+                    if machine_rate <= 0.0 and machine_hours > 0.0 and orig_machine > 0.0:
+                        machine_rate = orig_machine / machine_hours
+                    if machine_rate <= 0.0:
+                        machine_rate = default_machine_rate
+
+                    labor_rate = labor_rate_lookup if labor_rate_lookup > 0.0 else default_labor_rate
+                    if labor_rate <= 0.0 and labor_hours > 0.0 and orig_labor > 0.0:
+                        labor_rate = orig_labor / labor_hours
+                    if labor_rate <= 0.0:
+                        labor_rate = default_labor_rate
+
+                    machine_raw = machine_hours * max(machine_rate, 0.0)
+                    labor_raw = labor_hours * max(labor_rate, 0.0)
 
         total_raw = labor_raw + machine_raw
 
@@ -587,12 +681,13 @@ def _build_planner_bucket_render_state(
         }
 
         label = _display_bucket_label(canon_key, label_overrides)
+        minutes_val_rounded = round(minutes_val, 2)
         hours_val = round(hours_raw, 2)
         labor_val = round(labor_raw, 2)
         machine_val = round(machine_raw, 2)
         total_val = round(total_raw, 2)
 
-        state.table_rows.append((label, hours_val, labor_val, machine_val, total_val))
+        state.table_rows.append((label, minutes_val_rounded, labor_val, machine_val, total_val))
         state.label_to_canon[label] = canon_key
         state.canon_to_display_label.setdefault(canon_key, label)
         state.labor_costs_display[label] = total_val

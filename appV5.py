@@ -757,18 +757,24 @@ def estimate_milling_minutes_from_geometry(
                     return float(val)
         return default
 
-    machine_rate = _rate_from_mapping(
-        ("machine_per_hour", "machine_rate", "milling_rate", "milling"),
-        45.0,
+    mach_rate = float(
+        _rate_from_mapping(("machine_per_hour", "machine_rate", "milling_rate", "milling"), 90.0)
     )
-    labor_rate = _rate_from_mapping(
-        ("labor_per_hour", "labor_rate", "milling_labor_rate", "labor"),
-        0.0,
+    labor_rate = float(
+        _rate_from_mapping(("labor_per_hour", "labor_rate", "milling_labor_rate", "labor"), 45.0)
     )
 
-    machine_cost = (total_min / 60.0) * machine_rate
-    labor_cost = (total_min / 60.0) * labor_rate * 0.0
+    milling_minutes = float(total_min)
+    milling_attended_minutes = max(toolchanges_min, 0.0)
+
+    machine_cost = (milling_minutes / 60.0) * mach_rate
+    labor_cost = (milling_attended_minutes / 60.0) * labor_rate
     total_cost = machine_cost + labor_cost
+
+    print(
+        f"[CHECK/mill-rate] min={milling_minutes:.2f} hr={milling_minutes / 60.0:.2f} "
+        f"mach_rate={mach_rate:.2f}/hr => machine$={machine_cost:.2f}"
+    )
 
     logging.info(
         "[INFO] [milling] face_top=%.2fmin face_bot=%.2fmin rough_perim=%.2fmin "
@@ -1138,6 +1144,7 @@ from cad_quoter.ui import llm_panel
 from cad_quoter.ui import session_io
 from cad_quoter.ui.editor_controls import coerce_checkbox_state, derive_editor_control_spec
 from cad_quoter.ui.planner_render import (
+    PROGRAMMING_AMORTIZED_LABEL,
     PROGRAMMING_PER_PART_LABEL,
     PlannerBucketRenderState,
     _bucket_cost,
@@ -1544,6 +1551,76 @@ def _render_ops_card(
         )
     append_line("")
     return round(total_min, 2)
+
+
+def _side_from(txt: str) -> str:
+    text = str(txt or "").lower()
+    if "(front" in text:
+        return "front"
+    if "(back" in text:
+        return "back"
+    return "unspecified"
+
+
+def summarize_actions(removal_lines: list[str], planner_ops: list[dict]) -> None:
+    """Log aggregated removal + planner operation counts for diagnostics."""
+
+    import re
+    from collections import defaultdict
+
+    side_of = lambda s: (
+        "front"
+        if "(front" in s.lower()
+        else "back" if "(back" in s.lower() else "unspecified"
+    )
+
+    total = defaultdict(int)
+    by_side = defaultdict(lambda: defaultdict(int))
+
+    drill_re = re.compile(r'^Dia\s+[\d\.]+" × (\d+).*(\(.*?\))?', re.IGNORECASE)
+    tap_re = re.compile(r'^\s*#?\d.*\bTAP\b.*×\s+(\d+).*(\(.*?\))?', re.IGNORECASE)
+
+    for ln in removal_lines or []:
+        if not isinstance(ln, str):
+            continue
+        m = drill_re.search(ln)
+        if m:
+            qty = int(m.group(1))
+            total["drill"] += qty
+            by_side["drill"][side_of(ln)] += qty
+            continue
+        m = tap_re.search(ln)
+        if m:
+            qty = int(m.group(1))
+            total["tap"] += qty
+            by_side["tap"][side_of(ln)] += qty
+
+    for op in planner_ops or []:
+        if not isinstance(op, dict):
+            continue
+        name = (op.get("name", "") or "").lower()
+        qty_raw = op.get("qty")
+        try:
+            qty = int(float(qty_raw))
+        except Exception:
+            qty = 0
+        if qty <= 0:
+            continue
+        side = (op.get("side", "unspecified") or "unspecified").lower()
+        if "counterbore" in name or "c-bore" in name or "cbore" in name:
+            total["counterbore"] += qty
+            by_side["counterbore"][side] += qty
+        elif "spot" in name and "drill" in name:
+            total["spot"] += qty
+            by_side["spot"][side] += qty
+        elif "jig" in name and "grind" in name:
+            total["jig_grind"] += qty
+            by_side["jig_grind"][side] += qty
+
+    actions_total = sum(total.values())
+    print(f"[ACTIONS] totals={dict(total)} total={actions_total}")
+    for k, sides in by_side.items():
+        print(f"[ACTIONS/{k}] by_side={dict(sides)}")
 
 
 def _extract_milling_bucket(
@@ -4378,7 +4455,7 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
 
     def _render_process_and_hours_from_buckets(
         lines: list[str], bucket_view_obj: Mapping[str, Any] | None
-    ) -> None:
+    ) -> tuple[float, float, list[tuple[str, float, float, float, float]]]:
         try:
             buckets_candidate = (
                 bucket_view_obj.get("buckets") if bucket_view_obj else None
@@ -4415,45 +4492,338 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
             "inspection",
         ]
 
+        canonical_entries: dict[str, dict[str, float]] = {}
+        if isinstance(buckets, _MappingABC):
+            for raw_key, raw_entry in buckets.items():
+                if not isinstance(raw_entry, _MappingABC):
+                    continue
+                key_str = str(raw_key)
+                canon_key = (
+                    _canonical_bucket_key(key_str)
+                    or _normalize_bucket_key(key_str)
+                    or key_str
+                )
+                minutes_val = max(0.0, _as_float(raw_entry.get("minutes"), 0.0))
+                machine_val = max(0.0, _as_float(raw_entry.get("machine$"), 0.0))
+                labor_val = max(0.0, _as_float(raw_entry.get("labor$"), 0.0))
+                total_val = max(0.0, _as_float(raw_entry.get("total$"), 0.0))
+                if total_val <= 0.0:
+                    total_val = round(machine_val + labor_val, 2)
+                canonical_entries[canon_key] = {
+                    "minutes": minutes_val,
+                    "machine$": machine_val,
+                    "labor$": labor_val,
+                    "total$": total_val,
+                }
+
+        milling_entry = canonical_entries.get("milling")
+        if milling_entry:
+            milling_meta = _lookup_process_meta(process_meta, "milling") or {}
+
+            def _maybe_float(value: Any) -> float | None:
+                try:
+                    number = float(value)
+                except Exception:
+                    return None
+                if not math.isfinite(number):
+                    return None
+                return number
+
+            milling_minutes = _safe_float(milling_entry.get("minutes"), default=0.0)
+            meta_minutes = _safe_float(milling_meta.get("minutes"), default=0.0)
+            meta_hours = _safe_float(milling_meta.get("hr"), default=0.0)
+            if meta_minutes > 0.0:
+                milling_minutes = meta_minutes
+            elif meta_hours > 0.0:
+                milling_minutes = meta_hours * 60.0
+
+            if milling_minutes > 0.0:
+                milling_hours = milling_minutes / 60.0
+
+                def _rate_from_candidates(
+                    mapping: Mapping[str, Any] | None,
+                    keys: Sequence[str],
+                    default: float,
+                ) -> float:
+                    if not isinstance(mapping, _MappingABC):
+                        mapping = {}
+                    for key in keys:
+                        if not key:
+                            continue
+                        try:
+                            raw = mapping.get(key)  # type: ignore[index]
+                        except Exception:
+                            raw = None
+                        rate_val = _maybe_float(raw)
+                        if rate_val is not None and rate_val > 0.0:
+                            return rate_val
+                    return default
+
+                machine_rate = _rate_from_candidates(
+                    rates,
+                    (
+                        "machine_per_hour",
+                        "machine_rate",
+                        "milling_rate",
+                        "MachineRate",
+                        "MillingRate",
+                        "ShopMachineRate",
+                        "ShopRate",
+                    ),
+                    90.0,
+                )
+                labor_rate = _rate_from_candidates(
+                    rates,
+                    (
+                        "labor_per_hour",
+                        "labor_rate",
+                        "milling_labor_rate",
+                        "LaborRate",
+                        "ShopLaborRate",
+                    ),
+                    45.0,
+                )
+
+                if cfg is not None:
+                    cfg_machine = _maybe_float(getattr(cfg, "machine_rate_per_hr", None))
+                    if cfg_machine is not None and cfg_machine > 0.0:
+                        machine_rate = cfg_machine
+                    cfg_labor = _maybe_float(getattr(cfg, "labor_rate_per_hr", None))
+                    if cfg_labor is not None and cfg_labor > 0.0:
+                        labor_rate = cfg_labor
+
+                config_sources: list[Mapping[str, Any]] = []
+
+                def _add_config_source(candidate: Any) -> None:
+                    if isinstance(candidate, dict):
+                        config_sources.append(candidate)
+                    elif isinstance(candidate, _MappingABC):
+                        config_sources.append(dict(candidate))
+
+                for container in (breakdown, result):
+                    if not isinstance(container, _MappingABC):
+                        continue
+                    _add_config_source(container.get("config"))
+                    _add_config_source(container.get("params"))
+
+                if isinstance(result, _MappingABC):
+                    quote_state_payload = result.get("quote_state")
+                    if isinstance(quote_state_payload, _MappingABC):
+                        _add_config_source(quote_state_payload.get("config"))
+                        _add_config_source(quote_state_payload.get("params"))
+
+                attended_frac: float | None = None
+                if cfg is not None:
+                    cfg_frac = _maybe_float(getattr(cfg, "milling_attended_fraction", None))
+                    if cfg_frac is not None:
+                        attended_frac = cfg_frac
+
+                for source in config_sources:
+                    try:
+                        candidate = source.get("milling_attended_fraction")
+                    except Exception:
+                        candidate = None
+                    frac_val = _maybe_float(candidate)
+                    if frac_val is not None:
+                        attended_frac = frac_val
+                        break
+
+                if attended_frac is None:
+                    attended_frac = 0.0
+                attended_frac = max(0.0, min(attended_frac, 1.0))
+                milling_labor_hours = milling_hours * attended_frac
+
+                machine_cost = milling_hours * machine_rate
+                labor_cost = milling_labor_hours * labor_rate
+                total_cost = machine_cost + labor_cost
+
+                milling_entry["minutes"] = round(milling_minutes, 2)
+                milling_entry["machine$"] = round(machine_cost, 2)
+                milling_entry["labor$"] = round(labor_cost, 2)
+                milling_entry["total$"] = round(total_cost, 2)
+                canonical_entries["milling"] = milling_entry
+
+                if isinstance(buckets, dict):
+                    milling_bucket = buckets.get("milling")
+                    if isinstance(milling_bucket, dict):
+                        milling_bucket.update(
+                            {
+                                "minutes": milling_entry["minutes"],
+                                "machine$": milling_entry["machine$"],
+                                "labor$": milling_entry["labor$"],
+                                "total$": milling_entry["total$"],
+                            }
+                        )
+
+                aggregated_metrics_container = locals().get("aggregated_bucket_minutes")
+                if isinstance(aggregated_metrics_container, dict):
+                    milling_metrics = aggregated_metrics_container.get("milling")
+                    if isinstance(milling_metrics, dict):
+                        milling_metrics.update(
+                            {
+                                "minutes": milling_entry["minutes"],
+                                "machine$": milling_entry["machine$"],
+                                "labor$": milling_entry["labor$"],
+                            }
+                        )
+
+                print(
+                    f"[CHECK/milling] min={milling_minutes:.2f} hr={milling_hours:.2f} "
+                    f"mach_rate={machine_rate:.2f}/hr labor_rate={labor_rate:.2f}/hr "
+                    f"machine$={milling_entry['machine$']:.2f} "
+                    f"labor$={milling_entry['labor$']:.2f} total$={milling_entry['total$']:.2f}"
+                )
+
+        def _append_process_row(
+            rows: list[tuple[str, float, float, float, float]],
+            label: str,
+            minutes_val: float,
+            machine_val: float,
+            labor_val: float,
+            total_val: float,
+        ) -> None:
+            minutes_clean = max(0.0, _as_float(minutes_val, 0.0))
+            machine_clean = max(0.0, _as_float(machine_val, 0.0))
+            labor_clean = max(0.0, _as_float(labor_val, 0.0))
+            total_clean = max(0.0, _as_float(total_val, 0.0))
+            if total_clean <= 0.0:
+                total_clean = round(machine_clean + labor_clean, 2)
+            if (
+                total_clean <= 0.0
+                and machine_clean <= 0.0
+                and labor_clean <= 0.0
+                and minutes_clean <= 0.0
+            ):
+                return
+            rows.append(
+                (
+                    str(label),
+                    minutes_clean,
+                    machine_clean,
+                    labor_clean,
+                    total_clean,
+                )
+            )
+
+        def _label_for_bucket(canon_key: str) -> str:
+            display_label = _display_bucket_label(canon_key, label_overrides)
+            if display_label:
+                return display_label
+            return canon_key or ""
+
         lines.append("Process & Labor Costs")
         lines.append("-" * 74)
-        table_rows: list[tuple[str, float, float, float, float]] = []
-        seen: set[str] = set()
-        for k in list(order) + [k for k in buckets if k not in order]:
-            e = buckets.get(k)
-            if not isinstance(e, _MappingABC) or k in seen:
-                continue
-            seen.add(k)
-            minutes_val = max(0.0, _as_float(e.get("minutes"), 0.0))
-            machine_val = max(0.0, _as_float(e.get("machine$"), 0.0))
-            labor_val = max(0.0, _as_float(e.get("labor$"), 0.0))
-            total_val = max(0.0, _as_float(e.get("total$"), 0.0))
-            if total_val <= 0.0:
-                total_val = round(machine_val + labor_val, 2)
-            canon_key = _canonical_bucket_key(str(k)) or _normalize_bucket_key(str(k)) or str(k)
-            display_label = _display_bucket_label(canon_key, label_overrides)
-            if not display_label:
-                display_label = str(k)
+        rows: list[tuple[str, float, float, float, float]] = []
 
-            if total_val <= 0.0 and minutes_val <= 0.0:
-                continue
+        programming_entry: dict[str, float] | None = None
+        programming_entry_label = PROGRAMMING_PER_PART_LABEL
+        for candidate in ("programming_amortized", "programming"):
+            entry = canonical_entries.pop(candidate, None)
+            if entry is not None:
+                programming_entry = entry
+                if candidate == "programming_amortized" or qty <= 1:
+                    programming_entry_label = PROGRAMMING_AMORTIZED_LABEL
+                else:
+                    programming_entry_label = PROGRAMMING_PER_PART_LABEL
+                break
 
-            table_rows.append(
-                (
-                    display_label,
+        prog_minutes = 0.0
+        prog_total = 0.0
+        if programming_entry is not None:
+            prog_minutes = programming_entry.get("minutes", 0.0)
+            prog_total = programming_entry.get("total$", 0.0)
+            if prog_total <= 0.0:
+                prog_total = programming_entry.get("labor$", 0.0)
+        if prog_total <= 0.0:
+            try:
+                prog_total = max(
+                    0.0,
+                    _as_float(labor_cost_totals.get(PROGRAMMING_PER_PART_LABEL), 0.0),
+                )
+            except Exception:
+                prog_total = 0.0
+        if prog_minutes <= 0.0:
+            try:
+                prog_minutes = max(0.0, _as_float(programming_minutes, 0.0))
+            except NameError:
+                prog_minutes = 0.0
+        if prog_total > 0.0 or prog_minutes > 0.0:
+            _append_process_row(
+                rows,
+                programming_entry_label,
+                prog_minutes,
+                0.0,
+                prog_total,
+                prog_total,
+            )
+
+        def _consume_entry(canon_key: str) -> None:
+            entry = canonical_entries.pop(canon_key, None)
+            if not entry:
+                return
+            minutes_val = entry.get("minutes", 0.0)
+            machine_val = entry.get("machine$", 0.0)
+            labor_val = entry.get("labor$", 0.0)
+            total_val = entry.get("total$", 0.0)
+            _append_process_row(
+                rows,
+                _label_for_bucket(canon_key),
+                minutes_val,
+                machine_val,
+                labor_val,
+                total_val,
+            )
+
+        for bucket_key in order:
+            _consume_entry(bucket_key)
+
+        if canonical_entries:
+            for canon_key, entry in sorted(
+                canonical_entries.items(),
+                key=lambda item: _label_for_bucket(item[0]).lower(),
+            ):
+                minutes_val = entry.get("minutes", 0.0)
+                machine_val = entry.get("machine$", 0.0)
+                labor_val = entry.get("labor$", 0.0)
+                total_val = entry.get("total$", 0.0)
+                _append_process_row(
+                    rows,
+                    _label_for_bucket(canon_key),
                     minutes_val,
                     machine_val,
                     labor_val,
                     total_val,
                 )
+
+        row_canon_keys = {
+            _canonical_bucket_key(row_label) or _normalize_bucket_key(row_label)
+            for row_label, *_ in rows
+        }
+        if "tapping" not in row_canon_keys:
+            tapping_entry: Mapping[str, Any] | None = None
+            for candidate_key in ("tapping", "Tapping"):
+                entry = buckets.get(candidate_key)
+                if isinstance(entry, _MappingABC):
+                    tapping_entry = entry
+                    break
+            if tapping_entry is None:
+                tapping_entry = {}
+            _append_process_row(
+                rows,
+                _label_for_bucket("tapping"),
+                tapping_entry.get("minutes", 0.0),
+                tapping_entry.get("machine$", 0.0),
+                tapping_entry.get("labor$", 0.0),
+                tapping_entry.get("total$", 0.0),
             )
 
-        total_cost = sum(row[4] for row in table_rows)
+        total_cost = sum(row[4] for row in rows)
+        total_minutes = sum(row[1] for row in rows)
 
-        if table_rows:
+        if rows:
             headers = ("Process", "Minutes", "Machine $", "Labor $", "Total $")
             display_rows: list[tuple[str, str, str, str, str]] = []
-            for name, minutes_val, machine_val, labor_val, total_val in table_rows:
+            for name, minutes_val, machine_val, labor_val, total_val in rows:
                 display_rows.append(
                     (
                         str(name),
@@ -4490,12 +4860,14 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
                 lines.append(_format_row(row))
             lines.append(separator_line)
             lines.append(_format_row(total_row))
-            for display_label, *_ in table_rows:
+            for display_label, *_ in rows:
                 add_process_notes(display_label)
             lines.append("")
-        else:
-            lines.append("  (no bucket data)")
-            lines.append("")
+            return total_cost, total_minutes, rows
+
+        lines.append("  (no bucket data)")
+        lines.append("")
+        return 0.0, 0.0, []
 
     def _is_extra_segment(segment: str) -> bool:
         try:
@@ -4589,23 +4961,24 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
                     spec_for_bucket = spec_candidate
 
         meta = _lookup_process_meta(process_meta, key) or {}
-        hr_val = 0.0
+        canon_for_notes = str(
+            _canonical_bucket_key(key)
+            or _normalize_bucket_key(key)
+            or (key or "")
+        ).strip().lower()
+        footer_hours = 0.0
+        has_bucket_minutes = False
         if bucket_minutes_val > 0.0:
-            hr_val = bucket_minutes_val / 60.0
-        else:
-            hr_val = stored_hours
-        if hr_val <= 0:
-            try:
-                hr_val = float(meta.get("hr", 0.0) or 0.0)
-            except Exception:
-                hr_val = 0.0
-        if hr_val <= 0:
-            try:
-                minutes_val = float(meta.get("minutes", 0.0) or 0.0)
-            except Exception:
-                minutes_val = 0.0
-            if minutes_val > 0:
-                hr_val = minutes_val / 60.0
+            footer_hours = bucket_minutes_val / 60.0
+            has_bucket_minutes = footer_hours > 0.0
+        elif isinstance(bucket_entry, _MappingABC):
+            entry_minutes = _safe_float(bucket_entry.get("minutes"), default=0.0)
+            if entry_minutes > 0.0:
+                footer_hours = entry_minutes / 60.0
+                has_bucket_minutes = footer_hours > 0.0
+        if not has_bucket_minutes:
+            return
+
         meta_rate = 0.0
         if meta:
             try:
@@ -4616,14 +4989,16 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
             rate_float = meta_rate
         else:
             rate_float = stored_rate
-            if rate_float <= 0:
-                rate_val = meta.get("rate") if meta else None
+            if rate_float <= 0 and meta:
+                rate_val = meta.get("rate")
                 try:
                     rate_float = float(rate_val or 0.0)
                 except Exception:
                     rate_float = 0.0
-        if rate_float <= 0 and stored_cost > 0 and hr_val > 0:
-            rate_float = stored_cost / hr_val
+        if rate_float <= 0 and stored_cost > 0:
+            hours_for_rate = footer_hours if footer_hours > 0 else stored_hours
+            if hours_for_rate > 0:
+                rate_float = stored_cost / hours_for_rate
         if rate_float <= 0:
             rate_key = _rate_key_for_bucket(str(key))
             if rate_key:
@@ -4644,21 +5019,100 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
                 total_from_bucket = float(getattr(spec_for_bucket, "total", 0.0) or 0.0)
             except Exception:
                 total_from_bucket = 0.0
-        if total_from_bucket > 0.0 and hr_val > 0.0:
-            rate_float = total_from_bucket / hr_val
+        if total_from_bucket > 0.0 and footer_hours > 0.0:
+            rate_float = total_from_bucket / footer_hours
             stored_cost = total_from_bucket
 
-        try:
-            base_extra_val = float(meta.get("base_extra", 0.0) or 0.0)
-        except Exception:
-            base_extra_val = 0.0
+        # Milling/Drilling/Inspection: prefer canonical rates instead of
+        # reverse-computing them from bucket totals, which can drift when the
+        # user overrides costs.
+        canonical_minutes = bucket_minutes_val
+        if canonical_minutes <= 0.0 and isinstance(bucket_entry, _MappingABC):
+            canonical_minutes = _safe_float(bucket_entry.get("minutes"), default=0.0)
+        if canonical_minutes <= 0.0 and footer_hours > 0.0:
+            canonical_minutes = footer_hours * 60.0
 
-        if hr_val > 0:
-            write_line(_hours_with_rate_text(hr_val, rate_float), indent)
-        elif base_extra_val > 0 and rate_float > 0:
-            inferred_hours = base_extra_val / rate_float
-            if inferred_hours > 0:
-                write_line(_hours_with_rate_text(inferred_hours, rate_float), indent)
+        def _cfg_rate_fallback(attr: str) -> float:
+            try:
+                return float(getattr(cfg, attr, 0.0) or 0.0)
+            except Exception:
+                return 0.0
+
+        if canonical_minutes > 0.0 and canon_for_notes in {"milling", "drilling", "inspection"}:
+            hours_val = canonical_minutes / 60.0
+            machine_rate = 0.0
+            labor_rate = 0.0
+            labor_component = 0.0
+            if isinstance(bucket_entry, _MappingABC):
+                labor_component = _safe_float(bucket_entry.get("labor$"), default=0.0)
+
+            if canon_for_notes == "milling":
+                machine_rate = _resolve_rate_with_fallback(
+                    rates.get("MillingRate"), "MachineRate", "machine_rate", "machine"
+                )
+                if machine_rate <= 0.0:
+                    cfg_machine = _cfg_rate_fallback("machine_rate_per_hr")
+                    if cfg_machine > 0.0:
+                        machine_rate = cfg_machine
+                labor_rate = _resolve_rate_with_fallback(
+                    rates.get("MillingLaborRate"), "LaborRate", "labor_rate", "labor"
+                )
+                if labor_rate <= 0.0:
+                    cfg_labor = _cfg_rate_fallback("labor_rate_per_hr")
+                    if cfg_labor > 0.0:
+                        labor_rate = cfg_labor
+                line = f"Milling: {hours_val:.2f} hr"
+                if machine_rate > 0.0:
+                    line += f" @ ${machine_rate:.2f}/hr (machine)"
+                else:
+                    line += " (machine)"
+                if labor_component > 0.0 and labor_rate > 0.0:
+                    line += f" + ${labor_rate:.2f}/hr (labor)"
+                write_line(line, indent)
+                return
+
+            if canon_for_notes == "drilling":
+                machine_rate = _resolve_rate_with_fallback(
+                    rates.get("DrillingRate"), "MachineRate", "machine_rate", "machine"
+                )
+                if machine_rate <= 0.0:
+                    cfg_machine = _cfg_rate_fallback("machine_rate_per_hr")
+                    if cfg_machine > 0.0:
+                        machine_rate = cfg_machine
+                labor_rate = _resolve_rate_with_fallback(
+                    rates.get("DrillingLaborRate"), "LaborRate", "labor_rate", "labor"
+                )
+                if labor_rate <= 0.0:
+                    cfg_labor = _cfg_rate_fallback("labor_rate_per_hr")
+                    if cfg_labor > 0.0:
+                        labor_rate = cfg_labor
+                line = f"Drilling: {hours_val:.2f} hr"
+                if machine_rate > 0.0:
+                    line += f" @ ${machine_rate:.2f}/hr (machine)"
+                else:
+                    line += " (machine)"
+                if labor_component > 0.0 and labor_rate > 0.0:
+                    line += f" + ${labor_rate:.2f}/hr (labor)"
+                write_line(line, indent)
+                return
+
+            if canon_for_notes == "inspection":
+                labor_rate = _resolve_rate_with_fallback(
+                    rates.get("InspectionRate"), "LaborRate", "labor_rate", "labor"
+                )
+                if labor_rate <= 0.0:
+                    cfg_labor = _cfg_rate_fallback("labor_rate_per_hr")
+                    if cfg_labor > 0.0:
+                        labor_rate = cfg_labor
+                line = f"Inspection: {hours_val:.2f} hr"
+                if labor_rate > 0.0:
+                    line += f" @ ${labor_rate:.2f}/hr (labor)"
+                else:
+                    line += " (labor)"
+                write_line(line, indent)
+                return
+
+        write_line(_hours_with_rate_text(footer_hours, rate_float), indent)
 
     def add_pass_basis(key: str, indent: str = "    "):
         basis_map = breakdown.get("pass_basis", {}) or {}
@@ -4811,9 +5265,9 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
         render_drill_debug(sorted_drill_entries)
     row("Final Price per Part:", price)
     final_price_row_index = len(lines) - 1
-    total_labor_label = "Total Labor Cost:"
-    row(total_labor_label, float(totals.get("labor_cost", 0.0)))
-    total_labor_row_index = len(lines) - 1
+    total_process_cost_label = "Total Process Cost:"
+    row(total_process_cost_label, float(totals.get("labor_cost", 0.0)))
+    total_process_cost_row_index = len(lines) - 1
     total_direct_costs_label = "Total Direct Costs:"
     row(total_direct_costs_label, 0.0)
     total_direct_costs_row_index = len(lines) - 1
@@ -4943,6 +5397,7 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
     planner_total_meta = process_meta.get("planner_total", {}) if isinstance(process_meta, dict) else {}
     planner_line_items_meta = planner_total_meta.get("line_items") if isinstance(planner_total_meta, _MappingABC) else None
     bucket_ops_map: dict[str, list[PlannerBucketOp]] = {}
+    planner_ops_summary: list[dict[str, Any]] = []
     if isinstance(planner_line_items_meta, list):
         for entry in planner_line_items_meta:
             if not isinstance(entry, _MappingABC):
@@ -4963,6 +5418,23 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
                     "total": total_val,
                 }
             )
+
+            name_text = str(op_name or "").strip()
+            qty_candidate = entry.get("qty")
+            try:
+                qty_val = int(float(qty_candidate))
+            except Exception:
+                qty_val = 0
+            side_val = (
+                entry.get("side")
+                or entry.get("face")
+                or entry.get("orientation")
+                or entry.get("side_label")
+            )
+            if name_text:
+                planner_ops_summary.append(
+                    {"name": name_text, "qty": qty_val, "side": side_val}
+                )
 
     if bucket_ops_map:
         for ops in bucket_ops_map.values():
@@ -6318,6 +6790,12 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
         drilling_time_per_hole=drilling_time_per_hole_data,
     )
 
+    removal_summary_lines: list[str] = [
+        str(line)
+        for line in removal_card_lines
+        if isinstance(line, str)
+    ]
+
     if removal_card_extra.get("drill_machine_minutes") is not None:
         drill_machine_minutes_estimate = float(removal_card_extra["drill_machine_minutes"])
     if removal_card_extra.get("drill_labor_minutes") is not None:
@@ -7405,9 +7883,6 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
         bucket_entries_for_totals = {}
 
     bucket_entries_for_totals_map = {}
-    bucket_machine_total_sum = 0.0
-    bucket_labor_total_sum = 0.0
-    bucket_totals_for_summary: list[tuple[str, float]] = []
 
     preferred_bucket_order = [
         "programming",
@@ -7439,25 +7914,6 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
         normalized_key = _normalize_bucket_key(bucket_key)
         display_label = _display_bucket_label(canon_key, label_overrides)
 
-        machine_val = _safe_float(entry.get("machine$"), default=0.0)
-        labor_val = _safe_float(entry.get("labor$"), default=0.0)
-        total_val = _safe_float(entry.get("total$"), default=0.0)
-        if total_val <= 0.0:
-            total_val = machine_val + labor_val
-        if machine_val <= 0.0 and labor_val <= 0.0 and total_val > 0.0:
-            bucket_mode = _bucket_cost_mode(canon_key)
-            if bucket_mode == "labor":
-                labor_val = total_val
-            elif bucket_mode == "machine":
-                machine_val = total_val
-            else:
-                labor_val = total_val
-
-        proc_total_rendered += total_val
-        bucket_machine_total_sum += machine_val
-        bucket_labor_total_sum += labor_val
-        bucket_totals_for_summary.append((display_label or str(bucket_key), total_val))
-
         lookup_keys = {
             str(bucket_key),
             canon_key,
@@ -7468,42 +7924,38 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
             if lookup_key:
                 bucket_entries_for_totals_map[str(lookup_key)] = entry
 
-        hours_val = _minutes_to_hours(entry.get("minutes", 0.0))
-        if hours_val > 0:
-            hrs_total_rendered += hours_val
-
-    if bucket_totals_for_summary:
-        top_total = max(total for _, total in bucket_totals_for_summary)
-        summary_bits: list[str] = []
-        summary_bits.append(f"Machine {_m(bucket_machine_total_sum)}")
-        summary_bits.append(f"Labor {_m(bucket_labor_total_sum)}")
-        largest_bucket_parts: list[str] = []
-        if top_total > 0:
-            sorted_totals = sorted(
-                bucket_totals_for_summary,
-                key=lambda item: item[1],
-                reverse=True,
-            )
-            tolerance = max(0.01, top_total * 0.01)
-            for label, amount in sorted_totals:
-                if amount <= 0:
-                    continue
-                if amount + tolerance < top_total and len(largest_bucket_parts) >= 3:
-                    break
-                if top_total - amount > tolerance and largest_bucket_parts:
-                    break
-                label_text = str(label or "Process")
-                largest_bucket_parts.append(f"{label_text} {_m(amount)}")
-            if largest_bucket_parts:
-                summary_bits.append(
-                    "largest bucket(s): " + ", ".join(largest_bucket_parts)
-                )
-        bucket_why_summary_line = "Process buckets — " + "; ".join(summary_bits)
-
-    _render_process_and_hours_from_buckets(
+    process_rows_total, process_rows_minutes, process_rows_rendered = _render_process_and_hours_from_buckets(
         lines,
         bucket_view_for_render,
     )
+    proc_total_rendered = process_rows_total
+    hrs_total_rendered = process_rows_minutes / 60.0 if process_rows_minutes > 0 else 0.0
+    proc_machine = sum(row[2] for row in process_rows_rendered)
+    proc_labor = sum(row[3] for row in process_rows_rendered)
+    machine_sum = proc_machine
+    labor_sum = proc_labor
+    if process_rows_rendered:
+        top_rows = sorted(
+            process_rows_rendered,
+            key=lambda r: r[4],
+            reverse=True,
+        )[:3]
+        top_lines = [
+            f"{name} ${total:,.2f}" for (name, _, _, _, total) in top_rows
+        ]
+        for line in top_lines:
+            if line not in why_lines:
+                why_lines.append(line)
+        summary_bits: list[str] = [
+            f"Machine {_m(machine_sum)}",
+            f"Labor {_m(labor_sum)}",
+        ]
+        top_summary = [
+            f"{name} {_m(total)}" for (name, _, _, _, total) in top_rows if total > 0
+        ]
+        if top_summary:
+            summary_bits.append("largest bucket(s): " + ", ".join(top_summary))
+        bucket_why_summary_line = "Process buckets — " + "; ".join(summary_bits)
     if proc_total_rendered or hrs_total_rendered:
         for offset, text in enumerate(lines[process_section_start:]):
             stripped = str(text or "").strip()
@@ -7835,6 +8287,7 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
 
     pass_total = float(directs)
 
+    total_process_cost_value = round(float(proc_total or 0.0), 2)
     computed_total_labor_cost = proc_total
     expected_labor_total = computed_total_labor_cost
     if declared_labor_total > computed_total_labor_cost + 0.01:
@@ -7918,12 +8371,12 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
             display_machine = 0.0
     if isinstance(totals, dict):
         totals["labor_cost"] = computed_total_labor_cost
-    if 0 <= total_labor_row_index < len(lines):
+    if 0 <= total_process_cost_row_index < len(lines):
         replace_line(
-            total_labor_row_index,
+            total_process_cost_row_index,
             _format_row(
-                total_labor_label,
-                computed_total_labor_cost,
+                total_process_cost_label,
+                total_process_cost_value,
             ),
         )
 
@@ -8057,10 +8510,10 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
 
     final_per_part = round(machine_labor_total + nre_per_part + ladder_directs, 2)
     ladder_subtotal = final_per_part
-    if 0 <= total_labor_row_index < len(lines):
+    if 0 <= total_process_cost_row_index < len(lines):
         replace_line(
-            total_labor_row_index,
-            _format_row(total_labor_label, ladder_labor),
+            total_process_cost_row_index,
+            _format_row(total_process_cost_label, total_process_cost_value),
         )
     if isinstance(pricing, dict):
         pricing["ladder_subtotal"] = ladder_subtotal
@@ -8373,6 +8826,8 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
                 ops_rows = built
 
         # Emit the cards (will no-op if no TAP/CBore/Spot rows)
+        pre_ops_len = len(lines)
+
         _emit_hole_table_ops_cards(
             lines,
             geo=geo_map,
@@ -8382,6 +8837,50 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
             breakdown=breakdown,
             rates=rates,
         )
+
+        new_ops_lines = []
+        try:
+            for entry in lines[pre_ops_len:]:
+                if not isinstance(entry, str):
+                    continue
+                if entry.startswith("[DEBUG]"):
+                    continue
+                new_ops_lines.append(entry)
+        except Exception:
+            new_ops_lines = []
+        removal_summary_lines.extend(new_ops_lines)
+
+        try:
+            extra_bucket_ops = None
+            extra_map_candidate = getattr(bucket_state, "extra", None)
+            if isinstance(extra_map_candidate, _MappingABC):
+                extra_bucket_ops = extra_map_candidate.get("bucket_ops")
+            if isinstance(extra_bucket_ops, _MappingABC):
+                for _, entries in extra_bucket_ops.items():
+                    if not isinstance(entries, Sequence):
+                        continue
+                    for entry in entries:
+                        if not isinstance(entry, _MappingABC):
+                            continue
+                        name_text = str(entry.get("name") or entry.get("op") or "").strip()
+                        qty_candidate = entry.get("qty")
+                        try:
+                            qty_val = int(float(qty_candidate))
+                        except Exception:
+                            qty_val = 0
+                        side_val = entry.get("side")
+                        if name_text:
+                            planner_ops_summary.append(
+                                {"name": name_text, "qty": qty_val, "side": side_val}
+                            )
+            summarize_actions(removal_summary_lines, planner_ops_summary)
+        except Exception as exc:
+            logging.debug(
+                "[actions-summary] skipped due to %s: %s",
+                exc.__class__.__name__,
+                exc,
+                exc_info=False,
+            )
 
         milling_bucket_obj = None
         bucket_view_snapshot = (
@@ -8490,8 +8989,6 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
     quick_what_if_entries: list[dict[str, Any]] = []
     margin_slider_payload: dict[str, Any] | None = None
     margin_slider_display_lines: list[str] = []
-    margin_slider_display_points: list[dict[str, Any]] = []
-    display_quick_toggle_entries: list[dict[str, Any]] = []
 
     def _pct_label(value: float) -> str:
         try:
@@ -8782,6 +9279,11 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
                 "currency": currency,
             }
 
+            margin_slider_display_lines.append(
+                f"Current margin {_pct_label(margin_pct_value)} → {fmt_money(final_price_val, currency)}"
+            )
+
+            sample_points: list[dict[str, Any]] = []
             min_point = slider_points[0]
             max_point = slider_points[-1]
             current_point = next(
@@ -8792,120 +9294,26 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
                 ),
                 None,
             )
+            sample_points.append(min_point)
+            if current_point and current_point not in sample_points:
+                sample_points.append(current_point)
+            if len(slider_points) > 2:
+                mid_point = slider_points[len(slider_points) // 2]
+                if mid_point not in sample_points:
+                    sample_points.append(mid_point)
+            if max_point not in sample_points:
+                sample_points.append(max_point)
 
-            selected: list[dict[str, Any]] = []
-            seen_margin: set[float] = set()
-
-            def _find_point(pct_val: float) -> Mapping[str, Any] | None:
-                for point in slider_points:
-                    if math.isclose(
-                        float(point.get("margin_pct", 0.0)),
-                        pct_val,
-                        rel_tol=0.0,
-                        abs_tol=1e-6,
-                    ):
-                        return point
-                rounded = round(pct_val, 4)
-                for point in slider_points:
-                    if math.isclose(
-                        float(point.get("margin_pct", 0.0)),
-                        rounded,
-                        rel_tol=0.0,
-                        abs_tol=1e-6,
-                    ):
-                        return point
-                return None
-
-            def _select_pct(pct_val: float) -> None:
-                if len(selected) >= 4:
-                    return
-                point = _find_point(pct_val)
-                if not isinstance(point, _MappingABC):
-                    return
-                margin_val = float(point.get("margin_pct", 0.0))
-                key = round(margin_val, 4)
-                if key in seen_margin:
-                    return
-                seen_margin.add(key)
-                selected.append(dict(point))
-
-            preferred_steps = [0]
-            if display_step > 0.0:
-                for step_multiplier in ( -1, 1, 2, -2, 3, -3):
-                    preferred_steps.append(step_multiplier)
-            preferred_pcts: list[float] = []
-            for multiplier in preferred_steps:
-                if multiplier == 0:
-                    pct_val = margin_pct_value
-                else:
-                    pct_val = margin_pct_value + multiplier * display_step
-                if pct_val < slider_min_pct - 1e-6 or pct_val > slider_max_pct + 1e-6:
-                    continue
-                preferred_pcts.append(pct_val)
-
-            for pct_val in preferred_pcts:
-                _select_pct(pct_val)
-
-            for boundary in (slider_max_pct, slider_min_pct):
-                _select_pct(boundary)
-
-            if len(selected) < 4:
-                for point in slider_points:
-                    if len(selected) >= 4:
-                        break
-                    _select_pct(float(point.get("margin_pct", 0.0)))
-
-            margin_slider_display_points = sorted(
-                selected,
-                key=lambda entry: float(entry.get("margin_pct", 0.0)),
+            formatted_samples = " · ".join(
+                f"{point['label']}: {fmt_money(point['unit_price'], currency)}" for point in sample_points
             )
+            if formatted_samples:
+                margin_slider_display_lines.append(formatted_samples)
 
-    if quick_what_if_entries:
-        slider_margin_values: set[float] = set()
-        slider_text_tokens: set[str] = set()
-        if margin_slider_display_points:
-            for point in margin_slider_display_points:
-                try:
-                    margin_val = float(point.get("margin_pct", 0.0))
-                except Exception:
-                    continue
-                slider_margin_values.add(round(margin_val, 4))
-                pct_token = _pct_label(margin_val).lower()
-                slider_text_tokens.add(pct_token)
-                slider_text_tokens.add(pct_token.replace("%", " %"))
-
-        for entry in quick_what_if_entries:
-            skip_entry = False
-            label_lower = str(entry.get("label") or "").strip().lower()
-            detail_lower = str(entry.get("detail") or "").strip().lower()
-            combined_text = " ".join(filter(None, (label_lower, detail_lower)))
-
-            margin_val: float | None = None
-            if slider_margin_values:
-                try:
-                    margin_val = float(entry.get("margin_pct"))
-                except Exception:
-                    margin_val = None
-                if (
-                    margin_val is not None
-                    and "margin" in combined_text
-                    and any(
-                        math.isclose(margin_val, slider_val, rel_tol=0.0, abs_tol=1e-4)
-                        for slider_val in slider_margin_values
-                    )
-                ):
-                    skip_entry = True
-
-            if (
-                not skip_entry
-                and slider_text_tokens
-                and "margin" in combined_text
-                and any(token in combined_text for token in slider_text_tokens)
-            ):
-                skip_entry = True
-
-            if not skip_entry:
-                display_quick_toggle_entries.append(entry)
+            step_display = max(1, int(round(slider_step_pct * 100)))
+            margin_slider_display_lines.append(
+                f"Range {_pct_label(slider_min_pct)}–{_pct_label(slider_max_pct)} (step {step_display}%)."
+            )
 
     row("Subtotal (Labor + Directs):", subtotal)
     if applied_pcts.get("ExpeditePct"):
@@ -8918,166 +9326,39 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
         if lines and lines[-1] != "":
             _push(lines, "")
 
-    def _dot_fill(left: str, right: str, *, fill_char: str = ".", width: int = page_width) -> str:
-        left_text = left.rstrip()
-        right_text = right.strip()
-        if width <= 0:
-            width = len(left_text) + len(right_text) + 2
-        spacing = max(1, width - len(left_text) - len(right_text) - 1)
-        return f"{left_text}{fill_char * spacing} {right_text}"
-
-    qty_break_payload: list[dict[str, Any]] = []
-    qty_break_display_lines: list[str] = []
-
-    qty_targets: list[int] = []
-
-    def _extend_qty_targets(source: Mapping[str, Any] | Sequence[Any] | None) -> None:
-        if isinstance(source, _MappingABC):
-            for key in ("qty_breaks", "quantity_breaks", "qty_options", "qty_break_options"):
-                _extend_qty_targets(source.get(key))
-            for value in source.values():
-                if isinstance(value, (list, tuple, set)):
-                    _extend_qty_targets(value)
-                elif isinstance(value, _MappingABC) and any(
-                    hint in str(value.keys()).lower() for hint in ("qty", "quantity")
-                ):
-                    qty_val = _safe_float(value.get("qty") or value.get("quantity"), 0.0)
-                    if qty_val and qty_val > 0:
-                        qty_targets.append(int(round(qty_val)))
-        elif isinstance(source, (list, tuple, set)):
-            for item in source:
-                if isinstance(item, (int, float)):
-                    if item > 0:
-                        qty_targets.append(int(round(item)))
-                elif isinstance(item, (list, tuple, set, _MappingABC)):
-                    _extend_qty_targets(item)
-
-    for container in (result, breakdown, decision_state):
-        if isinstance(container, (dict, _MappingABC)):
-            _extend_qty_targets(container)
-
-    base_qty_val = int(qty if isinstance(qty, int) and qty > 0 else 1)
-    if base_qty_val <= 0:
-        base_qty_val = 1
-    qty_targets.append(base_qty_val)
-    for default_candidate in (1, 2, 5, 10):
-        if default_candidate > 0:
-            qty_targets.append(default_candidate)
-
-    unique_qty_targets = sorted({value for value in qty_targets if value > 0})
-
-    base_machine_labor = _safe_float(locals().get("machine_labor_total"), 0.0)
-    amortized_per_part = _safe_float(locals().get("nre_per_part"), 0.0)
-    directs_per_part = _safe_float(locals().get("ladder_directs"), 0.0)
-    expedite_pct_val = max(0.0, _safe_float(expedite_pct_value, 0.0))
-    margin_pct_val = max(0.0, _safe_float(margin_pct_value, 0.0))
-
-    lot_amortized_total = amortized_per_part * max(base_qty_val, 1)
-
-    for qty_candidate in unique_qty_targets:
-        if qty_candidate <= 0:
-            continue
-        amortized_candidate = lot_amortized_total / float(qty_candidate) if lot_amortized_total > 0 else 0.0
-        labor_per_part = round(base_machine_labor + amortized_candidate, 2)
-        directs_candidate = round(directs_per_part, 2)
-        subtotal_candidate = round(labor_per_part + directs_candidate, 2)
-        subtotal_with_expedite = round(subtotal_candidate * (1.0 + expedite_pct_val), 2)
-        final_candidate = round(subtotal_with_expedite * (1.0 + margin_pct_val), 2)
-
-        qty_break_payload.append(
-            {
-                "qty": qty_candidate,
-                "labor_per_part": labor_per_part,
-                "directs_per_part": directs_candidate,
-                "subtotal_before_margin": subtotal_candidate,
-                "subtotal_with_expedite": subtotal_with_expedite,
-                "final_price": final_candidate,
-                "currency": currency,
-            }
-        )
-
-    if qty_break_payload:
-        qty_break_display_lines.append(
-            "  Qty, Labor $/part, Directs $/part, Subtotal, Final"
-        )
-        for entry in qty_break_payload:
-            qty_val = entry["qty"]
-            labor_text = fmt_money(entry["labor_per_part"], currency)
-            directs_text = fmt_money(entry["directs_per_part"], currency)
-            subtotal_text = fmt_money(entry["subtotal_before_margin"], currency)
-            final_text = fmt_money(entry["final_price"], currency)
-            qty_break_display_lines.append(
-                f"  {qty_val:>3}, {labor_text:>12}, {directs_text:>12}, {subtotal_text:>11}, {final_text:>11}"
-            )
-
-    quick_sections_present = bool(
-        margin_slider_display_points
-        or qty_break_display_lines
-        or display_quick_toggle_entries
-    )
-
-    if quick_sections_present:
+    if quick_what_if_entries:
         _ensure_blank_line()
-        _push(lines, "QUICK WHAT-IFS (INTERNAL KNOBS)")
+        _push(lines, "Quick What-Ifs")
         _push(lines, divider)
+        for entry in quick_what_if_entries:
+            label_text = str(entry.get("label") or "").strip() or "Scenario"
+            amount_val = _safe_float(entry.get("unit_price"), 0.0)
+            amount_text = fmt_money(amount_val, currency)
+            delta_val = entry.get("delta")
+            if delta_val is not None:
+                delta_float = _safe_float(delta_val, 0.0)
+                if delta_float < -0.01:
+                    delta_prefix = "-"
+                elif abs(delta_float) <= 0.01:
+                    delta_prefix = "±"
+                else:
+                    delta_prefix = "+"
+                delta_text = fmt_money(abs(delta_float), currency)
+                base_line = f"{label_text}: {amount_text} ({delta_prefix}{delta_text})"
+            else:
+                base_line = f"{label_text}: {amount_text}"
+            detail_text = str(entry.get("detail") or "").strip()
+            if detail_text:
+                base_line = f"{base_line} — {detail_text}"
+            _push(lines, base_line)
+        _ensure_blank_line()
 
-        section_index = 0
-
-        def _section_prefix() -> str:
-            nonlocal section_index
-            label = chr(ord("A") + section_index)
-            section_index += 1
-            return f"{label})"
-
-        if margin_slider_display_points:
-            qty_display = max(base_qty_val, 1)
-            _push(lines, f"{_section_prefix()} Margin slider (Qty = {qty_display})")
-            for point in margin_slider_display_points:
-                margin_pct = float(point.get("margin_pct", 0.0))
-                label_text = f"  {point.get('label', _pct_label(margin_pct))} margin"
-                if math.isclose(margin_pct, margin_pct_value, rel_tol=0.0, abs_tol=1e-4):
-                    label_text = f"{label_text} (current)"
-                price_text = fmt_money(point.get("unit_price", 0.0), currency)
-                margin_slider_display_lines.append(_dot_fill(label_text, price_text))
-            for display_line in margin_slider_display_lines:
-                _push(lines, display_line)
-            if qty_break_display_lines or display_quick_toggle_entries:
-                _push(lines, "")
-
-        if qty_break_display_lines:
-            desc_bits = ["assumes same ops", "programming amortized", f"{_pct_label(margin_pct_val)} margin"]
-            if expedite_pct_val > 0.0:
-                desc_bits.append("includes expedite")
-            desc = "; ".join(desc_bits)
-            _push(lines, f"{_section_prefix()} Qty break ({desc})")
-            for table_line in qty_break_display_lines:
-                _push(lines, table_line)
-            if display_quick_toggle_entries:
-                _push(lines, "")
-
-        if display_quick_toggle_entries:
-            _push(lines, f"{_section_prefix()} Other quick toggles")
-            for entry in display_quick_toggle_entries:
-                label_text = str(entry.get("label") or "").strip() or "Scenario"
-                amount_val = _safe_float(entry.get("unit_price"), 0.0)
-                amount_text = fmt_money(amount_val, currency)
-                delta_val = entry.get("delta")
-                base_line = _dot_fill(f"  {label_text}", amount_text)
-                if delta_val is not None:
-                    delta_float = _safe_float(delta_val, 0.0)
-                    if delta_float < -0.01:
-                        delta_prefix = "-"
-                    elif abs(delta_float) <= 0.01:
-                        delta_prefix = "±"
-                    else:
-                        delta_prefix = "+"
-                    delta_text = fmt_money(abs(delta_float), currency)
-                    base_line = f"{base_line} ({delta_prefix}{delta_text})"
-                detail_text = str(entry.get("detail") or "").strip()
-                if detail_text:
-                    base_line = f"{base_line} — {detail_text}"
-                _push(lines, base_line)
-
+    if margin_slider_display_lines:
+        _ensure_blank_line()
+        _push(lines, "Margin Slider")
+        _push(lines, divider)
+        for text_line in margin_slider_display_lines:
+            _push(lines, text_line)
         _ensure_blank_line()
 
     # ---- LLM adjustments bullets (optional) ---------------------------------
@@ -9150,6 +9431,21 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
                 )
         if bucket_plan_info:
             plan_info_payload["bucket_state_extra"] = bucket_plan_info
+
+        if process_rows_rendered:
+            plan_info_payload.setdefault(
+                "process_rows_rendered",
+                [
+                    (
+                        name,
+                        minutes,
+                        machine,
+                        labor,
+                        total,
+                    )
+                    for (name, minutes, machine, labor, total) in process_rows_rendered
+                ],
+            )
 
         if plan_info_payload:
             plan_info_for_explainer = plan_info_payload
@@ -9444,6 +9740,11 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
             }
         )
 
+    if qty <= 1:
+        for entry in processes_entries:
+            if str(entry.get("label")) == PROGRAMMING_PER_PART_LABEL:
+                entry["label"] = PROGRAMMING_AMORTIZED_LABEL
+
     render_payload = {
         "summary": summary_payload,
         "price_drivers": price_drivers_payload,
@@ -9466,8 +9767,6 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
         render_payload["quick_what_ifs"] = quick_what_if_entries
     if margin_slider_payload is not None:
         render_payload["margin_slider"] = margin_slider_payload
-    if qty_break_payload:
-        render_payload["qty_breaks"] = qty_break_payload
 
     if isinstance(result, _MutableMappingABC):
         result.setdefault("render_payload", render_payload)
@@ -11139,6 +11438,9 @@ def compute_quote_from_df(  # type: ignore[reportGeneralTypeIssues]
             minutes_val = float(_safe_float(entry.get("minutes")))
             machine_val = float(_bucket_cost(entry, "machine_cost", "machine$"))
             labor_val = float(_bucket_cost(entry, "labor_cost", "labor$"))
+            if canon_key == "milling" and labor_val > 0.0:
+                machine_val += labor_val
+                labor_val = 0.0
             if (
                 minutes_val <= 0.0
                 and machine_val <= 0.0
@@ -11558,7 +11860,35 @@ def compute_quote_from_df(  # type: ignore[reportGeneralTypeIssues]
             machine_cost_val = (drilling_minutes_for_bucket / 60.0) * drill_rate_value
         metrics["machine$"] = round(machine_cost_val, 2)
 
-        labor_cost_val = _safe_float(metrics.get("labor$"))
+        drilling_labor_rate = _lookup_rate(
+            "DrillingLaborRate", rates, params, default_rates, fallback=0.0
+        )
+        if drilling_labor_rate <= 0.0:
+            drilling_labor_rate = _lookup_rate(
+                "LaborRate", rates, params, default_rates, fallback=45.0
+            )
+
+        attended_fraction: float | None = None
+        if isinstance(drilling_meta_entry, _MappingABC):
+            for key in (
+                "attended_fraction",
+                "attended_frac",
+                "labor_fraction",
+                "labor_attended_fraction",
+            ):
+                attended_candidate = drilling_meta_entry.get(key)
+                if attended_candidate is None:
+                    continue
+                attended_value = _coerce_float_or_none(attended_candidate)
+                if attended_value is not None:
+                    attended_fraction = attended_value
+                    break
+        if attended_fraction is None:
+            attended_fraction = 1.0
+        attended_fraction = max(0.0, min(attended_fraction, 1.0))
+
+        labor_cost_val = (drilling_minutes_for_bucket / 60.0) * drilling_labor_rate
+        labor_cost_val *= attended_fraction
         metrics["labor$"] = round(labor_cost_val, 2) if labor_cost_val > 0.0 else 0.0
 
     if aggregated_bucket_minutes:
@@ -11634,6 +11964,9 @@ def compute_quote_from_df(  # type: ignore[reportGeneralTypeIssues]
                     entry_minutes = new_minutes if should_update_minutes or existing_entry is None else existing_minutes
                     entry_machine = new_machine if should_update_costs or existing_entry is None else existing_machine
                     entry_labor = new_labor if should_update_costs or existing_entry is None else existing_labor
+                    if entry_labor > 0.0:
+                        entry_machine += entry_labor
+                        entry_labor = 0.0
                     entry_total = entry_machine + entry_labor
 
                     buckets["milling"] = {
