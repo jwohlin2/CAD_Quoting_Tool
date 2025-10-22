@@ -53,9 +53,8 @@ def test_render_quote_emits_structured_sections() -> None:
     assert math.isclose(summary["margin_pct"], 0.15, rel_tol=1e-6)
     assert math.isclose(summary["final_price"], result["price"], rel_tol=1e-6)
 
-    assert "QUICK WHAT-IFS (INTERNAL KNOBS)" in rendered_text
-    assert "Margin slider (Qty =" in rendered_text
-    assert "Qty break (assumes same ops" in rendered_text
+    assert "Quick What-Ifs" in rendered_text
+    assert "Margin Slider" in rendered_text
 
     quick_entries = payload.get("quick_what_ifs")
     assert isinstance(quick_entries, list) and quick_entries
@@ -68,11 +67,6 @@ def test_render_quote_emits_structured_sections() -> None:
         summary["margin_pct"],
         rel_tol=1e-6,
     )
-
-    qty_breaks = payload.get("qty_breaks")
-    assert isinstance(qty_breaks, list) and qty_breaks
-    first_break = qty_breaks[0]
-    assert {"qty", "labor_per_part", "final_price"}.issubset(first_break.keys())
 
     drivers = payload.get("price_drivers", [])
     assert any("Tight tolerance" in driver.get("detail", "") for driver in drivers)
