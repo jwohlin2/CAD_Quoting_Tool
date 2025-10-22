@@ -2222,8 +2222,9 @@ def _side_from(txt: str) -> str:
     return "unspecified"
 
 
-def summarize_actions(removal_lines: list[str], planner_ops: list[dict]) -> None:
-    """Log aggregated removal + planner operation counts for diagnostics."""
+def summarize_actions(removal_lines, planner_ops):
+    import re
+    from collections import defaultdict
 
     import re
     from collections import defaultdict
@@ -2255,6 +2256,7 @@ def summarize_actions(removal_lines: list[str], planner_ops: list[dict]) -> None
             total["tap"] += qty
             by_side["tap"][side_of(ln)] += qty
 
+    # Planner-derived ops (counterbore, spot, jig-grind) if you have them there
     for op in planner_ops or []:
         if not isinstance(op, dict):
             continue
