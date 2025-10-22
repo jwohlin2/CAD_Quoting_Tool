@@ -6,7 +6,6 @@ import logging
 import os
 import subprocess
 import tempfile
-import zipfile
 from pathlib import Path
 from typing import Any, Callable, Final
 
@@ -167,12 +166,8 @@ def _configured_dwg_converter() -> Path | None:
     return None
 
 
-def _convert_dwg_to_dxf(path: Path, *, target_version: str = "ACAD2018") -> tuple[Path, bool]:
-    """Convert ``path`` to DXF using the configured converter.
-
-    Returns a tuple of ``(produced_path, supports_versions)`` where
-    ``supports_versions`` indicates if the converter honours ``target_version``.
-    """
+def _convert_dwg_to_dxf(path: Path) -> Path | None:
+    """Convert ``path`` to DXF using the configured converter."""
 
     converter = _configured_dwg_converter()
     if converter is None:
@@ -185,7 +180,6 @@ def _convert_dwg_to_dxf(path: Path, *, target_version: str = "ACAD2018") -> tupl
     out_dxf = out_dir / (path.stem + ".dxf")
 
     exe_lower = converter.name.lower()
-    supports_versions = False
     if exe_lower.endswith((".bat", ".cmd")):
         cmd = ["cmd", "/c", str(converter), str(path), str(out_dxf)]
     elif "odafileconverter" in exe_lower:
@@ -193,13 +187,12 @@ def _convert_dwg_to_dxf(path: Path, *, target_version: str = "ACAD2018") -> tupl
             str(converter),
             str(path.parent),
             str(out_dir),
-            target_version,
+            "ACAD2018",
             "DXF",
             "0",
             "0",
             path.name,
         ]
-        supports_versions = True
     else:
         cmd = [str(converter), str(path), str(out_dxf)]
 
@@ -228,126 +221,63 @@ def _convert_dwg_to_dxf(path: Path, *, target_version: str = "ACAD2018") -> tupl
             f"cmd: {' '.join(cmd)}\n"
             f"checked: {out_dxf} | {produced}"
         )
-
-    if produced.suffix.lower() == ".zip" or _looks_like_zip(produced):
-        produced = _extract_converted_zip(produced)
-
-    return produced, supports_versions
-
-
-def _looks_like_zip(path: Path) -> bool:
-    try:
-        with path.open("rb") as fh:
-            signature = fh.read(4)
-    except OSError:  # pragma: no cover - filesystem permissions
-        return False
-    return signature.startswith(b"PK\x03\x04")
-
-
-def _extract_converted_zip(path: Path) -> Path:
-    """Extract the primary DXF from ``path`` and return its location."""
-
-    with zipfile.ZipFile(path) as archive:
-        dxf_names = [name for name in archive.namelist() if name.lower().endswith(".dxf")]
-        if not dxf_names:
-            raise RuntimeError(
-                "DWG converter produced a ZIP archive without a DXF payload.\n"
-                f"archive: {path}"
-            )
-        # Prefer the entry that matches the archive stem, but fall back to the first DXF.
-        stem = path.stem.lower()
-        target_name = next((name for name in dxf_names if Path(name).stem.lower() == stem), dxf_names[0])
-        extracted_path = path.with_suffix("") if path.suffix else path
-        extracted_path = extracted_path.with_suffix(".dxf")
-        with archive.open(target_name) as src, extracted_path.open("wb") as dst:
-            data = src.read()
-            dst.write(data)
-    try:
-        path.unlink()
-    except OSError:  # pragma: no cover - cleanup best-effort
-        pass
-    return extracted_path
-
-
-def _load_with_ezdxf(doc_path: Path) -> tuple[Any | None, Exception | None]:
-    """Attempt to load ``doc_path`` with ezdxf, returning (doc, error)."""
-
-    if _ezdxf_readfile is None:
-        return None, None
-
-    try:
-        return _ezdxf_readfile(str(doc_path)), None
-    except Exception as exc:  # pragma: no cover - depends on dxfs supplied
-        recovered = _recover_document(str(doc_path), error=exc)
-        if recovered is not None:
-            return recovered, None
-        return None, exc
+    return produced
 
 
 def read_document(path: str | Path) -> Any:
     """Return an ezdxf drawing, falling back to odafc when available."""
 
     path_obj = Path(path)
+    original_dwg: Path | None = None
+    converted_path: Path | None = None
     last_error: Exception | None = None
 
     if path_obj.suffix.lower() == ".dwg":
-        conversion_versions: tuple[str, ...] = ("ACAD2018", "ACAD2013", "ACAD2010", "ACAD2007")
-        supports_versions: bool | None = None
-        attempted_versions: list[str] = []
+        original_dwg = path_obj
+        try:
+            converted_path = _convert_dwg_to_dxf(path_obj)
+        except Exception as exc:  # pragma: no cover - depends on env/converter
+            last_error = exc
 
-        for idx, version in enumerate(conversion_versions):
-            if supports_versions is False and idx > 0:
-                break
+    candidate_paths: list[Path] = []
+    if converted_path is not None:
+        candidate_paths.append(converted_path)
+    if original_dwg is None:
+        candidate_paths.append(path_obj)
+
+    if _ezdxf_readfile is not None:
+        for candidate in candidate_paths:
+            doc_path = str(candidate)
             try:
-                converted_path, supports_versions = _convert_dwg_to_dxf(path_obj, target_version=version)
-            except Exception as exc:  # pragma: no cover - depends on env/converter
+                return _ezdxf_readfile(doc_path)
+            except Exception as exc:  # pragma: no cover - depends on dxfs supplied
                 last_error = exc
-                if supports_versions is False:
-                    break
-                continue
-
-            attempted_versions.append(version)
-            doc, error = _load_with_ezdxf(converted_path)
-            if doc is not None:
-                return doc
-            if error is not None:
-                last_error = error
-                continue
-
-        if _odafc_readfile is not None:
-            try:
-                return _odafc_readfile(str(path_obj))
-            except Exception as exc:  # pragma: no cover - depends on dwgs supplied
-                last_error = exc
-                recovered = _recover_document(str(path_obj), error=exc)
+                recovered = _recover_document(doc_path, error=exc)
                 if recovered is not None:
                     return recovered
 
-        if last_error is not None:
-            if attempted_versions:
-                attempted = ", ".join(attempted_versions)
-                raise RuntimeError(
-                    "Failed to load DWG after converting with ODAFileConverter versions "
-                    f"{attempted}. Last error: {last_error}"
-                ) from last_error
-            raise last_error
+    if original_dwg is not None and _odafc_readfile is not None:
+        doc_path = str(original_dwg)
+        try:
+            return _odafc_readfile(doc_path)
+        except Exception as exc:  # pragma: no cover - depends on dwgs supplied
+            last_error = exc
+            recovered = _recover_document(doc_path, error=exc)
+            if recovered is not None:
+                return recovered
 
-        if _odafc_readfile is None:
-            raise RuntimeError(
-                "DWG support is unavailable because ezdxf could not find a converter executable and the odafc backend is missing.\n"
-                "Install the ODA File Converter and expose it via ODA_CONVERTER_EXE/DWG2DXF_EXE, or install ezdxf.addons.odafc.\n"
-                f"{_DWG_CONVERTER_TIP}"
-            )
+    if last_error is not None:
+        raise last_error
 
-        raise RuntimeError("DWG support failed without a specific error. Please retry the import.")
-
-    doc, error = _load_with_ezdxf(path_obj)
-    if doc is not None:
-        return doc
-    if error is not None:
-        raise error
-
-    raise RuntimeError("No DXF/DWG reader available. Install ezdxf or the ODA File Converter.")
+    if original_dwg is not None and _odafc_readfile is None:
+        raise RuntimeError(
+            "DWG support is unavailable because ezdxf could not find a converter executable and the odafc backend is missing.\n"
+            "Install the ODA File Converter and expose it via ODA_CONVERTER_EXE/DWG2DXF_EXE, or install ezdxf.addons.odafc.\n"
+            f"{_DWG_CONVERTER_TIP}"
+        )
+    raise RuntimeError(
+        "No DXF/DWG reader available. Install ezdxf or the ODA File Converter."
+    )
 
 
 __all__ = [
