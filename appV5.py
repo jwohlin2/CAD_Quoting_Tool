@@ -2226,14 +2226,13 @@ def summarize_actions(removal_lines, planner_ops):
     import re
     from collections import defaultdict
 
-    import re
-    from collections import defaultdict
-
-    side_of = lambda s: (
-        "front"
-        if "(front" in s.lower()
-        else "back" if "(back" in s.lower() else "unspecified"
-    )
+    def side_of(text: str) -> str:
+        lowered = str(text or "").lower()
+        if "(front" in lowered:
+            return "front"
+        if "(back" in lowered:
+            return "back"
+        return "unspecified"
 
     total = defaultdict(int)
     by_side = defaultdict(lambda: defaultdict(int))
@@ -2244,19 +2243,18 @@ def summarize_actions(removal_lines, planner_ops):
     for ln in removal_lines or []:
         if not isinstance(ln, str):
             continue
-        m = drill_re.search(ln)
-        if m:
-            qty = int(m.group(1))
+        match = drill_re.search(ln)
+        if match:
+            qty = int(match.group(1))
             total["drill"] += qty
             by_side["drill"][side_of(ln)] += qty
             continue
-        m = tap_re.search(ln)
-        if m:
-            qty = int(m.group(1))
+        match = tap_re.search(ln)
+        if match:
+            qty = int(match.group(1))
             total["tap"] += qty
             by_side["tap"][side_of(ln)] += qty
 
-    # Planner-derived ops (counterbore, spot, jig-grind) if you have them there
     for op in planner_ops or []:
         if not isinstance(op, dict):
             continue
@@ -2279,29 +2277,10 @@ def summarize_actions(removal_lines, planner_ops):
             total["jig_grind"] += qty
             by_side["jig_grind"][side] += qty
 
-    drill_count = int(total.get("drill", 0))
-    tap_count = int(total.get("tap", 0))
-    cbor_count = int(total.get("counterbore", 0))
-    spot_count = int(total.get("spot", 0))
-    jig_count = int(total.get("jig_grind", 0))
-
-    actions = {
-        "Drills": drill_count,
-        "Taps": tap_count,
-        "Counterbores": cbor_count,
-        "Spot": spot_count,
-        "Jig-grind": jig_count,
-    }
-    actions_total = sum(actions.values())
-
-    print("Operation Counts")
-    print("--------------------------------------------------------------------------")
-    for k, v in actions.items():
-        print(f"  {k:<14} {v}")
-    print(f"  {'Actions total':<14} {actions_total}")
-
-    for k, sides in by_side.items():
-        print(f"[ACTIONS/{k}] by_side={dict(sides)}")
+    actions_total = sum(total.values())
+    print(f"[ACTIONS] totals={dict(total)} total={actions_total}")
+    for kind, sides in by_side.items():
+        print(f"[ACTIONS/{kind}] by_side={dict(sides)}")
 
 
 def _extract_milling_bucket(
@@ -5175,6 +5154,21 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
         ]
 
         canonical_entries: dict[str, dict[str, float]] = {}
+
+        def _entry_hours(entry: Mapping[str, Any]) -> float:
+            for key in ("hr", "hours", "total_hr", "total_hours"):
+                value = _as_float(entry.get(key), 0.0)
+                if value > 0.0:
+                    return value
+            return 0.0
+
+        def _entry_minutes(entry: Mapping[str, Any]) -> float:
+            for key in ("minutes_total", "total_minutes", "mins"):
+                value = _as_float(entry.get(key), 0.0)
+                if value > 0.0:
+                    return value
+            return 0.0
+
         if isinstance(buckets, _MappingABC):
             for raw_key, raw_entry in buckets.items():
                 if not isinstance(raw_entry, _MappingABC):
@@ -5186,11 +5180,93 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
                     or key_str
                 )
                 minutes_val = max(0.0, _as_float(raw_entry.get("minutes"), 0.0))
+                original_minutes = minutes_val
+                fallback_minutes = _entry_minutes(raw_entry)
+                if fallback_minutes > 0.0 and minutes_val <= 0.0:
+                    minutes_val = fallback_minutes
+                hours_val = _entry_hours(raw_entry)
+                if hours_val > 0.0:
+                    minutes_from_hours = hours_val * 60.0
+                    if minutes_val <= 0.0 or not math.isclose(
+                        minutes_val, minutes_from_hours, rel_tol=1e-3, abs_tol=0.05
+                    ):
+                        minutes_val = minutes_from_hours
+                source_minutes_for_scale = original_minutes if original_minutes > 0.0 else None
+                if source_minutes_for_scale is None and fallback_minutes > 0.0:
+                    source_minutes_for_scale = fallback_minutes
+
                 machine_val = max(0.0, _as_float(raw_entry.get("machine$"), 0.0))
                 labor_val = max(0.0, _as_float(raw_entry.get("labor$"), 0.0))
+
+                machine_rate_candidates = (
+                    raw_entry.get("machine_rate"),
+                    raw_entry.get("machine_rate_per_hr"),
+                    raw_entry.get("machine_rate_per_hour"),
+                    raw_entry.get("machine_per_hr"),
+                    raw_entry.get("machine_per_hour"),
+                    raw_entry.get("MachineRate"),
+                )
+                machine_rate = 0.0
+                for candidate in machine_rate_candidates:
+                    rate_val = _as_float(candidate, 0.0)
+                    if rate_val > 0.0:
+                        machine_rate = rate_val
+                        break
+                labor_rate_candidates = (
+                    raw_entry.get("labor_rate"),
+                    raw_entry.get("labor_rate_per_hr"),
+                    raw_entry.get("labor_rate_per_hour"),
+                    raw_entry.get("labor_per_hr"),
+                    raw_entry.get("labor_per_hour"),
+                    raw_entry.get("LaborRate"),
+                )
+                labor_rate = 0.0
+                for candidate in labor_rate_candidates:
+                    rate_val = _as_float(candidate, 0.0)
+                    if rate_val > 0.0:
+                        labor_rate = rate_val
+                        break
+                labor_fraction = 1.0
+                for key in ("labor_attended_fraction", "attended_fraction", "labor_fraction"):
+                    if key not in raw_entry:
+                        continue
+                    frac_val = _as_float(raw_entry.get(key), 0.0)
+                    if frac_val <= 0.0 and isinstance(raw_entry.get(key), bool):
+                        frac_val = 1.0 if raw_entry.get(key) else 0.0
+                    if frac_val > 0.0:
+                        labor_fraction = max(0.0, min(frac_val, 1.0))
+                        break
+
+                minutes_hours = minutes_val / 60.0 if minutes_val > 0.0 else 0.0
+                if minutes_hours > 0.0 and machine_rate > 0.0:
+                    machine_val = round(minutes_hours * machine_rate, 2)
+                elif (
+                    source_minutes_for_scale
+                    and source_minutes_for_scale > 0.0
+                    and machine_val > 0.0
+                    and not math.isclose(
+                        minutes_val, source_minutes_for_scale, rel_tol=1e-4, abs_tol=0.05
+                    )
+                ):
+                    scale = minutes_val / source_minutes_for_scale
+                    machine_val = round(machine_val * scale, 2)
+                if minutes_hours > 0.0 and labor_rate > 0.0:
+                    labor_val = round(minutes_hours * labor_rate * labor_fraction, 2)
+                elif (
+                    source_minutes_for_scale
+                    and source_minutes_for_scale > 0.0
+                    and labor_val > 0.0
+                    and not math.isclose(
+                        minutes_val, source_minutes_for_scale, rel_tol=1e-4, abs_tol=0.05
+                    )
+                ):
+                    scale = minutes_val / source_minutes_for_scale
+                    labor_val = round(labor_val * scale, 2)
+
                 total_val = max(0.0, _as_float(raw_entry.get("total$"), 0.0))
                 if total_val <= 0.0:
                     total_val = round(machine_val + labor_val, 2)
+
                 canonical_entries[canon_key] = {
                     "minutes": minutes_val,
                     "machine$": machine_val,
@@ -5490,16 +5566,18 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
                     break
             if tapping_bucket is None:
                 tapping_bucket = {}
-            tapping_total = _as_float(tapping_bucket.get("total$", 0.0), 0.0)
-            if tapping_total > 0.0:
-                _append_process_row(
-                    rows,
-                    _label_for_bucket("tapping"),
-                    tapping_bucket.get("minutes", 0.0),
-                    tapping_bucket.get("machine$", 0.0),
-                    tapping_bucket.get("labor$", 0.0),
-                    tapping_total,
-                )
+            tapping_minutes = tapping_bucket.get("minutes", 0.0)
+            tapping_machine = tapping_bucket.get("machine$", 0.0)
+            tapping_labor = tapping_bucket.get("labor$", 0.0)
+            tapping_total = tapping_bucket.get("total$", 0.0)
+            _append_process_row(
+                rows,
+                _label_for_bucket("tapping"),
+                tapping_minutes,
+                tapping_machine,
+                tapping_labor,
+                tapping_total,
+            )
 
         total_cost = sum(row[4] for row in rows)
         total_minutes = sum(row[1] for row in rows)
@@ -8600,8 +8678,13 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
         key for key in bucket_entries_for_totals if key not in preferred_bucket_order
     ]:
         entry = bucket_entries_for_totals.get(bucket_key)
-        if not isinstance(entry, _MappingABC) or bucket_key in seen_bucket_keys:
-            continue
+    proc_total_rendered = sum(row[4] for row in process_rows_rendered)
+    if proc_total_rendered <= 0.0:
+        proc_total_rendered = process_rows_total
+    total_minutes_rendered = sum(row[1] for row in process_rows_rendered)
+    if total_minutes_rendered <= 0.0:
+        total_minutes_rendered = process_rows_minutes
+    hrs_total_rendered = total_minutes_rendered / 60.0 if total_minutes_rendered > 0 else 0.0
         seen_bucket_keys.add(bucket_key)
 
         canon_key = (

@@ -12,6 +12,7 @@ from cad_quoter.pricing.process_buckets import (
     flatten_rates,
     lookup_rate,
     normalize_bucket_key,
+    _rate_candidates as _bucket_rate_candidates,
 )
 
 
@@ -169,8 +170,24 @@ def render_process_costs(
             continue
         hours = max(0.0, float(minutes.get(key, 0.0)) / 60.0)
         rate = lookup_rate(key, flat_rates, normalized_rates)
+        explicit_rate_available = False
+        for candidate in _bucket_rate_candidates(key):
+            if candidate in flat_rates:
+                explicit_rate_available = True
+                break
+            candidate_norm = normalize_bucket_key(candidate)
+            if candidate_norm and candidate_norm in normalized_rates:
+                explicit_rate_available = True
+                break
         if rate <= 0 and hours > 0:
             rate = amount / hours
+        elif (
+            hours > 0
+            and rate > 0
+            and not explicit_rate_available
+            and not math.isclose(hours * rate, amount, abs_tol=0.01)
+        ):
+            rate = amount / hours if amount > 0 else rate
         _emit_cost_row(
             tbl,
             label=bucket_label(key),
