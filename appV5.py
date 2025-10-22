@@ -4384,7 +4384,7 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
 
     def _render_process_and_hours_from_buckets(
         lines: list[str], bucket_view_obj: Mapping[str, Any] | None
-    ) -> tuple[float, float]:
+    ) -> tuple[float, float, list[tuple[str, float, float, float, float]]]:
         try:
             buckets_candidate = (
                 bucket_view_obj.get("buckets") if bucket_view_obj else None
@@ -4523,45 +4523,46 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
                 prog_total,
             )
 
-        def _canonical_label(value: Any) -> str:
-            value_str = str(value)
-            return (
-                _canonical_bucket_key(value_str)
-                or _normalize_bucket_key(value_str)
-                or value_str
+        def _consume_entry(canon_key: str) -> None:
+            entry = canonical_entries.pop(canon_key, None)
+            if not entry:
+                return
+            minutes_val = entry.get("minutes", 0.0)
+            machine_val = entry.get("machine$", 0.0)
+            labor_val = entry.get("labor$", 0.0)
+            total_val = entry.get("total$", 0.0)
+            _append_process_row(
+                rows,
+                _label_for_bucket(canon_key),
+                minutes_val,
+                machine_val,
+                labor_val,
+                total_val,
             )
 
-        try:
-            table_rows_local = list(table_rows)  # type: ignore[name-defined]
-        except Exception:
-            table_rows_local = []
+        for bucket_key in order:
+            _consume_entry(bucket_key)
 
-        def _bucket_snapshot(target: str) -> dict[str, float]:
-            target_canon = _canonical_label(target)
-            for label, minutes_val, machine_val, labor_val, total_val in table_rows_local:
-                if _canonical_label(label) == target_canon:
-                    return {
-                        "minutes": round(float(minutes_val or 0.0), 2),
-                        "machine$": round(float(machine_val or 0.0), 2),
-                        "labor$": round(float(labor_val or 0.0), 2),
-                        "total$": round(float(total_val or 0.0), 2),
-                    }
-            return {}
+        if canonical_entries:
+            for canon_key, entry in sorted(
+                canonical_entries.items(),
+                key=lambda item: _label_for_bucket(item[0]).lower(),
+            ):
+                minutes_val = entry.get("minutes", 0.0)
+                machine_val = entry.get("machine$", 0.0)
+                labor_val = entry.get("labor$", 0.0)
+                total_val = entry.get("total$", 0.0)
+                _append_process_row(
+                    rows,
+                    _label_for_bucket(canon_key),
+                    minutes_val,
+                    machine_val,
+                    labor_val,
+                    total_val,
+                )
 
-        mb = _bucket_snapshot("milling")
-        db = _bucket_snapshot("drilling")
-        print(f"[INFO] [bucket/milling] {mb}")
-        print(f"[INFO] [bucket/drilling] {db}")
-
-        rows_for_display = list(rows)
-        print(
-            f"[CHECK/process-sum] machine$={sum(float(r[2]) for r in rows_for_display):.2f} "
-            f"labor$={sum(float(r[3]) for r in rows_for_display):.2f} "
-            f"total$={sum(float(r[4]) for r in rows_for_display):.2f}"
-        )
-
-        total_cost = sum(row[4] for row in rows_for_display)
-        total_minutes = sum(row[1] for row in rows_for_display)
+        total_cost = sum(row[4] for row in rows)
+        total_minutes = sum(row[1] for row in rows)
 
         if rows:
             headers = ("Process", "Minutes", "Machine $", "Labor $", "Total $")
@@ -4606,11 +4607,11 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
             for display_label, *_ in rows:
                 add_process_notes(display_label)
             lines.append("")
-            return total_cost, total_minutes
+            return total_cost, total_minutes, rows
 
         lines.append("  (no bucket data)")
         lines.append("")
-        return 0.0, 0.0
+        return 0.0, 0.0, []
 
     def _is_extra_segment(segment: str) -> bool:
         try:
@@ -7602,9 +7603,6 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
         bucket_entries_for_totals = {}
 
     bucket_entries_for_totals_map = {}
-    bucket_machine_total_sum = 0.0
-    bucket_labor_total_sum = 0.0
-    bucket_totals_for_summary: list[tuple[str, float]] = []
 
     preferred_bucket_order = [
         "programming",
@@ -7636,25 +7634,6 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
         normalized_key = _normalize_bucket_key(bucket_key)
         display_label = _display_bucket_label(canon_key, label_overrides)
 
-        machine_val = _safe_float(entry.get("machine$"), default=0.0)
-        labor_val = _safe_float(entry.get("labor$"), default=0.0)
-        total_val = _safe_float(entry.get("total$"), default=0.0)
-        if total_val <= 0.0:
-            total_val = machine_val + labor_val
-        if machine_val <= 0.0 and labor_val <= 0.0 and total_val > 0.0:
-            bucket_mode = _bucket_cost_mode(canon_key)
-            if bucket_mode == "labor":
-                labor_val = total_val
-            elif bucket_mode == "machine":
-                machine_val = total_val
-            else:
-                labor_val = total_val
-
-        proc_total_rendered += total_val
-        bucket_machine_total_sum += machine_val
-        bucket_labor_total_sum += labor_val
-        bucket_totals_for_summary.append((display_label or str(bucket_key), total_val))
-
         lookup_keys = {
             str(bucket_key),
             canon_key,
@@ -7665,44 +7644,38 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
             if lookup_key:
                 bucket_entries_for_totals_map[str(lookup_key)] = entry
 
-        hours_val = _minutes_to_hours(entry.get("minutes", 0.0))
-        if hours_val > 0:
-            hrs_total_rendered += hours_val
-
-    if bucket_totals_for_summary:
-        top_total = max(total for _, total in bucket_totals_for_summary)
-        summary_bits: list[str] = []
-        summary_bits.append(f"Machine {_m(bucket_machine_total_sum)}")
-        summary_bits.append(f"Labor {_m(bucket_labor_total_sum)}")
-        largest_bucket_parts: list[str] = []
-        if top_total > 0:
-            sorted_totals = sorted(
-                bucket_totals_for_summary,
-                key=lambda item: item[1],
-                reverse=True,
-            )
-            tolerance = max(0.01, top_total * 0.01)
-            for label, amount in sorted_totals:
-                if amount <= 0:
-                    continue
-                if amount + tolerance < top_total and len(largest_bucket_parts) >= 3:
-                    break
-                if top_total - amount > tolerance and largest_bucket_parts:
-                    break
-                label_text = str(label or "Process")
-                largest_bucket_parts.append(f"{label_text} {_m(amount)}")
-            if largest_bucket_parts:
-                summary_bits.append(
-                    "largest bucket(s): " + ", ".join(largest_bucket_parts)
-                )
-        bucket_why_summary_line = "Process buckets — " + "; ".join(summary_bits)
-
-    process_rows_total, process_rows_minutes = _render_process_and_hours_from_buckets(
+    process_rows_total, process_rows_minutes, process_rows_rendered = _render_process_and_hours_from_buckets(
         lines,
         bucket_view_for_render,
     )
     proc_total_rendered = process_rows_total
     hrs_total_rendered = process_rows_minutes / 60.0 if process_rows_minutes > 0 else 0.0
+    proc_machine = sum(row[2] for row in process_rows_rendered)
+    proc_labor = sum(row[3] for row in process_rows_rendered)
+    machine_sum = proc_machine
+    labor_sum = proc_labor
+    if process_rows_rendered:
+        top_rows = sorted(
+            process_rows_rendered,
+            key=lambda r: r[4],
+            reverse=True,
+        )[:3]
+        top_lines = [
+            f"{name} ${total:,.2f}" for (name, _, _, _, total) in top_rows
+        ]
+        for line in top_lines:
+            if line not in why_lines:
+                why_lines.append(line)
+        summary_bits: list[str] = [
+            f"Machine {_m(machine_sum)}",
+            f"Labor {_m(labor_sum)}",
+        ]
+        top_summary = [
+            f"{name} {_m(total)}" for (name, _, _, _, total) in top_rows if total > 0
+        ]
+        if top_summary:
+            summary_bits.append("largest bucket(s): " + ", ".join(top_summary))
+        bucket_why_summary_line = "Process buckets — " + "; ".join(summary_bits)
     if proc_total_rendered or hrs_total_rendered:
         for offset, text in enumerate(lines[process_section_start:]):
             stripped = str(text or "").strip()
