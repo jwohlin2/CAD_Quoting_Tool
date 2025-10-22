@@ -224,7 +224,7 @@ def test_planner_bucket_minutes_from_line_items_when_bucketize_empty(monkeypatch
     planner_meta = breakdown["process_meta"]
     assert planner_meta["planner_total"]["minutes"] == pytest.approx(60.0, abs=0.01)
     assert planner_meta["planner_machine"]["minutes"] == pytest.approx(50.0, abs=0.01)
-    assert planner_meta["planner_labor"]["minutes"] == pytest.approx(10.0, abs=0.01)
+    assert planner_meta["planner_labor"]["minutes"] == pytest.approx(40.0, abs=0.01)
 
 
 def test_planner_does_not_emit_legacy_buckets_when_line_items_present(monkeypatch):
@@ -350,8 +350,104 @@ def test_planner_fallback_when_no_line_items(monkeypatch):
     assert drilling_bucket["machine_cost"] == pytest.approx(
         (expected_minutes / 60.0) * 75.0, abs=0.05
     )
-    assert drilling_bucket.get("labor_cost", 0.0) == pytest.approx(0.0, abs=1e-6)
+    expected_labor_cost = (expected_minutes / 60.0) * 45.0
+    assert drilling_bucket.get("labor_cost", 0.0) == pytest.approx(
+        expected_labor_cost, abs=0.05
+    )
 
+
+def test_planner_drilling_labor_minutes_match_machine(monkeypatch):
+    import appV5
+    import cad_quoter.pricing.planner as planner_pricing
+
+    df = pd.DataFrame(columns=["Item", "Example Values / Options", "Data Type / Input Method"])
+    geo = {
+        "process_planner_family": "die_plate",
+        "material": "tool steel",
+        "thickness_mm": 25.4,
+    }
+
+    drilling_minutes = 207.18
+    machine_rate = 95.0
+    labor_rate = 45.0
+
+    def fake_plan_job(family: str, inputs: dict[str, object]) -> dict[str, object]:
+        assert family == "die_plate"
+        assert isinstance(inputs, dict)
+        return {"ops": [{"op": "drill_ream_bore"}]}
+
+    def fake_price_with_planner(
+        family: str,
+        inputs: dict[str, object],
+        geom_payload: dict[str, object],
+        rates: dict[str, object],
+        *,
+        oee: float,
+    ) -> dict[str, object]:
+        assert family == "die_plate"
+        assert geom_payload, "expected non-empty geom payload"
+        assert isinstance(rates, dict)
+        assert oee > 0
+        machine_cost = drilling_minutes / 60.0 * machine_rate
+        labor_cost = drilling_minutes / 60.0 * labor_rate * 2.0
+        return {
+            "line_items": [
+                {
+                    "op": "drill_ream_bore",
+                    "minutes": drilling_minutes,
+                    "machine_cost": machine_cost,
+                    "labor_cost": labor_cost,
+                }
+            ],
+            "totals": {
+                "minutes": drilling_minutes,
+                "machine_cost": machine_cost,
+                "labor_cost": labor_cost,
+            },
+            "process_plan_summary": {
+                "drilling": {"total_minutes_billed": drilling_minutes}
+            },
+        }
+
+    monkeypatch.setattr(appV5, "_process_plan_job", fake_plan_job)
+    monkeypatch.setattr(planner_pricing, "price_with_planner", fake_price_with_planner)
+    monkeypatch.setattr(appV5, "FORCE_PLANNER", False)
+
+    result = appV5.compute_quote_from_df(
+        df,
+        params={
+            "OEE_EfficiencyPct": 0.9,
+            "DrillingRate": machine_rate,
+            "DrillingLaborRate": labor_rate,
+        },
+        geo=geo,
+        ui_vars={},
+    )
+
+    breakdown = result["breakdown"]
+    assert breakdown["pricing_source"] == "Planner"
+
+    process_meta = breakdown["process_meta"]
+    drilling_meta = process_meta["drilling"]
+    assert "labor_minutes" in drilling_meta, drilling_meta
+    assert drilling_meta["labor_minutes"] == pytest.approx(
+        drilling_minutes, abs=0.01
+    ), drilling_meta
+    assert "labor_hr" in drilling_meta, drilling_meta
+    assert drilling_meta["labor_hr"] == pytest.approx(
+        drilling_minutes / 60.0, abs=1e-3
+    ), drilling_meta
+
+    planner_labor = process_meta["planner_labor"]
+    assert planner_labor["minutes"] == pytest.approx(
+        drilling_minutes, abs=0.01
+    ), planner_labor
+
+    drilling_bucket = breakdown["bucket_view"]["buckets"]["drilling"]
+    expected_labor_cost = drilling_minutes / 60.0 * labor_rate
+    assert drilling_bucket["labor$"] == pytest.approx(
+        expected_labor_cost, abs=0.01
+    ), drilling_bucket
 
 def test_planner_zero_totals_logs_flag_and_falls_back(monkeypatch):
     import appV5

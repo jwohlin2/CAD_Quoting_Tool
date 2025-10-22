@@ -1991,7 +1991,7 @@ def _compute_drilling_removal_section(
             lines.append("")
 
             extras["drill_machine_minutes"] = float(drill_minutes_subtotal)
-            extras["drill_labor_minutes"] = float(total_tool_minutes)
+            extras["drill_labor_minutes"] = float(drill_minutes_total)
             extras["drill_total_minutes"] = drill_minutes_subtotal
             logging.info(
                 f"[removal] drill_total_minutes={extras['drill_total_minutes']}"
@@ -11655,6 +11655,14 @@ def compute_quote_from_df(  # type: ignore[reportGeneralTypeIssues]
             candidate_minutes = _safe_float(drilling_summary_map.get("total_minutes"))
             if candidate_minutes > 0.0:
                 drilling_minutes_for_bucket = candidate_minutes
+    if (drilling_minutes_for_bucket is None or drilling_minutes_for_bucket <= 0.0) and (
+        "drilling" in aggregated_bucket_minutes
+    ):
+        existing_metrics = aggregated_bucket_minutes.get("drilling")
+        if isinstance(existing_metrics, _MappingABC):
+            candidate_minutes = _safe_float(existing_metrics.get("minutes"))
+            if candidate_minutes > 0.0:
+                drilling_minutes_for_bucket = float(candidate_minutes)
 
     if drilling_minutes_for_bucket and drilling_minutes_for_bucket > 0.0:
         metrics = aggregated_bucket_minutes.setdefault(
@@ -11675,13 +11683,49 @@ def compute_quote_from_df(  # type: ignore[reportGeneralTypeIssues]
             drill_rate_value = float(drilling_rate)
 
         metrics["minutes"] = drilling_minutes_for_bucket
+        metrics["machine_minutes"] = drilling_minutes_for_bucket
         machine_cost_val = _safe_float(metrics.get("machine$"))
         if drill_rate_value > 0.0:
             machine_cost_val = (drilling_minutes_for_bucket / 60.0) * drill_rate_value
         metrics["machine$"] = round(machine_cost_val, 2)
 
-        labor_cost_val = _safe_float(metrics.get("labor$"))
+        drilling_labor_rate = _lookup_rate(
+            "DrillingLaborRate", rates, params, default_rates, fallback=0.0
+        )
+        if drilling_labor_rate <= 0.0:
+            drilling_labor_rate = _lookup_rate(
+                "LaborRate", rates, params, default_rates, fallback=45.0
+            )
+
+        attended_fraction: float | None = None
+        if isinstance(drilling_meta_entry, _MappingABC):
+            for key in (
+                "attended_fraction",
+                "attended_frac",
+                "labor_fraction",
+                "labor_attended_fraction",
+            ):
+                attended_candidate = drilling_meta_entry.get(key)
+                if attended_candidate is None:
+                    continue
+                attended_value = _coerce_float_or_none(attended_candidate)
+                if attended_value is not None:
+                    attended_fraction = attended_value
+                    break
+        if attended_fraction is None:
+            attended_fraction = 1.0
+        attended_fraction = max(0.0, min(attended_fraction, 1.0))
+
+        labor_minutes_for_bucket = drilling_minutes_for_bucket * attended_fraction
+        metrics["labor_minutes"] = labor_minutes_for_bucket
+        metrics["attended_fraction"] = attended_fraction
+
+        labor_cost_val = (labor_minutes_for_bucket / 60.0) * drilling_labor_rate
         metrics["labor$"] = round(labor_cost_val, 2) if labor_cost_val > 0.0 else 0.0
+
+        pm["attended_fraction"] = attended_fraction
+        pm["labor_minutes"] = round(labor_minutes_for_bucket, 2)
+        pm["labor_hr"] = round(labor_minutes_for_bucket / 60.0, 3)
 
     if aggregated_bucket_minutes:
         legacy_bucket_entries: dict[str, dict[str, Any]] = {}
@@ -11842,13 +11886,20 @@ def compute_quote_from_df(  # type: ignore[reportGeneralTypeIssues]
                 hours_val = minutes_val / 60.0
                 total_cost = machine_val + labor_val
                 total_minutes += minutes_val
-                if hours_val > 0.0 and total_cost > 0.0:
-                    rate_val = total_cost / hours_val
+                machine_minutes_val = float(_safe_float(metrics.get("machine_minutes")))
+                labor_minutes_val = float(_safe_float(metrics.get("labor_minutes")))
+                if machine_minutes_val > 0.0:
+                    machine_minutes += machine_minutes_val
+                elif hours_val > 0.0 and machine_val > 0.0:
+                    rate_val = total_cost / hours_val if total_cost > 0.0 else 0.0
                     if rate_val > 0.0:
-                        if machine_val > 0.0:
-                            machine_minutes += (machine_val / rate_val) * 60.0
-                        if labor_val > 0.0:
-                            labor_minutes += (labor_val / rate_val) * 60.0
+                        machine_minutes += (machine_val / rate_val) * 60.0
+                if labor_minutes_val > 0.0:
+                    labor_minutes += labor_minutes_val
+                elif hours_val > 0.0 and labor_val > 0.0:
+                    rate_val = total_cost / hours_val if total_cost > 0.0 else 0.0
+                    if rate_val > 0.0:
+                        labor_minutes += (labor_val / rate_val) * 60.0
 
             def _apply_minutes(key: str, minutes_val: float) -> None:
                 if minutes_val <= 0.0:
