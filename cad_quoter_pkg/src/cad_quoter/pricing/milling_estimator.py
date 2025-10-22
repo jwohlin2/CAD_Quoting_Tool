@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import Any, Mapping as _MappingABC
 
 from cad_quoter.pricing.planner import _geom as _normalize_geom, _material_factor
+from cad_quoter.pricing.process_rates import labor_rate, machine_rate
 from cad_quoter.speeds_feeds import (
     coerce_table_to_records,
     normalize_material_group_code,
@@ -564,13 +565,6 @@ def estimate_milling_minutes(
     return total_min, details
 
 
-MACHINE_RATE = {
-    "milling": 90.00,
-    "drilling": 95.00,
-}
-LABOR_RATE = 45.00
-
-
 def build_milling_bucket(
     material: str | None,
     milling_paths: Sequence[Mapping[str, Any]] | None,
@@ -583,8 +577,10 @@ def build_milling_bucket(
         material_group=material_group,
     )
 
-    mach_cost = (minutes / 60.0) * MACHINE_RATE["milling"]
-    labor_cost = (minutes / 60.0) * LABOR_RATE
+    milling_machine_rate = machine_rate("milling")
+    milling_labor_rate = labor_rate("milling")
+    mach_cost = (minutes / 60.0) * milling_machine_rate
+    labor_cost = (minutes / 60.0) * milling_labor_rate
     bucket = {
         "minutes": round(minutes, 2),
         "machine$": round(mach_cost, 2),
@@ -763,8 +759,22 @@ def estimate_milling_minutes_from_geometry(
     if total_minutes <= 0.0:
         return None
 
-    mach_rate = float(_lookup_rate(rates, "MillingRate", "CNC_Mill", default=95.0))
-    labor_rate = float(_lookup_rate(rates, "MillingLaborRate", "LaborRate", default=45.0))
+    mach_rate = float(
+        _lookup_rate(
+            rates,
+            "MillingRate",
+            "CNC_Mill",
+            default=machine_rate("milling"),
+        )
+    )
+    milling_labor_rate = float(
+        _lookup_rate(
+            rates,
+            "MillingLaborRate",
+            "LaborRate",
+            default=labor_rate("milling"),
+        )
+    )
     attend_ratio = _lookup_fraction(
         rates,
         "MillingAttendRatio",
@@ -778,7 +788,7 @@ def estimate_milling_minutes_from_geometry(
     milling_attended_minutes = milling_minutes * max(0.0, min(attend_ratio, 1.0))
 
     machine_cost = (milling_minutes / 60.0) * mach_rate
-    labor_cost = (milling_attended_minutes / 60.0) * labor_rate
+    labor_cost = (milling_attended_minutes / 60.0) * milling_labor_rate
 
     print(
         f"[CHECK/mill-rate] min={milling_minutes:.2f} hr={milling_minutes / 60.0:.2f} "
