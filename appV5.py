@@ -9762,6 +9762,91 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
             if str(entry.get("label")) == PROGRAMMING_PER_PART_LABEL:
                 entry["label"] = PROGRAMMING_AMORTIZED_LABEL
 
+    def _process_table_rows_from_view(
+        view: Mapping[str, Any] | None,
+    ) -> list[list[str]]:
+        if not isinstance(view, _MappingABC):
+            return []
+        buckets_obj = view.get("buckets")
+        if not isinstance(buckets_obj, _MappingABC):
+            return []
+
+        def _as_float(value: Any) -> float:
+            try:
+                return float(value or 0.0)
+            except Exception:
+                return 0.0
+
+        normalized: dict[str, Mapping[str, Any]] = {}
+        for raw_key, raw_entry in buckets_obj.items():
+            if not isinstance(raw_entry, _MappingABC):
+                continue
+            key_text = str(raw_key or "").strip()
+            if not key_text:
+                continue
+            key_lower = key_text.lower()
+            normalized.setdefault(key_lower, raw_entry)
+            normalized.setdefault(key_lower.replace(" ", "_"), raw_entry)
+            canon = _canonical_bucket_key(key_text)
+            if canon:
+                normalized.setdefault(str(canon).lower(), raw_entry)
+
+        pretty_labels = {
+            "programming_amortized": PROGRAMMING_AMORTIZED_LABEL,
+            "programming": PROGRAMMING_PER_PART_LABEL,
+            "milling": "Milling",
+            "drilling": "Drilling",
+            "tapping": "Tapping",
+            "inspection": "Inspection",
+        }
+        order = (
+            "programming_amortized",
+            "milling",
+            "drilling",
+            "tapping",
+            "inspection",
+        )
+
+        def _lookup_entry(key: str) -> Mapping[str, Any] | None:
+            candidate = normalized.get(key)
+            if candidate is not None:
+                return candidate
+            alt = key.replace("_", " ")
+            return normalized.get(alt)
+
+        rows: list[list[str]] = []
+        for canon_key in order:
+            entry = _lookup_entry(canon_key)
+            label_key = canon_key
+            if entry is None and canon_key == "programming_amortized":
+                entry = _lookup_entry("programming")
+                label_key = "programming"
+            if not isinstance(entry, _MappingABC):
+                continue
+            minutes_val = _as_float(entry.get("minutes"))
+            if minutes_val <= 0.0:
+                continue
+            machine_val = _as_float(entry.get("machine$"))
+            labor_val = _as_float(entry.get("labor$"))
+            total_val = entry.get("total$")
+            total_float = _as_float(total_val)
+            if total_float <= 0.0:
+                total_float = machine_val + labor_val
+            label = pretty_labels.get(
+                label_key,
+                str(label_key).replace("_", " ").title(),
+            )
+            rows.append(
+                [
+                    label,
+                    f"{minutes_val:.2f}",
+                    f"${machine_val:.2f}",
+                    f"${labor_val:.2f}",
+                    f"${total_float:.2f}",
+                ]
+            )
+        return rows
+
     render_payload = {
         "summary": summary_payload,
         "price_drivers": price_drivers_payload,
@@ -9779,6 +9864,12 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
             "final_price": round(final_price_val, 2),
         },
     }
+
+    process_table_rows_payload = _process_table_rows_from_view(bucket_view_struct)
+    if not process_table_rows_payload:
+        process_table_rows_payload = _process_table_rows_from_view(bucket_view_obj)
+    if process_table_rows_payload:
+        render_payload["process_table"] = process_table_rows_payload
 
     if quick_what_if_entries:
         render_payload["quick_what_ifs"] = quick_what_if_entries
