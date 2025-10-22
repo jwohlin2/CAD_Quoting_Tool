@@ -3,7 +3,7 @@ from __future__ import annotations
 from typing import Any
 
 from cad_quoter.domain_models import normalize_material_key
-from cad_quoter.estimators import drilling_legacy
+from cad_quoter.estimators import drilling
 
 
 def _make_table(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -21,7 +21,7 @@ def test_material_label_from_table_uses_shared_lookup() -> None:
         ]
     )
     normalized = normalize_material_key("6061 Aluminum")
-    label = drilling_legacy._material_label_from_table(table, "N1", normalized)
+    label = drilling._material_label_from_table(table, "N1", normalized)
     assert label == "6061 Aluminum"
 
 
@@ -40,7 +40,7 @@ def test_select_speeds_feeds_row_respects_aliases_and_group() -> None:
             },
         ]
     )
-    row = drilling_legacy._select_speeds_feeds_row(
+    row = drilling._select_speeds_feeds_row(
         table,
         operation="deep_drill",
         material_key="stainless_steel_303",

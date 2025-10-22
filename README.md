@@ -66,8 +66,19 @@ Automated checks live under `tests/`.  Run the suite with:
 pytest
 ```
 
-The repository also includes a `docs/` directory with deployment notes and
-integration guides for downstream teams.
+### Documentation
+
+All internal documentation now lives on the company wiki (requires SSO
+access).  Use the links below to open the migrated pages:
+
+* [App settings overrides](https://wiki.company.com/display/CAD/CAD+Quoting+Tool+-+App+Settings+Overrides)
+* [AppKit inventory](https://wiki.company.com/display/CAD/CAD+Quoting+Tool+-+AppKit+Inventory)
+* [AppV5 simplification plan](https://wiki.company.com/display/CAD/CAD+Quoting+Tool+-+AppV5+Simplification+Plan)
+* [Consolidation opportunities](https://wiki.company.com/display/CAD/CAD+Quoting+Tool+-+Consolidation+Opportunities)
+* [Deployment guide](https://wiki.company.com/display/CAD/CAD+Quoting+Tool+-+Deployment+Guide)
+* [Internal workflow reference](https://wiki.company.com/display/CAD/CAD+Quoting+Tool+-+Internal+Workflow+Reference)
+* [NRE costs](https://wiki.company.com/display/CAD/CAD+Quoting+Tool+-+NRE+Costs)
+* [Planner pricing migration](https://wiki.company.com/display/CAD/CAD+Quoting+Tool+-+Planner+Pricing+Migration)
 
 ## Troubleshooting
 

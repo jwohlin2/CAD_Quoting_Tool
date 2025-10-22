@@ -11,7 +11,7 @@ from pathlib import Path
 from typing import Any, Mapping as _MappingABC
 
 from cad_quoter.pricing.planner import _geom as _normalize_geom, _material_factor
-from cad_quoter.pricing.process_rates import labor_rate, machine_rate
+from cad_quoter.rates import default_labor_rate, default_machine_rate
 from cad_quoter.speeds_feeds import (
     coerce_table_to_records,
     normalize_material_group_code,
@@ -577,8 +577,8 @@ def build_milling_bucket(
         material_group=material_group,
     )
 
-    milling_machine_rate = machine_rate("milling")
-    milling_labor_rate = labor_rate("milling")
+    milling_machine_rate = default_machine_rate("milling")
+    milling_labor_rate = default_labor_rate("milling")
     mach_cost = (minutes / 60.0) * milling_machine_rate
     labor_cost = (minutes / 60.0) * milling_labor_rate
     bucket = {
@@ -764,7 +764,7 @@ def estimate_milling_minutes_from_geometry(
             rates,
             "MillingRate",
             "CNC_Mill",
-            default=machine_rate("milling"),
+            default=default_machine_rate("milling"),
         )
     )
     milling_labor_rate = float(
@@ -772,7 +772,7 @@ def estimate_milling_minutes_from_geometry(
             rates,
             "MillingLaborRate",
             "LaborRate",
-            default=labor_rate("milling"),
+            default=default_labor_rate("milling"),
         )
     )
     attend_ratio = _lookup_fraction(
