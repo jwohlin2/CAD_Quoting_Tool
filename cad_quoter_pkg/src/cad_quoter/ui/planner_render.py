@@ -1,29 +1,23 @@
+
+"""Runtime shim exposing the packaged planner render helpers."""
 from __future__ import annotations
 
-import copy
-import logging
-import math
-import re
-import typing
-from dataclasses import dataclass, field
-from typing import Any, Callable, Mapping, MutableMapping, TypedDict, cast
-from collections.abc import Iterable, Mapping as _MappingABC, MutableMapping as _MutableMappingABC, Sequence
+from cad_quoter_pkg.src.cad_quoter.ui import planner_render as _planner_render_impl
 
-from cad_quoter.config import logger
-from cad_quoter.app.hole_ops import TAP_MINUTES_BY_CLASS, CBORE_MIN_PER_SIDE_MIN
-from cad_quoter.domain_models import coerce_float_or_none as _coerce_float_or_none
-from cad_quoter.pricing.process_buckets import (
-    BUCKET_ROLE,
-    PLANNER_BUCKET_ORDER,
-    PLANNER_META,
-    canonical_bucket_key as _shared_canonical_bucket_key,
-    flatten_rates as _flatten_rates,
-    lookup_rate as _shared_lookup_rate,
-    normalize_bucket_key as _shared_normalize_bucket_key,
+globals().update(
+    {
+        name: getattr(_planner_render_impl, name)
+        for name in dir(_planner_render_impl)
+        if not name.startswith("__")
+    }
 )
-from cad_quoter.pricing.process_cost_renderer import (
-    canonicalize_costs as _shared_canonicalize_costs,
+
+__all__ = getattr(
+    _planner_render_impl,
+    "__all__",
+    [name for name in globals().keys() if not name.startswith("__")],
 )
+<=
 from cad_quoter.rates import (
     default_labor_rate as _process_labor_rate,
     default_machine_rate as _process_machine_rate,
@@ -36,11 +30,14 @@ from cad_quoter.utils.sheets import canonicalize_amortized_label as _canonical_a
 from .services import QuoteConfiguration
 
 
+
 PROGRAMMING_PER_PART_LABEL = "Programming (per part)"
 PROGRAMMING_AMORTIZED_LABEL = "Programming (amortized)"
 
+
 _MILLING_MACHINE_RATE = _process_machine_rate("milling")
 _MILLING_LABOR_RATE = _process_labor_rate("milling")
+
 
 # Heuristic fallbacks mirrored from appV5 for spot drill and jig grind minutes.
 SPOT_DRILL_MIN_PER_SIDE_MIN = 0.1
@@ -285,18 +282,22 @@ def _lookup_bucket_rate(
         return 0.0
 
     mode = _bucket_cost_mode(search_key)
+
     if mode == "labor":
         fallbacks = ("LaborRate", "labor_rate", "labor")
     else:
         fallbacks = ("MachineRate", "machine_rate", "machine")
+
 
     rate = _shared_lookup_rate(
         search_key,
         flat_rates,
         normalized_rates,
         fallbacks=fallbacks,
+
     )
     return float(rate or 0.0)
+
 
 
 @dataclass
@@ -441,15 +442,19 @@ def _build_planner_bucket_render_state(
     state.rates = _flatten_rate_map(rates)
     flat_rates, normalized_rates = _flatten_rates(rates)
 
+
     def _rate_from(search_key: str, fallbacks: tuple[str, ...]) -> float:
         if not search_key:
             return 0.0
+
         return float(
             _shared_lookup_rate(
                 search_key,
                 flat_rates,
                 normalized_rates,
                 fallbacks=fallbacks,
+
+
             )
             or 0.0
         )
@@ -571,8 +576,10 @@ def _build_planner_bucket_render_state(
         hours_raw = minutes_val / 60.0 if minutes_val else 0.0
         bucket_mode = _bucket_cost_mode(canon_key)
         search_key = str(canon_key or "")
+
         machine_rate_lookup = _rate_from(search_key, ("MachineRate", "machine_rate", "machine"))
         labor_rate_lookup = _rate_from(search_key, ("LaborRate", "labor_rate", "labor"))
+
         cfg_machine_rate = float(getattr(cfg, "machine_rate_per_hr", 0.0) or 0.0) if cfg else 0.0
         cfg_labor_rate = float(getattr(cfg, "labor_rate_per_hr", 0.0) or 0.0) if cfg else 0.0
 
@@ -817,6 +824,8 @@ def _display_rate_for_row(
         rate_lookup = float(getattr(cfg_obj, "labor_rate_per_hr", 0.0) or 0.0)
         if rate_lookup <= 0.0:
             rate_lookup = float(getattr(cfg_obj, "machine_rate_per_hr", 0.0) or 0.0)
+
+
     return f"${rate_lookup:.2f}/hr"
 
 
@@ -938,6 +947,7 @@ def _seed_bucket_minutes(
     def _bucket_rate(name: str, mode: str) -> float:
         if not flat_rates and not normalized_rates:
             return 0.0
+
         fallbacks = ("LaborRate", "labor_rate", "labor") if mode == "labor" else (
             "MachineRate",
             "machine_rate",
@@ -945,6 +955,7 @@ def _seed_bucket_minutes(
         )
         norm_key = _normalize_bucket_key(name)
         role = BUCKET_ROLE.get(norm_key, BUCKET_ROLE.get("_default", "machine_only"))
+
         candidates: list[str | None] = []
         rate_key = _rate_key_for_bucket(name)
         if mode != "labor" or role == "labor_only":
@@ -957,10 +968,12 @@ def _seed_bucket_minutes(
         for candidate in candidates:
             if not candidate:
                 continue
+
             rate = _shared_lookup_rate(candidate, flat_rates, normalized_rates, fallbacks=fallbacks)
             if rate:
                 return float(rate)
         return 0.0
+
 
     bucket_rates: dict[str, dict[str, float]] = {"machine": {}, "labor": {}}
 
@@ -1700,3 +1713,6 @@ __all__ = [
     "_format_planner_bucket_line",
     "_extract_bucket_map",
 ]
+
+>:cad_quoter_pkg/src/cad_quoter/ui/planner_render.py
+
