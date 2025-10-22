@@ -1031,12 +1031,54 @@ def explain_quote(
                 _add_reason("planner buckets include drilling")
 
     plan_info_mappings: list[Mapping[str, Any]] = []
+    process_rows_for_why: list[tuple[str, float, float, float, float]] = []
     bucket_view_obj: Mapping[str, Any] | None = None
+
+    def _capture_process_rows(source: Any) -> None:
+        nonlocal process_rows_for_why
+        if process_rows_for_why or source is None:
+            return
+        if isinstance(source, Mapping):
+            for key in ("process_rows_rendered", "process_rows"):
+                if key in source:
+                    _capture_process_rows(source.get(key))
+            return
+        if isinstance(source, Sequence):
+            rows: list[tuple[str, float, float, float, float]] = []
+            for entry in source:
+                if isinstance(entry, Sequence) and len(entry) >= 5:
+                    name = str(entry[0])
+                    minutes_val = _as_float(entry[1], 0.0)
+                    machine_val = _as_float(entry[2], 0.0)
+                    labor_val = _as_float(entry[3], 0.0)
+                    total_val = _as_float(entry[4], 0.0)
+                    rows.append((name, minutes_val, machine_val, labor_val, total_val))
+                elif isinstance(entry, Mapping):
+                    name = str(
+                        entry.get("name")
+                        or entry.get("label")
+                        or entry.get("process")
+                        or entry.get("bucket")
+                        or ""
+                    )
+                    if not name:
+                        continue
+                    minutes_val = _as_float(entry.get("minutes"), 0.0)
+                    machine_val = _as_float(
+                        entry.get("machine$") or entry.get("machine"), 0.0
+                    )
+                    labor_val = _as_float(entry.get("labor$") or entry.get("labor"), 0.0)
+                    total_val = _as_float(entry.get("total$") or entry.get("total"), 0.0)
+                    rows.append((name, minutes_val, machine_val, labor_val, total_val))
+            if rows:
+                process_rows_for_why = rows
+                return
     if isinstance(plan_info, Mapping) and plan_info:
         plan_info_mappings.extend(_iter_plan_mappings(plan_info))
 
     recognized_ops_from_plan = 0
     for mapping in plan_info_mappings:
+        _capture_process_rows(mapping)
         raw_recognized = mapping.get("recognized_line_items")
         recognized_val = coerce_int(raw_recognized)
         if recognized_val is not None and recognized_val > 0:
@@ -1085,6 +1127,9 @@ def explain_quote(
                 _check_bucket_map(buckets)
             else:
                 _check_bucket_map(bucket_view)
+
+    if not process_rows_for_why:
+        _capture_process_rows(breakdown)
 
     if not plan_drilling_reasons and recognized_ops_from_plan > 0:
         # Recognized operations present but no explicit drilling signal; treat as informational only.
@@ -1257,22 +1302,11 @@ def explain_quote(
 
     buckets = _collect_bucket_entries(bucket_view_obj)
 
-    machine_total = sum(_as_float(bucket.get("machine$"), 0.0) for bucket in buckets.values())
+    machine_total = sum(
+        _as_float(bucket.get("machine$"), 0.0) for bucket in buckets.values()
+    )
     labor_total = sum(_as_float(bucket.get("labor$"), 0.0) for bucket in buckets.values())
     grand_labor = machine_total + labor_total
-
-    grand_labor_text = _format_money(grand_labor)
-    machine_total_text = _format_money(machine_total)
-    labor_total_text = _format_money(labor_total)
-    labor_totals_present = grand_labor > 1e-2 and bool(grand_labor_text)
-    if labor_totals_present and grand_labor_text:
-        cost_makeup_parts.append(f"labor & machine {grand_labor_text}")
-
-    if cost_makeup_parts:
-        lines.append("Cost makeup: " + "; ".join(cost_makeup_parts) + ".")
-
-    if scrap_line:
-        lines.append(scrap_line)
 
     def _top_drivers(
         bucket_entries: Mapping[str, Mapping[str, Any]], n: int = 3
@@ -1295,12 +1329,50 @@ def explain_quote(
         items.sort(key=lambda x: x[1], reverse=True)
         return items[:n]
 
-    drivers = _top_drivers(buckets)
+    why_main_lines: list[str] = []
+    derived_from_rows = False
+    if process_rows_for_why:
+        proc_machine = sum(row[2] for row in process_rows_for_why)
+        proc_labor = sum(row[3] for row in process_rows_for_why)
+        machine_total = proc_machine
+        labor_total = proc_labor
+        grand_labor = proc_machine + proc_labor
+        top_rows = sorted(
+            process_rows_for_why,
+            key=lambda row: row[4],
+            reverse=True,
+        )[:3]
+        why_main_lines = [
+            f"{name} ${total:,.2f}"
+            for (name, _, _, _, total) in top_rows
+            if total > 1e-2
+        ]
+        derived_from_rows = bool(why_main_lines)
+    if not derived_from_rows:
+        drivers = _top_drivers(buckets)
+        why_main_lines = [
+            f"{k.replace('_', ' ').title()} ${v:,.2f}"
+            for k, v in drivers
+            if v > 1e-2
+        ]
+
+    grand_labor_text = _format_money(grand_labor)
+    machine_total_text = _format_money(machine_total)
+    labor_total_text = _format_money(labor_total)
+    labor_totals_present = grand_labor > 1e-2 and bool(grand_labor_text)
+    if labor_totals_present and grand_labor_text:
+        cost_makeup_parts.append(f"labor & machine {grand_labor_text}")
+
+    if cost_makeup_parts:
+        lines.append("Cost makeup: " + "; ".join(cost_makeup_parts) + ".")
+
+    if scrap_line:
+        lines.append(scrap_line)
+
     lines.append("Why this price")
     lines.append("-" * 74)
-    if drivers:
-        txt = ", ".join(f"{k.replace('_', ' ').title()} ${v:,.2f}" for k, v in drivers)
-        lines.append(f"  Main cost drivers: {txt}.")
+    if why_main_lines:
+        lines.append("  Main cost drivers: " + ", ".join(why_main_lines) + ".")
     else:
         lines.append("  Main cost drivers derive from bucket totals; none dominate.")
     if labor_totals_present and grand_labor_text:

@@ -9270,6 +9270,21 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
         if bucket_plan_info:
             plan_info_payload["bucket_state_extra"] = bucket_plan_info
 
+        if process_rows_rendered:
+            plan_info_payload.setdefault(
+                "process_rows_rendered",
+                [
+                    (
+                        name,
+                        minutes,
+                        machine,
+                        labor,
+                        total,
+                    )
+                    for (name, minutes, machine, labor, total) in process_rows_rendered
+                ],
+            )
+
         if plan_info_payload:
             plan_info_for_explainer = plan_info_payload
 
