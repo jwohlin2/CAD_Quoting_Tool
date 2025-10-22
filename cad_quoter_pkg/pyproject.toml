@@ -1,0 +1,39 @@
+[build-system]
+requires = ["setuptools>=65", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "cad-quoter"
+version = "0.1.0"
+description = "Reusable CAD quoting utilities"
+readme = "README.md"
+authors = [{ name = "CAD Quoting Team" }]
+license = { text = "Proprietary" }
+requires-python = ">=3.10"
+dependencies = [
+    "beautifulsoup4>=4.12",
+    "lxml>=4.9",
+    "requests>=2.31",
+    "requests-pkcs12>=1.22",
+    "truststore>=0.9.2",
+    "python-dotenv>=1.0",
+    "pandas>=1.5",
+    "openpyxl>=3.1",
+    "OCP>=7.7",
+    "trimesh>=3.22",
+    "ezdxf>=1.0",
+    "llama-cpp-python>=0.2.0",
+]
+
+[tool.setuptools]
+include-package-data = true
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+cad_quoter = [
+    "resources/**/*",
+    "pricing/resources/**/*",
+    "llm/**/*",
+]
