@@ -22,6 +22,19 @@ dependencies = [
     "types-PyMuPDF==1.24.3.20240525",
 ]
 
+[tool.setuptools]
+include-package-data = true
+
+[tool.setuptools.packages.find]
+where = ["."]
+
+[tool.setuptools.package-data]
+cad_quoter = [
+    "resources/**/*",
+    "pricing/resources/**/*",
+    "llm/**/*",
+]
+
 [tool.ruff]
 line-length = 100
 fix = true
