@@ -29,11 +29,12 @@ extract_features_with_occ = _export_geom("extract_features_with_occ")
 read_cad_any = _export_geom("read_cad_any")
 read_step_shape = _export_geom("read_step_shape")
 safe_bbox = _export_geom("safe_bbox")
-from cad_quoter.app import runtime as _runtime
+from cad_quoter.app import runner as _runtime
 from cad_quoter.resources import default_app_settings_json
 from cad_quoter.domain_models import DEFAULT_MATERIAL_DISPLAY
 from cad_quoter.domain_models import coerce_float_or_none as _coerce_float_or_none
 from cad_quoter.domain_models import normalize_material_key as _normalize_lookup_key
+from cad_quoter.rates import default_labor_rate, default_machine_rate
 from cad_quoter.utils import jdump
 
 from cad_quoter.app.optional_loaders import (
@@ -238,8 +239,8 @@ class QuoteConfiguration:
     round_tol_in: float = 0.05
     stock_rounding_mode: str = "per_axis_min_area"
     separate_machine_labor: bool = True
-    machine_rate_per_hr: float = 90.0
-    labor_rate_per_hr: float = 45.0
+    machine_rate_per_hr: float = default_machine_rate("milling")
+    labor_rate_per_hr: float = default_labor_rate("milling")
     milling_attended_fraction: float = 1.0
     hole_source_preference: str = "table"  # "table" | "geometry" | "auto"
     hole_merge_tol_diam_in: float = 0.001
