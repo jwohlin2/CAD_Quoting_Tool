@@ -8129,6 +8129,18 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
     )
     if extra_ops_lines:
         removal_card_lines.extend(extra_ops_lines)
+        try:
+            _normalize_buckets(breakdown.get("bucket_view"))
+        except Exception:
+            pass
+    else:
+        try:
+            _push(
+                lines,
+                "[DEBUG] extra_ops_lines=0 (no chart_lines/rows visible at callsite)",
+            )
+        except Exception:
+            pass
 
     removal_summary_lines: list[str] = [
         str(line)
