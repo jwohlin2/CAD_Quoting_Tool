@@ -811,8 +811,7 @@ def _build_ops_cards_from_chart_lines(
             _bucket_add_minutes(breakdown_mutable, "drilling", t_group, rates)
 
     if jig_qty > 0:
-        per_jig = float((globals().get("JIG_GRIND_MIN_PER_FEATURE") or 15.0) / 60.0)
-        per_jig = float(JIG_GRIND_MIN_PER_FEATURE)
+        per_jig = float(globals().get("JIG_GRIND_MIN_PER_FEATURE") or 0.75)  # minutes/feature
         t_group = jig_qty * per_jig
         lines += [
             "MATERIAL REMOVAL – JIG GRIND",
