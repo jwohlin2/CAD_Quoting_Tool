@@ -217,9 +217,15 @@ except Exception:
     parse_hole_table_lines = None
 
 try:
-    from cad_quoter.geometry.dxf_text import extract_text_lines_from_dxf
+    from cad_quoter.geometry.dxf_text import (
+        extract_text_lines_from_dxf,
+        harvest_text_lines,
+        HOLE_TOKENS,
+    )
 except Exception:
     extract_text_lines_from_dxf = None
+    harvest_text_lines = None
+    HOLE_TOKENS = None
 
 try:
     from cad_quoter.geometry.dxf_enrich import (
@@ -1230,6 +1236,8 @@ __all__ = [
     "extract_features_with_occ",
     "parse_hole_table_lines",
     "extract_text_lines_from_dxf",
+    "harvest_text_lines",
+    "HOLE_TOKENS",
     "build_geo_from_doc",
     "build_geo_from_dxf",
     "detect_dxf_units",
