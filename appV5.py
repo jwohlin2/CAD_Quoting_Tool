@@ -3632,6 +3632,37 @@ def _compute_drilling_removal_section(
                     continue
         return total
 
+    def _seed_drill_bins_from_geo(geo_map: dict) -> dict[float, int]:
+        """Build counts_by_diam_raw from GEO, robust to different shapes."""
+
+        if not isinstance(geo_map, dict):
+            return {}
+        families = (
+            geo_map.get("hole_diam_families_geom_in")
+            or geo_map.get("hole_diam_families_geom")
+            or geo_map.get("hole_diam_families_in")
+            or {}
+        )
+
+        def _as_float_key(k: Any) -> float | None:
+            # handles '0.5312"' and plain numbers
+            try:
+                return float(str(k).replace('"', "").strip())
+            except Exception:
+                return None
+
+        out: dict[float, int] = {}
+        for k, v in families.items():
+            fk = _as_float_key(k)
+            try:
+                q = int(v) if v is not None else 0
+            except Exception:
+                continue
+            if fk is not None and q > 0:
+                key = round(fk, 4)
+                out[key] = out.get(key, 0) + q
+        return out
+
     drill_bins_raw_total = 0
     drill_bins_adj_total = 0
 
@@ -3906,16 +3937,32 @@ def _compute_drilling_removal_section(
                 counts_by_diam_raw = fallback_counts
                 counts_source = counts_by_diam_raw
 
+            geo_map: dict[str, Any] = {}
+            if isinstance(breakdown, dict):
+                geo_candidate = breakdown.get("geo")
+                if isinstance(geo_candidate, dict):
+                    geo_map = geo_candidate
+            if not geo_map:
+                try:
+                    result_map = result if isinstance(result, dict) else {}
+                except NameError:
+                    result_map = {}
+                geo_candidate = result_map.get("geo") if isinstance(result_map, dict) else {}
+                if isinstance(geo_candidate, dict):
+                    geo_map = geo_candidate
+
+            if not counts_by_diam_raw or sum(int(v) for v in counts_by_diam_raw.values()) == 0:
+                counts_by_diam_raw = _seed_drill_bins_from_geo(dict(geo_map))
+
+            _push(lines, f"[DEBUG] DRILL bins raw={sum(counts_by_diam_raw.values())}")
+
             counts_by_diam = _adjust_drill_counts(
                 counts_source,
                 ops_claims,
                 ops_hint,
             )
             drill_actions = int(sum(counts_by_diam.values()))
-            _push(
-                lines,
-                f"[DEBUG] DRILL bins raw={sum(counts_source.values())} adj={drill_actions}",
-            )
+            _push(lines, f"[DEBUG] DRILL bins adj={drill_actions}")
             ops_hole_count_from_table = drill_actions
 
             remaining_counts = dict(counts_by_diam)
