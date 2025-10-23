@@ -29,6 +29,15 @@ _TAP_ROW_RE = re.compile(r'^\s*(#?\d+(?:-\d+)?|[0-9/]+-[0-9]+)\s+TAP.*×\s+(\d+)
 _parse_qty = _shared_parse_qty
 _side = _shared_side
 
+_COUNTERDRILL_RE = re.compile(
+    r"\b(?:C[’']\s*DRILL|C\s*DRILL|COUNTER\s*DRILL|COUNTERDRILL)\b",
+    re.IGNORECASE,
+)
+_CENTER_OR_SPOT_RE = re.compile(
+    r"\b(CENTER\s*DRILL|SPOT\s*DRILL|SPOT)\b",
+    re.IGNORECASE,
+)
+
 
 def _side_of(text: str | None) -> str:
     match = _SIDE_RE.search(text or "")
@@ -56,6 +65,8 @@ def _row_kind(row: Any) -> str:
             return "tap"
         if _CB_DIA_RE.search(text) or any(token in U for token in ("C'BORE", "CBORE", "COUNTER BORE")):
             return "counterbore"
+        if _COUNTERDRILL_RE.search(text) and not _CENTER_OR_SPOT_RE.search(text):
+            return "counterdrill"
         if (
             _SPOT_RE_TXT.search(text)
             and not _DRILL_THRU.search(text)
@@ -149,6 +160,9 @@ def _extract_ops_from_text(text: str) -> dict[str, int]:
         if _JIG_RE_TXT.search(s):
             counts["jig_grind"] += qty
 
+        if _COUNTERDRILL_RE.search(s) and not _CENTER_OR_SPOT_RE.search(s):
+            counts["counterdrill"] += qty
+
     return dict(counts)
 
 
@@ -177,6 +191,8 @@ def audit_operations(planner_ops_rows: Any, removal_sections_text: str | None) -
                 counts["counterbores_front"] += qty
             elif side == "BACK":
                 counts["counterbores_back"] += qty
+        elif kind in {"counterdrill", "counter-drill", "counter drill"}:
+            counts["counterdrill"] += qty
         elif kind in {"spot", "spot_drill", "spot-drill", "spot drill"}:
             counts["spot"] += qty
         elif kind in {"jig_grind", "jig-grind", "jig grind"}:
@@ -218,11 +234,13 @@ def audit_operations(planner_ops_rows: Any, removal_sections_text: str | None) -
         counts["counterbores_back"] = text_counts.get("counterbores_back", 0)
     counts["spot"] = max(counts["spot"], text_counts.get("spot", 0))
     counts["jig_grind"] = max(counts["jig_grind"], text_counts.get("jig_grind", 0))
+    counts["counterdrill"] = max(counts["counterdrill"], text_counts.get("counterdrill", 0))
 
     counts["actions_total"] = (
         counts["drills"]
         + counts["taps_total"]
         + counts["counterbores_total"]
+        + counts["counterdrill"]
         + counts["spot"]
         + counts["jig_grind"]
     )
