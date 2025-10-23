@@ -11335,6 +11335,39 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
         if removal_summary_extra_lines:
             removal_summary_lines.extend(removal_summary_extra_lines)
 
+        printed_sections = {
+            "tapping": any(
+                isinstance(s, str)
+                and s.strip().upper().startswith("MATERIAL REMOVAL – TAPPING")
+                for s in removal_card_lines
+            ),
+            "counterbore": any(
+                isinstance(s, str)
+                and s.strip().upper().startswith("MATERIAL REMOVAL – COUNTERBORE")
+                for s in removal_card_lines
+            ),
+            "spot": any(
+                isinstance(s, str)
+                and s.strip().upper().startswith("MATERIAL REMOVAL – SPOT")
+                for s in removal_card_lines
+            ),
+            "jig": any(
+                isinstance(s, str)
+                and s.strip().upper().startswith("MATERIAL REMOVAL – JIG")
+                for s in removal_card_lines
+            ),
+        }
+
+        skip_names = set()
+        if printed_sections["tapping"]:
+            skip_names.update({"tap", "npt tap"})
+        if printed_sections["counterbore"]:
+            skip_names.add("counterbore")
+        if printed_sections["spot"]:
+            skip_names.add("spot drill")
+        if printed_sections["jig"]:
+            skip_names.add("jig-grind")
+
         actions_summary_ready = True
         try:
             extra_bucket_ops: MutableMapping[str, Any] | dict[str, Any]
@@ -11354,13 +11387,14 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
                         if not isinstance(entry, _MappingABC):
                             continue
                         name_text = str(entry.get("name") or entry.get("op") or "").strip()
+                        name_lower = name_text.lower()
                         qty_candidate = entry.get("qty")
                         try:
                             qty_val = int(float(qty_candidate))
                         except Exception:
                             qty_val = 0
                         side_val = entry.get("side")
-                        if name_text:
+                        if name_text and name_lower not in skip_names:
                             planner_ops_summary.append(
                                 {"name": name_text, "qty": qty_val, "side": side_val}
                             )
