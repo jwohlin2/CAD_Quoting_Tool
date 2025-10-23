@@ -11459,11 +11459,11 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
                     if isinstance(entry, str) and not entry.startswith("[DEBUG]"):
                         removal_summary_extra_lines.append(entry)
 
-        removal_summary_lines = [
-            str(line) for line in removal_card_lines if isinstance(line, str)
-        ]
-        if removal_summary_extra_lines:
-            removal_summary_lines.extend(removal_summary_extra_lines)
+    removal_summary_lines = [
+        str(line) for line in removal_card_lines if isinstance(line, str)
+    ]
+    if removal_summary_extra_lines:
+        removal_summary_lines.extend(removal_summary_extra_lines)
 
         printed_sections = {
             "tapping": any(
@@ -11529,24 +11529,12 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
                                 {"name": name_text, "qty": qty_val, "side": side_val}
                             )
         except Exception as exc:
-            actions_summary_ready = False
             logging.debug(
                 "[actions-summary] skipped due to %s: %s",
                 exc.__class__.__name__,
                 exc,
                 exc_info=False,
             )
-
-        if actions_summary_ready:
-            try:
-                summarize_actions(removal_summary_lines, planner_ops_summary)
-            except Exception as exc:
-                logging.debug(
-                    "[actions-summary] skipped due to %s: %s",
-                    exc.__class__.__name__,
-                    exc,
-                    exc_info=False,
-                )
 
         milling_bucket_obj = None
         bucket_view_snapshot = (
