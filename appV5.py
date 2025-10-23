@@ -4060,6 +4060,112 @@ def _compute_drilling_removal_section(
     return extras, lines, updated_plan_summary
 
 
+def _adjusted_drill_groups_for_display(
+    breakdown: Mapping[str, Any] | MutableMapping[str, Any] | None,
+    result: Mapping[str, Any] | None,
+    drilling_meta_source: Mapping[str, Any] | None,
+) -> list[dict[str, Any]]:
+    """Return drill groups with geometry-based adjustments applied."""
+
+    geo_contexts: list[Mapping[str, Any]] = []
+
+    def _collect_geo(container: Mapping[str, Any] | MutableMapping[str, Any] | None) -> None:
+        if not isinstance(container, _MappingABC):
+            return
+        for key in ("geo", "geom"):
+            candidate = container.get(key)
+            if isinstance(candidate, _MappingABC):
+                geo_contexts.append(typing.cast(Mapping[str, Any], candidate))
+        if isinstance(container, Mapping):
+            direct = container.get("hole_table_geo")
+            if isinstance(direct, _MappingABC):
+                geo_contexts.append(typing.cast(Mapping[str, Any], direct))
+
+    _collect_geo(breakdown)
+    _collect_geo(result)
+    _collect_geo(drilling_meta_source)
+
+    expanded_geo: list[Mapping[str, Any]] = []
+    for geo_map in geo_contexts:
+        expanded_geo.append(geo_map)
+        for nested in _iter_geo_dicts_for_context(geo_map):
+            if isinstance(nested, _MappingABC):
+                expanded_geo.append(typing.cast(Mapping[str, Any], nested))
+
+    hole_diams_mm: list[float] = []
+    thickness_in: float | None = None
+    ops_claims_map: Mapping[str, Any] | None = None
+    primary_geo: Mapping[str, Any] | None = expanded_geo[0] if expanded_geo else None
+
+    def _extend_hole_diams(source: Mapping[str, Any] | None) -> None:
+        if not isinstance(source, _MappingABC):
+            return
+        for key in ("hole_diams_mm_precise", "hole_diams_mm", "hole_diams"):
+            seq = source.get(key)
+            if isinstance(seq, Sequence) and not isinstance(seq, (str, bytes, bytearray)):
+                for entry in seq:
+                    value = _coerce_float_or_none(entry)
+                    if value is not None and value > 0:
+                        hole_diams_mm.append(float(value))
+
+    def _maybe_thickness(source: Mapping[str, Any] | None) -> None:
+        nonlocal thickness_in
+        if not isinstance(source, _MappingABC) or thickness_in is not None:
+            return
+        thickness_candidates = (
+            source.get("thickness_in"),
+            source.get("plate_thickness_in"),
+            source.get("stock_thickness_in"),
+        )
+        for candidate in thickness_candidates:
+            t_val = _coerce_float_or_none(candidate)
+            if t_val is not None and t_val > 0:
+                thickness_in = float(t_val)
+                return
+        thickness_mm = _coerce_float_or_none(source.get("thickness_mm"))
+        if thickness_mm is not None and thickness_mm > 0:
+            thickness_in = float(thickness_mm) / 25.4
+
+    def _maybe_ops_claims(source: Mapping[str, Any] | None) -> None:
+        nonlocal ops_claims_map
+        if not isinstance(source, _MappingABC) or ops_claims_map is not None:
+            return
+        candidate = source.get("ops_claims")
+        if isinstance(candidate, _MappingABC):
+            ops_claims_map = typing.cast(Mapping[str, Any], candidate)
+            return
+        summary = source.get("ops_summary")
+        if isinstance(summary, _MappingABC):
+            claims = summary.get("claims")
+            if isinstance(claims, _MappingABC):
+                ops_claims_map = typing.cast(Mapping[str, Any], claims)
+
+    for ctx in expanded_geo:
+        _extend_hole_diams(ctx)
+        _maybe_thickness(ctx)
+        _maybe_ops_claims(ctx)
+
+    if not hole_diams_mm:
+        for container in (breakdown, result, drilling_meta_source):
+            if isinstance(container, _MappingABC):
+                _extend_hole_diams(container)
+                _maybe_thickness(container)
+                _maybe_ops_claims(container)
+
+    if not hole_diams_mm:
+        return []
+
+    try:
+        return build_drill_groups_from_geometry(
+            hole_diams_mm,
+            thickness_in,
+            ops_claims_map,
+            primary_geo,
+        )
+    except Exception:
+        return []
+
+
 def _ops_row_details_from_geo(geo: Mapping[str, Any] | None) -> list[Mapping[str, Any]]:
     if not isinstance(geo, _MappingABC):
         return []
@@ -8854,6 +8960,173 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
         material_group=material_group_display,
         drilling_time_per_hole=drilling_time_per_hole_data,
     )
+
+    adjusted_drill_groups = _adjusted_drill_groups_for_display(
+        breakdown,
+        typing.cast(Mapping[str, Any], result) if isinstance(result, _MappingABC) else None,
+        typing.cast(Mapping[str, Any], drilling_meta_map)
+        if isinstance(drilling_meta_map, _MappingABC)
+        else None,
+    )
+    if adjusted_drill_groups and isinstance(removal_card_lines, list):
+        counts_by_diam: dict[float, int] = {}
+        depth_by_diam: dict[float, float] = {}
+        for group in adjusted_drill_groups:
+            if not isinstance(group, _MappingABC):
+                continue
+            dia_val = _coerce_float_or_none(group.get("diameter_in"))
+            qty_val = _coerce_float_or_none(group.get("qty"))
+            if dia_val is None or qty_val is None:
+                continue
+            qty_int = int(round(float(qty_val)))
+            if qty_int <= 0:
+                continue
+            key = round(float(dia_val), 4)
+            counts_by_diam[key] = qty_int
+            depth_val = _coerce_float_or_none(group.get("depth_in"))
+            if depth_val is not None and math.isfinite(depth_val):
+                depth_by_diam.setdefault(key, float(depth_val))
+
+        if counts_by_diam:
+            info_by_dia: dict[float, dict[str, float]] = {}
+
+            def _merge_group_info(source: Sequence[Any] | None) -> None:
+                if not isinstance(source, Sequence):
+                    return
+                for entry in source:
+                    if not isinstance(entry, _MappingABC):
+                        continue
+                    dia_candidate = _coerce_float_or_none(entry.get("diameter_in"))
+                    if dia_candidate is None:
+                        continue
+                    dia_key = round(float(dia_candidate), 4)
+                    target = info_by_dia.setdefault(dia_key, {})
+                    depth_candidate = _coerce_float_or_none(entry.get("depth_in"))
+                    if depth_candidate is not None and math.isfinite(depth_candidate):
+                        target["depth"] = float(depth_candidate)
+                    sfm_candidate = _coerce_float_or_none(entry.get("sfm"))
+                    if sfm_candidate is not None and math.isfinite(sfm_candidate):
+                        target["sfm"] = float(sfm_candidate)
+                    ipr_candidate = _coerce_float_or_none(entry.get("ipr"))
+                    if ipr_candidate is not None and math.isfinite(ipr_candidate):
+                        target["ipr"] = float(ipr_candidate)
+                    per_candidate = (
+                        _coerce_float_or_none(entry.get("minutes_per_hole"))
+                        or _coerce_float_or_none(entry.get("t_per_hole_min"))
+                    )
+                    if per_candidate is not None and math.isfinite(per_candidate):
+                        target["t_per"] = float(per_candidate)
+                    qty_candidate = _coerce_float_or_none(entry.get("qty"))
+                    if qty_candidate is not None and math.isfinite(qty_candidate):
+                        target["qty"] = float(qty_candidate)
+
+            dtph_rows_source = None
+            if isinstance(drilling_time_per_hole_data, _MappingABC):
+                dtph_rows_source = drilling_time_per_hole_data.get("rows")
+            _merge_group_info(dtph_rows_source if isinstance(dtph_rows_source, Sequence) else None)
+
+            if isinstance(drilling_card_detail, _MappingABC):
+                _merge_group_info(drilling_card_detail.get("drill_groups"))
+
+            if isinstance(drilling_meta_map, _MappingABC):
+                _merge_group_info(drilling_meta_map.get("bins_list"))
+
+            hdr = "MATERIAL REMOVAL – DRILLING"
+            try:
+                start_idx = next(
+                    idx
+                    for idx, item in enumerate(removal_card_lines)
+                    if isinstance(item, str) and item.strip().upper().startswith(hdr)
+                )
+            except StopIteration:
+                start_idx = None
+
+            if start_idx is not None:
+                end_idx = start_idx + 1
+                while end_idx < len(removal_card_lines):
+                    text = str(removal_card_lines[end_idx] or "")
+                    if (
+                        text.strip().startswith("MATERIAL REMOVAL –")
+                        and end_idx > start_idx
+                    ):
+                        break
+                    end_idx += 1
+
+                group_start = start_idx + 1
+                while group_start < len(removal_card_lines):
+                    text = str(removal_card_lines[group_start] or "")
+                    if text.strip().upper().startswith("DIA "):
+                        break
+                    group_start += 1
+
+                tail_start = group_start
+                while tail_start < len(removal_card_lines):
+                    text = str(removal_card_lines[tail_start] or "")
+                    if text.strip().startswith("Toolchange adders"):
+                        break
+                    tail_start += 1
+
+                if (
+                    start_idx < len(removal_card_lines)
+                    and tail_start < len(removal_card_lines)
+                    and tail_start < end_idx
+                ):
+                    existing_info: dict[float, dict[str, float]] = {}
+                    drill_line_re = re.compile(
+                        r"Dia\s+([0-9.]+)\"\s*[x×]\s*(\d+).*?depth\s*([0-9.]+)\"\s*\|\s*([0-9.]+)\s*sfm\s*\|\s*([0-9.]+)\s*ipr\s*\|\s*t/hole\s*([0-9.]+)",
+                        re.IGNORECASE,
+                    )
+                    for line in removal_card_lines[group_start:tail_start]:
+                        if not isinstance(line, str):
+                            continue
+                        match = drill_line_re.search(line)
+                        if not match:
+                            continue
+                        dia_key = round(float(match.group(1)), 4)
+                        existing_info[dia_key] = {
+                            "qty": float(match.group(2)),
+                            "depth": float(match.group(3)),
+                            "sfm": float(match.group(4)),
+                            "ipr": float(match.group(5)),
+                            "t_per": float(match.group(6)),
+                        }
+                    for dia_key, payload in existing_info.items():
+                        info_by_dia.setdefault(dia_key, {}).update(payload)
+
+                    existing_counts = {
+                        dia: int(round(info.get("qty", 0.0)))
+                        for dia, info in existing_info.items()
+                        if info.get("qty", 0.0) > 0
+                    }
+                    if (
+                        {dia for dia, qty in existing_counts.items() if qty > 0} !=
+                        {dia for dia, qty in counts_by_diam.items() if qty > 0}
+                        or any(existing_counts.get(dia) != qty for dia, qty in counts_by_diam.items())
+                    ):
+                        header_lines = [
+                            str(item)
+                            for item in removal_card_lines[start_idx:group_start]
+                        ]
+                        tail_lines = [
+                            str(item)
+                            for item in removal_card_lines[tail_start:end_idx]
+                        ]
+                        new_group_lines: list[str] = []
+                        for dia_key in sorted(counts_by_diam.keys()):
+                            qty = counts_by_diam[dia_key]
+                            info = info_by_dia.get(dia_key, {})
+                            depth_val = depth_by_diam.get(dia_key) or info.get("depth") or 0.0
+                            sfm_val = info.get("sfm", 0.0)
+                            ipr_val = info.get("ipr", 0.0)
+                            t_per_val = info.get("t_per", 0.0)
+                            group_total = qty * t_per_val
+                            new_group_lines.append(
+                                f'Dia {dia_key:.3f}" × {qty}  | depth {depth_val:.3f}" | '
+                                f"{int(round(sfm_val))} sfm | {ipr_val:.4f} ipr | "
+                                f"t/hole {t_per_val:.2f} min | group {qty}×{t_per_val:.2f} = {group_total:.2f} min"
+                            )
+                        replacement = header_lines + new_group_lines + [""] + tail_lines
+                        removal_card_lines[start_idx:end_idx] = replacement
 
     # Extra MATERIAL REMOVAL cards from HOLE TABLE text (Counterbore / Spot / Jig)
     extra_ops_lines = _build_ops_cards_from_chart_lines(
