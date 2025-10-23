@@ -365,12 +365,12 @@ def test_parser_rules_v2_to_ops_matches_spec(caplog: pytest.LogCaptureFixture) -
 
 def test_build_ops_rows_from_lines_fallback_extracts_common_ops() -> None:
     lines = [
-        "(2) 1/4-20 TAP",
-        "THRU",
+        r"\A1;(2) 1/4-20 TAP",
+        r"\A0;THRU",
         "0.25 DEEP FROM BACK",
-        "(3) COUNTERBORE Ø0.750",
+        r"(3) COUNTERBORE %%C0.750",
         "X 0.25 DEEP FROM FRONT",
-        "3/8 - NPT",
+        r"\A1;3/8 - NPT",
     ]
 
     rows = build_ops_rows_from_lines_fallback(lines)
