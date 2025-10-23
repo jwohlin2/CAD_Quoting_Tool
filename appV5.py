@@ -9031,6 +9031,19 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
             if isinstance(drilling_meta_map, _MappingABC):
                 _merge_group_info(drilling_meta_map.get("bins_list"))
 
+            for dia_key, info in list(info_by_dia.items()):
+                if dia_key < 1.0 or dia_key in counts_by_diam:
+                    continue
+                qty_val = info.get("qty")
+                if not isinstance(qty_val, (int, float)) or not math.isfinite(qty_val):
+                    continue
+                if qty_val <= 0:
+                    continue
+                counts_by_diam[dia_key] = int(round(float(qty_val)))
+                depth_val = info.get("depth")
+                if isinstance(depth_val, (int, float)) and math.isfinite(depth_val):
+                    depth_by_diam.setdefault(dia_key, float(depth_val))
+
             hdr = "MATERIAL REMOVAL – DRILLING"
             try:
                 start_idx = next(
