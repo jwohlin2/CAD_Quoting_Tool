@@ -10820,10 +10820,14 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
                         removal_summary_lines.append(entry)
 
         try:
-            extra_bucket_ops = None
+            extra_bucket_ops: MutableMapping[str, Any] = {}
+            if isinstance(breakdown, _MappingABC):
+                extra_bucket_ops = dict(breakdown.get("extra_bucket_ops") or {})
             extra_map_candidate = getattr(bucket_state, "extra", None)
             if isinstance(extra_map_candidate, _MappingABC):
-                extra_bucket_ops = extra_map_candidate.get("bucket_ops")
+                extra_bucket_ops_candidate = extra_map_candidate.get("bucket_ops")
+                if isinstance(extra_bucket_ops_candidate, _MappingABC):
+                    extra_bucket_ops.update(extra_bucket_ops_candidate)
             if isinstance(extra_bucket_ops, _MappingABC):
                 for _, entries in extra_bucket_ops.items():
                     if not isinstance(entries, Sequence):
