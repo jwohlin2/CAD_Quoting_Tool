@@ -834,6 +834,52 @@ def test_aggregate_ops_tap_pilot_claims() -> None:
     assert all(entry.get("type") != "drill" for entry in detail)
 
 
+def test_aggregate_ops_claimed_pilot_without_tap_diameter() -> None:
+    _ensure_material_pricing_stubs()
+    import appV5
+
+    rows = [
+        {
+            "hole": "P1",
+            "ref": "Ø0.201",
+            "qty": 2,
+            "desc": "Ø0.201 DRILL THRU 1/4-20 TAP",
+            "diameter_in": 0.201,
+        }
+    ]
+    ops_entries = [
+        {
+            "type": "tap",
+            "qty": 2,
+            "side": "FRONT",
+            "thread": "1/4-20",
+            "source": "CHART",
+        },
+        {
+            "type": "drill",
+            "qty": 2,
+            "ref_dia_in": 0.201,
+            "side": "FRONT",
+            "claimed_by_tap": True,
+            "pilot_for_thread": "1/4-20",
+            "source": "CHART",
+        },
+    ]
+
+    summary = appV5.aggregate_ops(rows, ops_entries=ops_entries)
+
+    totals = summary["totals"]
+    assert totals["drill"] == 0
+    assert totals["tap_front"] == 2
+
+    claims = summary.get("claims", {})
+    assert claims
+    assert claims.get("claimed_pilot_diams") == [pytest.approx(0.201, rel=1e-6)] * 2
+
+    detail = summary.get("rows_detail") or []
+    assert all(entry.get("type") != "drill" for entry in detail)
+
+
 @pytest.mark.parametrize(
     "case",
     [

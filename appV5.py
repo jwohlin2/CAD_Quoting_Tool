@@ -16070,10 +16070,9 @@ def aggregate_ops(
     totals: defaultdict[str, int] = defaultdict(int)
     group_totals: defaultdict[str, dict[str, dict[str, dict[str, Any]]]] = defaultdict(dict)
     detail: list[dict[str, Any]] = []
-    drill_claim_bins: Counter[float] = Counter()
-    tap_claim_bins: Counter[float] = Counter()
-    drill_group_refs: dict[float, list[dict[str, Any]]] = defaultdict(list)
-    drill_detail_refs: dict[float, list[dict[str, Any]]] = defaultdict(list)
+    drill_claim_bins: Counter[float | None] = Counter()
+    drill_group_refs: dict[float | None, list[dict[str, Any]]] = defaultdict(list)
+    drill_detail_refs: dict[float | None, list[dict[str, Any]]] = defaultdict(list)
     claimed_pilot_diams: list[float] = []
 
     rows_simple = list(legacy_summary.get("rows") or [])
@@ -16177,19 +16176,16 @@ def aggregate_ops(
                 totals[f"csk_{'back' if side_norm == 'BACK' else 'front'}"] += qty
             elif op_type == "spot":
                 totals[f"spot_{'back' if side_norm == 'BACK' else 'front'}"] += qty
-            if op_type == "drill" and pilot_flag and dia_key is not None:
+            if op_type == "drill" and pilot_flag:
                 if bucket not in drill_group_refs.setdefault(dia_key, []):
                     drill_group_refs[dia_key].append(bucket)
         if op_type == "drill":
             totals["drill"] += qty
-            if pilot_flag and dia_key is not None:
+            if pilot_flag:
                 drill_claim_bins[dia_key] += qty
                 drill_detail_refs[dia_key].append(detail_entry)
         elif op_type == "jig_grind":
             totals["jig_grind"] += qty
-        if op_type == "tap" and dia_key is not None and dia_key > 0:
-            tap_claim_bins[dia_key] += qty
-            claimed_pilot_diams.extend([float(dia_key)] * qty)
 
     totals["tap_total"] = totals.get("tap_front", 0) + totals.get("tap_back", 0)
     totals["cbore_total"] = totals.get("cbore_front", 0) + totals.get("cbore_back", 0)
@@ -16197,9 +16193,8 @@ def aggregate_ops(
     totals["spot_total"] = totals.get("spot_front", 0) + totals.get("spot_back", 0)
 
     drill_subtracted_total = 0
-    for dia_key, claim_qty in tap_claim_bins.items():
-        available = drill_claim_bins.get(dia_key, 0)
-        subtract = min(available, claim_qty)
+    for dia_key, claim_qty in drill_claim_bins.items():
+        subtract = claim_qty
         if subtract <= 0:
             continue
         drill_subtracted_total += subtract
@@ -16223,6 +16218,8 @@ def aggregate_ops(
             remaining_detail -= take
             if remaining_detail <= 0:
                 break
+        if dia_key is not None:
+            claimed_pilot_diams.extend([float(dia_key)] * subtract)
 
     if drill_subtracted_total:
         totals["drill"] = max(0, totals.get("drill", 0) - drill_subtracted_total)
