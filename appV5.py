@@ -234,6 +234,7 @@ from cad_quoter.utils.machining import (
     _lookup_sfm_ipr,
     _parse_thread_major_in,
     _parse_tpi,
+    _rpm_from_sfm_diam,
 )
 if TYPE_CHECKING:
     from cad_quoter_pkg.src.cad_quoter.resources import default_app_settings_json
@@ -1020,6 +1021,68 @@ def _emit_hole_table_ops_cards(
             float(tap_lrate or 0.0),
         )
 
+        speeds_map = _normalize_speeds_csv_map(speeds_csv)
+
+        cbore_rows = _collect_ops_rows_for_kind(
+            ops_summary=ops_summary,
+            rows=rows,
+            kind="cbore",
+            material_group=material_group,
+            speeds_csv=speeds_map,
+        )
+        if cbore_rows:
+            cbore_total_min = _render_ops_card(
+                lambda text: _push(lines, text),
+                title="Material Removal – Counterbore",
+                rows=cbore_rows,
+            )
+            cbore_total_min = float(cbore_total_min or 0.0)
+            try:
+                if isinstance(ops_summary, (_MutableMappingABC, dict)):
+                    typing.cast(MutableMapping[str, Any], ops_summary)["cbore_minutes_total"] = cbore_total_min
+            except Exception:
+                pass
+
+        spot_rows = _collect_ops_rows_for_kind(
+            ops_summary=ops_summary,
+            rows=rows,
+            kind="spot",
+            material_group=material_group,
+            speeds_csv=speeds_map,
+        )
+        if spot_rows:
+            spot_total_min = _render_ops_card(
+                lambda text: _push(lines, text),
+                title="Material Removal – Spot Drill",
+                rows=spot_rows,
+            )
+            spot_total_min = float(spot_total_min or 0.0)
+            try:
+                if isinstance(ops_summary, (_MutableMappingABC, dict)):
+                    typing.cast(MutableMapping[str, Any], ops_summary)["spot_minutes_total"] = spot_total_min
+            except Exception:
+                pass
+
+        jig_rows = _collect_ops_rows_for_kind(
+            ops_summary=ops_summary,
+            rows=rows,
+            kind="jig_grind",
+            material_group=material_group,
+            speeds_csv=speeds_map,
+        )
+        if jig_rows:
+            jig_total_min = _render_ops_card(
+                lambda text: _push(lines, text),
+                title="Material Removal – Jig Grind",
+                rows=jig_rows,
+            )
+            jig_total_min = float(jig_total_min or 0.0)
+            try:
+                if isinstance(ops_summary, (_MutableMappingABC, dict)):
+                    typing.cast(MutableMapping[str, Any], ops_summary)["jig_grind_minutes_total"] = jig_total_min
+            except Exception:
+                pass
+
         _normalize_buckets(bucket_view_obj)
 
         dbg_entry: Mapping[str, Any] | None = None
@@ -1569,6 +1632,446 @@ def _finalize_tapping_rows(
     return finalized
 
 
+_COUNTERBORE_INDEX_MIN = 0.06
+_COUNTERBORE_RETRACT_FACTOR = 1.3
+_COUNTERBORE_EXTRA_TRAVEL_IN = 0.05
+_SPOT_INDEX_MIN = 0.05
+_SPOT_DEFAULT_DEPTH_IN = 0.1
+_JIG_GRIND_RATE_IPM = 0.02
+_JIG_GRIND_INDEX_MIN = 0.25
+_MIN_IPM_DENOM = 0.1
+
+
+def _format_ops_feed(ipr: float | None, rpm: float | None, ipm: float | None) -> str:
+    ipr_txt = "-" if ipr is None else f"{ipr:.4f}"
+    rpm_txt = "-" if rpm is None else f"{int(round(rpm))}"
+    ipm_txt = "-" if ipm is None else f"{ipm:.3f}"
+    return f"{ipr_txt} ipr | {rpm_txt} rpm | {ipm_txt} ipm"
+
+
+def _normalize_speeds_csv_map(
+    speeds_csv: Mapping[str, Any] | MutableMapping[str, Any] | None,
+) -> dict[str, Any] | None:
+    if isinstance(speeds_csv, dict):
+        return speeds_csv
+    if isinstance(speeds_csv, (_MutableMappingABC, _MappingABC)):
+        try:
+            return dict(speeds_csv)
+        except Exception:
+            return None
+    return None
+
+
+def _runtime_counterbore(
+    diameter_in: float | None,
+    depth_in: float | None,
+    *,
+    material_group: str | None,
+    speeds_csv: Mapping[str, Any] | None,
+) -> tuple[float | None, str]:
+    sfm, ipr = _lookup_sfm_ipr("counterbore", diameter_in, material_group, speeds_csv)
+    rpm = _rpm_from_sfm_diam(sfm, diameter_in) if diameter_in else None
+    ipm = _ipm_from_rpm_ipr(rpm, ipr)
+    minutes: float | None = None
+    if depth_in is not None and ipm is not None:
+        travel = max(0.0, float(depth_in))
+        cycle = (travel * _COUNTERBORE_RETRACT_FACTOR) + _COUNTERBORE_EXTRA_TRAVEL_IN
+        minutes = (cycle / max(_MIN_IPM_DENOM, ipm)) + _COUNTERBORE_INDEX_MIN
+    feed_fmt = _format_ops_feed(ipr, rpm, ipm)
+    return minutes, feed_fmt
+
+
+def _runtime_spot(
+    depth_in: float | None,
+    *,
+    material_group: str | None,
+    speeds_csv: Mapping[str, Any] | None,
+) -> tuple[float | None, str]:
+    tool_dia = 0.1875
+    sfm, ipr = _lookup_sfm_ipr("spot", tool_dia, material_group, speeds_csv)
+    rpm = _rpm_from_sfm_diam(sfm, tool_dia)
+    ipm = _ipm_from_rpm_ipr(rpm, ipr)
+    travel = depth_in if depth_in is not None else _SPOT_DEFAULT_DEPTH_IN
+    minutes: float | None = None
+    if ipm is not None:
+        cycle = max(0.0, float(travel))
+        minutes = (cycle / max(_MIN_IPM_DENOM, ipm)) + _SPOT_INDEX_MIN
+    feed_fmt = _format_ops_feed(ipr, rpm, ipm)
+    return minutes, feed_fmt
+
+
+def _runtime_jig(depth_in: float | None) -> tuple[float | None, str]:
+    travel = depth_in if depth_in is not None else 0.25
+    ipm = _JIG_GRIND_RATE_IPM
+    minutes = (max(0.0, float(travel)) / max(_MIN_IPM_DENOM, ipm)) + _JIG_GRIND_INDEX_MIN
+    feed_fmt = _format_ops_feed(None, None, ipm)
+    return minutes, feed_fmt
+
+
+def _label_for_ops_kind(
+    kind: str,
+    *,
+    diameter_in: float | None,
+    ref_label: Any,
+    ref_text: Any,
+) -> str:
+    base = str(ref_label or ref_text or "").strip()
+    base_upper = base.upper()
+    if kind == "cbore":
+        if diameter_in is not None and diameter_in > 0:
+            return f"{diameter_in:.4f} C’BORE"
+        if any(token in base_upper for token in ("C’BORE", "CBORE", "COUNTERBORE")):
+            return base
+        return f"{base} C’BORE".strip()
+    if kind == "spot":
+        if any(token in base_upper for token in ("C’DRILL", "SPOT")):
+            return base
+        return (base + " C’DRILL").strip() or "C’DRILL"
+    if kind in {"jig", "jig_grind"}:
+        if "JIG" in base_upper:
+            return base
+        return (base + " JIG GRIND").strip() or "JIG GRIND"
+    return base or kind
+
+
+def _depth_from_desc(text: str) -> float | None:
+    if not text:
+        return None
+    match = _DEPTH_TOKEN.search(text)
+    if match:
+        return _first_numeric_or_none(match.group(1))
+    match = RE_DEPTH.search(text)
+    if match:
+        return _first_numeric_or_none(match.group(1))
+    return None
+
+
+def _extract_sides_from_desc(desc_upper: str) -> list[str]:
+    if _SIDE_BOTH.search(desc_upper):
+        return ["FRONT", "BACK"]
+    if _SIDE_BACK.search(desc_upper):
+        return ["BACK"]
+    if _SIDE_FRONT.search(desc_upper):
+        return ["FRONT"]
+    return ["FRONT"]
+
+
+def _runtime_for_kind(
+    kind: str,
+    *,
+    diameter_in: float | None,
+    depth_in: float | None,
+    material_group: str | None,
+    speeds_csv: Mapping[str, Any] | None,
+) -> tuple[float | None, str]:
+    if kind == "cbore":
+        return _runtime_counterbore(diameter_in, depth_in, material_group=material_group, speeds_csv=speeds_csv)
+    if kind == "spot":
+        return _runtime_spot(depth_in, material_group=material_group, speeds_csv=speeds_csv)
+    if kind in {"jig", "jig_grind"}:
+        return _runtime_jig(depth_in)
+    return None, _format_ops_feed(None, None, None)
+
+
+def _build_ops_card_row(
+    *,
+    kind: str,
+    label: str,
+    qty: int,
+    side: str,
+    diameter_in: float | None,
+    depth_in: float | None,
+    material_group: str | None,
+    speeds_csv: Mapping[str, Any] | None,
+) -> dict[str, Any]:
+    side_norm = str(side or "").upper()
+    if side_norm not in {"FRONT", "BACK"}:
+        side_norm = "FRONT"
+    minutes, feed_fmt = _runtime_for_kind(
+        kind,
+        diameter_in=diameter_in,
+        depth_in=depth_in,
+        material_group=material_group,
+        speeds_csv=speeds_csv,
+    )
+    minutes_val = float(minutes) if minutes is not None and math.isfinite(minutes) else 0.0
+    return {
+        "label": label or kind,
+        "qty": int(qty),
+        "side": side_norm,
+        "depth_in": float(depth_in) if depth_in is not None and math.isfinite(float(depth_in)) else None,
+        "depth_in_display": f'{float(depth_in):.2f}"' if depth_in is not None else "-",
+        "feed_fmt": feed_fmt,
+        "t_per_hole_min": round(minutes_val, 3),
+    }
+
+
+def _ops_card_rows_from_group_totals(
+    ops_summary: Mapping[str, Any] | MutableMapping[str, Any] | None,
+    *,
+    kind: str,
+    material_group: str | None,
+    speeds_csv: Mapping[str, Any] | None,
+) -> list[dict[str, Any]]:
+    if not isinstance(ops_summary, _MappingABC):
+        return []
+    group_totals = ops_summary.get("group_totals")
+    if not isinstance(group_totals, _MappingABC):
+        return []
+    type_map = group_totals.get(kind)
+    if not isinstance(type_map, _MappingABC):
+        return []
+    rows: list[dict[str, Any]] = []
+    for side_map in type_map.values():
+        if not isinstance(side_map, _MappingABC):
+            continue
+        for side_key, payload in side_map.items():
+            if not isinstance(payload, _MappingABC):
+                continue
+            qty = _coerce_int_or_zero(payload.get("qty"))
+            if qty <= 0:
+                continue
+            side_norm = str(side_key or "").upper()
+            depth_in = _first_numeric_or_none(
+                payload.get("depth_in_avg"),
+                payload.get("depth_in"),
+                payload.get("depth_in_max"),
+                payload.get("depth_in_min"),
+            )
+            diameter_in = _first_numeric_or_none(
+                payload.get("diameter_in"),
+                payload.get("ref_dia_in"),
+                _parse_ref_to_inch(payload.get("ref_label")),
+                _parse_ref_to_inch(payload.get("ref")),
+            )
+            label = _label_for_ops_kind(
+                kind,
+                diameter_in=diameter_in,
+                ref_label=payload.get("ref_label"),
+                ref_text=payload.get("ref"),
+            )
+            rows.append(
+                _build_ops_card_row(
+                    kind=kind,
+                    label=label,
+                    qty=qty,
+                    side=side_norm,
+                    diameter_in=diameter_in,
+                    depth_in=depth_in,
+                    material_group=material_group,
+                    speeds_csv=speeds_csv,
+                )
+            )
+    return rows
+
+
+def _ops_card_rows_from_detail(
+    ops_summary: Mapping[str, Any] | MutableMapping[str, Any] | None,
+    *,
+    kind: str,
+    material_group: str | None,
+    speeds_csv: Mapping[str, Any] | None,
+) -> list[dict[str, Any]]:
+    if not isinstance(ops_summary, _MappingABC):
+        return []
+    detail_obj = ops_summary.get("rows_detail")
+    if not isinstance(detail_obj, list):
+        return []
+    aggregated: dict[tuple[str, str, float | None, float | None], dict[str, Any]] = {}
+    for entry in detail_obj:
+        if not isinstance(entry, _MappingABC):
+            continue
+        entry_type = str(entry.get("type") or "").lower()
+        if entry_type != kind:
+            continue
+        qty = _coerce_int_or_zero(entry.get("qty"))
+        if qty <= 0:
+            continue
+        sides = list(entry.get("sides") or [])
+        if not sides:
+            side_single = entry.get("side")
+            if side_single:
+                sides = [side_single]
+        if not sides:
+            sides = ["FRONT"]
+        diameter_in = _first_numeric_or_none(
+            entry.get("ref_dia_in"),
+            entry.get("diameter_in"),
+            _parse_ref_to_inch(entry.get("ref_label")),
+            _parse_ref_to_inch(entry.get("ref")),
+        )
+        depth_in = _first_numeric_or_none(entry.get("depth_in"))
+        label = _label_for_ops_kind(
+            kind,
+            diameter_in=diameter_in,
+            ref_label=entry.get("ref_label"),
+            ref_text=entry.get("ref"),
+        )
+        for side in sides:
+            side_norm = str(side or "").upper() or "FRONT"
+            key = (
+                label,
+                side_norm,
+                round(diameter_in, 5) if diameter_in is not None else None,
+                round(depth_in, 5) if depth_in is not None else None,
+            )
+            bucket = aggregated.setdefault(
+                key,
+                {
+                    "label": label,
+                    "qty": 0,
+                    "side": side_norm,
+                    "diameter_in": diameter_in,
+                    "_depths": [],
+                },
+            )
+            bucket["qty"] += qty
+            if depth_in is not None:
+                bucket.setdefault("_depths", []).append(float(depth_in))
+            if bucket.get("diameter_in") is None and diameter_in is not None:
+                bucket["diameter_in"] = diameter_in
+    rows: list[dict[str, Any]] = []
+    for bucket in aggregated.values():
+        depth_values = [float(val) for val in bucket.pop("_depths", []) if isinstance(val, (int, float))]
+        depth_in = sum(depth_values) / len(depth_values) if depth_values else None
+        rows.append(
+            _build_ops_card_row(
+                kind=kind,
+                label=bucket.get("label", kind),
+                qty=bucket.get("qty", 0),
+                side=bucket.get("side", "FRONT"),
+                diameter_in=bucket.get("diameter_in"),
+                depth_in=depth_in,
+                material_group=material_group,
+                speeds_csv=speeds_csv,
+            )
+        )
+    return rows
+
+
+def _ops_card_rows_from_simple(
+    rows: Sequence[Any] | None,
+    *,
+    kind: str,
+    material_group: str | None,
+    speeds_csv: Mapping[str, Any] | None,
+) -> list[dict[str, Any]]:
+    extracted: list[dict[str, Any]] = []
+    if not rows:
+        return extracted
+    for entry in rows:
+        if not isinstance(entry, _MappingABC):
+            if isinstance(entry, dict):
+                entry_map = entry
+            else:
+                continue
+        else:
+            entry_map = entry
+        qty = _coerce_int_or_zero(entry_map.get("qty"))
+        if qty <= 0:
+            continue
+        desc = str(entry_map.get("desc") or "")
+        if not desc:
+            continue
+        desc_upper = desc.upper()
+        if kind == "cbore" and not any(token in desc_upper for token in ("C’BORE", "CBORE", "COUNTERBORE")):
+            continue
+        if kind == "spot" and not any(token in desc_upper for token in ("SPOT", "C’DRILL", "CENTER DRILL")):
+            continue
+        if kind in {"jig", "jig_grind"} and "JIG" not in desc_upper:
+            continue
+        sides = _extract_sides_from_desc(desc_upper)
+        diameter_in = _first_numeric_or_none(
+            entry_map.get("diameter_in"),
+            _parse_ref_to_inch(entry_map.get("ref")),
+            _parse_ref_to_inch(desc),
+        )
+        depth_in = _first_numeric_or_none(entry_map.get("depth_in"), _depth_from_desc(desc))
+        label = _label_for_ops_kind(
+            kind,
+            diameter_in=diameter_in,
+            ref_label=entry_map.get("label"),
+            ref_text=desc,
+        )
+        feed_fmt = str(entry_map.get("feed_fmt") or "").strip()
+        minutes_raw = entry_map.get("t_per_hole_min")
+        try:
+            minutes_val = float(minutes_raw)
+            if not math.isfinite(minutes_val) or minutes_val < 0:
+                minutes_val = None
+        except Exception:
+            minutes_val = None
+        if minutes_val is None:
+            minutes_calc, feed_calc = _runtime_for_kind(
+                kind,
+                diameter_in=diameter_in,
+                depth_in=depth_in,
+                material_group=material_group,
+                speeds_csv=speeds_csv,
+            )
+            if minutes_calc is not None:
+                minutes_val = float(minutes_calc)
+            if not feed_fmt:
+                feed_fmt = feed_calc
+        if not feed_fmt:
+            _, feed_calc = _runtime_for_kind(
+                kind,
+                diameter_in=diameter_in,
+                depth_in=depth_in,
+                material_group=material_group,
+                speeds_csv=speeds_csv,
+            )
+            feed_fmt = feed_calc
+        minutes_clean = minutes_val if minutes_val is not None and math.isfinite(minutes_val) else 0.0
+        for side in sides:
+            row = _build_ops_card_row(
+                kind=kind,
+                label=label,
+                qty=qty,
+                side=side,
+                diameter_in=diameter_in,
+                depth_in=depth_in,
+                material_group=material_group,
+                speeds_csv=speeds_csv,
+            )
+            row["feed_fmt"] = feed_fmt or row.get("feed_fmt")
+            row["t_per_hole_min"] = round(minutes_clean, 3)
+            extracted.append(row)
+    return extracted
+
+
+def _collect_ops_rows_for_kind(
+    *,
+    ops_summary: Mapping[str, Any] | MutableMapping[str, Any] | None,
+    rows: Sequence[Any] | None,
+    kind: str,
+    material_group: str | None,
+    speeds_csv: Mapping[str, Any] | None,
+) -> list[dict[str, Any]]:
+    rows_from_totals = _ops_card_rows_from_group_totals(
+        ops_summary,
+        kind=kind,
+        material_group=material_group,
+        speeds_csv=speeds_csv,
+    )
+    if rows_from_totals:
+        return rows_from_totals
+    rows_from_detail = _ops_card_rows_from_detail(
+        ops_summary,
+        kind=kind,
+        material_group=material_group,
+        speeds_csv=speeds_csv,
+    )
+    if rows_from_detail:
+        return rows_from_detail
+    return _ops_card_rows_from_simple(
+        rows,
+        kind=kind,
+        material_group=material_group,
+        speeds_csv=speeds_csv,
+    )
+
+
 def _render_ops_card(
     append_line: Callable[[str], None],
     *,
@@ -1635,10 +2138,46 @@ def summarize_actions(removal_lines: list[str], planner_ops: list[dict]) -> None
     )
     spotln_re = re.compile(r'^\s*MATERIAL REMOVAL – SPOT|Spot drill ×\s*(\d+)', re.IGNORECASE)
     jigln_re = re.compile(r'^\s*MATERIAL REMOVAL – JIG GRIND|Jig grind ×\s*(\d+)', re.IGNORECASE)
+    qty_re = re.compile(r'[×x]\s*(\d+)')
+
+    card_counts = {"counterbore": False, "spot": False, "jig_grind": False}
+    active_card: str | None = None
 
     for ln in removal_lines or []:
         if not isinstance(ln, str):
             continue
+
+        header = ln.upper().strip()
+        if header.startswith("MATERIAL REMOVAL –"):
+            if "COUNTERBORE" in header:
+                active_card = "counterbore"
+            elif "SPOT" in header:
+                active_card = "spot"
+            elif "JIG" in header:
+                active_card = "jig_grind"
+            elif "TAPPING" in header:
+                active_card = "tap"
+            else:
+                active_card = None
+            continue
+
+        if not ln.strip():
+            active_card = None
+            continue
+
+        if ln.strip().startswith("-") or ln.strip().startswith("="):
+            continue
+
+        if active_card in {"counterbore", "spot", "jig_grind"}:
+            qty_match = qty_re.search(ln)
+            if qty_match:
+                qty = int(qty_match.group(1))
+                side = _side_from(ln)
+                total[active_card] += qty
+                by_side[active_card][side] += qty
+                card_counts[active_card] = True
+            continue
+
         m = drill_re.search(ln)
         if m:
             qty = int(m.group(1))
@@ -1654,7 +2193,7 @@ def summarize_actions(removal_lines: list[str], planner_ops: list[dict]) -> None
             by_side["tap"][side] += qty
             continue
 
-        if cbore_re.search(ln) or "C’BORE GROUPS" in ln or "CBORE" in ln:
+        if not card_counts["counterbore"] and (cbore_re.search(ln) or "C’BORE GROUPS" in ln or "CBORE" in ln):
             m_qty = re.search(r'[×x]\s*(\d+)', ln)
             if m_qty:
                 qty = int(m_qty.group(1))
@@ -1664,7 +2203,7 @@ def summarize_actions(removal_lines: list[str], planner_ops: list[dict]) -> None
                 continue
 
         m = spotln_re.search(ln)
-        if m:
+        if not card_counts["spot"] and m:
             qty = int(m.group(1)) if m.lastindex else 0
             if qty:
                 total["spot"] += qty
@@ -1672,7 +2211,7 @@ def summarize_actions(removal_lines: list[str], planner_ops: list[dict]) -> None
                 continue
 
         m = jigln_re.search(ln)
-        if m:
+        if not card_counts["jig_grind"] and m:
             qty = int(m.group(1)) if m.lastindex else 0
             if qty:
                 total["jig_grind"] += qty
@@ -1695,12 +2234,18 @@ def summarize_actions(removal_lines: list[str], planner_ops: list[dict]) -> None
         side = (op.get("side") or "unspecified").lower()
 
         if "counterbore" in name or "c-bore" in name or "cbore" in name:
+            if card_counts["counterbore"]:
+                continue
             total["counterbore"] += qty
             by_side["counterbore"][side] += qty
         elif "spot" in name and "drill" in name:
+            if card_counts["spot"]:
+                continue
             total["spot"] += qty
             by_side["spot"][side] += qty
         elif "jig" in name and "grind" in name:
+            if card_counts["jig_grind"]:
+                continue
             total["jig_grind"] += qty
             by_side["jig_grind"][side] += qty
 
