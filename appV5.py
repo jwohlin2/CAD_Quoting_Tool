@@ -10248,6 +10248,35 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
 
     # Render MATERIAL REMOVAL card + TIME PER HOLE lines (replace legacy Time block)
     # NOTE: Patch 3 keeps the hole-table hook active so downstream cards continue to render.
+    # -- Ensure extra ops cards are appended to the SAME list that gets printed --
+    try:
+        geo_map = ((result or {}).get("geo") if isinstance(result, _MappingABC) else None) \
+                  or ((breakdown or {}).get("geo") if isinstance(breakdown, _MappingABC) else None) \
+                  or {}
+    except Exception:
+        geo_map = {}
+
+    # We can re-collect lines here—same function that produced chart_lines_found=10
+    try:
+        chart_lines_all = _collect_chart_lines_context(ctx, geo_map, ctx_a, ctx_b)
+    except Exception:
+        chart_lines_all = []
+
+    # Use any rows already built earlier (if present)
+    try:
+        ops_rows_now = (((geo_map or {}).get("ops_summary") or {}).get("rows") or [])
+    except Exception:
+        ops_rows_now = []
+
+    _appended_at_print = _append_counterbore_spot_jig_cards(
+        lines_out=removal_card_lines,     # <— append directly to the printed list
+        chart_lines=chart_lines_all,
+        rows=ops_rows_now,
+        breakdown_mutable=breakdown_mutable,
+        rates=rates,
+    )
+    _push(lines, f"[DEBUG] extra_ops_appended_at_print={_appended_at_print}")
+
     append_lines(removal_card_lines)
 
     try:
