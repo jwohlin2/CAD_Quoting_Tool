@@ -140,16 +140,16 @@ _RE_FROM_SIDE = re.compile(r"\bFROM\s+(FRONT|BACK)\b", re.I)
 _RE_DEPTH_MULT = re.compile(r"[×x]\s*([0-9.]+)\b", re.I)
 _RE_DEPTH_DEEP = re.compile(r"(\d+(?:\.\d+)?)\s*DEEP(?:\s+FROM\s+(FRONT|BACK))?", re.I)
 _RE_THRU = re.compile(r"\bTHRU\b", re.I)
-_RE_DIA_ANY = re.compile(r"(?:Ø|⌀|DIA|O)\s*([0-9.]+)|\(([0-9.]+)\s*Ø?\)|\b([0-9.]+)\b")
+_RE_DIA_ANY = re.compile(r"(?:%%[Cc]|Ø|⌀|DIA|O)\s*([0-9.]+)|\(([0-9.]+)\s*Ø?\)|\b([0-9.]+)\b")
 _RE_TAP = re.compile(
     r"(\(\d+\)\s*)?(#\s*\d{1,2}-\d+|(?:\d+/\d+)\s*-\s*\d+|(?:\d+(?:\.\d+)?)\s*-\s*\d+|M\d+(?:\.\d+)?\s*x\s*\d+(?:\.\d+)?)\s*TAP",
     re.I,
 )
 _RE_CBORE = re.compile(r"\b(C['’]?\s*BORE|CBORE|COUNTER\s*BORE)\b", re.I)
 _RE_NPT = re.compile(r"(\d+/\d+)\s*-\s*N\.?P\.?T\.?", re.I)
-_RE_MM_IN_DIA = re.compile(r"(?:Ø|⌀|O|DIA|\b)\s*([0-9.]+)")
+_RE_MM_IN_DIA = re.compile(r"(?:%%[Cc]|Ø|⌀|O|DIA|\b)\s*([0-9.]+)")
 _RE_PAREN_DIA = re.compile(r"\(([0-9.]+)\s*Ø?\)")
-_RE_DIA_SIMPLE = re.compile(r"[Ø⌀\u00D8]?\s*(\d+(?:\.\d+)?)", re.I)
+_RE_DIA_SIMPLE = re.compile(r"(?:%%[Cc]\s*|[Ø⌀\u00D8]\s*)?(\d+(?:\.\d+)?)", re.I)
 _RE_JIG_GRIND = re.compile(r"\bJIG\s*GRIND\b", re.I)
 
 

@@ -31,7 +31,7 @@ RE_CBORE = re.compile(r"C[’']?BORE|CBORE|COUNTERBORE", re.I)
 RE_CSK = re.compile(r"CSK|C'SINK|COUNTERSINK", re.I)
 _RE_DEPTH_OR_THICK = re.compile(r"(\d+(?:\.\d+)?)\s*DEEP(?:\s+FROM\s+(FRONT|BACK))?", re.I)
 RE_DEPTH = _RE_DEPTH_OR_THICK
-RE_DIA = re.compile(r"[Ø⌀\u00D8]?\s*(\d+(?:\.\d+)?)", re.I)
+RE_DIA = re.compile(r"(?:%%[Cc]\s*|[Ø⌀\u00D8]\s*)?(\d+(?:\.\d+)?)", re.I)
 RE_FRONT_BACK = re.compile(
     r"FRONT\s*&\s*BACK|FRONT\s+AND\s+BACK|BOTH\s+SIDES|TWO\s+SIDES|2\s+SIDES|OPPOSITE\s+SIDE",
     re.I,
@@ -74,14 +74,14 @@ _THREAD_WITH_NPT_RE = re.compile(
     re.I,
 )
 _CBORE_RE = re.compile(
-    r"(?:^|[ ;])(?:Ø|⌀|DIA)?\s*((?:\d+\s*/\s*\d+)|(?:\d+(?:\.\d+)?))\s*(?:C['’]?\s*BORE|CBORE|COUNTER\s*BORE)",
+    r"(?:^|[ ;])(?:%%[Cc]|Ø|⌀|DIA)?\s*((?:\d+\s*/\s*\d+)|(?:\d+(?:\.\d+)?))\s*(?:C['’]?\s*BORE|CBORE|COUNTER\s*BORE)",
     re.I,
 )
 _SIDE_BACK = re.compile(r"\b(?:FROM\s+)?BACK\b", re.I)
 _SIDE_FRONT = re.compile(r"\b(?:FROM\s+)?FRONT\b", re.I)
 _DEPTH_TOKEN = re.compile(r"[×xX]\s*([0-9.]+)\b")
 _DIA_TOKEN = re.compile(
-    r"(?:Ø|⌀|REF|DIA)[^0-9]*((?:\d+\s*/\s*\d+)|(?:\d+)?\.\d+|\d+(?:\.\d+)?)",
+    r"(?:%%[Cc]|Ø|⌀|REF|DIA)[^0-9]*((?:\d+\s*/\s*\d+)|(?:\d+)?\.\d+|\d+(?:\.\d+)?)",
     re.I,
 )
 
@@ -99,7 +99,9 @@ def _parse_ref_to_inch(value: Any) -> float | None:
     if not text:
         return None
     cleaned = (
-        text.replace("\u00D8", "")
+        text.replace("%%C", "")
+        .replace("%%c", "")
+        .replace("\u00D8", "")
         .replace("Ø", "")
         .replace("⌀", "")
         .replace("IN", "")
@@ -230,7 +232,7 @@ def _normalize_hole_text(text: str | None) -> str:
     if not text:
         return ""
     cleaned = re.sub(r"\s+", " ", str(text)).strip().upper()
-    cleaned = cleaned.replace("Ø", "").replace("⌀", "")
+    cleaned = cleaned.replace("%%C", "").replace("%%c", "").replace("Ø", "").replace("⌀", "")
     return cleaned
 
 
@@ -506,7 +508,7 @@ def _parse_hole_line(line: str, to_in: float, *, source: str | None = None) -> d
     if re.search(r"\b(FRONT\s*&\s*BACK|BOTH\s+SIDES)\b", U):
         entry["double_sided"] = True
 
-    mref = re.search(r"REF\s*[Ø⌀]\s*(\d+(?:\.\d+)?)", U)
+    mref = re.search(r"REF\s*(?:%%[Cc]|[Ø⌀])\s*(\d+(?:\.\d+)?)", U)
     if mref:
         try:
             entry["ref_dia_in"] = float(mref.group(1)) * float(to_in)
@@ -515,7 +517,7 @@ def _parse_hole_line(line: str, to_in: float, *, source: str | None = None) -> d
 
     if entry.get("ref_dia_in") is None:
         mdia = RE_DIA.search(U)
-        if mdia and ("Ø" in U or "⌀" in U or " REF" in U):
+        if mdia and ("Ø" in U or "⌀" in U or " REF" in U or "%%C" in U or "%%c" in U):
             try:
                 entry["ref_dia_in"] = float(mdia.group(1)) * float(to_in)
             except Exception:

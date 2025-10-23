@@ -751,7 +751,7 @@ _JOIN_START_TOKENS = re.compile(
     r"(?:^\s*\(\d+\)\s*)"               # starts with "(n)"
     r"|(?:\bTAP\b)"                     # a TAP line starts a new row
     r"|(?:C[’']?\s*BORE|CBORE|COUNTER\s*BORE)"  # counterbore token
-    r"|(?:[Ø⌀\u00D8])"                  # diameter symbol
+    r"|(?:%%[Cc]|[Ø⌀\u00D8])"            # diameter symbol / MTEXT %%C
     r"|(?:C[’']?\s*DRILL|CENTER\s*DRILL|SPOT\s*DRILL\b)"  # spot callouts
     , re.I
 )
@@ -785,11 +785,11 @@ def _join_wrapped_chart_lines(chart_lines: list[str]) -> list[str]:
     _flush()
     return out
 _CB_DIA_RE = re.compile(
-    # Case A: Ø before number  → "Ø .750 C'BORE"
-    r"(?:[Ø⌀\u00D8]\s*)?(?P<numA>(?:\d+(?:\.\d+)?|\.\d+|\d+\s*/\s*\d+))\s*(?:C[’']?\s*BORE|CBORE|COUNTER\s*BORE)"
+    # Case A: Ø/%%C before number  → "Ø .750 C'BORE" or "%%C.750 C'BORE"
+    r"(?:%%[Cc]\s*|[Ø⌀\u00D8]\s*)?(?P<numA>(?:\d+(?:\.\d+)?|\.\d+|\d+\s*/\s*\d+))\s*(?:C[’']?\s*BORE|CBORE|COUNTER\s*BORE)"
     r"|"
-    # Case B: Ø after number   → ".750 Ø C'BORE" or ".750Ø C'BORE"
-    r"(?P<numB>(?:\d+(?:\.\d+)?|\.\d+|\d+\s*/\s*\d+))\s*[Ø⌀\u00D8]\s*(?:C[’']?\s*BORE|CBORE|COUNTER\s*BORE)",
+    # Case B: Ø/%%C after number   → ".750 Ø C'BORE" / ".750Ø C'BORE" / ".750 %%C C'BORE"
+    r"(?P<numB>(?:\d+(?:\.\d+)?|\.\d+|\d+\s*/\s*\d+))\s*(?:%%[Cc]|[Ø⌀\u00D8])\s*(?:C[’']?\s*BORE|CBORE|COUNTER\s*BORE)",
     re.I,
 )
 _X_DEPTH_RE   = re.compile(r"[×xX]\s*([0-9]+(?:\.[0-9]+)?)")      # × .62  or  x 0.63
