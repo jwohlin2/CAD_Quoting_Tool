@@ -11635,6 +11635,27 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
                 return c["material_group"]
         return None
 
+    def _sum_count_values(candidate: Any) -> int:
+        """Best-effort sum of numeric-ish values in mappings or sequences."""
+
+        if isinstance(candidate, (_MappingABC, dict)):
+            values = candidate.values()  # type: ignore[assignment]
+        elif isinstance(candidate, Sequence) and not isinstance(candidate, (str, bytes, bytearray)):
+            values = candidate
+        else:
+            return 0
+
+        total = 0
+        for value in values:
+            try:
+                total += int(round(float(value)))
+            except Exception:
+                try:
+                    total += int(value)  # type: ignore[arg-type]
+                except Exception:
+                    continue
+        return total
+
     ctx_a = locals().get("breakdown")
     ctx_b = locals().get("result")
     ctx_c = locals().get("quote")
@@ -11732,6 +11753,13 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
 
                 counts_by_diam_raw_obj = locals().get("counts_by_diam_raw")
                 counts_by_diam_obj = locals().get("counts_by_diam")
+                drilling_meta_container = locals().get("drilling_meta_container")
+                if not isinstance(drilling_meta_container, (_MappingABC, dict)):
+                    drilling_meta_container = None
+                    if isinstance(breakdown_mutable, (_MappingABC, dict)):
+                        candidate_meta = breakdown_mutable.get("drilling_meta")
+                        if isinstance(candidate_meta, (_MappingABC, dict)):
+                            drilling_meta_container = candidate_meta
                 if not isinstance(counts_by_diam_raw_obj, (_MappingABC, dict, Sequence)):
                     counts_by_diam_raw_obj = None
                 if not isinstance(counts_by_diam_obj, (_MappingABC, dict, Sequence)):
@@ -11744,8 +11772,30 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
                     candidate = drilling_meta_container.get("counts_by_diam")
                     if isinstance(candidate, (_MappingABC, dict, Sequence)):
                         counts_by_diam_obj = candidate
-                drill_bins_raw_total = _sum_count_values(counts_by_diam_raw_obj)
-                drill_bins_adj_total = _sum_count_values(counts_by_diam_obj)
+                sum_counts = locals().get("_sum_count_values")
+                if not callable(sum_counts):
+                    def sum_counts(candidate: Any) -> int:
+                        if isinstance(candidate, (_MappingABC, dict)):
+                            values = candidate.values()  # type: ignore[assignment]
+                        elif isinstance(candidate, Sequence) and not isinstance(
+                            candidate, (str, bytes, bytearray)
+                        ):
+                            values = candidate
+                        else:
+                            return 0
+                        total = 0
+                        for value in values:
+                            try:
+                                total += int(round(float(value)))
+                            except Exception:
+                                try:
+                                    total += int(value)  # type: ignore[arg-type]
+                                except Exception:
+                                    continue
+                        return total
+
+                drill_bins_raw_total = sum_counts(counts_by_diam_raw_obj)
+                drill_bins_adj_total = sum_counts(counts_by_diam_obj)
                 _push(lines, f"[DEBUG] chart_lines_found={len(chart_lines_all)}")
                 _push(
                     lines,
