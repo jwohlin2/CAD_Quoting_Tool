@@ -906,64 +906,62 @@ _NPT_PILOT_IN: dict[str, float] = {
 }
 
 
-def _collect_pilot_claims_from_rows(geo: Mapping[str, Any] | None) -> list[float]:
-    vals: list[float] = []
-    if not isinstance(geo, (_MappingABC, dict)):
-        return vals
+def _collect_pilot_claims(geo_map: dict, joined_chart: list[str]) -> list[float]:
+    claims: list[float] = []
 
-    ops_summary = geo.get("ops_summary") if isinstance(geo, (_MappingABC, dict)) else None
-    rows: Sequence[Mapping[str, Any]] | None = None
-    if isinstance(ops_summary, (_MappingABC, dict)):
-        candidate = ops_summary.get("rows")
-        if isinstance(candidate, Sequence):
-            rows = typing.cast(Sequence[Mapping[str, Any]], candidate)
-
-    if not rows:
-        return vals
-
-    for row in rows:
-        if not isinstance(row, (_MappingABC, dict)):
-            continue
-        desc_raw = row.get("desc") or row.get("name") or ""
-        desc = str(desc_raw or "").upper()
-        if not desc:
-            continue
-
-        qty_raw = row.get("qty", 1)
+    # from ops rows
+    rows = ((geo_map or {}).get("ops_summary") or {}).get("rows") or []
+    TAP_PILOT = {"#10-32": 0.1590, "5/8-11": 0.5312, "5/16-24": 0.2720, "5/16-18": 0.2610, "3/8-24": 0.3320}
+    NPT_PILOT = {"1/8": 0.3390}
+    for r in rows:
+        desc = str(r.get("desc") or r.get("name") or "").upper()
+        qty_raw = r.get("qty")
         qty = 1
         if isinstance(qty_raw, (int, float)):
-            qty = int(qty_raw)
+            try:
+                qty = int(qty_raw)
+            except Exception:
+                qty = 1
         elif isinstance(qty_raw, str):
-            match = re.search(r"(\d+)", qty_raw)
-            if match:
+            m_qty = re.search(r"(\d+)", qty_raw)
+            if m_qty:
                 try:
-                    qty = int(match.group(1))
+                    qty = int(m_qty.group(1))
                 except Exception:
                     qty = 1
+        else:
+            try:
+                qty = int(qty_raw or 1)
+            except Exception:
+                qty = 1
         if qty <= 0:
             qty = 1
+        for spec, dia in TAP_PILOT.items():
+            if spec.replace(" ", "") in desc.replace(" ", ""):
+                claims.extend([dia] * qty)
+        if "NPT" in desc and "1/8" in desc:
+            claims.extend([NPT_PILOT["1/8"]] * qty)
+        m = re.search(r"(\d*\.?\d+)\s*(?:DRILL\s*)?THRU", desc)
+        if m:
+            claims.extend([float(m.group(1))] * qty)
 
-        desc_compact = desc.replace(" ", "")
-        # UN taps
-        for spec, dia in _TAP_PILOT_IN.items():
-            if spec.replace(" ", "") in desc_compact:
-                vals.extend([float(dia)] * qty)
+    # from joined chart lines (quantity prefixes like “(2) 5/8-11 …”)
+    for s in (joined_chart or []):
+        u = s.upper()
+        mqty = re.match(r"\s*\((\d+)\)\s*(.*)$", u)
+        qty = int(mqty.group(1)) if mqty else 1
+        body = mqty.group(2) if mqty else u
+        for spec, dia in TAP_PILOT.items():
+            if spec.replace(" ", "") in body.replace(" ", ""):
+                claims.extend([dia] * qty)
+        if "N.P.T" in body or "NPT" in body:
+            if "1/8" in body:
+                claims.extend([NPT_PILOT["1/8"]] * qty)
+        m2 = re.search(r"(\d*\.?\d+)\s*(?:DRILL\s*)?THRU", body)
+        if m2:
+            claims.extend([float(m2.group(1))] * qty)
 
-        # NPT taps
-        if "NPT" in desc:
-            match = re.search(r"((?:\d+/\d+)|(?:\d+\.\d+)|(?:\d+))\s*-\s*27\s*NPT|\b1/8\b", desc)
-            if match:
-                vals.extend([_NPT_PILOT_IN["1/8"]] * qty)
-
-        # explicit decimals, e.g. "Ø0.201 DRILL THRU" or ".339 THRU"
-        match_decimal = re.search(r"(\d*\.\d+)\s*(?:DRILL\s*)?THRU", desc)
-        if match_decimal:
-            try:
-                vals.extend([float(match_decimal.group(1))] * qty)
-            except Exception:
-                pass
-
-    return vals
+    return claims
 
 
 def _record_drill_claims(
@@ -4329,9 +4327,18 @@ def _compute_drilling_removal_section(
             else:
                 ops_claims = {}
 
-            pilot_from_rows = _collect_pilot_claims_from_rows(geo_map_for_drill)
-            pilot_from_chart = list(ops_claims.get("claimed_pilot_diams") or [])
-            ops_claims["claimed_pilot_diams"] = pilot_from_rows + pilot_from_chart
+            joined_chart_for_claims = list(joined_lines)
+            if not isinstance(geo_map_for_drill, dict):
+                try:
+                    geo_map_for_claims = dict(geo_map_for_drill)
+                except Exception:
+                    geo_map_for_claims = {}
+            else:
+                geo_map_for_claims = geo_map_for_drill
+            ops_claims["claimed_pilot_diams"] = _collect_pilot_claims(
+                geo_map_for_claims,
+                joined_chart_for_claims,
+            )
 
             ops_hint: dict[str, Any] = {}
             try:
