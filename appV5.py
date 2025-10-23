@@ -4292,11 +4292,6 @@ def _compute_drilling_removal_section(
             )
 
             # If counts_by_diam_raw is empty/undefined, seed from GEO now
-            try:
-                _ = counts_by_diam_raw  # type: ignore[name-defined]
-            except NameError:
-                counts_by_diam_raw = {}  # type: ignore[assignment]
-
             if not counts_by_diam_raw or sum(int(v) for v in (counts_by_diam_raw or {}).values()) == 0:
                 counts_by_diam_raw = _seed_drill_bins_from_geo(geo_map)
 
