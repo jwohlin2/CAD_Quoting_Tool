@@ -868,7 +868,7 @@ def _append_counterbore_spot_jig_cards(
         total_cb = sum(cb_groups.values())
         front_cb = sum(q for (d,s,dep), q in cb_groups.items() if s=="FRONT")
         back_cb  = sum(q for (d,s,dep), q in cb_groups.items() if s=="BACK")
-        lines_out += [
+        lines_out.extend([
             "MATERIAL REMOVAL – COUNTERBORE",
             "="*64,
             "Inputs",
@@ -877,7 +877,7 @@ def _append_counterbore_spot_jig_cards(
             "",
             "TIME PER HOLE – C’BORE GROUPS",
             "-"*66,
-        ]
+        ])
         per = float(globals().get("CBORE_MIN_PER_SIDE_MIN") or 0.15)  # minutes/side
         cb_minutes = 0.0
         for (dia, side, depth), qty in sorted(cb_groups.items(), key=lambda k:(k[0][0] or 0.0, k[0][1], k[0][2] or 0.0)):
@@ -902,14 +902,14 @@ def _append_counterbore_spot_jig_cards(
     if spot_qty > 0:
         per_spot = 0.05
         t_group = spot_qty * per_spot
-        lines_out += [
+        lines_out.extend([
             "MATERIAL REMOVAL – SPOT (CENTER DRILL)",
             "="*64,
             "TIME PER HOLE – SPOT GROUPS",
             "-"*66,
             f"Spot drill × {spot_qty} | t/hole {per_spot:.2f} min | group {spot_qty}×{per_spot:.2f} = {t_group:.2f} min",
             "",
-        ]
+        ])
         try:
             _set_bucket_minutes_cost(
                 breakdown_mutable.setdefault("bucket_view", {}),
@@ -925,14 +925,14 @@ def _append_counterbore_spot_jig_cards(
     if jig_qty > 0:
         per_jig = float(globals().get("JIG_GRIND_MIN_PER_FEATURE") or 0.75)  # minutes/feature
         t_group = jig_qty * per_jig
-        lines_out += [
+        lines_out.extend([
             "MATERIAL REMOVAL – JIG GRIND",
             "="*64,
             "TIME PER FEATURE",
             "-"*66,
             f"Jig grind × {jig_qty} | t/feat {per_jig:.2f} min | group {jig_qty}×{per_jig:.2f} = {t_group:.2f} min",
             "",
-        ]
+        ])
         try:
             _set_bucket_minutes_cost(
                 breakdown_mutable.setdefault("bucket_view", {}),
