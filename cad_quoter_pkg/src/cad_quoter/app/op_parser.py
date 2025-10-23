@@ -66,7 +66,6 @@ def _parse_qty(s: str) -> int:
 def _side(U: str) -> str:
     has_front = bool(_FRONT_RE.search(U) or re.search(r"\bFRONT\b", U))
     has_back = bool(_BACK_RE.search(U) or re.search(r"\bBACK\b", U))
-
     if _BOTH_RE.search(U) or (has_front and has_back):
         return "BOTH"
     if has_back:

@@ -193,7 +193,10 @@ def _ensure_geo_context_fields(
                             if isinstance(claims_candidate, Mapping):
                                 ops_claims_map = claims_candidate
                 drill_groups = build_drill_groups_from_geometry(
-                    diams_seq, thickness_in_guess, ops_claims_map
+                    diams_seq,
+                    thickness_in_guess,
+                    ops_claims_map,
+                    geom,
                 )
                 for group in drill_groups:
                     try:
@@ -340,10 +343,16 @@ def _holes_removed_mass_g(geo: Mapping[str, Any] | None) -> float | None:
     return removed_mass_g
 
 
+OPS_TOTAL_OVERRIDES_DEFAULT: Mapping[str, int] = {}
+
+
 def build_drill_groups_from_geometry(
     hole_diams_mm: Sequence[Any] | None,
     thickness_in: Any | None,
     ops_claims: Mapping[str, Any] | None = None,
+    geo_map: Mapping[str, Any] | None = None,
+    *,
+    drop_large_holes: bool = True,
 ) -> list[dict[str, Any]]:
     """Create simple drill groups from hole diameters and plate thickness."""
 
@@ -355,7 +364,7 @@ def build_drill_groups_from_geometry(
         t_in = None
 
     groups: dict[float, dict[str, Any]] = {}
-    counts_by_diam: Counter[float] = Counter()
+    counts_by_diam_raw: Counter[float] = Counter()
     if isinstance(hole_diams_mm, Sequence) and not isinstance(hole_diams_mm, (str, bytes, bytearray)):
         for raw in hole_diams_mm:
             d_mm = _coerce_positive_float(raw)
@@ -375,55 +384,88 @@ def build_drill_groups_from_geometry(
                 },
             )
             bucket["qty"] += 1
-            counts_by_diam[key] += 1
+            counts_by_diam_raw[key] += 1
 
-    if counts_by_diam and isinstance(ops_claims, Mapping):
+    counts_by_diam: dict[float, int] = {
+        float(dia): int(qty)
+        for dia, qty in counts_by_diam_raw.items()
+    }
 
-        def _nearest_bin(val: float, bins: Sequence[float]) -> float | None:
-            return min(bins, key=lambda b: abs(b - val)) if bins else None
+    if counts_by_diam:
+
+        def _nearest_bin(val: float, bins: Sequence[float]) -> float:
+            return min(bins, key=lambda b: abs(b - val))
 
         bins = sorted(float(d) for d in counts_by_diam.keys())
 
-        claimed = (ops_claims or {}).get("claimed_pilot_diams")
-        if claimed:
-            claimed_ctr = Counter(
-                round(float(d), 4) for d in claimed if d is not None
-            )
-            for val, qty in claimed_ctr.items():
+        if isinstance(ops_claims, Mapping):
+            claimed = (ops_claims or {}).get("claimed_pilot_diams")
+            if claimed:
+                claimed_ctr = Counter(
+                    round(float(d), 4) for d in claimed if d is not None
+                )
+                for val, qty in claimed_ctr.items():
+                    if not bins:
+                        break
+                    target = _nearest_bin(val, bins)
+                    if abs(target - val) <= 0.015:
+                        counts_by_diam[target] = max(
+                            0,
+                            int(counts_by_diam.get(target, 0)) - int(qty),
+                        )
+
+            cb_face_counts: Counter[float] = Counter()
+            for (diam, _side, _depth), qty in (ops_claims or {}).get("cb_groups", {}).items():
+                if diam is None:
+                    continue
+                try:
+                    cb_face_counts[round(float(diam), 4)] += int(qty)
+                except Exception:
+                    continue
+
+            for face_diam, face_qty in cb_face_counts.items():
                 if not bins:
                     break
-                target = _nearest_bin(val, bins)
-                if target is None:
-                    continue
-                if abs(target - val) <= 0.015:
+                target = _nearest_bin(face_diam, bins)
+                if abs(target - face_diam) <= 0.02:
                     counts_by_diam[target] = max(
                         0,
-                        int(counts_by_diam.get(target, 0)) - int(qty),
+                        int(counts_by_diam.get(target, 0)) - int(face_qty),
                     )
 
-        cb_face_counts: Counter[float] = Counter()
-        for (diam, _side, _depth), qty in (ops_claims or {}).get("cb_groups", {}).items():
-            if diam is None:
-                continue
-            try:
-                cb_face_counts[round(float(diam), 4)] += int(qty)
-            except Exception:
-                continue
+        for diameter in list(counts_by_diam.keys()):
+            if drop_large_holes and diameter >= 1.0:
+                counts_by_diam[diameter] = 0
 
-        for face_diam, face_qty in cb_face_counts.items():
-            if not bins:
-                break
-            target = _nearest_bin(face_diam, bins)
-            if target is None:
-                continue
-            if abs(target - face_diam) <= 0.02:
-                counts_by_diam[target] = max(
-                    0,
-                    int(counts_by_diam.get(target, 0)) - int(face_qty),
-                )
+        ops_hint: Mapping[str, Any] = {}
+        try:
+            ops_hint = (
+                (geo_map.get("ops_totals_hint") or {})
+                if isinstance(geo_map, Mapping)
+                else {}
+            )
+        except Exception:
+            ops_hint = {}
+        ops_hint = dict(OPS_TOTAL_OVERRIDES_DEFAULT) | dict(ops_hint or {})
+
+        if "drill" in ops_hint:
+            try:
+                target = int(ops_hint["drill"])
+            except Exception:
+                target = None
+            if target is not None:
+                cur = sum(max(0, int(v)) for v in counts_by_diam.values())
+                if cur > target:
+                    over = cur - target
+                    for diameter in sorted(counts_by_diam.keys(), reverse=True):
+                        if over <= 0:
+                            break
+                        take = min(over, counts_by_diam[diameter])
+                        counts_by_diam[diameter] -= take
+                        over -= take
 
         for key in list(groups.keys()):
-            qty_adj = int(counts_by_diam.get(key, 0))
+            qty_adj = int(max(0, counts_by_diam.get(key, 0)))
             if qty_adj <= 0:
                 groups.pop(key, None)
             else:
