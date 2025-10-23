@@ -1005,15 +1005,10 @@ def _record_drill_claims(
 
 def _count_counterdrill(lines_joined: Sequence[str] | None) -> int:
     total = 0
-    if not lines_joined:
-        return 0
-    for raw in lines_joined:
+    for raw in lines_joined or []:
         if not isinstance(raw, str):
             continue
-        s = raw.strip()
-        if not s:
-            continue
-        upper = s.upper()
+        upper = raw.upper()
         if _CENTER_OR_SPOT_RE.search(upper):
             continue
         if _COUNTERDRILL_RE.search(upper):
@@ -1030,9 +1025,7 @@ def _count_counterdrill(lines_joined: Sequence[str] | None) -> int:
 
 def _count_jig(lines_joined: Sequence[str] | None) -> int:
     total = 0
-    if not lines_joined:
-        return 0
-    for raw in lines_joined:
+    for raw in lines_joined or []:
         if raw is None:
             continue
         text = str(raw)
