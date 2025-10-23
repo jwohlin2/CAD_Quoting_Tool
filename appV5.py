@@ -10516,11 +10516,17 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
     )
     _push(lines, f"[DEBUG] extra_ops_appended_at_print={_appended_at_print}")
 
-    removal_summary_lines = [
-        str(line) for line in removal_card_lines if isinstance(line, str)
-    ]
-    if removal_summary_extra_lines:
-        removal_summary_lines.extend(removal_summary_extra_lines)
+    def _collect_removal_summary_lines() -> list[str]:
+        combined: list[str] = []
+        for entry in removal_card_lines:
+            if isinstance(entry, str):
+                combined.append(entry)
+        if removal_summary_extra_lines:
+            for entry in removal_summary_extra_lines:
+                combined.append(entry if isinstance(entry, str) else str(entry))
+        return combined
+
+    removal_summary_lines: list[str] = []
 
     append_lines(removal_card_lines)
 
@@ -10891,6 +10897,8 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
                     if isinstance(entry, str) and not entry.startswith("[DEBUG]"):
                         removal_summary_extra_lines.append(entry)
 
+        removal_summary_lines = _collect_removal_summary_lines()
+
         actions_summary_ready = True
         try:
             extra_bucket_ops: MutableMapping[str, Any] | dict[str, Any]
@@ -10950,6 +10958,8 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
 
     except Exception as e:
         _push(lines, f"[DEBUG] material_removal_emit_skipped={e.__class__.__name__}: {e}")
+
+    removal_summary_lines = _collect_removal_summary_lines()
     # ========================================================================
 
     planner_ops_rows_for_audit: Any
