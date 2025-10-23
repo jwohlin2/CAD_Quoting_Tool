@@ -11448,13 +11448,17 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
     else:
         planner_ops_rows_for_audit = ops_rows
 
+    removal_summary_lines_for_audit = locals().get("removal_summary_lines") or []
     removal_sections_text = "\n".join(
         str(line)
-        for line in removal_summary_lines
+        for line in removal_summary_lines_for_audit
         if isinstance(line, str)
     )
 
-    ops_counts = audit_operations(planner_ops_rows_for_audit, removal_sections_text)
+    ops_counts = audit_operations(
+        planner_ops_rows_for_audit,
+        removal_sections_text,
+    )
 
     print(
         f"[ops-audit] drills={ops_counts.get('drills', 0)} "
