@@ -351,6 +351,8 @@ def build_drill_groups_from_geometry(
     thickness_in: Any | None,
     ops_claims: Mapping[str, Any] | None = None,
     geo_map: Mapping[str, Any] | None = None,
+    *,
+    drop_large_holes: bool = True,
 ) -> list[dict[str, Any]]:
     """Create simple drill groups from hole diameters and plate thickness."""
 
@@ -432,7 +434,7 @@ def build_drill_groups_from_geometry(
                     )
 
         for diameter in list(counts_by_diam.keys()):
-            if diameter >= 1.0:
+            if drop_large_holes and diameter >= 1.0:
                 counts_by_diam[diameter] = 0
 
         ops_hint: Mapping[str, Any] = {}
