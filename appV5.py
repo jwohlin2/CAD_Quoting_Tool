@@ -3523,6 +3523,28 @@ def _render_milling_removal_card(
     return True
 
 
+def _sum_count_values(candidate: Any) -> int:
+    """Best-effort sum of numeric values from mappings or sequences."""
+
+    if isinstance(candidate, (_MappingABC, dict)):
+        values = candidate.values()  # type: ignore[assignment]
+    elif isinstance(candidate, Sequence) and not isinstance(candidate, (str, bytes, bytearray)):
+        values = candidate
+    else:
+        return 0
+
+    total = 0
+    for value in values:
+        try:
+            total += int(round(float(value)))
+        except Exception:
+            try:
+                total += int(value)  # type: ignore[arg-type]
+            except Exception:
+                continue
+    return total
+
+
 def _compute_drilling_removal_section(
     *,
     breakdown: Mapping[str, Any] | MutableMapping[str, Any],
@@ -3546,27 +3568,6 @@ def _compute_drilling_removal_section(
             target.append(str(text))
         except Exception:
             pass
-
-    def _sum_count_values(candidate: Any) -> int:
-        """Best-effort sum of numeric values from mappings or sequences."""
-
-        if isinstance(candidate, (_MappingABC, dict)):
-            values = candidate.values()  # type: ignore[assignment]
-        elif isinstance(candidate, Sequence) and not isinstance(candidate, (str, bytes, bytearray)):
-            values = candidate
-        else:
-            return 0
-
-        total = 0
-        for value in values:
-            try:
-                total += int(round(float(value)))
-            except Exception:
-                try:
-                    total += int(value)  # type: ignore[arg-type]
-                except Exception:
-                    continue
-        return total
 
     drill_bins_raw_total = 0
     drill_bins_adj_total = 0
@@ -11218,6 +11219,14 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
 
     ops_summary_map = None
     ops_rows: list[Any] = []
+    drilling_meta_container: Mapping[str, Any] | None = None
+    if isinstance(breakdown_mutable, (_MappingABC, dict)):
+        try:
+            candidate_meta = breakdown_mutable.get("drilling_meta")  # type: ignore[assignment]
+        except Exception:
+            candidate_meta = None
+        if isinstance(candidate_meta, (_MappingABC, dict)):
+            drilling_meta_container = candidate_meta
 
     try:
         ops_summary_payload = (
