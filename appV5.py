@@ -3267,7 +3267,11 @@ def _side_from(txt: str) -> str:
     return "unspecified"
 
 
-def summarize_actions(removal_lines: list[str], planner_ops: list[dict]) -> None:
+def summarize_actions(
+    removal_lines: list[str],
+    planner_ops: list[dict],
+    extra_bucket_ops: Mapping[str, Any] | None = None,
+) -> None:
     """Log aggregated removal + planner operation counts for diagnostics."""
 
     from collections import defaultdict
@@ -3518,6 +3522,92 @@ def summarize_actions(removal_lines: list[str], planner_ops: list[dict]) -> None
                 continue
             total["jig_grind"] += qty
             by_side["jig_grind"][side] += qty
+
+    # --- From extra bucket ops (fallback data published during pricing) ---
+    def _bucket_key(name: str | None) -> str:
+        if not isinstance(name, str):
+            return ""
+        bucket = name.strip().lower()
+        if not bucket:
+            return ""
+        if bucket in {"drill", "drills", "drilling"}:
+            return "drill"
+        if bucket in {"tap", "taps", "tapping"}:
+            return "tap"
+        if bucket in {"counterbore", "c'bore", "cbore", "counter bore"}:
+            return "counterbore"
+        if bucket in {"spot", "spot drill", "spot-drill", "spot_drill"}:
+            return "spot"
+        if bucket in {"jig-grind", "jig_grind", "jig grind"}:
+            return "jig_grind"
+        if bucket in {"counterdrill", "counter-drill", "c'drill"}:
+            return "counterdrill"
+        return ""
+
+    def _normalize_side_value(val: Any) -> str:
+        if val is None:
+            return "unspecified"
+        if isinstance(val, str):
+            side_txt = val.strip().lower()
+        else:
+            side_txt = str(val).strip().lower()
+        if side_txt in {"front", "f"}:
+            return "front"
+        if side_txt in {"back", "b"}:
+            return "back"
+        if side_txt in {"both", "front/back", "front & back", "both sides", "both-sides"}:
+            return "both"
+        return "unspecified"
+
+    def _iter_extra_entries(payload: Any) -> Iterable[Any]:
+        if payload is None:
+            return []
+        if isinstance(payload, _MappingABC):
+            rows_candidate = payload.get("rows")
+            if isinstance(rows_candidate, Sequence) and not isinstance(rows_candidate, (str, bytes)):
+                return rows_candidate
+            return [payload]
+        if isinstance(payload, Sequence) and not isinstance(payload, (str, bytes)):
+            return payload
+        return []
+
+    extra_totals = defaultdict(int)
+    extra_by_side = defaultdict(lambda: defaultdict(int))
+
+    if isinstance(extra_bucket_ops, _MappingABC):
+        for bucket_name, entries in extra_bucket_ops.items():
+            key = _bucket_key(bucket_name)
+            if not key:
+                continue
+            for entry in _iter_extra_entries(entries):
+                if isinstance(entry, _MappingABC):
+                    qty_val = entry.get("qty")
+                    side_val = entry.get("side")
+                else:
+                    qty_val = getattr(entry, "qty", None)
+                    side_val = getattr(entry, "side", None)
+                try:
+                    qty = int(round(float(qty_val)))
+                except Exception:
+                    continue
+                if qty <= 0:
+                    continue
+                side_norm = _normalize_side_value(side_val)
+                if side_norm == "both":
+                    extra_by_side[key]["front"] += qty
+                    extra_by_side[key]["back"] += qty
+                else:
+                    extra_by_side[key][side_norm] += qty
+                extra_totals[key] += qty
+
+    for key, qty in extra_totals.items():
+        if qty <= 0:
+            continue
+        if total[key] <= 0:
+            total[key] += qty
+            for side_label, side_qty in extra_by_side[key].items():
+                if side_qty > 0:
+                    by_side[key][side_label] += side_qty
 
     actions = {
         "Drills": int(total.get("drill", 0)),
