@@ -10997,46 +10997,96 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
                 return True
         return False
 
-    try:
-        ops_claims_for_cards = (
-            _normalize_ops_claims_map(breakdown_mutable.get("_ops_claims"))
-            if isinstance(breakdown_mutable, _MappingABC)
-            else {}
-        )
-    except Exception:
-        ops_claims_for_cards = {}
-    if not ops_claims_for_cards:
-        ops_claims_for_cards = dict(ops_claims)
-
-    spot_heading = "MATERIAL REMOVAL – SPOT (CENTER DRILL)"
-    spot_qty = int(ops_claims_for_cards.get("spot") or 0)
-    if spot_qty > 0 and not _card_heading_exists(spot_heading):
-        removal_card_lines.extend([
-            spot_heading,
-            "=" * 64,
-            "TIME PER HOLE – SPOT GROUPS",
-            "-" * 66,
-            f"Spot drill × {spot_qty} | t/hole 0.05 min | group {spot_qty}×0.05 = {spot_qty * 0.05:.2f} min",
-            "",
-        ])
-
-    jig_heading = "MATERIAL REMOVAL – JIG GRIND"
-    jig_qty = int(ops_claims_for_cards.get("jig") or 0)
-    if jig_qty > 0 and not _card_heading_exists(jig_heading):
-        per_jig = float(globals().get("JIG_GRIND_MIN_PER_FEATURE") or 0.75)
-        removal_card_lines.extend([
-            jig_heading,
-            "=" * 64,
-            "TIME PER FEATURE",
-            "-" * 66,
-            f"Jig grind × {jig_qty} | t/feat {per_jig:.2f} min | group {jig_qty}×{per_jig:.2f} = {jig_qty * per_jig:.2f} min",
-            "",
-        ])
-
     actions_summary_ready = False
 
     def _collect_removal_summary_lines() -> list[str]:
         nonlocal actions_summary_ready
+        try:
+            ebo = breakdown_mutable.setdefault("extra_bucket_ops", {})
+            if ops_claims.get("cb_front", 0) > 0:
+                cb_front_qty = int(ops_claims.get("cb_front", 0) or 0)
+                ebo.setdefault("counterbore", []).append(
+                    {
+                        "name": "Counterbore",
+                        "qty": cb_front_qty,
+                        "side": "front",
+                    }
+                )
+            if ops_claims.get("cb_back", 0) > 0:
+                cb_back_qty = int(ops_claims.get("cb_back", 0) or 0)
+                ebo.setdefault("counterbore", []).append(
+                    {
+                        "name": "Counterbore",
+                        "qty": cb_back_qty,
+                        "side": "back",
+                    }
+                )
+            if ops_claims.get("tap", 0) > 0:
+                tap_qty = int(ops_claims.get("tap", 0) or 0)
+                ebo.setdefault("tap", []).append(
+                    {
+                        "name": "Tap",
+                        "qty": tap_qty,
+                        "side": "front",
+                    }
+                )
+            if ops_claims.get("npt", 0) > 0:
+                npt_qty = int(ops_claims.get("npt", 0) or 0)
+                ebo.setdefault("tap", []).append(
+                    {
+                        "name": "NPT tap",
+                        "qty": npt_qty,
+                        "side": "front",
+                    }
+                )
+            if ops_claims.get("spot", 0) > 0:
+                spot_qty = int(ops_claims.get("spot", 0) or 0)
+                ebo.setdefault("spot", []).append(
+                    {
+                        "name": "Spot drill",
+                        "qty": spot_qty,
+                        "side": "front",
+                    }
+                )
+            if ops_claims.get("jig", 0) > 0:
+                jig_qty = int(ops_claims.get("jig", 0) or 0)
+                ebo.setdefault("jig-grind", []).append(
+                    {
+                        "name": "Jig-grind",
+                        "qty": jig_qty,
+                        "side": None,
+                    }
+                )
+        except Exception:
+            pass
+
+        if (ops_claims.get("spot") or 0) > 0:
+            spot_qty = int(ops_claims.get("spot", 0) or 0)
+            spot_heading = "MATERIAL REMOVAL – SPOT (CENTER DRILL)"
+            if not _card_heading_exists(spot_heading):
+                removal_card_lines.extend([
+                    spot_heading,
+                    "=" * 64,
+                    "TIME PER HOLE – SPOT GROUPS",
+                    "-" * 66,
+                    f"Spot drill × {spot_qty} | t/hole 0.05 min | group {spot_qty}×0.05 = {spot_qty * 0.05:.2f} min",
+                    "",
+                ])
+
+        if (ops_claims.get("jig") or 0) > 0:
+            jig_qty = int(ops_claims.get("jig", 0) or 0)
+            jig_heading = "MATERIAL REMOVAL – JIG GRIND"
+            if not _card_heading_exists(jig_heading):
+                per = float(globals().get("JIG_GRIND_MIN_PER_FEATURE") or 0.75)
+                removal_card_lines.extend([
+                    jig_heading,
+                    "=" * 64,
+                    "TIME PER FEATURE",
+                    "-" * 66,
+                    f"Jig grind × {jig_qty} | t/feat {per:.2f} min | group {jig_qty}×{per:.2f} = {jig_qty * per:.2f} min",
+                    "",
+                ])
+
         summary_lines = [
             str(line) for line in removal_card_lines if isinstance(line, str)
         ]
