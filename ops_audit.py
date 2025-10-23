@@ -150,7 +150,10 @@ def _extract_ops_from_text(text: str) -> dict[str, int]:
             else:
                 counts["counterbores_front"] += qty
 
-        if (
+        counterdrill_hit = _COUNTERDRILL_RE.search(s) and not _CENTER_OR_SPOT_RE.search(s)
+        if counterdrill_hit:
+            counts["counterdrill"] += qty
+        elif (
             _SPOT_RE_TXT.search(s)
             and not _DRILL_THRU.search(s)
             and not ("TAP" in U or _TAP_RE.search(s))
@@ -159,9 +162,6 @@ def _extract_ops_from_text(text: str) -> dict[str, int]:
 
         if _JIG_RE_TXT.search(s):
             counts["jig_grind"] += qty
-
-        if _COUNTERDRILL_RE.search(s) and not _CENTER_OR_SPOT_RE.search(s):
-            counts["counterdrill"] += qty
 
     return dict(counts)
 

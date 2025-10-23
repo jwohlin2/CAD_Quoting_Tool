@@ -1383,6 +1383,7 @@ def _append_counterbore_spot_jig_cards(
                 continue
             if (
                 _SPOT_RE_TXT.search(s)
+                and not _COUNTERDRILL_RE.search(s)
                 and not _DRILL_THRU.search(s)
                 and not ("TAP" in U or _TAP_RE.search(s))
             ):
@@ -1413,6 +1414,7 @@ def _append_counterbore_spot_jig_cards(
             else:
                 if (
                     _SPOT_RE_TXT.search(s)
+                    and not _COUNTERDRILL_RE.search(s)
                     and not _DRILL_THRU.search(s)
                     and not ("TAP" in U or _TAP_RE.search(s))
                 ):
@@ -1422,34 +1424,42 @@ def _append_counterbore_spot_jig_cards(
 
     appended = 0
 
+    total_cb = sum(cb_groups.values()) if cb_groups else 0
+    front_cb = (
+        sum(q for (d, s, dep), q in cb_groups.items() if s == "FRONT")
+        if cb_groups
+        else 0
+    )
+    back_cb = (
+        sum(q for (d, s, dep), q in cb_groups.items() if s == "BACK")
+        if cb_groups
+        else 0
+    )
+
+    try:
+        ebo = breakdown_mutable.setdefault("extra_bucket_ops", {})
+        if total_cb > 0:
+            if front_cb > 0:
+                ebo.setdefault("counterbore", []).append(
+                    {"name": "Counterbore", "qty": int(front_cb), "side": "front"}
+                )
+            if back_cb > 0:
+                ebo.setdefault("counterbore", []).append(
+                    {"name": "Counterbore", "qty": int(back_cb), "side": "back"}
+                )
+        if spot_qty > 0:
+            ebo.setdefault("spot", []).append(
+                {"name": "Spot drill", "qty": int(spot_qty), "side": "front"}
+            )
+        if jig_qty > 0:
+            ebo.setdefault("jig-grind", []).append(
+                {"name": "Jig-grind", "qty": int(jig_qty), "side": None}
+            )
+    except Exception:
+        pass
+
     # ---------- Emit COUNTERBORE card ----------
     if cb_groups:
-        total_cb = sum(cb_groups.values())
-        front_cb = sum(q for (d,s,dep), q in cb_groups.items() if s=="FRONT")
-        back_cb  = sum(q for (d,s,dep), q in cb_groups.items() if s=="BACK")
-        try:
-            ebo = breakdown_mutable.setdefault("extra_bucket_ops", {})
-            total_cb = sum(cb_groups.values())
-            if total_cb > 0:
-                if front_cb > 0:
-                    ebo.setdefault("counterbore", []).append(
-                        {"name": "Counterbore", "qty": int(front_cb), "side": "front"}
-                    )
-                if back_cb > 0:
-                    ebo.setdefault("counterbore", []).append(
-                        {"name": "Counterbore", "qty": int(back_cb), "side": "back"}
-                    )
-            if spot_qty > 0:
-                ebo.setdefault("spot", []).append(
-                    {"name": "Spot drill", "qty": int(spot_qty), "side": "front"}
-                )
-            if jig_qty > 0:
-                ebo.setdefault("jig-grind", []).append(
-                    {"name": "Jig-grind", "qty": int(jig_qty), "side": None}
-                )
-        except Exception:
-            pass
-
         lines_out.extend([
             "MATERIAL REMOVAL – COUNTERBORE",
             "="*64,
@@ -2068,12 +2078,13 @@ def _count_spot_and_jig(rows: list[dict]) -> tuple[int, int]:
         qty = _row_qty(r)
         if qty <= 0:
             continue
+        counter_hit = bool(_COUNTERDRILL_RE.search(txt))
         spot_hit = False
         try:
             if hasattr(_SPOT_TOKENS, "search"):
-                spot_hit = bool(_SPOT_TOKENS.search(txt))
+                spot_hit = bool(_SPOT_TOKENS.search(txt)) and not counter_hit
             else:
-                spot_hit = any(tok in txt for tok in _SPOT_TOKENS)
+                spot_hit = any(tok in txt for tok in _SPOT_TOKENS) and not counter_hit
         except Exception:
             spot_hit = False
         if spot_hit:
