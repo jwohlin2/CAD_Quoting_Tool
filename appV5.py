@@ -787,7 +787,7 @@ _JOIN_START_TOKENS = re.compile(
     r"(?:^\s*\(\d+\)\s*)"               # starts with "(n)"
     r"|(?:\bTAP\b)"                     # a TAP line starts a new row
     r"|(?:C[’']?\s*BORE|CBORE|COUNTER\s*BORE)"  # counterbore token
-    r"|(?:[Ø⌀\u00D8])"                  # diameter symbol
+    r"|(?:%%[Cc]|[Ø⌀\u00D8])"            # diameter symbol / MTEXT %%C
     r"|(?:C[’']?\s*DRILL|CENTER\s*DRILL|SPOT\s*DRILL\b)"  # spot callouts
     , re.I
 )
