@@ -11463,90 +11463,90 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
                     if isinstance(entry, str) and not entry.startswith("[DEBUG]"):
                         removal_summary_extra_lines.append(entry)
 
-    removal_summary_lines = [
-        str(line) for line in removal_card_lines if isinstance(line, str)
-    ]
-    if removal_summary_extra_lines:
-        removal_summary_lines.extend(removal_summary_extra_lines)
+        removal_summary_lines = [
+            str(line) for line in removal_card_lines if isinstance(line, str)
+        ]
+        if removal_summary_extra_lines:
+            removal_summary_lines.extend(removal_summary_extra_lines)
 
-        printed_sections = {
-            "tapping": any(
-                isinstance(s, str)
-                and s.strip().upper().startswith("MATERIAL REMOVAL – TAPPING")
-                for s in removal_card_lines
-            ),
-            "counterbore": any(
-                isinstance(s, str)
-                and s.strip().upper().startswith("MATERIAL REMOVAL – COUNTERBORE")
-                for s in removal_card_lines
-            ),
-            "spot": any(
-                isinstance(s, str)
-                and s.strip().upper().startswith("MATERIAL REMOVAL – SPOT")
-                for s in removal_card_lines
-            ),
-            "jig": any(
-                isinstance(s, str)
-                and s.strip().upper().startswith("MATERIAL REMOVAL – JIG")
-                for s in removal_card_lines
-            ),
-        }
+            printed_sections = {
+                "tapping": any(
+                    isinstance(s, str)
+                    and s.strip().upper().startswith("MATERIAL REMOVAL – TAPPING")
+                    for s in removal_card_lines
+                ),
+                "counterbore": any(
+                    isinstance(s, str)
+                    and s.strip().upper().startswith("MATERIAL REMOVAL – COUNTERBORE")
+                    for s in removal_card_lines
+                ),
+                "spot": any(
+                    isinstance(s, str)
+                    and s.strip().upper().startswith("MATERIAL REMOVAL – SPOT")
+                    for s in removal_card_lines
+                ),
+                "jig": any(
+                    isinstance(s, str)
+                    and s.strip().upper().startswith("MATERIAL REMOVAL – JIG")
+                    for s in removal_card_lines
+                ),
+            }
 
-        skip_names = set()
-        if printed_sections["tapping"]:
-            skip_names.update({"tap", "npt tap"})
-        if printed_sections["counterbore"]:
-            skip_names.add("counterbore")
-        if printed_sections["spot"]:
-            skip_names.add("spot drill")
-        if printed_sections["jig"]:
-            skip_names.add("jig-grind")
+            skip_names = set()
+            if printed_sections["tapping"]:
+                skip_names.update({"tap", "npt tap"})
+            if printed_sections["counterbore"]:
+                skip_names.add("counterbore")
+            if printed_sections["spot"]:
+                skip_names.add("spot drill")
+            if printed_sections["jig"]:
+                skip_names.add("jig-grind")
 
-        actions_summary_ready = True
-        try:
-            extra_bucket_ops: MutableMapping[str, Any] | dict[str, Any]
-            extra_bucket_ops = {}
-            if isinstance(breakdown, _MappingABC):
-                extra_bucket_ops = dict(breakdown.get("extra_bucket_ops") or {})
-            extra_map_candidate = getattr(bucket_state, "extra", None)
-            if isinstance(extra_map_candidate, _MappingABC):
-                extra_bucket_ops_candidate = extra_map_candidate.get("bucket_ops")
-                if isinstance(extra_bucket_ops_candidate, _MappingABC):
-                    extra_bucket_ops.update(extra_bucket_ops_candidate)
-            if isinstance(extra_bucket_ops, _MappingABC):
-                for _, entries in extra_bucket_ops.items():
-                    if not isinstance(entries, Sequence):
-                        continue
-                    for entry in entries:
-                        if not isinstance(entry, _MappingABC):
+            actions_summary_ready = True
+            try:
+                extra_bucket_ops: MutableMapping[str, Any] | dict[str, Any]
+                extra_bucket_ops = {}
+                if isinstance(breakdown, _MappingABC):
+                    extra_bucket_ops = dict(breakdown.get("extra_bucket_ops") or {})
+                extra_map_candidate = getattr(bucket_state, "extra", None)
+                if isinstance(extra_map_candidate, _MappingABC):
+                    extra_bucket_ops_candidate = extra_map_candidate.get("bucket_ops")
+                    if isinstance(extra_bucket_ops_candidate, _MappingABC):
+                        extra_bucket_ops.update(extra_bucket_ops_candidate)
+                if isinstance(extra_bucket_ops, _MappingABC):
+                    for _, entries in extra_bucket_ops.items():
+                        if not isinstance(entries, Sequence):
                             continue
-                        name_text = str(entry.get("name") or entry.get("op") or "").strip()
-                        name_lower = name_text.lower()
-                        qty_candidate = entry.get("qty")
-                        try:
-                            qty_val = int(float(qty_candidate))
-                        except Exception:
-                            qty_val = 0
-                        side_val = entry.get("side")
-                        if name_text and name_lower not in skip_names:
-                            planner_ops_summary.append(
-                                {"name": name_text, "qty": qty_val, "side": side_val}
-                            )
-        except Exception as exc:
-            logging.debug(
-                "[actions-summary] skipped due to %s: %s",
-                exc.__class__.__name__,
-                exc,
-                exc_info=False,
-            )
+                        for entry in entries:
+                            if not isinstance(entry, _MappingABC):
+                                continue
+                            name_text = str(entry.get("name") or entry.get("op") or "").strip()
+                            name_lower = name_text.lower()
+                            qty_candidate = entry.get("qty")
+                            try:
+                                qty_val = int(float(qty_candidate))
+                            except Exception:
+                                qty_val = 0
+                            side_val = entry.get("side")
+                            if name_text and name_lower not in skip_names:
+                                planner_ops_summary.append(
+                                    {"name": name_text, "qty": qty_val, "side": side_val}
+                                )
+            except Exception as exc:
+                logging.debug(
+                    "[actions-summary] skipped due to %s: %s",
+                    exc.__class__.__name__,
+                    exc,
+                    exc_info=False,
+                )
 
-        milling_bucket_obj = None
-        bucket_view_snapshot = (
-            breakdown.get("bucket_view") if isinstance(breakdown, _MappingABC) else None
-        )
-        if isinstance(bucket_view_snapshot, (_MappingABC, dict)):
-            milling_bucket_obj = _extract_milling_bucket(bucket_view_snapshot)
-        _render_milling_removal_card(append_line, lines, milling_bucket_obj)
+            milling_bucket_obj = None
+            bucket_view_snapshot = (
+                breakdown.get("bucket_view") if isinstance(breakdown, _MappingABC) else None
+            )
+            if isinstance(bucket_view_snapshot, (_MappingABC, dict)):
+                milling_bucket_obj = _extract_milling_bucket(bucket_view_snapshot)
+            _render_milling_removal_card(append_line, lines, milling_bucket_obj)
 
     except Exception as e:
         _push(lines, f"[DEBUG] material_removal_emit_skipped={e.__class__.__name__}: {e}")
