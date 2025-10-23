@@ -514,59 +514,6 @@ def _get_chart_lines_for_ops(
     return []
 
 
-_QTY_PAREN_RE = re.compile(r"^\s*\((\d+)\)\s*")
-_CB_DIA_RE = re.compile(
-    r"(?:(?:[Ø⌀\u00D8]|%%[Cc])\s*)?"
-    r"(?P<numA>\d+(?:\.\d+)?|\.\d+|\d+\s*/\s*\d+)\s*"
-    r"(?:C[’']?\s*BORE|CBORE|COUNTER\s*BORE)"
-    r"|"
-    r"(?P<numB>\d+(?:\.\d+)?|\.\d+|\d+\s*/\s*\d+)\s*"
-    r"(?:[Ø⌀\u00D8]|%%[Cc])\s*"
-    r"(?:C[’']?\s*BORE|CBORE|COUNTER\s*BORE)",
-    re.I,
-)
-_X_DEPTH_RE = re.compile(r"[×xX]\s*([0-9]+(?:\.[0-9]+)?)")
-_BACK_RE = re.compile(r"\bFROM\s+BACK\b", re.I)
-_FRONT_RE = re.compile(r"\bFROM\s+FRONT\b", re.I)
-_BOTH_RE = re.compile(r"\bFRONT\s*&\s*BACK|BOTH\s+SIDES|2\s+SIDES\b", re.I)
-_SPOT_RE_TXT = re.compile(r"(?:C[’']?\s*DRILL|CENTER\s*DRILL|SPOT\s*DRILL|SPOT\b)", re.I)
-_JIG_RE_TXT = re.compile(r"\bJIG\s*GRIND\b", re.I)
-_TAP_RE = re.compile(
-    r"\b(?:#?\d+[- ]\d+|[1-9]/\d+-\d+|[1-9]/\d+|[\d/]+-NPT|N\.?P\.?T\.?)\s*TAP\b",
-    re.I,
-)
-_DRILL_THRU = re.compile(r"\bDRILL\s+THRU\b", re.I)
-_SIZE_INCH_RE = re.compile(r"\((\d+(?:\.\d+)?|\.\d+)\)")
-_LETTER_RE = re.compile(r"\b([A-Z])\b")
-
-
-def _parse_qty(s: str) -> int:
-    m = re.match(r"\s*\((\d+)\)\s*", s)
-    if m:
-        return int(m.group(1))
-    m = re.search(r"(?<![\d.])(\d+)\s*[xX×](?!\w)", s)
-    if m:
-        return int(m.group(1))
-    m = re.search(r"\bQTY[:\s]+(\d+)\b", s, re.I)
-    if m:
-        return int(m.group(1))
-    return 1
-
-
-def _side(U: str) -> str:
-    if _BOTH_RE.search(U):
-        return "BOTH"
-    has_back = bool(_BACK_RE.search(U) or re.search(r"\bBACK\b", U))
-    has_front = bool(_FRONT_RE.search(U) or re.search(r"\bFRONT\b", U))
-    if has_back and has_front:
-        return "BOTH"
-    if has_back:
-        return "BACK"
-    if has_front:
-        return "FRONT"
-    return "FRONT"
-
-
 def _bucket_add_minutes(
     breakdown_mutable: MutableMapping[str, Any],
     key: str,
@@ -640,107 +587,38 @@ def _build_ops_cards_from_chart_lines(
     if not chart_lines and not ops_rows:
         return lines
 
-    # --- Aggregate groups from text lines ------------------------------------
-    cb_groups: dict[tuple[float | None, str, float | None], int] = {}
-    spot_qty = 0
-    jig_qty = 0
+    cleaned_chart_lines: list[str] = []
+    for raw in chart_lines or []:
+        cleaned = _clean_mtext(str(raw or ""))
+        if cleaned:
+            cleaned_chart_lines.append(cleaned)
+    joined_chart = _join_wrapped_chart_lines(cleaned_chart_lines)
+    chart_claims = _parse_ops_and_claims(joined_chart)
 
-    for raw in chart_lines:
-        s = str(raw or "")
-        if not s.strip():
+    cb_groups: dict[tuple[float | None, str, float | None], int] = dict(chart_claims.get("cb_groups") or {})
+    spot_qty = int(chart_claims.get("spot") or 0)
+    jig_qty = int(chart_claims.get("jig") or 0)
+
+    row_lines: list[str] = []
+    for entry in ops_rows:
+        if not isinstance(entry, _MappingABC):
             continue
-
-        qty = _parse_qty(s)
-
-        U = s.upper()
-        side = _side(U)
-
-        # Counterbore rows
-        if ("CBORE" in U) or ("C'BORE" in U) or ("COUNTER BORE" in U) or _CB_DIA_RE.search(s):
-            dia = None
-            mcb = _CB_DIA_RE.search(s)
-            if mcb:
-                raw = (mcb.group("numA") or mcb.group("numB") or "").replace(" ", "")
-                if raw:
-                    if "/" in raw:
-                        try:
-                            dia = float(Fraction(raw))
-                        except Exception:
-                            dia = None
-                    else:
-                        try:
-                            dia = float(raw)
-                        except Exception:
-                            dia = None
-            mdepth = _X_DEPTH_RE.search(s)
-            depth = float(mdepth.group(1)) if mdepth else None
-            if side == "BOTH":
-                for sd in ("FRONT", "BACK"):
-                    cb_groups[(dia, sd, depth)] = cb_groups.get((dia, sd, depth), 0) + qty
-            else:
-                cb_groups[(dia, side, depth)] = cb_groups.get((dia, side, depth), 0) + qty
+        desc = str(entry.get("desc") or "")
+        if not desc.strip():
             continue
+        try:
+            qty_val = int(entry.get("qty") or 0)
+        except Exception:
+            qty_val = 0
+        prefix = f"({qty_val}) " if qty_val > 0 else ""
+        row_lines.append(prefix + desc)
 
-        # Spots (standalone)
-        if (
-            _SPOT_RE_TXT.search(s)
-            and not _DRILL_THRU.search(s)
-            and not ("TAP" in U or _TAP_RE.search(s))
-        ):
-            spot_qty += qty
-            continue
-
-        # Jig grind calls (standalone)
-        if _JIG_RE_TXT.search(s):
-            jig_qty += qty
-            continue
-
-    # If no chart_lines produced groups, try building from ops_rows descriptions
-    if not cb_groups and ops_rows:
-        for r in ops_rows:
-            s = str((r or {}).get("desc") or "")
-            if not s.strip():
-                continue
-            U = s.upper()
-            if ("CBORE" in U) or ("C'BORE" in U) or ("COUNTER BORE" in U) or _CB_DIA_RE.search(s):
-                qty = int((r or {}).get("qty") or 0)
-                if qty <= 0:
-                    continue
-                # side/depth/dia from text
-                side = _side(U)
-                mdepth = _X_DEPTH_RE.search(s)
-                depth = float(mdepth.group(1)) if mdepth else None
-                dia = None
-                mcb = _CB_DIA_RE.search(s)
-                if mcb:
-                    raw = (mcb.group("numA") or mcb.group("numB") or "").replace(" ", "")
-                    if raw:
-                        if "/" in raw:
-                            try:
-                                dia = float(Fraction(raw))
-                            except Exception:
-                                dia = None
-                        else:
-                            try:
-                                dia = float(raw)
-                            except Exception:
-                                dia = None
-                cb_groups[(dia, side, depth)] = cb_groups.get((dia, side, depth), 0) + qty
-        # Spots/Jig from rows text too
-        for r in ops_rows:
-            s = str((r or {}).get("desc") or "")
-            if not s.strip():
-                continue
-            U = s.upper()
-            qty_val = int((r or {}).get("qty") or 0)
-            if (
-                _SPOT_RE_TXT.search(s)
-                and not _DRILL_THRU.search(s)
-                and not ("TAP" in U or _TAP_RE.search(s))
-            ):
-                spot_qty += qty_val
-            if _JIG_RE_TXT.search(s):
-                jig_qty += qty_val
+    if row_lines:
+        row_claims = _parse_ops_and_claims(row_lines)
+        if not cb_groups and row_claims.get("cb_groups"):
+            cb_groups = dict(row_claims["cb_groups"])
+        spot_qty += int(row_claims.get("spot") or 0)
+        jig_qty += int(row_claims.get("jig") or 0)
 
     # --- Emit COUNTERBORE card ----------------------------------------------
     if cb_groups:
@@ -892,23 +770,23 @@ def _join_wrapped_chart_lines(chart_lines: list[str]) -> list[str]:
     flush()
     return out
 _CB_DIA_RE = re.compile(
-    # Case A: symbol BEFORE the number: "Ø .750 C'BORE" or "%%C .750 C'BORE"
-    r"(?:(?:[Ø⌀\u00D8]|%%[Cc])\s*)?"
-    r"(?P<numA>\d+(?:\.\d+)?|\.\d+|\d+\s*/\s*\d+)\s*"
-    r"(?:C[’']?\s*BORE|CBORE|COUNTER\s*BORE)"
-    r"|"
-    # Case B: symbol AFTER the number: ".750 Ø C'BORE" or ".750%%C C'BORE"
-    r"(?P<numB>\d+(?:\.\d+)?|\.\d+|\d+\s*/\s*\d+)\s*"
-    r"(?:[Ø⌀\u00D8]|%%[Cc])\s*"
-    r"(?:C[’']?\s*BORE|CBORE|COUNTER\s*BORE)",
+    r"(?:(?:[Ø⌀\u00D8]|%%[Cc])\s*)?(?P<numA>\d+(?:\.\d+)?|\.\d+|\d+\s*/\s*\d+)\s*(?:C[’']?\s*BORE|CBORE|COUNTER\s*BORE)"
+    r"|(?P<numB>\d+(?:\.\d+)?|\.\d+|\d+\s*/\s*\d+)\s*(?:[Ø⌀\u00D8]|%%[Cc])\s*(?:C[’']?\s*BORE|CBORE|COUNTER\s*BORE)",
     re.I,
 )
-_X_DEPTH_RE   = re.compile(r"[×xX]\s*([0-9]+(?:\.[0-9]+)?)")      # × .62  or  x 0.63
-_BACK_RE      = re.compile(r"\bFROM\s+BACK\b", re.I)
-_FRONT_RE     = re.compile(r"\bFROM\s+FRONT\b", re.I)
-_BOTH_RE      = re.compile(r"\bFRONT\s*&\s*BACK|BOTH\s+SIDES|2\s+SIDES\b", re.I)
-_SPOT_RE_TXT  = re.compile(r"(?:C[’']?\s*DRILL|CENTER\s*DRILL|SPOT\s*DRILL|SPOT\b)", re.I)
-_JIG_RE_TXT   = re.compile(r"\bJIG\s*GRIND\b", re.I)
+_X_DEPTH_RE = re.compile(r"[×xX]\s*([0-9]+(?:\.[0-9]+)?)")
+_BACK_RE = re.compile(r"\bFROM\s+BACK\b", re.I)
+_FRONT_RE = re.compile(r"\bFROM\s+FRONT\b", re.I)
+_BOTH_RE = re.compile(r"\bFRONT\s*&\s*BACK|BOTH\s+SIDES|2\s+SIDES\b", re.I)
+_SPOT_RE_TXT = re.compile(r"(?:C[’']?\s*DRILL|CENTER\s*DRILL|SPOT\s*DRILL|SPOT\b)", re.I)
+_JIG_RE_TXT = re.compile(r"\bJIG\s*GRIND\b", re.I)
+_TAP_RE = re.compile(
+    r"\b(?:#?\d+[- ]\d+|[1-9]/\d+-\d+|M\d+(?:[.\s×xX]\d+)?|[\d/]+-NPT|N\.?P\.?T\.?)\s*TAP\b",
+    re.I,
+)
+_DRILL_THRU = re.compile(r"\bDRILL\s+THRU\b", re.I)
+_SIZE_INCH_RE = re.compile(r"\((\d+(?:\.\d+)?|\.\d+)\)")
+_LETTER_RE = re.compile(r"\b([A-Z])\b")
 
 LETTER_DRILLS = {
     "Q": 0.3320,
@@ -917,28 +795,22 @@ LETTER_DRILLS = {
     "T": 0.3580,
 }
 
-_SIZE_INCH_RE = re.compile(r"\(\s*(\d+(?:\.\d+)?|\.\d+)\s*\)")
-_LETTER_RE = re.compile(r"\b([A-Z])(?=\s*(?:\(|DRILL|$))")
-_DRILL_THRU = re.compile(r"\bDRILL\s+THRU\b", re.I)
-_TAP_RE = re.compile(r"\bTAP(?:PING)?\b", re.I)
-
 
 def _side(U: str) -> str:
     if _BOTH_RE.search(U):
         return "BOTH"
-    if _BACK_RE.search(U):
+    if _BACK_RE.search(U) or re.search(r"\bBACK\b", U):
         return "BACK"
-    if _FRONT_RE.search(U):
+    if _FRONT_RE.search(U) or re.search(r"\bFRONT\b", U):
         return "FRONT"
     return "FRONT"
 
 
 def _parse_qty(s: str) -> int:
-    # (4) prefix, or 4X/4 x anywhere, or QTY 4
     m = re.match(r"\s*\((\d+)\)\s*", s)
     if m:
         return int(m.group(1))
-    m = re.search(r"(?<![\d.])(\d+)\s*[xX×](?!\w)", s)
+    m = re.search(r"(?<!\d)(\d+)\s*[xX×]\b", s)
     if m:
         return int(m.group(1))
     m = re.search(r"\bQTY[:\s]+(\d+)\b", s, re.I)
@@ -994,149 +866,125 @@ def _record_drill_claims(
     except Exception:
         pass
 
-def _parse_ops_and_claims(
-    chart_lines: Sequence[str] | None,
-    *,
-    rows: Sequence[Mapping[str, Any]] | None = None,
-) -> dict[str, int]:
-    """Extract operation claims (cbore/tap/spot/jig) from chart lines/rows."""
+def _parse_ops_and_claims(joined_lines: Sequence[str] | None) -> dict[str, Any]:
+    """Collect operations + pilot drill claims from text lines."""
 
     cb_groups: dict[tuple[float | None, str, float | None], int] = {}
     tap_qty = 0
     npt_qty = 0
     spot_qty = 0
     jig_qty = 0
-    tap_qty = 0
-    npt_qty = 0
+    claimed_pilot_diams: list[float] = []
 
-    def _side(U: str) -> str:
-        if _BOTH_RE.search(U):
-            return "BOTH"
-        if _BACK_RE.search(U):
-            return "BACK"
-        if _FRONT_RE.search(U):
-            return "FRONT"
-        return "FRONT"
+    for raw in joined_lines or []:
+        s = _clean_mtext(str(raw or ""))
+        if not s:
+            continue
+        U = s.upper()
+        qty = _parse_qty(s)
 
-    def _qty_from_text(text: str) -> int:
-        mqty = re.match(r"\s*\((\d+)\)\s*", text)
-        if not mqty:
-            mqty = re.search(r"(?<!\d)(\d+)\s*[xX]\b", text)
-        try:
-            return int(mqty.group(1)) if mqty else 1
-        except Exception:
-            return 1
-
-    def _register_cb(diameter: float | None, side: str, depth: float | None, qty: int) -> None:
-        if side == "BOTH":
-            for sd in ("FRONT", "BACK"):
-                cb_groups[(diameter, sd, depth)] = cb_groups.get((diameter, sd, depth), 0) + qty
-        else:
-            cb_groups[(diameter, side, depth)] = cb_groups.get((diameter, side, depth), 0) + qty
-
-    def _parse_cb_tokens(text: str, qty: int, side: str) -> bool:
-        mcb = _CB_DIA_RE.search(text)
-        if not mcb:
-            return False
-        rawnum = mcb.group("numA") or mcb.group("numB")
-        diameter: float | None = None
-        if rawnum:
-            raw = rawnum.strip()
-            if "/" in raw:
+        mcb = _CB_DIA_RE.search(s)
+        if mcb:
+            rawnum = (mcb.group("numA") or mcb.group("numB") or "").strip()
+            dia: float | None = None
+            if rawnum:
+                if "/" in rawnum:
+                    try:
+                        num, den = [part.strip() for part in rawnum.split("/", 1)]
+                        dia = float(int(num) / int(den))
+                    except Exception:
+                        dia = None
+                else:
+                    try:
+                        dia = float(rawnum)
+                    except Exception:
+                        dia = None
+            mdepth = _X_DEPTH_RE.search(s)
+            depth = None
+            if mdepth:
                 try:
-                    num, den = raw.split("/", 1)
-                    diameter = float(int(num) / int(den))
+                    depth = float(mdepth.group(1))
                 except Exception:
-                    diameter = None
+                    depth = None
+            side = _side(U)
+            if side == "BOTH":
+                for sd in ("FRONT", "BACK"):
+                    cb_groups[(dia, sd, depth)] = cb_groups.get((dia, sd, depth), 0) + qty
             else:
+                cb_groups[(dia, side, depth)] = cb_groups.get((dia, side, depth), 0) + qty
+            continue
+
+        if _SPOT_RE_TXT.search(U) and ("TAP" not in U) and ("THRU" not in U):
+            spot_qty += qty
+            continue
+
+        if _JIG_RE_TXT.search(U):
+            jig_qty += qty
+            continue
+
+        if "NPT" in U or "N.P.T" in U:
+            npt_qty += qty
+            mdec = _SIZE_INCH_RE.search(s)
+            if mdec:
                 try:
-                    diameter = float(raw)
+                    claimed_pilot_diams.extend([float(mdec.group(1))] * qty)
                 except Exception:
-                    diameter = None
-        mdepth = _X_DEPTH_RE.search(text)
-        depth = None
-        if mdepth:
-            try:
-                depth = float(mdepth.group(1))
-            except Exception:
-                depth = None
-        _register_cb(diameter, side, depth, qty)
-        return True
+                    pass
+            else:
+                mlet = _LETTER_RE.search(s)
+                if mlet and mlet.group(1) in LETTER_DRILLS:
+                    claimed_pilot_diams.extend([LETTER_DRILLS[mlet.group(1)]] * qty)
+            continue
 
-    # Pass A: from chart_lines
-    if isinstance(chart_lines, Sequence):
-        for raw in chart_lines:
-            s = _clean_mtext(str(raw or ""))
-            if not s:
-                continue
-            qty = _qty_from_text(s)
-            U = s.upper()
-            side = _side(U)
-            if _parse_cb_tokens(s, qty, side):
-                continue
-            if RE_NPT.search(s):
-                npt_qty += qty
-            elif RE_TAP.search(s):
-                tap_qty += qty
-            if _SPOT_RE_TXT.search(U) and ("TAP" not in U) and ("THRU" not in U):
-                spot_qty += qty
-            if _JIG_RE_TXT.search(U):
-                jig_qty += qty
+        if _TAP_RE.search(U):
+            tap_qty += qty
+            mdec = _SIZE_INCH_RE.search(s)
+            if mdec:
+                try:
+                    claimed_pilot_diams.extend([float(mdec.group(1))] * qty)
+                except Exception:
+                    pass
+            else:
+                mlet = _LETTER_RE.search(s)
+                if mlet and mlet.group(1) in LETTER_DRILLS:
+                    claimed_pilot_diams.extend([LETTER_DRILLS[mlet.group(1)]] * qty)
+            continue
 
-    # Pass B: optional fallback from rows (only if no cb claims yet)
-    if not cb_groups and isinstance(rows, Sequence):
-        for entry in rows:
-            if not isinstance(entry, _MappingABC):
-                continue
-            try:
-                qty_val = int(entry.get("qty") or 0)
-            except Exception:
-                qty_val = 0
-            if qty_val <= 0:
-                continue
-            desc = str(entry.get("desc") or "")
-            if not desc.strip():
-                continue
-            U = desc.upper()
-            side = _side(U)
-            if _parse_cb_tokens(desc, qty_val, side):
-                continue
-            if _SPOT_RE_TXT.search(U) and ("TAP" not in U) and ("THRU" not in U):
-                spot_qty += qty_val
-            if _JIG_RE_TXT.search(U):
-                jig_qty += qty_val
+        if _DRILL_THRU.search(U):
+            mdec = _SIZE_INCH_RE.search(s)
+            if mdec:
+                try:
+                    claimed_pilot_diams.extend([float(mdec.group(1))] * qty)
+                except Exception:
+                    pass
+            else:
+                mlet = _LETTER_RE.search(s)
+                if mlet and mlet.group(1) in LETTER_DRILLS:
+                    claimed_pilot_diams.extend([LETTER_DRILLS[mlet.group(1)]] * qty)
 
-    # Pass C: taps from rows (always, to catch structured summaries)
-    if isinstance(rows, Sequence):
-        for entry in rows:
-            if not isinstance(entry, _MappingABC):
-                continue
-            try:
-                qty_val = int(entry.get("qty") or 0)
-            except Exception:
-                qty_val = 0
-            if qty_val <= 0:
-                continue
-            desc = str(entry.get("desc") or "")
-            if not desc.strip():
-                continue
-            if RE_NPT.search(desc):
-                npt_qty += qty_val
-            elif RE_TAP.search(desc):
-                tap_qty += qty_val
+    total_cb = int(sum(cb_groups.values()))
+    front_cb = int(sum(q for (dia, side, depth), q in cb_groups.items() if side == "FRONT"))
+    back_cb = int(sum(q for (dia, side, depth), q in cb_groups.items() if side == "BACK"))
 
-    total_cb = sum(cb_groups.values())
-    front_cb = sum(q for (_, side, _), q in cb_groups.items() if side == "FRONT")
-    back_cb = sum(q for (_, side, _), q in cb_groups.items() if side == "BACK")
+    cleaned_claims: list[float] = []
+    for value in claimed_pilot_diams:
+        try:
+            num = float(value)
+        except Exception:
+            continue
+        if math.isfinite(num):
+            cleaned_claims.append(num)
 
     return {
-        "cb_total": int(total_cb),
-        "cb_front": int(front_cb),
-        "cb_back": int(back_cb),
+        "cb_groups": dict(cb_groups),
+        "cb_total": total_cb,
+        "cb_front": front_cb,
+        "cb_back": back_cb,
         "tap": int(tap_qty),
         "npt": int(npt_qty),
         "spot": int(spot_qty),
         "jig": int(jig_qty),
+        "claimed_pilot_diams": cleaned_claims,
     }
 
 
