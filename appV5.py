@@ -12170,6 +12170,14 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
                                 "side": "front",
                             }
                         )
+                    if ops_claims.get("counterdrill", 0) > 0:
+                        ebo.setdefault("counterdrill", []).append(
+                            {
+                                "name": "Counterdrill",
+                                "qty": int(ops_claims["counterdrill"]),
+                                "side": "front",
+                            }
+                        )
                     if ops_claims["spot"] > 0:
                         ebo.setdefault("spot", []).append(
                             {"name": "Spot drill", "qty": int(ops_claims["spot"]), "side": "front"}
