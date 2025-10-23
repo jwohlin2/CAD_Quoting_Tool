@@ -874,7 +874,7 @@ def test_collect_pilot_claims_combines_sources() -> None:
                 {"qty": "4X", "desc": "4X TAP #10-32 THRU"},
                 {"qty": 2, "desc": "2X TAP 5/8-11"},
                 {"qty": 1, "desc": "1/8-27 NPT TAP"},
-                {"qty": 1, "desc": ".339 THRU"},
+                {"qty": 1, "desc": ".339 PILOT DRILL THRU"},
             ]
         }
     }
