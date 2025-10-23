@@ -725,8 +725,19 @@ def _build_ops_cards_from_chart_lines(
         row_claims = _parse_ops_and_claims(row_lines)
         if not cb_groups and row_claims.get("cb_groups"):
             cb_groups = dict(row_claims["cb_groups"])
-        spot_qty += int(row_claims.get("spot") or 0)
-        jig_qty += int(row_claims.get("jig") or 0)
+
+        spot_from_rows = int(row_claims.get("spot") or 0)
+        jig_from_rows = int(row_claims.get("jig") or 0)
+
+        if spot_qty <= 0:
+            spot_qty = spot_from_rows
+        else:
+            spot_qty = max(spot_qty, spot_from_rows)
+
+        if jig_qty <= 0:
+            jig_qty = jig_from_rows
+        else:
+            jig_qty = max(jig_qty, jig_from_rows)
 
     # --- Emit COUNTERBORE card ----------------------------------------------
     if cb_groups:
