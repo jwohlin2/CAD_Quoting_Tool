@@ -5,6 +5,7 @@ import math
 import re
 import sys
 import types
+from collections import Counter
 from dataclasses import dataclass
 from typing import Callable, Iterable, Union
 
@@ -862,6 +863,52 @@ def test_aggregate_ops_tap_pilot_claims() -> None:
 
     detail = summary.get("rows_detail") or []
     assert all(entry.get("type") != "drill" for entry in detail)
+
+
+def test_collect_pilot_claims_from_rows() -> None:
+    import appV5
+
+    geo = {
+        "ops_summary": {
+            "rows": [
+                {"qty": "4X", "desc": "4X TAP #10-32 THRU"},
+                {"qty": 2, "desc": "2X TAP 5/8-11"},
+                {"qty": 1, "desc": "1/8-27 NPT TAP"},
+                {"qty": 1, "desc": ".339 THRU"},
+            ]
+        }
+    }
+
+    pilots = appV5._collect_pilot_claims_from_rows(geo)
+    counts = Counter(round(val, 4) for val in pilots)
+
+    assert counts[round(0.1590, 4)] == 4
+    assert counts[round(0.5312, 4)] == 2
+    assert counts[round(0.3390, 4)] == 2
+
+
+def test_adjust_drill_counts_subtracts_row_pilots() -> None:
+    import appV5
+
+    geo = {
+        "ops_summary": {
+            "rows": [
+                {"qty": "4X", "desc": "4X TAP #10-32 THRU"},
+                {"qty": 2, "desc": "5/8-11 TAP"},
+                {"qty": 1, "desc": "1/8-27 NPT TAP"},
+            ]
+        }
+    }
+
+    pilots = appV5._collect_pilot_claims_from_rows(geo)
+    ops_claims = {"claimed_pilot_diams": pilots}
+
+    counts_raw = {0.1590: 4, 0.5312: 2, 0.3390: 1}
+    adjusted = appV5._adjust_drill_counts(counts_raw, ops_claims, None)
+
+    assert adjusted[round(0.1590, 4)] == 0
+    assert adjusted[round(0.5312, 4)] == 0
+    assert adjusted[round(0.3390, 4)] == 0
 
 
 @pytest.mark.parametrize(

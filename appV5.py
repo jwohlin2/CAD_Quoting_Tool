@@ -838,6 +838,95 @@ def _parse_ops_and_claims(joined_lines: Sequence[str] | None) -> dict[str, Any]:
     return _shared_parse_ops_and_claims(joined_lines, cleaner=_clean_mtext)
 
 
+_TAP_PILOT_TABLE: dict[str, float] = {
+    "#10-32": 0.1590,
+    "5/8-11": 0.5312,
+    # add others as needed
+}
+
+_NPT_PILOT_TABLE: dict[str, float] = {
+    "1/8": 0.3390,  # letter R
+}
+
+
+def _collect_pilot_claims_from_rows(
+    geo_map: Mapping[str, Any] | MutableMapping[str, Any] | None,
+) -> list[float]:
+    vals: list[float] = []
+
+    if not isinstance(geo_map, (_MappingABC, dict)):
+        return vals
+
+    try:
+        ops_summary = geo_map.get("ops_summary")  # type: ignore[index]
+    except Exception:
+        ops_summary = None
+
+    rows: Sequence[Any] | None
+    if isinstance(ops_summary, (_MappingABC, dict)):
+        try:
+            rows = ops_summary.get("rows")  # type: ignore[index]
+        except Exception:
+            rows = None
+    else:
+        rows = None
+
+    for row in rows or []:
+        if not isinstance(row, (_MappingABC, dict)):
+            continue
+
+        desc_raw = row.get("desc")
+        if not desc_raw:
+            continue
+
+        try:
+            desc = str(desc_raw).upper()
+        except Exception:
+            continue
+
+        qty_val = row.get("qty")
+        qty = 1
+        if isinstance(qty_val, (int, float)):
+            try:
+                parsed_qty = int(round(float(qty_val)))
+            except Exception:
+                parsed_qty = 0
+            if parsed_qty > 0:
+                qty = parsed_qty
+            else:
+                continue
+        elif isinstance(qty_val, str):
+            match_qty = re.search(r"(\d+)", qty_val)
+            if match_qty:
+                try:
+                    qty = max(1, int(match_qty.group(1)))
+                except Exception:
+                    qty = 1
+
+        is_npt = "NPT" in desc
+        is_tap = "TAP" in desc
+
+        if is_tap and not is_npt:
+            for spec, dia in _TAP_PILOT_TABLE.items():
+                if spec.upper() in desc:
+                    vals.extend([float(dia)] * qty)
+
+        if is_npt:
+            for nominal, dia in _NPT_PILOT_TABLE.items():
+                pattern = rf"(?<!\d){re.escape(str(nominal).upper())}(?!\d)"
+                if re.search(pattern, desc):
+                    vals.extend([float(dia)] * qty)
+
+        match_thru = re.search(r"(?<!\d)(\d*\.\d+)\s*THRU", desc)
+        if match_thru:
+            try:
+                vals.extend([float(match_thru.group(1))] * qty)
+            except Exception:
+                continue
+
+    return vals
+
+
 def _adjust_drill_counts(
     counts_by_diam_raw: dict[float, int],
     ops_claims: dict,
@@ -3853,6 +3942,12 @@ def _compute_drilling_removal_section(
                 ops_claims = dict(ops_claims_raw)
             else:
                 ops_claims = {}
+
+            pilot_from_rows = _collect_pilot_claims_from_rows(geo_map_for_drill)
+            if pilot_from_rows:
+                ops_claims["claimed_pilot_diams"] = (
+                    list(ops_claims.get("claimed_pilot_diams") or []) + pilot_from_rows
+                )
 
             ops_hint: dict[str, Any] = {}
             try:
