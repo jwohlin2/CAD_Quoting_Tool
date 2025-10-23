@@ -10784,6 +10784,8 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
             return {}
         try:
             claims_candidate = source.get("ops_claims")  # type: ignore[index]
+            if not isinstance(claims_candidate, (_MappingABC, dict)):
+                claims_candidate = source.get("_ops_claims")  # type: ignore[index]
         except Exception:
             return {}
         if not isinstance(claims_candidate, (_MappingABC, dict)):
@@ -11166,6 +11168,7 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
                 _clean_mtext(x) for x in chart_lines_all
             ])
             ops_claims = _parse_ops_and_claims(joined_early)
+            breakdown_mutable["_ops_claims"] = ops_claims
             _push(
                 lines,
                 f"[DEBUG] preseed_ops cb={ops_claims['cb_total']} tap={ops_claims['tap']} "
@@ -11215,6 +11218,10 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
                 cb_min = (ops_claims["cb_total"] or 0) * float(
                     globals().get("CBORE_MIN_PER_SIDE_MIN") or 0.15
                 )
+                spot_min = (ops_claims["spot"] or 0) * 0.05
+                jig_min = (ops_claims["jig"] or 0) * float(
+                    globals().get("JIG_GRIND_MIN_PER_FEATURE") or 0.75
+                )
                 seed(
                     "counterbore",
                     cb_min,
@@ -11224,18 +11231,17 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
                     _lookup_bucket_rate("labor", rates) or 25.46,
                 )
                 seed(
-                    "drilling",
-                    (ops_claims["spot"] or 0) * 0.05,
-                    _lookup_bucket_rate("machine", rates) or 53.76,
-                    _lookup_bucket_rate("labor", rates) or 25.46,
-                )
-                seed(
                     "grinding",
-                    (ops_claims["jig"] or 0)
-                    * float(globals().get("JIG_GRIND_MIN_PER_FEATURE") or 0.75),
+                    jig_min,
                     _lookup_bucket_rate("grinding", rates)
                     or _lookup_bucket_rate("machine", rates)
                     or 53.76,
+                    _lookup_bucket_rate("labor", rates) or 25.46,
+                )
+                seed(
+                    "drilling",
+                    spot_min + cb_min + jig_min,
+                    _lookup_bucket_rate("machine", rates) or 53.76,
                     _lookup_bucket_rate("labor", rates) or 25.46,
                 )
 
