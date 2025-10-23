@@ -1220,35 +1220,51 @@ def _build_ops_cards_from_chart_lines(
     result: Mapping[str, Any] | None,
     rates: Mapping[str, Any] | None,
     breakdown_mutable: MutableMapping[str, Any] | None = None,
+    ctx: Mapping[str, Any] | MutableMapping[str, Any] | None = None,
+    ctx_a: Mapping[str, Any] | MutableMapping[str, Any] | None = None,
+    ctx_b: Mapping[str, Any] | MutableMapping[str, Any] | None = None,  # NEW: let us reuse your collector
 ) -> list[str]:
     """Return MATERIAL REMOVAL card lines derived from raw hole table text."""
 
     try:
-        ctx_candidates: list[Mapping[str, Any]] = []
+        geo_map_obj: Mapping[str, Any] | MutableMapping[str, Any] | None = None
         if isinstance(result, _MappingABC):
-            ctx_candidates.append(typing.cast(Mapping[str, Any], result))
-        if isinstance(breakdown, _MappingABC):
-            ctx_candidates.append(typing.cast(Mapping[str, Any], breakdown))
-        if not ctx_candidates:
-            return []
+            geo_map_obj = typing.cast(Mapping[str, Any] | MutableMapping[str, Any] | None, result.get("geo"))
+        if not isinstance(geo_map_obj, _MappingABC) and isinstance(breakdown, _MappingABC):
+            geo_map_obj = typing.cast(Mapping[str, Any] | MutableMapping[str, Any] | None, breakdown.get("geo"))
+        if not isinstance(geo_map_obj, _MappingABC) and isinstance(ctx, _MappingABC):
+            try:
+                geo_map_obj = typing.cast(Mapping[str, Any] | MutableMapping[str, Any] | None, ctx.get("geo"))
+            except Exception:
+                geo_map_obj = None
+        geo_map: Mapping[str, Any] | MutableMapping[str, Any]
+        if isinstance(geo_map_obj, _MappingABC):
+            geo_map = typing.cast(Mapping[str, Any] | MutableMapping[str, Any], geo_map_obj)
+        else:
+            geo_map = {}
 
-        ctx = ctx_candidates[0]
+        chart_lines: Sequence[str] | None
+        try:
+            chart_lines = _collect_chart_lines_context(ctx, geo_map, ctx_a, ctx_b)
+        except Exception:
+            chart_lines = _get_chart_lines_for_ops(breakdown, result)
 
-        geo_map: Mapping[str, Any] | MutableMapping[str, Any] | None = None
-        for candidate in (
-            ctx.get("geo") if isinstance(ctx, _MappingABC) else None,
-            (breakdown.get("geo") if isinstance(breakdown, _MappingABC) else None),
-            (result.get("geo") if isinstance(result, _MappingABC) else None),
-        ):
-            if isinstance(candidate, _MappingABC):
-                geo_map = typing.cast(Mapping[str, Any] | MutableMapping[str, Any], candidate)
-                break
-
-        chart_lines = _collect_chart_lines_context(ctx, geo_map, breakdown, result)
+        if not chart_lines:
+            chart_lines = _get_chart_lines_for_ops(breakdown, result)
         if not chart_lines:
             return []
 
-        built_rows = _build_ops_rows_from_lines_fallback(chart_lines)
+        if isinstance(chart_lines, list):
+            chart_lines_list = chart_lines
+        else:
+            try:
+                chart_lines_list = list(chart_lines)
+            except Exception:
+                return []
+        if not chart_lines_list:
+            return []
+
+        built_rows = _build_ops_rows_from_lines_fallback(chart_lines_list)
         if not built_rows:
             return []
 
@@ -8102,6 +8118,29 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
         if isinstance(candidate_group, str) and candidate_group.strip():
             material_group_display = candidate_group.strip()
 
+    ctx_a: Mapping[str, Any] | None = (
+        typing.cast(Mapping[str, Any], breakdown)
+        if isinstance(breakdown, _MappingABC)
+        else None
+    )
+    ctx_b: Mapping[str, Any] | None = (
+        typing.cast(Mapping[str, Any], result)
+        if isinstance(result, _MappingABC)
+        else None
+    )
+    ctx: Mapping[str, Any] | None = None
+    quote_candidate = locals().get("quote")
+    if isinstance(quote_candidate, dict) and quote_candidate:
+        ctx = typing.cast(Mapping[str, Any], quote_candidate)
+    elif isinstance(ctx_a, dict) and ctx_a:
+        ctx = ctx_a
+    elif isinstance(ctx_b, dict) and ctx_b:
+        ctx = ctx_b
+    elif isinstance(ctx_a, _MappingABC):
+        ctx = ctx_a
+    elif isinstance(ctx_b, _MappingABC):
+        ctx = ctx_b
+
     (
         removal_card_extra,
         removal_card_lines,
@@ -8126,6 +8165,9 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
         result=result,
         rates=rates,
         breakdown_mutable=breakdown_mutable,  # so buckets get minutes
+        ctx=ctx,
+        ctx_a=ctx_a,
+        ctx_b=ctx_b,
     )
     if extra_ops_lines:
         removal_card_lines.extend(extra_ops_lines)
@@ -10227,6 +10269,9 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
                 result=result,
                 rates=rates,
                 breakdown_mutable=breakdown_mutable,
+                ctx=ctx,
+                ctx_a=ctx_a,
+                ctx_b=ctx_b,
             )
             if fallback_lines:
                 lines.extend(fallback_lines)
