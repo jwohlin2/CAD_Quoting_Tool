@@ -544,7 +544,7 @@ def _parse_qty(s: str) -> int:
     m = re.match(r"\s*\((\d+)\)\s*", s)
     if m:
         return int(m.group(1))
-    m = re.search(r"(?<!\d)(\d+)\s*[xX×]\b?", s)
+    m = re.search(r"(?<!\S)(\d+)\s*[xX×]\b", s)
     if m:
         return int(m.group(1))
     m = re.search(r"\bQTY[:\s]+(\d+)\b", s, re.I)
@@ -677,8 +677,8 @@ def _build_ops_cards_from_chart_lines(
             if side == "BOTH":
                 for sd in ("FRONT", "BACK"):
                     cb_groups[(dia, sd, depth)] = cb_groups.get((dia, sd, depth), 0) + qty
-                else:
-                    cb_groups[(dia, side, depth)] = cb_groups.get((dia, side, depth), 0) + qty
+            else:
+                cb_groups[(dia, side, depth)] = cb_groups.get((dia, side, depth), 0) + qty
             continue
 
         # Spots (standalone)
