@@ -733,6 +733,8 @@ def _build_ops_cards_from_chart_lines(
                 continue
             U = s.upper()
             qty_val = int((r or {}).get("qty") or 0)
+            if qty_val <= 0:
+                continue
             if (
                 _SPOT_RE_TXT.search(s)
                 and not _DRILL_THRU.search(s)
@@ -11086,7 +11088,27 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
             joined_early = _join_wrapped_chart_lines([
                 _clean_mtext(x) for x in chart_lines_all
             ])
-            ops_claims = _parse_ops_and_claims(joined_early)
+
+            fallback_row_lines: list[str] = []
+            if not joined_early and isinstance(built, Sequence):
+                for entry in built:
+                    if not isinstance(entry, _MappingABC):
+                        continue
+                    try:
+                        qty_val = int(entry.get("qty") or 0)
+                    except Exception:
+                        qty_val = 0
+                    if qty_val <= 0:
+                        continue
+                    desc = str(entry.get("desc") or "")
+                    if not desc.strip():
+                        continue
+                    fallback_row_lines.append(f"({qty_val}) {desc}")
+
+            ops_claims = _parse_ops_and_claims(
+                joined_early or fallback_row_lines,
+                rows=built,
+            )
             _push(
                 lines,
                 f"[DEBUG] preseed_ops cb={ops_claims['cb_total']} tap={ops_claims['tap']} "
