@@ -729,12 +729,19 @@ def _build_ops_cards_from_chart_lines(
     return lines
 
 
+
 # --- Inline ops-cards builder from chart_lines (fallback to rows) ------------
-import re, math
-_CB_DIA_RE    = re.compile(r"[Ø⌀\u00D8]?\s*([0-9]+(?:\.[0-9]+)?)\s*(?:C[’']?\s*BORE|CBORE|COUNTER\s*BORE)", re.I)
-_X_DEPTH_RE   = re.compile(r"[×x]\s*([0-9]+(?:\.[0-9]+)?)")
+import re, math, fractions
+_CB_DIA_RE = re.compile(
+    r"(?:[Ø⌀\u00D8]\s*)?(?:"                       # optional diameter symbol
+    r"(?P<dec>\d+(?:\.\d+)?|\.\d+)"                 # decimal "1.000" or ".623"
+    r"|(?P<num>\d+)\s*/\s*(?P<den>\d+)"             # fraction "13/32"
+    r")\s*(?:C[’']?\s*BORE|CBORE|COUNTER\s*BORE)",  # C'BORE variants
+    re.I,
+)
+_X_DEPTH_RE   = re.compile(r"[×xX]\s*([0-9]+(?:\.[0-9]+)?)")      # × .62  or  x 0.63
 _BACK_RE      = re.compile(r"\bFROM\s+BACK\b", re.I)
-_FRONT_RE     = re.compile(r"\bFROM\s+FRONT\b", re.I)   # <-- correct name
+_FRONT_RE     = re.compile(r"\bFROM\s+FRONT\b", re.I)
 _BOTH_RE      = re.compile(r"\bFRONT\s*&\s*BACK|BOTH\s+SIDES|2\s+SIDES\b", re.I)
 _SPOT_RE_TXT  = re.compile(r"(?:C[’']?\s*DRILL|CENTER\s*DRILL|SPOT\s*DRILL|SPOT\b)", re.I)
 _JIG_RE_TXT   = re.compile(r"\bJIG\s*GRIND\b", re.I)
@@ -748,38 +755,49 @@ def _append_counterbore_spot_jig_cards(
     breakdown_mutable,
     rates,
 ) -> int:
-    """Build COUNTERBORE / SPOT / JIG cards from chart_lines first, then rows.
-       Returns number of cards appended (0..3)."""
     cb_groups: dict[tuple[float|None,str,float|None], int] = {}  # (dia, side, depth) -> qty
     spot_qty = 0
-    jig_qty = 0
+    jig_qty  = 0
 
-    def _side_from(U: str) -> str:
+    def _side(U: str) -> str:
         if _BOTH_RE.search(U): return "BOTH"
         if _BACK_RE.search(U): return "BACK"
         if _FRONT_RE.search(U): return "FRONT"
         return "FRONT"
 
-    # ---------- PASS A: parse from chart_lines ----------
+    def _parse_qty(s: str) -> int:
+        # (4) prefix, or 4X/4 x anywhere, or QTY 4
+        m = re.match(r"\s*\((\d+)\)\s*", s)
+        if m: return int(m.group(1))
+        m = re.search(r"(?<!\d)(\d+)\s*[xX]\b", s)
+        if m: return int(m.group(1))
+        m = re.search(r"\bQTY[:\s]+(\d+)\b", s, re.I)
+        if m: return int(m.group(1))
+        return 1
+
+    def _parse_cbore_dia(s: str) -> float | None:
+        m = _CB_DIA_RE.search(s)
+        if not m: return None
+        if m.group("dec"):
+            return float(m.group("dec"))
+        if m.group("num") and m.group("den"):
+            try: return float(fractions.Fraction(int(m.group("num")), int(m.group("den"))))
+            except Exception: return None
+        return None
+
+    # ---------- PASS A: parse CHART LINES (what you already have: 10) ----------
     if isinstance(chart_lines, list):
+        # helpful debug
+        for i, ln in enumerate(chart_lines[:6]):
+            lines_out.append(f"[DEBUG] chart[{i}]: {ln}")
         for raw in chart_lines:
             s = str(raw or "")
-            if not s.strip(): 
-                continue
+            if not s.strip(): continue
             U = s.upper()
-            # (n) qty prefix e.g. "(4) ..."
-            qty = 1
-            mqty = re.match(r"^\s*\((\d+)\)\s*", s)
-            if mqty:
-                try: qty = int(mqty.group(1))
-                except Exception: qty = 1
-
-            side = _side_from(U)
-
-            # Counterbore
-            mcb = _CB_DIA_RE.search(s)
-            if mcb:
-                dia = float(mcb.group(1))
+            qty  = _parse_qty(s)
+            side = _side(U)
+            dia  = _parse_cbore_dia(s)
+            if dia is not None:
                 mdepth = _X_DEPTH_RE.search(s)
                 depth = float(mdepth.group(1)) if mdepth else None
                 if side == "BOTH":
@@ -788,31 +806,24 @@ def _append_counterbore_spot_jig_cards(
                 else:
                     cb_groups[(dia, side, depth)] = cb_groups.get((dia, side, depth), 0) + qty
                 continue
-
             # Spot-only (exclude THRU/TAP)
             if _SPOT_RE_TXT.search(U) and ("TAP" not in U) and ("THRU" not in U):
-                spot_qty += qty
-                continue
-
+                spot_qty += qty; continue
             # Jig grind
             if _JIG_RE_TXT.search(U):
-                jig_qty += qty
-                continue
+                jig_qty += qty; continue
 
-    # ---------- PASS B: if nothing yet, parse from built rows ----------
+    # ---------- PASS B: fallback to ROWS (your built_rows=3) ----------
     if not cb_groups and isinstance(rows, list):
         for r in rows:
             qty = int((r or {}).get("qty") or 0)
-            if qty <= 0:
-                continue
+            if qty <= 0: continue
             s = str((r or {}).get("desc") or "")
-            if not s.strip():
-                continue
+            if not s.strip(): continue
             U = s.upper()
-            side = _side_from(U)
-            mcb = _CB_DIA_RE.search(s)
-            if mcb:
-                dia = float(mcb.group(1))
+            side = _side(U)
+            dia  = _parse_cbore_dia(s)
+            if dia is not None:
                 mdepth = _X_DEPTH_RE.search(s)
                 depth = float(mdepth.group(1)) if mdepth else None
                 if side == "BOTH":
@@ -843,9 +854,9 @@ def _append_counterbore_spot_jig_cards(
             "TIME PER HOLE – C’BORE GROUPS",
             "-"*66,
         ]
-        per = float(globals().get("CBORE_MIN_PER_SIDE_MIN") or 0.15)  # minutes/hole-side
+        per = float(globals().get("CBORE_MIN_PER_SIDE_MIN") or 0.15)  # minutes/side
         cb_minutes = 0.0
-        for (dia, side, depth), qty in sorted(cb_groups.items(), key=lambda k: (k[0][0] or 0.0, k[0][1], k[0][2] or 0.0)):
+        for (dia, side, depth), qty in sorted(cb_groups.items(), key=lambda k:(k[0][0] or 0.0, k[0][1], k[0][2] or 0.0)):
             dia_txt = "—" if dia is None else f'Ø{dia:.4f}"'
             dep_txt = "—" if depth is None else f'{depth:.2f}"'
             t_group = qty * per
@@ -910,6 +921,7 @@ def _append_counterbore_spot_jig_cards(
         appended += 1
 
     return appended
+
 
 
 def _as_float(x: Any, default: float = 0.0) -> float:
@@ -10501,16 +10513,15 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
                 )
                 _finalize_tapping_rows(built, thickness_in=plate_thickness)
 
-            # persist for other consumers
+            # Persist ops-summary rows for other consumers
             ops_summary_map = geo_map.setdefault("ops_summary", {})
             ops_summary_map["rows"] = built
             ops_rows = built
-            try:
-                geo_map.setdefault("chart_lines", list(chart_lines_all))
-            except Exception:
-                pass
 
-            # ⬇️ NEW: append cards using chart_lines first, then rows
+            # Persist chart lines for other consumers
+            geo_map.setdefault("chart_lines", list(chart_lines_all))
+
+            # Append extra MATERIAL REMOVAL cards (Counterbore / Spot / Jig)
             _appended = _append_counterbore_spot_jig_cards(
                 lines_out=removal_card_lines,
                 chart_lines=chart_lines_all,
