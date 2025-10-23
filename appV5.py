@@ -1058,10 +1058,7 @@ def _parse_ops_and_claims(joined_lines: Sequence[str] | None) -> dict[str, Any]:
 def _adjust_drill_counts(
     counts_by_diam_raw: dict[float, int],
     ops_claims: dict,
-    _logger=None,
 ) -> dict[float, int]:
-    """Return adjusted drill groups: subtract pilots, counterbores, and ignore large bores."""
-
     if not counts_by_diam_raw:
         return {}
 
@@ -1070,54 +1067,48 @@ def _adjust_drill_counts(
         for d, q in counts_by_diam_raw.items()
         if int(q) > 0
     }
-
-    if not counts:
-        return {}
-
     bins = sorted(counts.keys())
 
     def _nearest(val: float) -> float | None:
         return min(bins, key=lambda b: abs(b - val)) if bins else None
 
-    # (a) subtract pilot drills claimed by TAP/NPT/explicit DRILL THRU, mapped to nearest geom bin
+    # sanitize pilot claims (inches only, reasonable range)
     raw_claims = list(ops_claims.get("claimed_pilot_diams") or [])
-    claim_ctr: Counter[float] = Counter()
-    for value in raw_claims:
+    claims = []
+    for v in raw_claims:
         try:
-            num = float(value)
+            f = float(v)
+            if 0.05 <= f <= 3.0:
+                claims.append(round(f, 4))
+        except Exception:
+            pass
+
+    # subtract pilots
+    for dia, qty in Counter(claims).items():
+        tgt = _nearest(dia)
+        if tgt is None:
+            continue
+        if abs(tgt - dia) <= 0.015:  # snap letter/number equivalent
+            counts[tgt] = max(0, counts[tgt] - int(qty))
+
+    # subtract counterbore faces so they don't double-count as drills
+    cb_ctr = Counter()
+    for (d, _side, _depth), q in (ops_claims.get("cb_groups") or {}).items():
+        try:
+            f = float(d)
         except Exception:
             continue
-        if not 0.05 <= num <= 3.0:
-            continue
-        claim_ctr[round(num, 4)] += 1
+        if 0.05 <= f <= 3.0:
+            cb_ctr[round(f, 4)] += int(q)
+    for face_d, face_q in cb_ctr.items():
+        tgt = _nearest(face_d)
+        if tgt is not None and abs(tgt - face_d) <= 0.02:
+            counts[tgt] = max(0, counts[tgt] - int(face_q))
 
-    for val, qty in claim_ctr.items():
-        tgt = _nearest(val)
-        if tgt is not None and abs(tgt - val) <= 0.015:
-            counts[tgt] = max(0, counts[tgt] - max(0, int(qty)))
-
-    # (b) subtract counterbore face diameters (don’t double-count big faces as drills)
-    cb_face_ctr: Counter[float] = Counter()
-    for (diam, _side, _depth), qty in (ops_claims.get("cb_groups") or {}).items():
-        if diam is None:
-            continue
-        try:
-            num = float(diam)
-        except Exception:
-            continue
-        if not 0.05 <= num <= 3.0:
-            continue
-        cb_face_ctr[round(num, 4)] += max(0, int(qty))
-
-    for face_dia, qty in cb_face_ctr.items():
-        tgt = _nearest(face_dia)
-        if tgt is not None and abs(tgt - face_dia) <= 0.02:
-            counts[tgt] = max(0, counts[tgt] - max(0, int(qty)))
-
-    # (c) treat very large diameters as bores/pockets (not drills)
-    for dia in list(counts.keys()):
-        if dia >= 1.0:
-            counts[dia] = 0
+    # filter out ≥1.0" if those are bores (matches your part)
+    for d in list(counts.keys()):
+        if d >= 1.0:
+            counts[d] = 0
 
     return counts
 
@@ -4372,13 +4363,15 @@ def _compute_drilling_removal_section(
             if not counts_by_diam_raw or sum(int(v) for v in counts_by_diam_raw.values()) == 0:
                 counts_by_diam_raw = _seed_drill_bins_from_geo(geo_map)
 
-            raw_total = sum(int(v) for v in counts_by_diam_raw.values())
-            _push(lines, f"[DEBUG] DRILL bins raw={raw_total} (seeded from GEO)")
+            raw_total = sum(int(v) for v in (counts_by_diam_raw or {}).values())
+            _push(lines, f"[DEBUG] DRILL bins raw={raw_total}")
 
             counts_by_diam = _adjust_drill_counts(
                 counts_source,
                 ops_claims,
             )
+            adj_total = sum(int(v) for v in (counts_by_diam or {}).values())
+            _push(lines, f"[DEBUG] DRILL bins raw={raw_total} adj={adj_total}")
             if isinstance(breakdown_mutable, (_MutableMappingABC, dict)):
                 try:
                     extra_bucket_ops = typing.cast(
@@ -4512,6 +4505,8 @@ def _compute_drilling_removal_section(
                 f"{drill_minutes_total:.2f} min  ("
                 f"{fmt_hours(minutes_to_hours(drill_minutes_total))})",
             )
+            _printed_sum = sum(int(v) for v in (counts_by_diam or {}).values())
+            _push(lines, f"[DEBUG] DRILL verify printed_sum={_printed_sum}")
             lines.append("")
 
             extras["drill_machine_minutes"] = float(drill_minutes_subtotal)
@@ -12747,6 +12742,16 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
         f"npt={ops_claims['npt']} cbore={ops_claims['cb_total']} "
         f"spot={ops_claims['spot']} counterdrill={ops_claims['counterdrill']} "
         f"jig={ops_claims['jig']}",
+    )
+
+    counts_by_diam_final = locals().get("counts_by_diam")
+    if not isinstance(counts_by_diam_final, (_MappingABC, dict)):
+        counts_by_diam_final = {}
+    _push(
+        lines,
+        f"[DEBUG] OPS TALLY (final) drill={int(sum(int(v) for v in counts_by_diam_final.values()))} "
+        f"tap={ops_claims.get('tap',0)} cbore={sum(int(q) for q in (ops_claims.get('cb_groups') or {}).values())} "
+        f"counterdrill={ops_claims.get('counterdrill',0)} jig={ops_claims.get('jig',0)}",
     )
 
     print(
