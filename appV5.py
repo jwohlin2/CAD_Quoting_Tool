@@ -838,34 +838,39 @@ def _parse_ops_and_claims(joined_lines: Sequence[str] | None) -> dict[str, Any]:
     return _shared_parse_ops_and_claims(joined_lines, cleaner=_clean_mtext)
 
 
+
 def _adjust_drill_counts(
     counts_by_diam_raw: dict[float, int],
     ops_claims: dict,
-    ops_hint: dict | None = None,
 ) -> dict[float, int]:
     """Return adjusted drill groups: subtract pilots, counterbores, and ignore large bores."""
 
+    if not counts_by_diam_raw:
+        return {}
+
     counts = {
         round(float(d), 4): int(q)
-        for d, q in (counts_by_diam_raw or {}).items()
+        for d, q in counts_by_diam_raw.items()
+        if int(q) > 0
     }
 
-    def nearest_bin(val: float, bins: list[float]) -> float:
-        return min(bins, key=lambda b: abs(b - val))
+    if not counts:
+        return {}
+
+    def _nearest(bins: Sequence[float], val: float) -> float | None:
+        return min(bins, key=lambda b: abs(b - val)) if bins else None
 
     bins = sorted(counts.keys())
 
     # (a) subtract pilot drills claimed by TAP/NPT/explicit DRILL THRU, mapped to nearest geom bin
-    claimed_vals = [
+    claimed_vals = Counter(
         round(float(x), 4)
         for x in (ops_claims.get("claimed_pilot_diams") or [])
         if x is not None
-    ]
-    for val, qty in Counter(claimed_vals).items():
-        if not bins:
-            break
-        tgt = nearest_bin(val, bins)
-        if abs(tgt - val) <= 0.015:
+    )
+    for val, qty in claimed_vals.items():
+        tgt = _nearest(bins, val)
+        if tgt is not None and abs(tgt - val) <= 0.015:
             counts[tgt] = max(0, counts[tgt] - int(qty))
 
     # (b) subtract counterbore face diameters (don’t double-count big faces as drills)
@@ -875,29 +880,14 @@ def _adjust_drill_counts(
             continue
         cb_face_ctr[round(float(diam), 4)] += int(qty)
     for face_dia, qty in cb_face_ctr.items():
-        if not bins:
-            break
-        tgt = nearest_bin(face_dia, bins)
-        if abs(tgt - face_dia) <= 0.02:
+        tgt = _nearest(bins, face_dia)
+        if tgt is not None and abs(tgt - face_dia) <= 0.02:
             counts[tgt] = max(0, counts[tgt] - int(qty))
 
     # (c) treat very large diameters as bores/pockets (not drills)
     for dia in list(counts.keys()):
         if dia >= 1.0:
             counts[dia] = 0
-
-    # (d) optional: lock to blueprint totals if provided
-    if ops_hint and isinstance(ops_hint.get("drill"), (int, float)):
-        target = int(ops_hint["drill"])
-        current = sum(counts.values())
-        if current > target:
-            over = current - target
-            for dia in sorted(counts.keys(), reverse=True):
-                if over <= 0:
-                    break
-                take = min(over, counts[dia])
-                counts[dia] -= take
-                over -= take
 
     return counts
 
@@ -3959,7 +3949,6 @@ def _compute_drilling_removal_section(
             counts_by_diam = _adjust_drill_counts(
                 counts_source,
                 ops_claims,
-                ops_hint,
             )
             drill_actions = int(sum(counts_by_diam.values()))
             _push(lines, f"[DEBUG] DRILL bins adj={drill_actions}")
