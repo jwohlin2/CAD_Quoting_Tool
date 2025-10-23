@@ -10991,237 +10991,36 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
             "",
         ])
 
-    removal_summary_lines = [
-        str(line) for line in removal_card_lines if isinstance(line, str)
-    ]
-    if removal_summary_extra_lines:
-        for entry in removal_summary_extra_lines:
-            entry_text = str(entry)
-            if entry_text not in removal_summary_lines:
-                removal_summary_lines.append(entry_text)
+    actions_summary_ready = False
 
-    append_lines(removal_card_lines)
+    def _collect_removal_summary_lines() -> list[str]:
+        nonlocal actions_summary_ready
+        summary_lines = [
+            str(line) for line in removal_card_lines if isinstance(line, str)
+        ]
+        if removal_summary_extra_lines:
+            for entry in removal_summary_extra_lines:
+                entry_text = str(entry)
+                if entry_text not in summary_lines:
+                    summary_lines.append(entry_text)
 
-    try:
-        _normalize_buckets(breakdown.get("bucket_view"))
-    except Exception:
-        pass
+        append_lines(removal_card_lines)
 
-    removal_drill_heading = "MATERIAL REMOVAL – DRILLING"
-    removal_card_has_drill = False
-    for line_text in removal_card_lines:
-        if isinstance(line_text, str) and line_text.strip().upper().startswith(
-            removal_drill_heading
-        ):
-            removal_card_has_drill = True
-            break
+        try:
+            _normalize_buckets(breakdown.get("bucket_view"))
+        except Exception:
+            pass
 
-    if removal_card_has_drill:
-        milling_bucket_obj = None
-        bucket_view_snapshot = (
-            breakdown.get("bucket_view") if isinstance(breakdown, _MappingABC) else None
-        )
-        if isinstance(bucket_view_snapshot, (_MappingABC, dict)):
-            milling_bucket_obj = _extract_milling_bucket(bucket_view_snapshot)
-        _render_milling_removal_card(append_line, lines, milling_bucket_obj)
-
-    if not removal_card_has_drill:
-        drill_groups_render: list[dict[str, float]] = []
-
-        def _extract_groups(rows: Sequence[Any] | None) -> bool:
-            nonlocal drill_groups_render
-            if not isinstance(rows, Sequence) or not rows:
-                return False
-            extracted: list[dict[str, float]] = []
-            for entry in rows:
-                if not isinstance(entry, _MappingABC):
-                    continue
-                qty_val = int(_coerce_float_or_none(entry.get("qty")) or 0)
-                if qty_val <= 0:
-                    continue
-                dia_val = _coerce_float_or_none(entry.get("diameter_in"))
-                if dia_val is None or dia_val <= 0:
-                    continue
-                depth_val = _coerce_float_or_none(entry.get("depth_in")) or 0.0
-                sfm_val = _coerce_float_or_none(entry.get("sfm")) or 0.0
-                ipr_val = _coerce_float_or_none(entry.get("ipr")) or 0.0
-                per_hole = (
-                    _coerce_float_or_none(entry.get("t_hole_min"))
-                    or _coerce_float_or_none(entry.get("t_per_hole_min"))
-                    or _coerce_float_or_none(entry.get("minutes_per_hole"))
-                )
-                group_total = (
-                    _coerce_float_or_none(entry.get("t_group_min"))
-                    or _coerce_float_or_none(entry.get("group_minutes"))
-                )
-                if per_hole is None and group_total is not None and qty_val > 0:
-                    per_hole = float(group_total) / float(qty_val)
-                if per_hole is None:
-                    per_hole = 0.0
-                if group_total is None:
-                    group_total = float(qty_val) * float(per_hole)
-                extracted.append(
-                    {
-                        "diameter_in": float(dia_val),
-                        "qty": float(qty_val),
-                        "depth_in": float(depth_val),
-                        "sfm": float(sfm_val),
-                        "ipr": float(ipr_val),
-                        "t_hole_min": float(per_hole),
-                        "t_group_min": float(group_total),
-                    }
-                )
-            if extracted:
-                drill_groups_render = extracted
-                return True
-            return False
-
-        dtph_rows_source = None
-        if isinstance(drilling_time_per_hole_data, _MappingABC):
-            dtph_rows_source = drilling_time_per_hole_data.get("rows")
-        if not _extract_groups(dtph_rows_source):
-            detail_groups = None
-            if isinstance(drilling_card_detail, _MappingABC):
-                detail_groups = drilling_card_detail.get("drill_groups")
-            if not _extract_groups(detail_groups):
-                meta_groups = None
-                if isinstance(drilling_meta_map, _MappingABC):
-                    meta_groups = drilling_meta_map.get("drill_groups")
-                    if not meta_groups:
-                        meta_groups = drilling_meta_map.get("bins_list")
-                _extract_groups(meta_groups)
-
-        if drill_groups_render:
-            append_line(removal_drill_heading)
-            append_line("-" * 66)
-            for group in drill_groups_render:
-                dia = float(group.get("diameter_in", 0.0))
-                qty = int(round(float(group.get("qty", 0.0))))
-                depth = float(group.get("depth_in", 0.0))
-                sfm = float(group.get("sfm", 0.0))
-                ipr = float(group.get("ipr", 0.0))
-                t_hole = float(group.get("t_hole_min", 0.0))
-                t_group = float(group.get("t_group_min", qty * t_hole))
-                append_line(
-                    f'Dia {dia:.3f}" × {qty}  | depth {depth:.3f}" | '
-                    f"{int(round(sfm))} sfm | {ipr:.4f} ipr | "
-                    f"t/hole {t_hole:.2f} min | group {qty}×{t_hole:.2f} = {t_group:.2f} min"
-                )
-            subtotal_minutes_raw = 0.0
-            for group in drill_groups_render:
-                try:
-                    subtotal_minutes_raw += float(group.get("t_group_min", 0.0))
-                except Exception:
-                    continue
-
-            subtotal_minutes_val = None
-            tool_components_source: Sequence[Any] | None = None
-            toolchange_total_min: float | None = None
-            total_minutes_val: float | None = None
-
-            def _resolve_mapping(candidate: Any) -> Mapping[str, Any] | None:
-                if isinstance(candidate, _MappingABC):
-                    return typing.cast(Mapping[str, Any], candidate)
-                if isinstance(candidate, dict):
-                    return candidate
-                return None
-
-            for source_candidate in (
-                drilling_time_per_hole_data,
-                drilling_card_detail,
-                drilling_meta_map,
+        removal_drill_heading = "MATERIAL REMOVAL – DRILLING"
+        removal_card_has_drill = False
+        for line_text in removal_card_lines:
+            if isinstance(line_text, str) and line_text.strip().upper().startswith(
+                removal_drill_heading
             ):
-                source_map = _resolve_mapping(source_candidate)
-                if not source_map:
-                    continue
-                if subtotal_minutes_val is None:
-                    subtotal_minutes_val = _coerce_float_or_none(
-                        source_map.get("subtotal_minutes")
-                    )
-                if tool_components_source is None:
-                    components = source_map.get("tool_components")
-                    if isinstance(components, Sequence) and components:
-                        tool_components_source = components
-                if toolchange_total_min is None:
-                    for key in ("toolchange_minutes", "toolchange_total"):
-                        candidate_val = _coerce_float_or_none(source_map.get(key))
-                        if candidate_val is not None:
-                            toolchange_total_min = float(candidate_val)
-                            break
-                if total_minutes_val is None:
-                    total_candidate = (
-                        _coerce_float_or_none(
-                            source_map.get("total_minutes_with_toolchange")
-                        )
-                        or _coerce_float_or_none(source_map.get("total_minutes"))
-                    )
-                    if total_candidate is not None:
-                        total_minutes_val = float(total_candidate)
+                removal_card_has_drill = True
+                break
 
-            component_labels: list[str] = []
-            component_minutes = 0.0
-            if isinstance(tool_components_source, Sequence):
-                for comp in tool_components_source:
-                    if not isinstance(comp, _MappingABC):
-                        continue
-                    label = str(comp.get("label") or comp.get("name") or "").strip()
-                    minutes_val = _coerce_float_or_none(comp.get("minutes"))
-                    if minutes_val is None:
-                        minutes_val = _coerce_float_or_none(comp.get("mins"))
-                    minutes_f = float(minutes_val or 0.0)
-                    if not label:
-                        label = "-"
-                    if label != "-" or minutes_f > 0.0:
-                        component_labels.append(f"{label} {minutes_f:.2f} min")
-                    component_minutes += minutes_f
-
-            if subtotal_minutes_val is None:
-                subtotal_minutes_val = subtotal_minutes_raw
-            drill_minutes_subtotal_raw = _sanitize_drill_removal_minutes(
-                subtotal_minutes_val or 0.0
-            )
-            drill_minutes_subtotal = round(drill_minutes_subtotal_raw, 2)
-
-            if toolchange_total_min is None:
-                toolchange_total_min = component_minutes
-            try:
-                toolchange_total_min = float(toolchange_total_min or 0.0)
-            except Exception:
-                toolchange_total_min = 0.0
-            if not math.isfinite(toolchange_total_min):
-                toolchange_total_min = component_minutes
-            if toolchange_total_min < 0.0:
-                toolchange_total_min = 0.0
-
-            if total_minutes_val is None:
-                total_minutes_val = drill_minutes_subtotal_raw + toolchange_total_min
-            total_minutes_val = _sanitize_drill_removal_minutes(total_minutes_val or 0.0)
-            drill_minutes_total = round(total_minutes_val, 2)
-
-            if component_labels:
-                label_text = " + ".join(component_labels)
-                append_line(
-                    f"Toolchange adders: {label_text} = {toolchange_total_min:.2f} min"
-                )
-            elif toolchange_total_min > 0.0:
-                append_line(
-                    f"Toolchange adders: Toolchange {toolchange_total_min:.2f} min = {toolchange_total_min:.2f} min"
-                )
-            else:
-                append_line("Toolchange adders: -")
-
-            append_line("-" * 66)
-            append_line(
-                f"Subtotal (per-hole × qty) . {drill_minutes_subtotal:.2f} min  ("
-                f"{fmt_hours(minutes_to_hours(drill_minutes_subtotal))})"
-            )
-            append_line(
-                "TOTAL DRILLING (with toolchange) . "
-                f"{drill_minutes_total:.2f} min  ("
-                f"{fmt_hours(minutes_to_hours(drill_minutes_total))})"
-            )
-            append_line("")
-
+        if removal_card_has_drill:
             milling_bucket_obj = None
             bucket_view_snapshot = (
                 breakdown.get("bucket_view") if isinstance(breakdown, _MappingABC) else None
@@ -11230,8 +11029,213 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
                 milling_bucket_obj = _extract_milling_bucket(bucket_view_snapshot)
             _render_milling_removal_card(append_line, lines, milling_bucket_obj)
 
-    # ===== MATERIAL REMOVAL: HOLE-TABLE CARDS =================================
-    # use module-level 're'
+        if not removal_card_has_drill:
+            drill_groups_render: list[dict[str, float]] = []
+
+            def _extract_groups(rows: Sequence[Any] | None) -> bool:
+                nonlocal drill_groups_render
+                if not isinstance(rows, Sequence) or not rows:
+                    return False
+                extracted: list[dict[str, float]] = []
+                for entry in rows:
+                    if not isinstance(entry, _MappingABC):
+                        continue
+                    qty_val = int(_coerce_float_or_none(entry.get("qty")) or 0)
+                    if qty_val <= 0:
+                        continue
+                    dia_val = _coerce_float_or_none(entry.get("diameter_in"))
+                    if dia_val is None or dia_val <= 0:
+                        continue
+                    depth_val = _coerce_float_or_none(entry.get("depth_in")) or 0.0
+                    sfm_val = _coerce_float_or_none(entry.get("sfm")) or 0.0
+                    ipr_val = _coerce_float_or_none(entry.get("ipr")) or 0.0
+                    per_hole = (
+                        _coerce_float_or_none(entry.get("t_hole_min"))
+                        or _coerce_float_or_none(entry.get("t_per_hole_min"))
+                        or _coerce_float_or_none(entry.get("minutes_per_hole"))
+                    )
+                    group_total = (
+                        _coerce_float_or_none(entry.get("t_group_min"))
+                        or _coerce_float_or_none(entry.get("group_minutes"))
+                    )
+                    if per_hole is None and group_total is not None and qty_val > 0:
+                        per_hole = float(group_total) / float(qty_val)
+                    if per_hole is None:
+                        per_hole = 0.0
+                    if group_total is None:
+                        group_total = float(qty_val) * float(per_hole)
+                    extracted.append(
+                        {
+                            "diameter_in": float(dia_val),
+                            "qty": float(qty_val),
+                            "depth_in": float(depth_val),
+                            "sfm": float(sfm_val),
+                            "ipr": float(ipr_val),
+                            "t_hole_min": float(per_hole),
+                            "t_group_min": float(group_total),
+                        }
+                    )
+                if extracted:
+                    drill_groups_render = extracted
+                    return True
+                return False
+
+            dtph_rows_source = None
+            if isinstance(drilling_time_per_hole_data, _MappingABC):
+                dtph_rows_source = drilling_time_per_hole_data.get("rows")
+            if not _extract_groups(dtph_rows_source):
+                detail_groups = None
+                if isinstance(drilling_card_detail, _MappingABC):
+                    detail_groups = drilling_card_detail.get("drill_groups")
+                if not _extract_groups(detail_groups):
+                    meta_groups = None
+                    if isinstance(drilling_meta_map, _MappingABC):
+                        meta_groups = drilling_meta_map.get("drill_groups")
+                        if not meta_groups:
+                            meta_groups = drilling_meta_map.get("bins_list")
+                    _extract_groups(meta_groups)
+
+            if drill_groups_render:
+                append_line(removal_drill_heading)
+                append_line("-" * 66)
+                for group in drill_groups_render:
+                    dia = float(group.get("diameter_in", 0.0))
+                    qty = int(round(float(group.get("qty", 0.0))))
+                    depth = float(group.get("depth_in", 0.0))
+                    sfm = float(group.get("sfm", 0.0))
+                    ipr = float(group.get("ipr", 0.0))
+                    t_hole = float(group.get("t_hole_min", 0.0))
+                    t_group = float(group.get("t_group_min", qty * t_hole))
+                    append_line(
+                        f'Dia {dia:.3f}" × {qty}  | depth {depth:.3f}" | '
+                        f"{int(round(sfm))} sfm | {ipr:.4f} ipr | "
+                        f"t/hole {t_hole:.2f} min | group {qty}×{t_hole:.2f} = {t_group:.2f} min"
+                    )
+                subtotal_minutes_raw = 0.0
+                for group in drill_groups_render:
+                    try:
+                        subtotal_minutes_raw += float(group.get("t_group_min", 0.0))
+                    except Exception:
+                        continue
+
+                subtotal_minutes_val = None
+                tool_components_source: Sequence[Any] | None = None
+                toolchange_total_min: float | None = None
+                total_minutes_val: float | None = None
+
+                def _resolve_mapping(candidate: Any) -> Mapping[str, Any] | None:
+                    if isinstance(candidate, _MappingABC):
+                        return typing.cast(Mapping[str, Any], candidate)
+                    if isinstance(candidate, dict):
+                        return candidate
+                    return None
+
+                for source_candidate in (
+                    drilling_time_per_hole_data,
+                    drilling_card_detail,
+                    drilling_meta_map,
+                ):
+                    source_map = _resolve_mapping(source_candidate)
+                    if not source_map:
+                        continue
+                    if subtotal_minutes_val is None:
+                        subtotal_minutes_val = _coerce_float_or_none(
+                            source_map.get("subtotal_minutes")
+                        )
+                    if tool_components_source is None:
+                        components = source_map.get("tool_components")
+                        if isinstance(components, Sequence) and components:
+                            tool_components_source = components
+                    if toolchange_total_min is None:
+                        for key in ("toolchange_minutes", "toolchange_total"):
+                            candidate_val = _coerce_float_or_none(source_map.get(key))
+                            if candidate_val is not None:
+                                toolchange_total_min = float(candidate_val)
+                                break
+                    if total_minutes_val is None:
+                        total_candidate = (
+                            _coerce_float_or_none(
+                                source_map.get("total_minutes_with_toolchange")
+                            )
+                            or _coerce_float_or_none(source_map.get("total_minutes"))
+                        )
+                        if total_candidate is not None:
+                            total_minutes_val = float(total_candidate)
+
+                component_labels: list[str] = []
+                component_minutes = 0.0
+                if isinstance(tool_components_source, Sequence):
+                    for comp in tool_components_source:
+                        if not isinstance(comp, _MappingABC):
+                            continue
+                        label = str(comp.get("label") or comp.get("name") or "").strip()
+                        minutes_val = _coerce_float_or_none(comp.get("minutes"))
+                        if minutes_val is None:
+                            minutes_val = _coerce_float_or_none(comp.get("mins"))
+                        minutes_f = float(minutes_val or 0.0)
+                        if not label:
+                            label = "-"
+                        if label != "-" or minutes_f > 0.0:
+                            component_labels.append(f"{label} {minutes_f:.2f} min")
+                        component_minutes += minutes_f
+
+                if subtotal_minutes_val is None:
+                    subtotal_minutes_val = subtotal_minutes_raw
+                drill_minutes_subtotal_raw = _sanitize_drill_removal_minutes(
+                    subtotal_minutes_val or 0.0
+                )
+                drill_minutes_subtotal = round(drill_minutes_subtotal_raw, 2)
+
+                if toolchange_total_min is None:
+                    toolchange_total_min = component_minutes
+                try:
+                    toolchange_total_min = float(toolchange_total_min or 0.0)
+                except Exception:
+                    toolchange_total_min = 0.0
+                if not math.isfinite(toolchange_total_min):
+                    toolchange_total_min = component_minutes
+                if toolchange_total_min < 0.0:
+                    toolchange_total_min = 0.0
+
+                if total_minutes_val is None:
+                    total_minutes_val = drill_minutes_subtotal_raw + toolchange_total_min
+                total_minutes_val = _sanitize_drill_removal_minutes(total_minutes_val or 0.0)
+                drill_minutes_total = round(total_minutes_val, 2)
+
+                if component_labels:
+                    label_text = " + ".join(component_labels)
+                    append_line(
+                        f"Toolchange adders: {label_text} = {toolchange_total_min:.2f} min"
+                    )
+                elif toolchange_total_min > 0.0:
+                    append_line(
+                        f"Toolchange adders: Toolchange {toolchange_total_min:.2f} min = {toolchange_total_min:.2f} min"
+                    )
+                else:
+                    append_line("Toolchange adders: -")
+
+                append_line("-" * 66)
+                append_line(
+                    f"Subtotal (per-hole × qty) . {drill_minutes_subtotal:.2f} min  ("
+                    f"{fmt_hours(minutes_to_hours(drill_minutes_subtotal))})"
+                )
+                append_line(
+                    "TOTAL DRILLING (with toolchange) . "
+                    f"{drill_minutes_total:.2f} min  ("
+                    f"{fmt_hours(minutes_to_hours(drill_minutes_total))})"
+                )
+                append_line("")
+
+                milling_bucket_obj = None
+                bucket_view_snapshot = (
+                    breakdown.get("bucket_view") if isinstance(breakdown, _MappingABC) else None
+                )
+                if isinstance(bucket_view_snapshot, (_MappingABC, dict)):
+                    milling_bucket_obj = _extract_milling_bucket(bucket_view_snapshot)
+                _render_milling_removal_card(append_line, lines, milling_bucket_obj)
+
+        # ===== MATERIAL REMOVAL: HOLE-TABLE CARDS =================================
+        # use module-level 're'
 
     def _first_dict(*cands):
         for c in cands:
@@ -11296,153 +11300,155 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
                 )
                 _finalize_tapping_rows(built, thickness_in=plate_thickness)
 
-            # Persist ops-summary rows for other consumers
-            ops_summary_map = geo_map.setdefault("ops_summary", {})
-            ops_summary_map["rows"] = built
-            ops_rows = built
+                # Persist ops-summary rows for other consumers
+                ops_summary_map = geo_map.setdefault("ops_summary", {})
+                ops_summary_map["rows"] = built
+                ops_rows = built
 
-            # Persist chart lines for other consumers
-            geo_map.setdefault("chart_lines", list(chart_lines_all))
+                # Persist chart lines for other consumers
+                geo_map.setdefault("chart_lines", list(chart_lines_all))
 
-            # Clean + join lines
-            joined_early = _join_wrapped_chart_lines([
-                _clean_mtext(x) for x in chart_lines_all
-            ])
-            ops_claims = _parse_ops_and_claims(joined_early)
-            breakdown_mutable["_ops_claims"] = ops_claims
-            _push(
-                lines,
-                f"[DEBUG] preseed_ops cb={ops_claims['cb_total']} tap={ops_claims['tap']} "
-                f"npt={ops_claims['npt']} spot={ops_claims['spot']} jig={ops_claims['jig']}",
+                # Clean + join lines
+                joined_early = _join_wrapped_chart_lines([
+                    _clean_mtext(x) for x in chart_lines_all
+                ])
+                ops_claims = _parse_ops_and_claims(joined_early)
+                breakdown_mutable["_ops_claims"] = ops_claims
+                _push(
+                    lines,
+                    f"[DEBUG] preseed_ops cb={ops_claims['cb_total']} tap={ops_claims['tap']} "
+                    f"npt={ops_claims['npt']} spot={ops_claims['spot']} jig={ops_claims['jig']}",
+                )
+
+                # Publish structured ops for planner_ops_summary
+                try:
+                    ebo = breakdown_mutable.setdefault("extra_bucket_ops", {})
+                    if ops_claims["cb_front"] > 0:
+                        ebo.setdefault("counterbore", []).append(
+                            {"name": "Counterbore", "qty": int(ops_claims["cb_front"]), "side": "front"}
+                        )
+                    if ops_claims["cb_back"] > 0:
+                        ebo.setdefault("counterbore", []).append(
+                            {"name": "Counterbore", "qty": int(ops_claims["cb_back"]), "side": "back"}
+                        )
+                    if ops_claims["tap"] > 0:
+                        ebo.setdefault("tap", []).append(
+                            {"name": "Tap", "qty": int(ops_claims["tap"]), "side": "front"}
+                        )
+                    if ops_claims["npt"] > 0:
+                        ebo.setdefault("tap", []).append(
+                            {"name": "NPT tap", "qty": int(ops_claims["npt"]), "side": "front"}
+                        )
+                    if ops_claims["spot"] > 0:
+                        ebo.setdefault("spot", []).append(
+                            {"name": "Spot drill", "qty": int(ops_claims["spot"]), "side": "front"}
+                        )
+                    if ops_claims["jig"] > 0:
+                        ebo.setdefault("jig-grind", []).append(
+                            {"name": "Jig-grind", "qty": int(ops_claims["jig"]), "side": None}
+                        )
+                except Exception:
+                    pass
+
+                # Seed minutes so Process table shows rows
+                try:
+                    bv = breakdown_mutable.setdefault("bucket_view", {})
+
+                    def seed(name, minutes, mach, lab):
+                        if minutes <= 0:
+                            return
+                        _set_bucket_minutes_cost(bv, name, minutes, mach, lab)
+
+                    # You can tune per-feature minutes as constants or from rates
+                    cb_min = (ops_claims["cb_total"] or 0) * float(
+                        globals().get("CBORE_MIN_PER_SIDE_MIN") or 0.15
+                    )
+                    spot_min = (ops_claims["spot"] or 0) * 0.05
+                    jig_min = (ops_claims["jig"] or 0) * float(
+                        globals().get("JIG_GRIND_MIN_PER_FEATURE") or 0.75
+                    )
+                    seed(
+                        "counterbore",
+                        cb_min,
+                        _lookup_bucket_rate("counterbore", rates)
+                        or _lookup_bucket_rate("machine", rates)
+                        or 53.76,
+                        _lookup_bucket_rate("labor", rates) or 25.46,
+                    )
+                    seed(
+                        "grinding",
+                        jig_min,
+                        _lookup_bucket_rate("grinding", rates)
+                        or _lookup_bucket_rate("machine", rates)
+                        or 53.76,
+                        _lookup_bucket_rate("labor", rates) or 25.46,
+                    )
+                    seed(
+                        "drilling",
+                        spot_min + cb_min + jig_min,
+                        _lookup_bucket_rate("machine", rates) or 53.76,
+                        _lookup_bucket_rate("labor", rates) or 25.46,
+                    )
+
+                    order = bv.setdefault("order", [])
+                    if "counterbore" in bv.get("buckets", {}) and "counterbore" not in order:
+                        if "drilling" in order:
+                            order.insert(order.index("drilling") + 1, "counterbore")
+                        else:
+                            order.append("counterbore")
+                    if "grinding" in bv.get("buckets", {}) and "grinding" not in order:
+                        order.append("grinding")
+                    _normalize_buckets(bv)
+                except Exception:
+                    pass
+
+                # Append extra MATERIAL REMOVAL cards (Counterbore / Spot / Jig)
+                _appended = _append_counterbore_spot_jig_cards(
+                    lines_out=removal_card_lines,
+                    chart_lines=chart_lines_all,
+                    rows=built,
+                    breakdown_mutable=breakdown_mutable,
+                    rates=rates,
+                )
+                _push(lines, f"[DEBUG] extra_ops_appended={_appended}")
+
+            # Extra MATERIAL REMOVAL cards from HOLE TABLE text (Counterbore / Spot / Jig)
+            extra_ops_lines = _build_ops_cards_from_chart_lines(
+                breakdown=breakdown,
+                result=result,
+                rates=rates,
+                breakdown_mutable=breakdown_mutable,  # so buckets get minutes
+                ctx=ctx,
+                ctx_a=ctx_a,
+                ctx_b=ctx_b,
             )
-
-            # Publish structured ops for planner_ops_summary
-            try:
-                ebo = breakdown_mutable.setdefault("extra_bucket_ops", {})
-                if ops_claims["cb_front"] > 0:
-                    ebo.setdefault("counterbore", []).append(
-                        {"name": "Counterbore", "qty": int(ops_claims["cb_front"]), "side": "front"}
-                    )
-                if ops_claims["cb_back"] > 0:
-                    ebo.setdefault("counterbore", []).append(
-                        {"name": "Counterbore", "qty": int(ops_claims["cb_back"]), "side": "back"}
-                    )
-                if ops_claims["tap"] > 0:
-                    ebo.setdefault("tap", []).append(
-                        {"name": "Tap", "qty": int(ops_claims["tap"]), "side": "front"}
-                    )
-                if ops_claims["npt"] > 0:
-                    ebo.setdefault("tap", []).append(
-                        {"name": "NPT tap", "qty": int(ops_claims["npt"]), "side": "front"}
-                    )
-                if ops_claims["spot"] > 0:
-                    ebo.setdefault("spot", []).append(
-                        {"name": "Spot drill", "qty": int(ops_claims["spot"]), "side": "front"}
-                    )
-                if ops_claims["jig"] > 0:
-                    ebo.setdefault("jig-grind", []).append(
-                        {"name": "Jig-grind", "qty": int(ops_claims["jig"]), "side": None}
-                    )
-            except Exception:
-                pass
-
-            # Seed minutes so Process table shows rows
-            try:
-                bv = breakdown_mutable.setdefault("bucket_view", {})
-
-                def seed(name, minutes, mach, lab):
-                    if minutes <= 0:
-                        return
-                    _set_bucket_minutes_cost(bv, name, minutes, mach, lab)
-
-                # You can tune per-feature minutes as constants or from rates
-                cb_min = (ops_claims["cb_total"] or 0) * float(
-                    globals().get("CBORE_MIN_PER_SIDE_MIN") or 0.15
-                )
-                spot_min = (ops_claims["spot"] or 0) * 0.05
-                jig_min = (ops_claims["jig"] or 0) * float(
-                    globals().get("JIG_GRIND_MIN_PER_FEATURE") or 0.75
-                )
-                seed(
-                    "counterbore",
-                    cb_min,
-                    _lookup_bucket_rate("counterbore", rates)
-                    or _lookup_bucket_rate("machine", rates)
-                    or 53.76,
-                    _lookup_bucket_rate("labor", rates) or 25.46,
-                )
-                seed(
-                    "grinding",
-                    jig_min,
-                    _lookup_bucket_rate("grinding", rates)
-                    or _lookup_bucket_rate("machine", rates)
-                    or 53.76,
-                    _lookup_bucket_rate("labor", rates) or 25.46,
-                )
-                seed(
-                    "drilling",
-                    spot_min + cb_min + jig_min,
-                    _lookup_bucket_rate("machine", rates) or 53.76,
-                    _lookup_bucket_rate("labor", rates) or 25.46,
-                )
-
-                order = bv.setdefault("order", [])
-                if "counterbore" in bv.get("buckets", {}) and "counterbore" not in order:
-                    if "drilling" in order:
-                        order.insert(order.index("drilling") + 1, "counterbore")
+            if extra_ops_lines:
+                removal_card_lines.extend(extra_ops_lines)
+                _push(lines, f"[DEBUG] extra_ops_lines={len(extra_ops_lines)}")
+                for entry in extra_ops_lines:
+                    if isinstance(entry, str):
+                        removal_summary_extra_lines.append(entry)
                     else:
-                        order.append("counterbore")
-                if "grinding" in bv.get("buckets", {}) and "grinding" not in order:
-                    order.append("grinding")
-                _normalize_buckets(bv)
-            except Exception:
-                pass
+                        removal_summary_extra_lines.append(str(entry))
 
-            # Append extra MATERIAL REMOVAL cards (Counterbore / Spot / Jig)
-            _appended = _append_counterbore_spot_jig_cards(
-                lines_out=removal_card_lines,
-                chart_lines=chart_lines_all,
-                rows=built,
-                breakdown_mutable=breakdown_mutable,
+            # Emit the cards (will no-op if no TAP/CBore/Spot rows)
+            pre_ops_len = len(lines)
+
+            _emit_hole_table_ops_cards(
+                lines,
+                geo=geo_map,
+                material_group=material_group,
+                speeds_csv=None,
+                result=result,
+                breakdown=breakdown,
                 rates=rates,
             )
-            _push(lines, f"[DEBUG] extra_ops_appended={_appended}")
 
-        # Extra MATERIAL REMOVAL cards from HOLE TABLE text (Counterbore / Spot / Jig)
-        extra_ops_lines = _build_ops_cards_from_chart_lines(
-            breakdown=breakdown,
-            result=result,
-            rates=rates,
-            breakdown_mutable=breakdown_mutable,  # so buckets get minutes
-            ctx=ctx,
-            ctx_a=ctx_a,
-            ctx_b=ctx_b,
-        )
-        if extra_ops_lines:
-            removal_card_lines.extend(extra_ops_lines)
-            _push(lines, f"[DEBUG] extra_ops_lines={len(extra_ops_lines)}")
-            for entry in extra_ops_lines:
-                if isinstance(entry, str):
-                    removal_summary_extra_lines.append(entry)
-                else:
-                    removal_summary_extra_lines.append(str(entry))
-
-        # Emit the cards (will no-op if no TAP/CBore/Spot rows)
-        pre_ops_len = len(lines)
-
-        _emit_hole_table_ops_cards(
-            lines,
-            geo=geo_map,
-            material_group=material_group,
-            speeds_csv=None,
-            result=result,
-            breakdown=breakdown,
-            rates=rates,
-        )
+        pre_ops_start = locals().get("pre_ops_len", len(lines))
 
         new_ops_lines = [
             entry
-            for entry in lines[pre_ops_len:]
+            for entry in lines[pre_ops_start:]
             if isinstance(entry, str) and not entry.startswith("[DEBUG]")
         ]
         removal_summary_extra_lines.extend(new_ops_lines)
