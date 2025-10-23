@@ -8560,6 +8560,7 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
 
     removal_card_lines: list[str] = []
     removal_summary_extra_lines: list[str] = []
+    removal_summary_lines: list[str] = []
     removal_card_extra: dict[str, float] = {}
     speeds_feeds_table = None
     if isinstance(result, _MappingABC):
