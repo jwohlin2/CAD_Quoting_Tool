@@ -467,14 +467,27 @@ def _normalize_buckets(bucket_view_obj: MutableMapping[str, Any] | Mapping[str, 
 
 
 def _get_chart_lines_for_ops(
-    breakdown: Mapping[str, Any] | None, result: Mapping[str, Any] | None
+    breakdown: Mapping[str, Any] | None,
+    result: Mapping[str, Any] | None,
+    *,
+    ctx: Mapping[str, Any] | None = None,
+    ctx_a: Mapping[str, Any] | None = None,
+    ctx_b: Mapping[str, Any] | None = None,
 ) -> list[str]:
     def _geo(m):
         if not isinstance(m, _MappingABC):
             return {}
         return m.get("geo_context") or m.get("geo") or m.get("geom") or {}
 
-    for src in (breakdown, result, (_MappingABC({}) if False else {})):
+    sources: tuple[Mapping[str, Any] | None, ...] = (
+        ctx,
+        ctx_a,
+        ctx_b,
+        breakdown,
+        result,
+    )
+
+    for src in sources:
         g = _geo(src)
         if isinstance(g, _MappingABC):
             cl = g.get("chart_lines")
@@ -539,11 +552,20 @@ def _build_ops_cards_from_chart_lines(
     result: Mapping[str, Any] | None,
     rates: Mapping[str, Any] | None,
     breakdown_mutable: MutableMapping[str, Any] | None,
+    ctx: Mapping[str, Any] | None = None,
+    ctx_a: Mapping[str, Any] | None = None,
+    ctx_b: Mapping[str, Any] | None = None,
 ) -> list[str]:
     """Return extra MATERIAL REMOVAL cards for Counterbore / Spot / Jig."""
 
     lines: list[str] = []
-    chart_lines = _get_chart_lines_for_ops(breakdown, result)
+    chart_lines = _get_chart_lines_for_ops(
+        breakdown,
+        result,
+        ctx=ctx,
+        ctx_a=ctx_a,
+        ctx_b=ctx_b,
+    )
     if not chart_lines:
         return lines
 
@@ -1247,10 +1269,22 @@ def _build_ops_cards_from_chart_lines(
         try:
             chart_lines = _collect_chart_lines_context(ctx, geo_map, ctx_a, ctx_b)
         except Exception:
-            chart_lines = _get_chart_lines_for_ops(breakdown, result)
+            chart_lines = _get_chart_lines_for_ops(
+                breakdown,
+                result,
+                ctx=ctx,
+                ctx_a=ctx_a,
+                ctx_b=ctx_b,
+            )
 
         if not chart_lines:
-            chart_lines = _get_chart_lines_for_ops(breakdown, result)
+            chart_lines = _get_chart_lines_for_ops(
+                breakdown,
+                result,
+                ctx=ctx,
+                ctx_a=ctx_a,
+                ctx_b=ctx_b,
+            )
         if not chart_lines:
             return []
 
@@ -10242,10 +10276,13 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
             result=result,
             rates=rates,
             breakdown_mutable=breakdown_mutable,  # so buckets get minutes
+            ctx=ctx,
+            ctx_a=ctx_a,
+            ctx_b=ctx_b,
         )
         if extra_ops_lines:
-            _push(lines, f"[DEBUG] extra_ops_lines={len(extra_ops_lines)}")
             removal_card_lines.extend(extra_ops_lines)
+            _push(lines, f"[DEBUG] extra_ops_lines={len(extra_ops_lines)}")
             for entry in extra_ops_lines:
                 if isinstance(entry, str):
                     removal_summary_lines.append(entry)
