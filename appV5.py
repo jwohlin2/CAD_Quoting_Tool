@@ -10640,10 +10640,25 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
     # Render MATERIAL REMOVAL card + TIME PER HOLE lines (replace legacy Time block)
     # NOTE: Patch 3 keeps the hole-table hook active so downstream cards continue to render.
     # -- Ensure extra ops cards are appended to the SAME list that gets printed --
-    geo_map = ((result or {}).get("geo") if isinstance(result, _MappingABC) else None) \
-              or ((breakdown or {}).get("geo") if isinstance(breakdown, _MappingABC) else None) \
-              or {}
-    chart_lines_all = list((geo_map.get("chart_lines") or []))
+    geo_map_candidate = ((result or {}).get("geo") if isinstance(result, _MappingABC) else None) \
+                        or ((breakdown or {}).get("geo") if isinstance(breakdown, _MappingABC) else None) \
+                        or {}
+    chart_lines_source: Any
+    if isinstance(geo_map_candidate, (_MappingABC, dict)):
+        geo_map = geo_map_candidate
+        try:
+            chart_lines_source = geo_map.get("chart_lines")  # type: ignore[index]
+        except Exception:
+            chart_lines_source = None
+    else:
+        geo_map = {}
+        if isinstance(geo_map_candidate, Iterable) and not isinstance(
+            geo_map_candidate, (str, bytes, bytearray)
+        ):
+            chart_lines_source = geo_map_candidate
+        else:
+            chart_lines_source = None
+    chart_lines_all = list(chart_lines_source or [])
     if not chart_lines_all:
         try:
             chart_lines_all = _collect_chart_lines_context(ctx, geo_map, ctx_a, ctx_b) or []
