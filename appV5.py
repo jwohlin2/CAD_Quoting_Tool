@@ -956,12 +956,14 @@ def _collect_pilot_claims_from_rows(geo: Mapping[str, Any] | None) -> list[float
                 vals.extend([_NPT_PILOT_IN["1/8"]] * qty)
 
         # explicit decimals, e.g. "Ø0.201 DRILL THRU" or ".339 THRU"
-        match_decimal = re.search(r"(\d*\.\d+)\s*(?:DRILL\s*)?THRU", desc)
-        if match_decimal:
-            try:
-                vals.extend([float(match_decimal.group(1))] * qty)
-            except Exception:
-                pass
+        mentions_pilot = "TAP" in desc or "NPT" in desc or "PILOT" in desc
+        if mentions_pilot and "THRU" in desc:
+            match_decimal = re.search(r"(\d*\.\d+)", desc)
+            if match_decimal:
+                try:
+                    vals.extend([float(match_decimal.group(1))] * qty)
+                except Exception:
+                    pass
 
     return vals
 
