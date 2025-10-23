@@ -31,7 +31,7 @@ _CB_DIA_RE = re.compile(
 _X_DEPTH_RE = re.compile(r"[×xX]\s*([0-9]+(?:\.[0-9]+)?)")
 _BACK_RE = re.compile(r"\bFROM\s+BACK\b", re.I)
 _FRONT_RE = re.compile(r"\bFROM\s+FRONT\b", re.I)
-_BOTH_RE = re.compile(r"\bFRONT\s*&\s*BACK|BOTH\s+SIDES|2\s+SIDES\b", re.I)
+_BOTH_RE = re.compile(r"\bFRONT\s*(?:[&/]|AND)\s*BACK|BOTH\s+SIDES|2\s+SIDES\b", re.I)
 _SPOT_RE_TXT = re.compile(r"(?:C[’']?\s*DRILL|CENTER\s*DRILL|SPOT\s*DRILL|SPOT\b)", re.I)
 _JIG_RE_TXT = re.compile(r"\bJIG\s*GRIND\b", re.I)
 _TAP_RE = re.compile(
@@ -64,11 +64,14 @@ def _parse_qty(s: str) -> int:
 
 
 def _side(U: str) -> str:
-    if _BOTH_RE.search(U):
+    has_front = bool(_FRONT_RE.search(U) or re.search(r"\bFRONT\b", U))
+    has_back = bool(_BACK_RE.search(U) or re.search(r"\bBACK\b", U))
+
+    if _BOTH_RE.search(U) or (has_front and has_back):
         return "BOTH"
-    if _BACK_RE.search(U) or re.search(r"\bBACK\b", U):
+    if has_back:
         return "BACK"
-    if _FRONT_RE.search(U) or re.search(r"\bFRONT\b", U):
+    if has_front:
         return "FRONT"
     return "FRONT"
 
