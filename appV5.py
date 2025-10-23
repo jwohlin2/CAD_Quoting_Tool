@@ -9816,21 +9816,26 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
         return normalized_lines
 
     # Extra MATERIAL REMOVAL cards from HOLE TABLE text (Counterbore / Spot / Jig)
-    extra_ops_lines = _build_ops_cards_from_chart_lines(
-        breakdown=breakdown,
-        result=result,
-        rates=rates,
-        breakdown_mutable=breakdown_mutable,  # so buckets get minutes
-        ctx=ctx,
-        ctx_a=ctx_a,
-        ctx_b=ctx_b,
-    )
-    if not isinstance(extra_ops_lines, list):
-        extra_ops_lines = list(extra_ops_lines or [])
+    def _build_extra_ops_lines_list() -> list[Any]:
+        built_extra_ops = _build_ops_cards_from_chart_lines(
+            breakdown=breakdown,
+            result=result,
+            rates=rates,
+            breakdown_mutable=breakdown_mutable,  # so buckets get minutes
+            ctx=ctx,
+            ctx_a=ctx_a,
+            ctx_b=ctx_b,
+        )
+        if not isinstance(built_extra_ops, list):
+            built_extra_ops = list(built_extra_ops or [])
+        return built_extra_ops
+
+    extra_ops_lines_cache = _build_extra_ops_lines_list()
     appended_extra_ops_lines = _append_extra_ops_lines(
-        extra_ops_lines,
+        extra_ops_lines_cache,
         include_in_removal_cards=True,
     )
+    extra_ops_lines_appended = bool(appended_extra_ops_lines)
     if appended_extra_ops_lines:
         for entry in appended_extra_ops_lines:
             if not entry.startswith("[DEBUG]"):
@@ -9839,7 +9844,7 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
             _normalize_buckets(breakdown.get("bucket_view"))
         except Exception:
             pass
-    elif extra_ops_lines:
+    elif extra_ops_lines_cache:
         try:
             _push(
                 lines,
@@ -12389,8 +12394,13 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
                 _push(lines, f"[DEBUG] extra_ops_appended={_appended}")
 
             # Extra MATERIAL REMOVAL cards from HOLE TABLE text (Counterbore / Spot / Jig)
+            if extra_ops_lines_appended:
+                extra_ops_source = extra_ops_lines_cache
+            else:
+                extra_ops_lines_cache = _build_extra_ops_lines_list()
+                extra_ops_source = extra_ops_lines_cache
             appended_later_extra_ops_lines = _append_extra_ops_lines(
-                extra_ops_lines,
+                extra_ops_source,
                 include_in_removal_cards=True,
             )
             if appended_later_extra_ops_lines:
@@ -12399,6 +12409,7 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
                     f"[DEBUG] extra_ops_lines={len(appended_later_extra_ops_lines)}",
                 )
                 removal_summary_extra_lines.extend(appended_later_extra_ops_lines)
+                extra_ops_lines_appended = True
 
             # Emit the cards (will no-op if no TAP/CBore/Spot rows)
             pre_ops_len = len(lines)
@@ -12431,14 +12442,20 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
                 else:
                     breakdown_mutable = None
 
+                if extra_ops_lines_appended:
+                    fallback_extra_ops_source = extra_ops_lines_cache
+                else:
+                    extra_ops_lines_cache = _build_extra_ops_lines_list()
+                    fallback_extra_ops_source = extra_ops_lines_cache
                 appended_fallback_extra_ops_lines = _append_extra_ops_lines(
-                    extra_ops_lines,
+                    fallback_extra_ops_source,
                     include_in_removal_cards=False,
                 )
                 if appended_fallback_extra_ops_lines:
                     for entry in appended_fallback_extra_ops_lines:
                         if not entry.startswith("[DEBUG]"):
                             removal_summary_extra_lines.append(entry)
+                    extra_ops_lines_appended = True
         except Exception as e:
             _push(
                 lines,
