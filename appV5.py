@@ -8120,22 +8120,6 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
         drilling_time_per_hole=drilling_time_per_hole_data,
     )
 
-    # Extra MATERIAL REMOVAL cards from HOLE TABLE text (Counterbore / Spot / Jig)
-    extra_ops_lines = _build_ops_cards_from_chart_lines(
-        breakdown=breakdown,
-        result=result,
-        rates=rates,
-        breakdown_mutable=breakdown_mutable,  # so buckets get minutes
-    )
-    if extra_ops_lines:
-        removal_card_lines.extend(extra_ops_lines)
-
-    removal_summary_lines: list[str] = [
-        str(line)
-        for line in removal_card_lines
-        if isinstance(line, str)
-    ]
-
     if removal_card_extra.get("drill_machine_minutes") is not None:
         drill_machine_minutes_estimate = float(removal_card_extra["drill_machine_minutes"])
     if removal_card_extra.get("drill_labor_minutes") is not None:
@@ -10141,6 +10125,12 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
                 return c["material_group"]
         return None
 
+    removal_summary_lines: list[str] = [
+        str(line)
+        for line in removal_card_lines
+        if isinstance(line, str)
+    ]
+
     try:
         ctx_a = locals().get("breakdown")
         ctx_b = locals().get("result")
@@ -10175,6 +10165,22 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
                 ops_summary_map = geo_map.setdefault("ops_summary", {})
                 ops_summary_map["rows"] = built  # now emitter can read rows
                 ops_rows = built
+
+        # Extra MATERIAL REMOVAL cards from HOLE TABLE text (Counterbore / Spot / Jig)
+        extra_ops_lines = _build_ops_cards_from_chart_lines(
+            breakdown=breakdown,
+            result=result,
+            rates=rates,
+            breakdown_mutable=breakdown_mutable,  # so buckets get minutes
+        )
+        if extra_ops_lines:
+            _push(lines, f"[DEBUG] extra_ops_lines={len(extra_ops_lines)}")
+            removal_card_lines.extend(extra_ops_lines)
+            for entry in extra_ops_lines:
+                if isinstance(entry, str):
+                    removal_summary_lines.append(entry)
+                else:
+                    removal_summary_lines.append(str(entry))
 
         # Emit the cards (will no-op if no TAP/CBore/Spot rows)
         pre_ops_len = len(lines)
