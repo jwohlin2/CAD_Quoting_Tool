@@ -9740,6 +9740,7 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
     )
     if extra_ops_lines:
         removal_card_lines.extend(extra_ops_lines)
+        lines.extend(extra_ops_lines)
         try:
             _normalize_buckets(breakdown.get("bucket_view"))
         except Exception:
@@ -12379,6 +12380,7 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
             )
             if extra_ops_lines:
                 removal_card_lines.extend(extra_ops_lines)
+                lines.extend(extra_ops_lines)
                 _push(lines, f"[DEBUG] extra_ops_lines={len(extra_ops_lines)}")
                 for entry in extra_ops_lines:
                     if isinstance(entry, str):
