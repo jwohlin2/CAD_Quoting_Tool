@@ -921,8 +921,12 @@ def _preseed_ops_from_chart_lines(*, chart_lines, rows, breakdown_mutable, rates
             if not s:
                 continue
             U = s.upper()
-            # qty: (n) or "4X"
-            mqty = re.match(r"\s*\((\d+)\)\s*", s) or re.search(r"(?<!\d)(\d+)\s*[xX]\b", s)
+            # qty: (n), "4X", or "QTY 4"
+            mqty = re.match(r"\s*\((\d+)\)\s*", s)
+            if not mqty:
+                mqty = re.search(r"(?<!\d)(\d+)\s*[xX]\b", s)
+            if not mqty:
+                mqty = re.search(r"\bQTY[:\s]+(\d+)\b", s, re.I)
             qty = int(mqty.group(1)) if mqty else 1
             side = _side(U)
             mcb = _CB_DIA_RE.search(s)
