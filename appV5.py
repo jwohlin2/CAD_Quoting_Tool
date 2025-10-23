@@ -10294,11 +10294,14 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
     except Exception:
         geo_map = {}
 
-    # We can re-collect lines here—same function that produced chart_lines_found=10
+    # Re-collect raw chart lines (same source as earlier)
     try:
-        chart_lines_all = _collect_chart_lines_context(ctx, geo_map, ctx_a, ctx_b)
+        chart_lines_all = _collect_chart_lines_context(ctx, geo_map, ctx_a, ctx_b) or []
     except Exception:
         chart_lines_all = []
+
+    # NEW: join wrapped lines into full rows so depth/side stick with the quantity line
+    joined_lines = _join_wrapped_chart_lines(chart_lines_all)
 
     # Use any rows already built earlier (if present)
     try:
@@ -10306,9 +10309,10 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
     except Exception:
         ops_rows_now = []
 
+    # Append extra MATERIAL REMOVAL cards (Counterbore / Spot / Jig) from JOINED lines
     _appended_at_print = _append_counterbore_spot_jig_cards(
         lines_out=removal_card_lines,     # <— append directly to the printed list
-        chart_lines=chart_lines_all,
+        chart_lines=joined_lines,   # <- use joined lines
         rows=ops_rows_now,
         breakdown_mutable=breakdown_mutable,
         rates=rates,
