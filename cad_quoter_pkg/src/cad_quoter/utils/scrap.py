@@ -136,17 +136,20 @@ def build_drill_groups_from_geometry(
             counts_by_diam[key] += 1
 
     if counts_by_diam and isinstance(ops_claims, Mapping):
-        claimed = ops_claims.get("claimed_pilot_diams") if ops_claims else None
+
+        def _nearest_bin(val: float, bins: Sequence[float]) -> float | None:
+            return min(bins, key=lambda b: abs(b - val)) if bins else None
+
+        bins = sorted(float(d) for d in counts_by_diam.keys())
+
+        claimed = (ops_claims or {}).get("claimed_pilot_diams")
         if claimed:
             claimed_ctr = Counter(
                 round(float(d), 4) for d in claimed if d is not None
             )
-
-            def _nearest_bin(val: float, bins: Sequence[float]) -> float | None:
-                return min(bins, key=lambda b: abs(b - val)) if bins else None
-
-            bins = sorted(round(float(d), 4) for d in counts_by_diam.keys())
             for val, qty in claimed_ctr.items():
+                if not bins:
+                    break
                 target = _nearest_bin(val, bins)
                 if target is None:
                     continue
@@ -156,12 +159,33 @@ def build_drill_groups_from_geometry(
                         int(counts_by_diam.get(target, 0)) - int(qty),
                     )
 
-            for key in list(groups.keys()):
-                qty_adj = int(counts_by_diam.get(key, 0))
-                if qty_adj <= 0:
-                    groups.pop(key, None)
-                else:
-                    groups[key]["qty"] = qty_adj
+        cb_face_counts: Counter[float] = Counter()
+        for (diam, _side, _depth), qty in (ops_claims or {}).get("cb_groups", {}).items():
+            if diam is None:
+                continue
+            try:
+                cb_face_counts[round(float(diam), 4)] += int(qty)
+            except Exception:
+                continue
+
+        for face_diam, face_qty in cb_face_counts.items():
+            if not bins:
+                break
+            target = _nearest_bin(face_diam, bins)
+            if target is None:
+                continue
+            if abs(target - face_diam) <= 0.02:
+                counts_by_diam[target] = max(
+                    0,
+                    int(counts_by_diam.get(target, 0)) - int(face_qty),
+                )
+
+        for key in list(groups.keys()):
+            qty_adj = int(counts_by_diam.get(key, 0))
+            if qty_adj <= 0:
+                groups.pop(key, None)
+            else:
+                groups[key]["qty"] = qty_adj
 
     ordered = [groups[k] for k in sorted(groups.keys())]
     return ordered
