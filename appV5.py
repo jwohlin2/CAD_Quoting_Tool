@@ -1739,6 +1739,17 @@ def _build_ops_cards_from_chart_lines(
             )
             cb_lrate = _lookup_bucket_rate("labor", rates) or 25.46
             _set_bucket_minutes_cost(bucket_view_obj, "counterbore", cb_minutes, cb_mrate, cb_lrate)
+            try:
+                bv = breakdown_mutable.setdefault("bucket_view", {})
+                buckets = bv.setdefault("buckets", {})
+                order = bv.setdefault("order", [])
+                if "counterbore" in buckets and "counterbore" not in order:
+                    if "drilling" in order:
+                        order.insert(order.index("drilling") + 1, "counterbore")
+                    else:
+                        order.append("counterbore")
+            except Exception:
+                pass
 
         spot_qty, jig_qty = _count_spot_and_jig(built_rows)
         if spot_qty > 0:
