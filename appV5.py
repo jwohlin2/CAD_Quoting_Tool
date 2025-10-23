@@ -904,6 +904,89 @@ _BOTH_RE      = re.compile(r"\bFRONT\s*&\s*BACK|BOTH\s+SIDES|2\s+SIDES\b", re.I)
 _SPOT_RE_TXT  = re.compile(r"(?:C[’']?\s*DRILL|CENTER\s*DRILL|SPOT\s*DRILL|SPOT\b)", re.I)
 _JIG_RE_TXT   = re.compile(r"\bJIG\s*GRIND\b", re.I)
 
+LETTER_DRILLS = {
+    "Q": 0.3320,
+    "R": 0.3390,
+    "S": 0.3480,
+    "T": 0.3580,
+}
+
+_SIZE_INCH_RE = re.compile(r"\(\s*(\d+(?:\.\d+)?|\.\d+)\s*\)")
+_LETTER_RE = re.compile(r"\b([A-Z])(?=\s*(?:\(|DRILL|$))")
+_DRILL_THRU = re.compile(r"\bDRILL\s+THRU\b", re.I)
+_TAP_RE = re.compile(r"\bTAP(?:PING)?\b", re.I)
+
+
+def _side(U: str) -> str:
+    if _BOTH_RE.search(U):
+        return "BOTH"
+    if _BACK_RE.search(U):
+        return "BACK"
+    if _FRONT_RE.search(U):
+        return "FRONT"
+    return "FRONT"
+
+
+def _parse_qty(s: str) -> int:
+    # (4) prefix, or 4X/4 x anywhere, or QTY 4
+    m = re.match(r"\s*\((\d+)\)\s*", s)
+    if m:
+        return int(m.group(1))
+    m = re.search(r"(?<!\d)(\d+)\s*[xX]\b", s)
+    if m:
+        return int(m.group(1))
+    m = re.search(r"\bQTY[:\s]+(\d+)\b", s, re.I)
+    if m:
+        return int(m.group(1))
+    return 1
+
+
+def _record_drill_claims(
+    breakdown_mutable: MutableMapping[str, Any] | None,
+    claimed: Iterable[float],
+) -> None:
+    if not claimed or breakdown_mutable is None:
+        return
+    if not isinstance(breakdown_mutable, (_MutableMappingABC, dict)):
+        return
+    try:
+        drilling_meta = breakdown_mutable.setdefault("drilling_meta", {})
+    except Exception:
+        return
+    if not isinstance(drilling_meta, (_MutableMappingABC, dict)):
+        try:
+            drilling_meta = dict(drilling_meta)  # type: ignore[arg-type]
+        except Exception:
+            return
+        try:
+            breakdown_mutable["drilling_meta"] = drilling_meta  # type: ignore[index]
+        except Exception:
+            return
+    if drilling_meta.get("claimed_pilot_diams"):
+        return
+    cleaned: list[float] = []
+    for value in claimed:
+        try:
+            num = float(value)
+        except Exception:
+            continue
+        if not math.isfinite(num):
+            continue
+        cleaned.append(num)
+    if not cleaned:
+        return
+    try:
+        drilling_meta["claimed_pilot_diams"] = list(cleaned)
+    except Exception:
+        return
+    try:
+        counts = Counter(round(val, 4) for val in cleaned)
+        drilling_meta["claimed_pilot_counts"] = {
+            f"{key:.4f}": int(count)
+            for key, count in counts.items()
+        }
+    except Exception:
+        pass
 
 def _parse_ops_and_claims(
     chart_lines: Sequence[str] | None,
@@ -913,6 +996,8 @@ def _parse_ops_and_claims(
     """Extract operation claims (cbore/tap/spot/jig) from chart lines/rows."""
 
     cb_groups: dict[tuple[float | None, str, float | None], int] = {}
+    tap_qty = 0
+    npt_qty = 0
     spot_qty = 0
     jig_qty = 0
     tap_qty = 0
@@ -1076,9 +1161,12 @@ def _append_counterbore_spot_jig_cards(
             except Exception:
                 return None
         try:
-            return float(raw)
+            for raw in list(chart_lines):
+                cleaned = _clean_mtext(str(raw or ""))
+                if cleaned:
+                    chart_lines_list.append(cleaned)
         except Exception:
-            return None
+            chart_lines_list = []
 
     # ---------- PASS A: parse CHART LINES (what you already have: 10) ----------
     if isinstance(chart_lines, list):
