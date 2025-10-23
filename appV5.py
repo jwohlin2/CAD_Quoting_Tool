@@ -732,6 +732,44 @@ def _build_ops_cards_from_chart_lines(
 
 # --- Inline ops-cards builder from chart_lines (fallback to rows) ------------
 import re, math
+_JOIN_QTY_RE = re.compile(r"^\s*\((\d+)\)\s*")   # e.g. "(4) ..."
+_JOIN_START_TOKENS = re.compile(
+    r"(?:^\s*\(\d+\)\s*)"               # starts with "(n)"
+    r"|(?:\bTAP\b)"                     # a TAP line starts a new row
+    r"|(?:C[’']?\s*BORE|CBORE|COUNTER\s*BORE)"  # counterbore token
+    r"|(?:[Ø⌀\u00D8])"                  # diameter symbol
+    r"|(?:C[’']?\s*DRILL|CENTER\s*DRILL|SPOT\s*DRILL\b)"  # spot callouts
+    , re.I
+)
+
+
+def _join_wrapped_chart_lines(chart_lines: list[str]) -> list[str]:
+    """
+    Coalesce wrapped hole-table lines:
+      - Start a new record if line has (n), TAP, C'BORE, Ø, or SPOT tokens.
+      - Otherwise append the line to the current record.
+    """
+    if not isinstance(chart_lines, list) or not chart_lines:
+        return []
+    out, buf = [], ""
+
+    def _flush():
+        nonlocal buf
+        if buf.strip():
+            out.append(re.sub(r"\s+", " ", buf).strip())
+        buf = ""
+
+    for raw in chart_lines:
+        s = str(raw or "")
+        if not s.strip():
+            continue
+        if _JOIN_START_TOKENS.search(s):
+            _flush()
+            buf = s
+        else:
+            buf += " " + s
+    _flush()
+    return out
 _CB_DIA_RE = re.compile(
     # Case A: Ø before number  → "Ø .750 C'BORE"
     r"(?:[Ø⌀\u00D8]\s*)?(?P<numA>(?:\d+(?:\.\d+)?|\.\d+|\d+\s*/\s*\d+))\s*(?:C[’']?\s*BORE|CBORE|COUNTER\s*BORE)"
