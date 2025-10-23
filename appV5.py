@@ -11547,6 +11547,8 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
 
     except Exception as e:
         _push(lines, f"[DEBUG] material_removal_emit_skipped={e.__class__.__name__}: {e}")
+
+    removal_summary_lines = _collect_removal_summary_lines()
     # ========================================================================
 
     planner_ops_rows_for_audit: Any
