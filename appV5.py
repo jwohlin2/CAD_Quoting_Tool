@@ -138,6 +138,15 @@ _MM_DIM_TOKEN = re.compile(
     re.IGNORECASE,
 )
 
+_COUNTERDRILL_RE = re.compile(
+    r"\b(?:C[’']\s*DRILL|C\s*DRILL|COUNTER\s*DRILL|COUNTERDRILL)\b",
+    re.IGNORECASE,
+)
+_CENTER_OR_SPOT_RE = re.compile(
+    r"\b(CENTER\s*DRILL|SPOT\s*DRILL|SPOT)\b",
+    re.IGNORECASE,
+)
+
 _DRILL_REMOVAL_MINUTES_MIN = 0.0
 _DRILL_REMOVAL_MINUTES_MAX = 600.0
 
@@ -833,6 +842,32 @@ def _record_drill_claims(
         }
     except Exception:
         pass
+
+
+def _tally_counterdrill(lines_joined: Sequence[str] | None) -> int:
+    total = 0
+    if not lines_joined:
+        return 0
+    for raw in lines_joined:
+        if not isinstance(raw, str):
+            continue
+        s = raw.strip()
+        if not s:
+            continue
+        upper = s.upper()
+        if _CENTER_OR_SPOT_RE.search(upper):
+            continue
+        if _COUNTERDRILL_RE.search(upper):
+            prefix = re.match(r"\s*\((\d+)\)", raw)
+            if prefix:
+                try:
+                    total += int(prefix.group(1))
+                except Exception:
+                    total += 1
+            else:
+                total += 1
+    return total
+
 
 def _parse_ops_and_claims(joined_lines: Sequence[str] | None) -> dict[str, Any]:
     return _shared_parse_ops_and_claims(joined_lines, cleaner=_clean_mtext)
@@ -11104,6 +11139,7 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
     # CLEAN then JOIN
     cleaned = [_clean_mtext(x) for x in chart_lines_all]
     joined_lines = _join_wrapped_chart_lines(cleaned)
+    counterdrill_qty = _tally_counterdrill(joined_lines)
 
     try:
         ops_claims_preview = _parse_ops_and_claims(joined_lines)
@@ -11111,13 +11147,22 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
         ops_claims_preview = {}
     if not isinstance(ops_claims_preview, dict):
         ops_claims_preview = {}
+    try:
+        preview_counterdrill = int(round(float(ops_claims_preview.get("counterdrill", 0))))
+    except Exception:
+        preview_counterdrill = 0
+    if counterdrill_qty > preview_counterdrill:
+        ops_claims_preview["counterdrill"] = counterdrill_qty
+    else:
+        ops_claims_preview["counterdrill"] = preview_counterdrill
     _push(
         lines,
-        "[DEBUG] at_print_ops cb={cb} tap={tap} npt={npt} spot={spot} jig={jig}".format(
+        "[DEBUG] at_print_ops cb={cb} tap={tap} npt={npt} spot={spot} counterdrill={counterdrill} jig={jig}".format(
             cb=int(ops_claims_preview.get("cb_total", 0)),
             tap=int(ops_claims_preview.get("tap", 0)),
             npt=int(ops_claims_preview.get("npt", 0)),
             spot=int(ops_claims_preview.get("spot", 0)),
+            counterdrill=int(ops_claims_preview.get("counterdrill", 0)),
             jig=int(ops_claims_preview.get("jig", 0)),
         ),
     )
@@ -11132,7 +11177,10 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
 
     ops_claims: dict[str, int] = {}
     try:
-        if any(int(ops_claims_preview.get(key, 0)) > 0 for key in ("cb_total", "tap", "npt", "spot", "jig")):
+        if any(
+            int(ops_claims_preview.get(key, 0)) > 0
+            for key in ("cb_total", "tap", "npt", "spot", "counterdrill", "jig")
+        ):
             ops_claims = {
                 "cb_total": int(ops_claims_preview.get("cb_total", 0)),
                 "cb_front": int(ops_claims_preview.get("cb_front", 0)),
@@ -11140,6 +11188,7 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
                 "tap": int(ops_claims_preview.get("tap", 0)),
                 "npt": int(ops_claims_preview.get("npt", 0)),
                 "spot": int(ops_claims_preview.get("spot", 0)),
+                "counterdrill": int(ops_claims_preview.get("counterdrill", 0)),
                 "jig": int(ops_claims_preview.get("jig", 0)),
             }
     except Exception:
@@ -11223,7 +11272,18 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
                 ops_claims = extracted
                 _stash_ops_claims(dict(ops_claims))
 
-    for key in ("cb_total", "cb_front", "cb_back", "tap", "npt", "spot", "jig"):
+    current_counterdrill = 0
+    try:
+        current_counterdrill = int(round(float(ops_claims.get("counterdrill", 0))))
+    except Exception:
+        current_counterdrill = 0
+    counterdrill_claim = max(counterdrill_qty, current_counterdrill)
+    if counterdrill_claim > 0:
+        ops_claims["counterdrill"] = counterdrill_claim
+    elif "counterdrill" in ops_claims:
+        ops_claims["counterdrill"] = 0
+
+    for key in ("cb_total", "cb_front", "cb_back", "tap", "npt", "spot", "counterdrill", "jig"):
         ops_claims.setdefault(key, 0)
 
     def _extract_ops_hint(source: Any) -> dict[str, int]:
@@ -11319,6 +11379,15 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
                         "side": "front",
                     }
                 )
+            if ops_claims.get("counterdrill", 0) > 0:
+                counterdrill_qty_local = int(ops_claims.get("counterdrill", 0) or 0)
+                ebo.setdefault("counterdrill", []).append(
+                    {
+                        "name": "Counterdrill",
+                        "qty": counterdrill_qty_local,
+                        "side": "front",
+                    }
+                )
             if ops_claims.get("jig", 0) > 0:
                 jig_qty = int(ops_claims.get("jig", 0) or 0)
                 ebo.setdefault("jig-grind", []).append(
@@ -11339,6 +11408,10 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
                     ops_claims["cb_total"] = cb_need
             if "spot" in ops_hint:
                 ops_claims["spot"] = int(ops_hint.get("spot", 0) or 0)
+            if "counterdrill" in ops_hint:
+                hint_counterdrill = int(ops_hint.get("counterdrill", 0) or 0)
+                existing_counterdrill = int(ops_claims.get("counterdrill", 0) or 0)
+                ops_claims["counterdrill"] = max(existing_counterdrill, hint_counterdrill)
             if "jig" in ops_hint:
                 ops_claims["jig"] = int(ops_hint.get("jig", 0) or 0)
             if "tap" in ops_hint:
@@ -11360,6 +11433,21 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
                     f"Spot drill × {spot_qty} | t/hole 0.05 min | group {spot_qty}×0.05 = {spot_qty * 0.05:.2f} min",
                     "",
                 ])
+
+        if (ops_claims.get("counterdrill") or 0) > 0:
+            counterdrill_qty_local = int(ops_claims.get("counterdrill", 0) or 0)
+            counterdrill_heading = "MATERIAL REMOVAL – COUNTERDRILL"
+            if not _card_heading_exists(counterdrill_heading):
+                removal_card_lines.extend(
+                    [
+                        counterdrill_heading,
+                        "=" * 64,
+                        "TIME PER HOLE – COUNTERDRILL GROUPS",
+                        "-" * 66,
+                        f"Counterdrill × {counterdrill_qty_local} | group {counterdrill_qty_local}",
+                        "",
+                    ]
+                )
 
         if (ops_claims.get("jig") or 0) > 0:
             jig_qty = int(ops_claims.get("jig", 0) or 0)
@@ -11714,11 +11802,20 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
                     _clean_mtext(x) for x in chart_lines_all
                 ])
                 ops_claims = _parse_ops_and_claims(joined_early)
+                if not isinstance(ops_claims, dict):
+                    ops_claims = {}
+                early_counterdrill = _tally_counterdrill(joined_early)
+                try:
+                    existing_counterdrill = int(round(float(ops_claims.get("counterdrill", 0))))
+                except Exception:
+                    existing_counterdrill = 0
+                ops_claims["counterdrill"] = max(existing_counterdrill, early_counterdrill)
                 breakdown_mutable["_ops_claims"] = ops_claims
                 _push(
                     lines,
                     f"[DEBUG] preseed_ops cb={ops_claims['cb_total']} tap={ops_claims['tap']} "
-                    f"npt={ops_claims['npt']} spot={ops_claims['spot']} jig={ops_claims['jig']}",
+                    f"npt={ops_claims['npt']} spot={ops_claims['spot']} "
+                    f"counterdrill={ops_claims['counterdrill']} jig={ops_claims['jig']}",
                 )
 
                 # Publish structured ops for planner_ops_summary
@@ -11739,6 +11836,14 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
                     if ops_claims["npt"] > 0:
                         ebo.setdefault("tap", []).append(
                             {"name": "NPT tap", "qty": int(ops_claims["npt"]), "side": "front"}
+                        )
+                    if ops_claims.get("counterdrill", 0) > 0:
+                        ebo.setdefault("counterdrill", []).append(
+                            {
+                                "name": "Counterdrill",
+                                "qty": int(ops_claims["counterdrill"]),
+                                "side": "front",
+                            }
                         )
                     if ops_claims["spot"] > 0:
                         ebo.setdefault("spot", []).append(
@@ -11800,7 +11905,8 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
                 _push(
                     lines,
                     f"[DEBUG] at_print_ops cb={ops_claims.get('cb_total', 0)} tap={ops_claims.get('tap', 0)} "
-                    f"npt={ops_claims.get('npt', 0)} spot={ops_claims.get('spot', 0)} jig={ops_claims.get('jig', 0)}",
+                    f"npt={ops_claims.get('npt', 0)} spot={ops_claims.get('spot', 0)} "
+                    f"counterdrill={ops_claims.get('counterdrill', 0)} jig={ops_claims.get('jig', 0)}",
                 )
                 _push(
                     lines,
@@ -12074,6 +12180,14 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
             extra_bucket_ops.setdefault("spot", []).append(
                 {"name": "Spot drill", "qty": int(ops_claims["spot"]), "side": "front"}
             )
+        if (ops_claims.get("counterdrill") or 0) > 0:
+            extra_bucket_ops.setdefault("counterdrill", []).append(
+                {
+                    "name": "Counterdrill",
+                    "qty": int(ops_claims["counterdrill"]),
+                    "side": "front",
+                }
+            )
         if (ops_claims.get("jig") or 0) > 0:
             extra_bucket_ops.setdefault("jig-grind", []).append(
                 {"name": "Jig-grind", "qty": int(ops_claims["jig"]), "side": None}
@@ -12121,7 +12235,7 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
                 drill_actions_adjusted_display = total_qty
     if drill_actions_adjusted_display is not None:
         _push(lines, f"[DEBUG] drill_actions_adjusted={int(drill_actions_adjusted_display)}")
-    for key in ("tap", "npt", "cb_total", "spot", "jig"):
+    for key in ("tap", "npt", "cb_total", "spot", "counterdrill", "jig"):
         if key not in ops_claims:
             ops_claims[key] = 0
     counts_by_diam_current = locals().get("counts_by_diam")
@@ -12134,13 +12248,15 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
     _push(
         lines,
         f"[DEBUG] OPS TALLY drill={drill_bins_adj_logged} tap={ops_claims.get('tap', 0) + ops_claims.get('npt', 0)} "
-        f"cbore={ops_claims.get('cb_total', 0)} spot={ops_claims.get('spot', 0)} jig={ops_claims.get('jig', 0)}",
+        f"cbore={ops_claims.get('cb_total', 0)} spot={ops_claims.get('spot', 0)} "
+        f"counterdrill={ops_claims.get('counterdrill', 0)} jig={ops_claims.get('jig', 0)}",
     )
     _push(
         lines,
         f"[DEBUG] OPS TALLY  drill={drill_actions} tap={ops_claims['tap']} "
         f"npt={ops_claims['npt']} cbore={ops_claims['cb_total']} "
-        f"spot={ops_claims['spot']} jig={ops_claims['jig']}",
+        f"spot={ops_claims['spot']} counterdrill={ops_claims['counterdrill']} "
+        f"jig={ops_claims['jig']}",
     )
 
     print(
@@ -12150,6 +12266,7 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
         f"cbore_total={ops_counts.get('counterbores_total', 0)} "
         f"(F={ops_counts.get('counterbores_front', 0)}, B={ops_counts.get('counterbores_back', 0)}) "
         f"spot={ops_counts.get('spot', 0)} "
+        f"counterdrill={ops_counts.get('counterdrill', 0)} "
         f"jig_grind={ops_counts.get('jig_grind', 0)} "
         f"actions={ops_counts.get('actions_total', 0)}"
     )
@@ -12166,6 +12283,7 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
         f"{ops_counts.get('counterbores_total', 0)}  (Front {ops_counts.get('counterbores_front', 0)} / Back {ops_counts.get('counterbores_back', 0)})"
     )
     lines.append(f" Spot:          {ops_counts.get('spot', 0)}")
+    lines.append(f" Counterdrill:  {ops_counts.get('counterdrill', 0)}")
     lines.append(f" Jig-grind:     {ops_counts.get('jig_grind', 0)}")
     lines.append(f" Actions total: {ops_counts.get('actions_total', 0)}")
     lines.append("")
