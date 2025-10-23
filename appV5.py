@@ -4284,20 +4284,6 @@ def _compute_drilling_removal_section(
                     fallback_counts[key] = fallback_counts.get(key, 0) + qty_val
                 counts_by_diam_raw = fallback_counts
 
-            # --- DRILL BIN SEEDING ---
-            geo_map = (
-                ((result or {}).get("geo") if isinstance(result, dict) else None)
-                or ((breakdown or {}).get("geo") if isinstance(breakdown, dict) else None)
-                or {}
-            )
-
-            # If counts_by_diam_raw is empty/undefined, seed from GEO now
-            if not counts_by_diam_raw or sum(int(v) for v in (counts_by_diam_raw or {}).values()) == 0:
-                counts_by_diam_raw = _seed_drill_bins_from_geo(geo_map)
-
-            raw_total = sum(int(v) for v in (counts_by_diam_raw or {}).values())
-            _push(lines, f"[DEBUG] DRILL bins raw={raw_total}")
-
             pilot_claims = _collect_pilot_claims(
                 geo_map,
                 breakdown=breakdown,
@@ -4317,6 +4303,21 @@ def _compute_drilling_removal_section(
                         cb_groups_payload = dict(candidate_cb_groups)
                     except Exception:
                         cb_groups_payload = {}
+
+            # --- DRILL BIN SEEDING ---
+            geo_map = (
+                ((result or {}).get("geo") if isinstance(result, dict) else None)
+                or ((breakdown or {}).get("geo") if isinstance(breakdown, dict) else None)
+                or {}
+            )
+
+            # If counts_by_diam_raw is empty/undefined, seed from GEO now
+            if not counts_by_diam_raw or sum(int(v) for v in (counts_by_diam_raw or {}).values()) == 0:
+                counts_by_diam_raw = _seed_drill_bins_from_geo(geo_map)
+
+            raw_total = sum(int(v) for v in (counts_by_diam_raw or {}).values())
+            _push(lines, f"[DEBUG] DRILL bins raw={raw_total}")
+
             counts_by_diam = _adjust_drill_counts(
                 counts_by_diam_raw,
                 pilot_claims=pilot_claims,
