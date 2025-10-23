@@ -865,7 +865,7 @@ def test_aggregate_ops_tap_pilot_claims() -> None:
     assert all(entry.get("type") != "drill" for entry in detail)
 
 
-def test_collect_pilot_claims_from_rows() -> None:
+def test_collect_pilot_claims_combines_sources() -> None:
     import appV5
 
     geo = {
@@ -879,12 +879,20 @@ def test_collect_pilot_claims_from_rows() -> None:
         }
     }
 
-    pilots = appV5._collect_pilot_claims_from_rows(geo)
+    chart = [
+        "(3) 5/16-24 TAP DRILL THRU",
+        "Ø0.261 DRILL THRU",
+        "1/8-27 NPT TAP",
+    ]
+
+    pilots = appV5._collect_pilot_claims(geo, chart)
     counts = Counter(round(val, 4) for val in pilots)
 
     assert counts[round(0.1590, 4)] == 4
     assert counts[round(0.5312, 4)] == 2
-    assert counts[round(0.3390, 4)] == 2
+    assert counts[round(0.3390, 4)] == 3
+    assert counts[round(0.2720, 4)] == 3
+    assert counts[round(0.2610, 4)] == 1
 
 
 def test_adjust_drill_counts_subtracts_row_pilots() -> None:
@@ -900,7 +908,7 @@ def test_adjust_drill_counts_subtracts_row_pilots() -> None:
         }
     }
 
-    pilots = appV5._collect_pilot_claims_from_rows(geo)
+    pilots = appV5._collect_pilot_claims(geo, [])
     ops_claims = {"claimed_pilot_diams": pilots}
 
     counts_raw = {0.1590: 4, 0.5312: 2, 0.3390: 1}
