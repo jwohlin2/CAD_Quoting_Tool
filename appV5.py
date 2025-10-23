@@ -11251,22 +11251,26 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
                 return c["material_group"]
         return None
 
+    ctx_a = locals().get("breakdown")
+    ctx_b = locals().get("result")
+    ctx_c = locals().get("quote")
+    ctx = _first_dict(ctx_a, ctx_b, ctx_c)
+
+    geo_map = _get_geo_map(ctx, locals().get("geo"), ctx_a, ctx_b)
+    material_group = _get_material_group(ctx, ctx_a, ctx_b)
+
     ops_summary_map = None
     ops_rows: list[Any] = []
 
     try:
-        ctx_a = locals().get("breakdown")
-        ctx_b = locals().get("result")
-        ctx_c = locals().get("quote")
-        ctx   = _first_dict(ctx_a, ctx_b, ctx_c)
-
-        geo_map        = _get_geo_map(ctx, locals().get("geo"), ctx_a, ctx_b)
-        material_group = _get_material_group(ctx, ctx_a, ctx_b)
-
-        ops_summary_payload = geo_map.get("ops_summary") if isinstance(geo_map, _MappingABC) else None
-        ops_summary_map = ops_summary_payload if isinstance(
-            ops_summary_payload, (_MutableMappingABC, dict)
-        ) else None
+        ops_summary_payload = (
+            geo_map.get("ops_summary") if isinstance(geo_map, _MappingABC) else None
+        )
+        ops_summary_map = (
+            ops_summary_payload
+            if isinstance(ops_summary_payload, (_MutableMappingABC, dict))
+            else None
+        )
         ops_rows = (
             ((ops_summary_map or {}).get("rows") or [])
             if isinstance(ops_summary_map, _MappingABC)
