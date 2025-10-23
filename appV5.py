@@ -3301,6 +3301,18 @@ def summarize_actions(removal_lines: list[str], planner_ops: list[dict]) -> None
         r'^\s*([0-9]+(?:\.[0-9]+)?|\.[0-9]+)"?\s*[×xX]\s*(\d+)\s*\((FRONT|BACK)\)',
         re.IGNORECASE,
     )
+    cbo_card_row_re = re.compile(
+        r'^\s*Ø\s*([0-9]+(?:\.[0-9]+)?|\.[0-9]+)"?.*?[×xX]\s*(\d+)\s*\((FRONT|BACK)\)',
+        re.IGNORECASE,
+    )
+    spot_card_row_re = re.compile(
+        r'^\s*Spot\s+drill.*?[×xX]\s*(\d+)\s*\((FRONT|BACK)\)',
+        re.IGNORECASE,
+    )
+    jig_card_row_re = re.compile(
+        r'^\s*Jig\s+grind.*?[×xX]\s*(\d+)\s*(?:\((FRONT|BACK)\))?',
+        re.IGNORECASE,
+    )
 
     card_counts = {"counterbore": False, "spot": False, "jig_grind": False}
     active_card: str | None = None
@@ -3319,6 +3331,14 @@ def summarize_actions(removal_lines: list[str], planner_ops: list[dict]) -> None
             continue
 
         if in_cbo:
+            simple_cbo = cbo_card_row_re.search(ln)
+            if simple_cbo:
+                qty = int(simple_cbo.group(2))
+                side = simple_cbo.group(3).upper()
+                total["counterbore"] += qty
+                by_side["counterbore"][side.lower()] += qty
+                card_counts["counterbore"] = True
+                continue
             m = cbo_line_re.search(ln)
             if m:
                 qty = int(m.group(2))
@@ -3368,6 +3388,24 @@ def summarize_actions(removal_lines: list[str], planner_ops: list[dict]) -> None
             continue
 
         if active_card in {"spot", "jig_grind"}:
+            if active_card == "spot":
+                spot_simple = spot_card_row_re.search(ln)
+                if spot_simple:
+                    qty = int(spot_simple.group(1))
+                    side = _side_from(ln)
+                    total["spot"] += qty
+                    by_side["spot"][side] += qty
+                    card_counts["spot"] = True
+                    continue
+            if active_card == "jig_grind":
+                jig_simple = jig_card_row_re.search(ln)
+                if jig_simple:
+                    qty = int(jig_simple.group(1))
+                    side = _side_from(ln)
+                    total["jig_grind"] += qty
+                    by_side["jig_grind"][side] += qty
+                    card_counts["jig_grind"] = True
+                    continue
             qty_match = qty_re.search(ln)
             if qty_match:
                 qty = int(qty_match.group(1))
@@ -8799,6 +8837,7 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
             drilling_time_per_hole_data = candidate_dtph
 
     removal_card_lines: list[str] = []
+    removal_summary_lines: list[str] = []
     removal_summary_extra_lines: list[str] = []
     removal_card_extra: dict[str, float] = {}
     speeds_feeds_table = None
@@ -11080,6 +11119,12 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
                 for entry in fallback_lines:
                     if isinstance(entry, str) and not entry.startswith("[DEBUG]"):
                         removal_summary_extra_lines.append(entry)
+
+        removal_summary_lines = [
+            str(line) for line in removal_card_lines if isinstance(line, str)
+        ]
+        if removal_summary_extra_lines:
+            removal_summary_lines.extend(removal_summary_extra_lines)
 
         actions_summary_ready = True
         try:
