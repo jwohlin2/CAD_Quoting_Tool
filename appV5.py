@@ -779,6 +779,26 @@ def _append_counterbore_spot_jig_cards(
         if m: return int(m.group(1))
         return 1
 
+    def _extract_counterbore_dia(text: str) -> float | None:
+        """Return a numeric counterbore diameter from ``text`` if present."""
+
+        mcb = _CB_DIA_RE.search(text)
+        if not mcb:
+            return None
+        raw = (mcb.group("numA") or mcb.group("numB") or "").strip()
+        if not raw:
+            return None
+        if "/" in raw:
+            try:
+                num, den = raw.split("/", 1)
+                return float(int(num.strip()) / int(den.strip()))
+            except Exception:
+                return None
+        try:
+            return float(raw)
+        except Exception:
+            return None
+
     # ---------- PASS A: parse CHART LINES (what you already have: 10) ----------
     if isinstance(chart_lines, list):
         # helpful debug
@@ -790,22 +810,7 @@ def _append_counterbore_spot_jig_cards(
             U = s.upper()
             qty  = _parse_qty(s)
             side = _side(U)
-            dia = None
-            mcb = _CB_DIA_RE.search(s)
-            if mcb:
-                raw = (mcb.group("numA") or mcb.group("numB") or "").strip()
-                if raw:
-                    if "/" in raw:
-                        try:
-                            num, den = raw.split("/", 1)
-                            dia = float(int(num.strip()) / int(den.strip()))
-                        except Exception:
-                            dia = None
-                    else:
-                        try:
-                            dia = float(raw)
-                        except Exception:
-                            dia = None
+            dia = _extract_counterbore_dia(s)
             if dia is not None:
                 mdepth = _X_DEPTH_RE.search(s)
                 depth = float(mdepth.group(1)) if mdepth else None
@@ -831,22 +836,7 @@ def _append_counterbore_spot_jig_cards(
             if not s.strip(): continue
             U = s.upper()
             side = _side(U)
-            dia = None
-            mcb = _CB_DIA_RE.search(s)
-            if mcb:
-                raw = (mcb.group("numA") or mcb.group("numB") or "").strip()
-                if raw:
-                    if "/" in raw:
-                        try:
-                            num, den = raw.split("/", 1)
-                            dia = float(int(num.strip()) / int(den.strip()))
-                        except Exception:
-                            dia = None
-                    else:
-                        try:
-                            dia = float(raw)
-                        except Exception:
-                            dia = None
+            dia = _extract_counterbore_dia(s)
             if dia is not None:
                 mdepth = _X_DEPTH_RE.search(s)
                 depth = float(mdepth.group(1)) if mdepth else None
