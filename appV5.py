@@ -10937,6 +10937,34 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
                 ops_claims = extracted
                 _stash_ops_claims(dict(ops_claims))
 
+    for key in ("cb_total", "cb_front", "cb_back", "tap", "npt", "spot", "jig"):
+        ops_claims.setdefault(key, 0)
+
+    def _extract_ops_hint(source: Any) -> dict[str, int]:
+        if not isinstance(source, (_MappingABC, dict)):
+            return {}
+        hint_candidate: Any
+        try:
+            hint_candidate = source.get("ops_hint")  # type: ignore[index]
+        except Exception:
+            hint_candidate = None
+        if not isinstance(hint_candidate, (_MappingABC, dict)):
+            return {}
+        extracted_hint: dict[str, int] = {}
+        for key, value in hint_candidate.items():
+            try:
+                extracted_hint[str(key)] = int(round(float(value)))
+            except Exception:
+                continue
+        return extracted_hint
+
+    ops_hint: dict[str, int] = {}
+    for candidate_source in (geo_map, breakdown_mutable, breakdown, result):
+        extracted_hint = _extract_ops_hint(candidate_source)
+        if extracted_hint:
+            ops_hint = extracted_hint
+            break
+
     # Append extra MATERIAL REMOVAL cards (Counterbore / Spot / Jig) from JOINED lines
     _appended_at_print = _append_counterbore_spot_jig_cards(
         lines_out=removal_card_lines,     # <— append directly to the printed list
@@ -11013,6 +11041,23 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
                         "qty": jig_qty,
                         "side": None,
                     }
+                )
+        except Exception:
+            pass
+
+        try:
+            if "counterbore" in ops_hint:
+                cb_need = int(ops_hint.get("counterbore", 0) or 0)
+                cb_have = int(ops_claims.get("cb_total", 0) or 0)
+                if cb_need > cb_have:
+                    ops_claims["cb_total"] = cb_need
+            if "spot" in ops_hint:
+                ops_claims["spot"] = int(ops_hint.get("spot", 0) or 0)
+            if "jig" in ops_hint:
+                ops_claims["jig"] = int(ops_hint.get("jig", 0) or 0)
+            if "tap" in ops_hint:
+                ops_claims["tap"] = int(ops_claims.get("tap", 0) or 0) + int(
+                    ops_hint.get("tap", 0) or 0
                 )
         except Exception:
             pass
