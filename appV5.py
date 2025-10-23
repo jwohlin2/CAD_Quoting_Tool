@@ -879,6 +879,12 @@ def _join_wrapped_chart_lines(chart_lines: list[str]) -> list[str]:
         if not s:
             continue
         if _JOIN_START_TOKENS.search(s):
+            # ✨ glue rule: if this line is the NPT continuation and the buffer ends with DRILL THRU,
+            # append instead of starting a new row. This keeps the pilot drill call-out together
+            # with the NPT note so downstream logic sees them as a single feature description.
+            if re.search(r"\bN\.?P\.?T\.?\b", s, re.I) and re.search(r"\bDRILL\s+THRU\b", buf or "", re.I):
+                buf += " " + s
+                continue
             flush()
             buf = s
         else:
@@ -10815,6 +10821,8 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
             return {}
         try:
             claims_candidate = source.get("ops_claims")  # type: ignore[index]
+            if not isinstance(claims_candidate, (_MappingABC, dict)):
+                claims_candidate = source.get("_ops_claims")  # type: ignore[index]
         except Exception:
             return {}
         if not isinstance(claims_candidate, (_MappingABC, dict)):
@@ -11210,7 +11218,7 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
                 _clean_mtext(x) for x in chart_lines_all
             ])
             ops_claims = _parse_ops_and_claims(joined_early)
-            _stash_ops_claims(dict(ops_claims))
+            breakdown_mutable["_ops_claims"] = ops_claims
             _push(
                 lines,
                 f"[DEBUG] preseed_ops cb={ops_claims['cb_total']} tap={ops_claims['tap']} "
@@ -11260,6 +11268,10 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
                 cb_min = (ops_claims["cb_total"] or 0) * float(
                     globals().get("CBORE_MIN_PER_SIDE_MIN") or 0.15
                 )
+                spot_min = (ops_claims["spot"] or 0) * 0.05
+                jig_min = (ops_claims["jig"] or 0) * float(
+                    globals().get("JIG_GRIND_MIN_PER_FEATURE") or 0.75
+                )
                 seed(
                     "counterbore",
                     cb_min,
@@ -11269,18 +11281,17 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
                     _lookup_bucket_rate("labor", rates) or 25.46,
                 )
                 seed(
-                    "drilling",
-                    (ops_claims["spot"] or 0) * 0.05,
-                    _lookup_bucket_rate("machine", rates) or 53.76,
-                    _lookup_bucket_rate("labor", rates) or 25.46,
-                )
-                seed(
                     "grinding",
-                    (ops_claims["jig"] or 0)
-                    * float(globals().get("JIG_GRIND_MIN_PER_FEATURE") or 0.75),
+                    jig_min,
                     _lookup_bucket_rate("grinding", rates)
                     or _lookup_bucket_rate("machine", rates)
                     or 53.76,
+                    _lookup_bucket_rate("labor", rates) or 25.46,
+                )
+                seed(
+                    "drilling",
+                    spot_min + cb_min + jig_min,
+                    _lookup_bucket_rate("machine", rates) or 53.76,
                     _lookup_bucket_rate("labor", rates) or 25.46,
                 )
 
@@ -11380,6 +11391,39 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
         if removal_summary_extra_lines:
             removal_summary_lines.extend(removal_summary_extra_lines)
 
+        printed_sections = {
+            "tapping": any(
+                isinstance(s, str)
+                and s.strip().upper().startswith("MATERIAL REMOVAL – TAPPING")
+                for s in removal_card_lines
+            ),
+            "counterbore": any(
+                isinstance(s, str)
+                and s.strip().upper().startswith("MATERIAL REMOVAL – COUNTERBORE")
+                for s in removal_card_lines
+            ),
+            "spot": any(
+                isinstance(s, str)
+                and s.strip().upper().startswith("MATERIAL REMOVAL – SPOT")
+                for s in removal_card_lines
+            ),
+            "jig": any(
+                isinstance(s, str)
+                and s.strip().upper().startswith("MATERIAL REMOVAL – JIG")
+                for s in removal_card_lines
+            ),
+        }
+
+        skip_names = set()
+        if printed_sections["tapping"]:
+            skip_names.update({"tap", "npt tap"})
+        if printed_sections["counterbore"]:
+            skip_names.add("counterbore")
+        if printed_sections["spot"]:
+            skip_names.add("spot drill")
+        if printed_sections["jig"]:
+            skip_names.add("jig-grind")
+
         actions_summary_ready = True
         try:
             extra_bucket_ops: MutableMapping[str, Any] | dict[str, Any]
@@ -11399,13 +11443,14 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
                         if not isinstance(entry, _MappingABC):
                             continue
                         name_text = str(entry.get("name") or entry.get("op") or "").strip()
+                        name_lower = name_text.lower()
                         qty_candidate = entry.get("qty")
                         try:
                             qty_val = int(float(qty_candidate))
                         except Exception:
                             qty_val = 0
                         side_val = entry.get("side")
-                        if name_text:
+                        if name_text and name_lower not in skip_names:
                             planner_ops_summary.append(
                                 {"name": name_text, "qty": qty_val, "side": side_val}
                             )

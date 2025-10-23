@@ -384,16 +384,19 @@ def build_drill_groups_from_geometry(
                 round(float(d), 4) for d in claimed if d is not None
             )
 
-            def _nearest_bin(val: float, bins: Sequence[float]) -> float:
-                return min(bins, key=lambda b: abs(b - val))
+            def _nearest_bin(val: float, bins: Sequence[float]) -> float | None:
+                return min(bins, key=lambda b: abs(b - val)) if bins else None
 
-            bins = list(counts_by_diam.keys())
+            bins = sorted(round(float(d), 4) for d in counts_by_diam.keys())
             for val, qty in claimed_ctr.items():
-                if not bins:
-                    break
                 target = _nearest_bin(val, bins)
+                if target is None:
+                    continue
                 if abs(target - val) <= 0.015:
-                    counts_by_diam[target] = max(0, counts_by_diam[target] - qty)
+                    counts_by_diam[target] = max(
+                        0,
+                        int(counts_by_diam.get(target, 0)) - int(qty),
+                    )
 
             for key in list(groups.keys()):
                 qty_adj = int(counts_by_diam.get(key, 0))
