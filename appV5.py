@@ -10995,7 +10995,10 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
         str(line) for line in removal_card_lines if isinstance(line, str)
     ]
     if removal_summary_extra_lines:
-        removal_summary_lines.extend(removal_summary_extra_lines)
+        for entry in removal_summary_extra_lines:
+            entry_text = str(entry)
+            if entry_text not in removal_summary_lines:
+                removal_summary_lines.append(entry_text)
 
     append_lines(removal_card_lines)
 
