@@ -71,6 +71,116 @@ def _aggregate_counts_by_diameter(
     return counts
 
 
+def _coerce_counts_mapping(
+    payload: Mapping[Any, Any]
+) -> dict[float, int]:
+    counts: dict[float, int] = {}
+    for raw_key, raw_val in payload.items():
+        try:
+            dia = float(raw_key)
+            qty = int(raw_val)
+        except (TypeError, ValueError):
+            continue
+        if dia <= 0 or qty <= 0:
+            continue
+        counts[dia] = qty
+    return counts
+
+
+def _extract_counts_override(
+    groups: Sequence[Mapping[str, Any]]
+) -> dict[float, int] | None:
+    combined: dict[float, int] = {}
+    found = False
+    for group in groups:
+        if not isinstance(group, Mapping):
+            continue
+        candidates: list[Mapping[Any, Any]] = []
+        direct = group.get("counts_by_diam")
+        if isinstance(direct, Mapping):
+            candidates.append(direct)
+        meta = group.get("meta")
+        if isinstance(meta, Mapping):
+            meta_direct = meta.get("counts_by_diam")
+            if isinstance(meta_direct, Mapping):
+                candidates.append(meta_direct)
+        for candidate in candidates:
+            coerced = _coerce_counts_mapping(candidate)
+            if coerced:
+                combined.update(coerced)
+                found = True
+    return combined if found else None
+
+
+def _per_diameter_metrics(
+    groups: Sequence[Mapping[str, Any]]
+) -> dict[float, dict[str, float]]:
+    metrics: dict[float, dict[str, float]] = {}
+    aggregates: dict[float, dict[str, float]] = {}
+    for group in groups:
+        dia = group.get("dia")
+        qty = group.get("qty")
+        if dia is None or qty is None:
+            continue
+        try:
+            dia_val = float(dia)
+            qty_int = int(qty)
+        except (TypeError, ValueError):
+            continue
+        if dia_val <= 0 or qty_int <= 0:
+            continue
+        bucket = aggregates.setdefault(
+            dia_val,
+            {
+                "qty": 0.0,
+                "t_total": 0.0,
+                "t_qty": 0.0,
+                "sfm_total": 0.0,
+                "sfm_count": 0.0,
+                "ipr_total": 0.0,
+                "ipr_count": 0.0,
+            },
+        )
+        bucket["qty"] += float(qty_int)
+        tph = group.get("t_per_hole_min")
+        if tph is None:
+            tph = group.get("minutes_per_hole")
+        try:
+            tph_val = float(tph) if tph is not None else None
+        except (TypeError, ValueError):
+            tph_val = None
+        if tph_val is not None and math.isfinite(tph_val) and tph_val > 0.0:
+            bucket["t_total"] += tph_val * float(qty_int)
+            bucket["t_qty"] += float(qty_int)
+        sfm = group.get("sfm")
+        try:
+            sfm_val = float(sfm) if sfm is not None else None
+        except (TypeError, ValueError):
+            sfm_val = None
+        if sfm_val is not None and math.isfinite(sfm_val) and sfm_val > 0.0:
+            bucket["sfm_total"] += sfm_val
+            bucket["sfm_count"] += 1.0
+        ipr = group.get("ipr")
+        try:
+            ipr_val = float(ipr) if ipr is not None else None
+        except (TypeError, ValueError):
+            ipr_val = None
+        if ipr_val is not None and math.isfinite(ipr_val) and ipr_val > 0.0:
+            bucket["ipr_total"] += ipr_val
+            bucket["ipr_count"] += 1.0
+
+    for dia, bucket in aggregates.items():
+        out: dict[str, float] = {}
+        if bucket["t_qty"] > 0.0:
+            out["t_per"] = bucket["t_total"] / bucket["t_qty"]
+        if bucket["sfm_count"] > 0.0:
+            out["sfm"] = bucket["sfm_total"] / bucket["sfm_count"]
+        if bucket["ipr_count"] > 0.0:
+            out["ipr"] = bucket["ipr_total"] / bucket["ipr_count"]
+        metrics[dia] = out
+    return metrics
+
+
 def _per_diameter_depths(groups: Sequence[Mapping[str, Any]]) -> dict[float, float]:
     totals: dict[float, tuple[float, int]] = {}
     for group in groups:
@@ -178,7 +288,8 @@ def render_drilling_section(
     drill_groups: Sequence[Mapping[str, Any]],
     overheads: Mapping[str, Number],
 ) -> str:
-    counts_by_diam = _aggregate_counts_by_diameter(drill_groups)
+    counts_override = _extract_counts_override(drill_groups)
+    counts_by_diam = counts_override or _aggregate_counts_by_diameter(drill_groups)
     per_diam_depth = _per_diameter_depths(drill_groups)
     deep_ct, std_ct = _classify_deep_std(per_diam_depth, counts_by_diam)
     total_ct = deep_ct + std_ct
@@ -249,28 +360,67 @@ def render_drilling_section(
     lines.append("TIME PER HOLE – DRILL GROUPS")
     lines.append("------------------------------------------------------------------")
 
-    for group in drill_groups:
-        rpm = _calc_rpm(group.get("sfm"), group.get("dia"))
-        ipm = _calc_ipm(rpm, group.get("ipr"))
-        _ = ipm  # maintained for parity with the reference implementation
-        tph = group.get("t_per_hole_min")
-        group_minutes = (float(tph) * int(group.get("qty", 0))) if tph else None
-        dia_str = _fmt3(group["dia"])
-        depth_str = _fmt3(group.get("depth_in", 0.0))
-        sfm_str = f"{int(group['sfm'])}" if group.get("sfm") else "-"
-        ipr_val = group.get("ipr")
-        ipr_str = f"{float(ipr_val):.4f}" if ipr_val is not None else "-"
-        tph_str = f"{float(tph):.2f} min" if tph else "—"
-        if tph and group_minutes is not None:
-            group_str = (
-                f"{group['qty']}×{float(tph):.2f} = {group_minutes:.2f} min"
+    per_hole_sum_min = 0.0
+    rendered_from_counts = False
+
+    if counts_override:
+        metrics_by_dia = _per_diameter_metrics(drill_groups)
+        for dia in sorted(counts_by_diam.keys()):
+            qty = int(counts_by_diam[dia])
+            if qty <= 0:
+                continue
+            depth = per_diam_depth.get(dia)
+            if depth is None:
+                try:
+                    depth = float(block_thickness)
+                except (TypeError, ValueError):
+                    depth = 0.0
+            depth = float(depth or 0.0)
+            metrics = metrics_by_dia.get(dia, {})
+            sfm_val = metrics.get("sfm")
+            ipr_val = metrics.get("ipr")
+            tph_val = metrics.get("t_per")
+            rpm = _calc_rpm(sfm_val, dia)
+            _ = _calc_ipm(rpm, ipr_val)
+            sfm_str = f"{int(round(sfm_val))}" if sfm_val else "-"
+            ipr_str = f"{float(ipr_val):.4f}" if ipr_val else "-"
+            if tph_val:
+                tph_str = f"{float(tph_val):.2f} min"
+                group_minutes = float(tph_val) * qty
+                group_str = f"{qty}×{float(tph_val):.2f} = {group_minutes:.2f} min"
+                per_hole_sum_min += group_minutes
+            else:
+                tph_str = "—"
+                group_str = f"{qty}×— = —"
+            lines.append(
+                f"Dia {_fmt3(dia)}\" × {qty}  | depth {_fmt3(depth)}\" | "
+                f"{sfm_str} sfm | {ipr_str} ipr | t/hole {tph_str} | group {group_str}"
             )
-        else:
-            group_str = f"{group['qty']}×— = —"
-        lines.append(
-            f"Dia {dia_str}\" × {group['qty']}  | depth {depth_str}\" | "
-            f"{sfm_str} sfm | {ipr_str} ipr | t/hole {tph_str} | group {group_str}"
-        )
+        rendered_from_counts = True
+    else:
+        for group in drill_groups:
+            rpm = _calc_rpm(group.get("sfm"), group.get("dia"))
+            ipm = _calc_ipm(rpm, group.get("ipr"))
+            _ = ipm  # maintained for parity with the reference implementation
+            tph = group.get("t_per_hole_min")
+            group_minutes = (float(tph) * int(group.get("qty", 0))) if tph else None
+            dia_str = _fmt3(group["dia"])
+            depth_str = _fmt3(group.get("depth_in", 0.0))
+            sfm_str = f"{int(group['sfm'])}" if group.get("sfm") else "-"
+            ipr_val = group.get("ipr")
+            ipr_str = f"{float(ipr_val):.4f}" if ipr_val is not None else "-"
+            tph_str = f"{float(tph):.2f} min" if tph else "—"
+            if tph and group_minutes is not None:
+                group_str = (
+                    f"{group['qty']}×{float(tph):.2f} = {group_minutes:.2f} min"
+                )
+                per_hole_sum_min += group_minutes
+            else:
+                group_str = f"{group['qty']}×— = —"
+            lines.append(
+                f"Dia {dia_str}\" × {group['qty']}  | depth {depth_str}\" | "
+                f"{sfm_str} sfm | {ipr_str} ipr | t/hole {tph_str} | group {group_str}"
+            )
 
     deep_tc = float(overheads["toolchange_deep_min"]) if deep_ct else 0.0
     std_tc = float(overheads["toolchange_std_min"]) if std_ct else 0.0
@@ -281,7 +431,8 @@ def render_drilling_section(
     )
     lines.append("------------------------------------------------------------------")
 
-    per_hole_sum_min = _sum_minutes(drill_groups)
+    if not rendered_from_counts:
+        per_hole_sum_min = _sum_minutes(drill_groups)
     total_with_tc = per_hole_sum_min + deep_tc + std_tc
     lines.append(
         f"Subtotal (per-hole × qty) . {_fmt(per_hole_sum_min, 2)} min  "
