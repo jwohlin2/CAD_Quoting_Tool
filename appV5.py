@@ -4408,6 +4408,7 @@ def _compute_drilling_removal_section(
             drill_actions_from_groups = int(
                 sum(max(0, int(v)) for v in counts_by_diam.values())
             )
+            extras["drill_actions_from_groups"] = drill_actions_from_groups
             _push(lines, f"[DEBUG] DRILL bins adj={drill_actions_from_groups}")
             ops_hole_count_from_table = drill_actions_from_groups
 
@@ -9673,6 +9674,22 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
         material_group=material_group_display,
         drilling_time_per_hole=drilling_time_per_hole_data,
     )
+
+    drill_actions_from_groups = 0
+    if isinstance(removal_card_extra, (_MappingABC, dict)):
+        try:
+            drill_actions_from_groups = int(
+                round(
+                    float(
+                        typing.cast(Mapping[str, Any], removal_card_extra).get(
+                            "drill_actions_from_groups", 0
+                        )
+                        or 0
+                    )
+                )
+            )
+        except Exception:
+            drill_actions_from_groups = 0
 
     adjusted_drill_groups = _adjusted_drill_groups_for_display(
         breakdown,
