@@ -11519,6 +11519,12 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
     )
 
     drill_actions = int(ops_counts.get("drills", 0))
+    drilling_summary_candidate = locals().get("drilling_summary")
+    if isinstance(drilling_summary_candidate, (_MappingABC, dict)):
+        drilling_summary = typing.cast(Mapping[str, Any], drilling_summary_candidate)
+    else:
+        drilling_summary = {}
+    drill_actions_adjusted_total: int | None = None
     drill_actions_adjusted_display = drill_actions_adjusted_total
     if drill_actions_adjusted_display is None:
         try:
