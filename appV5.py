@@ -1150,22 +1150,22 @@ def _append_counterbore_spot_jig_cards(
 
         mcb = _CB_DIA_RE.search(text)
         if not mcb:
-            return None
-        raw = (mcb.group("numA") or mcb.group("numB") or "").replace(" ", "")
+            mcb = re.search(
+                r"(?:Ø|%%[Cc])?\s*(\d+(?:\.\d+)?|\.\d+)\s*C[’']?\s*BORE",
+                text,
+                re.IGNORECASE,
+            )
+            if not mcb:
+                return None
+            raw = mcb.group(1)
+        else:
+            raw = (mcb.group("numA") or mcb.group("numB") or "").replace(" ", "")
         if not raw:
             return None
-        if "/" in raw:
-            try:
-                return float(Fraction(raw))
-            except Exception:
-                return None
         try:
-            for raw in list(chart_lines):
-                cleaned = _clean_mtext(str(raw or ""))
-                if cleaned:
-                    chart_lines_list.append(cleaned)
+            return float(Fraction(raw)) if "/" in raw else float(raw)
         except Exception:
-            chart_lines_list = []
+            return None
 
     # ---------- PASS A: parse CHART LINES (what you already have: 10) ----------
     if isinstance(chart_lines, list):
