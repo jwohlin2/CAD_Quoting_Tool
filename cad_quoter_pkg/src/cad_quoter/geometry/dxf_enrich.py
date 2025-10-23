@@ -8,6 +8,10 @@ from collections import Counter
 from typing import Any, Dict, Iterable, Iterator, List
 
 from cad_quoter.vendors import ezdxf as _ezdxf_vendor
+from .dxf_text import _clean_mtext as _shared_clean_mtext
+
+_WS_RE = re.compile(r"\s+")
+_MTEXT_SPLIT_RE = re.compile(r"\\P|\n", re.I)
 
 try:  # pragma: no cover - optional dependency
     _EZDXF = _ezdxf_vendor.require_ezdxf()
@@ -128,9 +132,63 @@ def iter_table_entities(doc: Any) -> Iterator[Any]:
 
 
 def iter_table_text(doc: Any) -> Iterator[str]:
-    """Yield text strings discovered inside TABLE and TEXT entities."""
+    """Yield text strings discovered inside TABLE, TEXT and INSERT entities."""
 
-    for table in iter_table_entities(doc):
+    def _normalize(value: object) -> str:
+        text = "" if value is None else str(value)
+        return _WS_RE.sub(" ", text).strip()
+
+    def _yield_text(entity: Any) -> Iterator[str]:
+        try:
+            kind = entity.dxftype()
+        except Exception:
+            return
+
+        if kind == "MTEXT":
+            raw = ""
+            try:
+                raw = entity.text
+            except Exception:
+                raw = ""
+            if not raw:
+                try:
+                    raw = entity.plain_text()
+                except Exception:
+                    raw = ""
+            for segment in _MTEXT_SPLIT_RE.split(raw or ""):
+                cleaned = _shared_clean_mtext(segment)
+                if cleaned:
+                    yield cleaned
+        elif kind in {"TEXT", "ATTRIB", "ATTDEF"}:
+            try:
+                text = entity.dxf.text
+            except Exception:
+                text = None
+            normalized = _normalize(text)
+            if normalized:
+                yield normalized
+        elif kind == "INSERT":
+            yield from _yield_from_insert(entity)
+
+    def _yield_from_insert(ins: Any) -> Iterator[str]:
+        try:
+            virtual_entities = ins.virtual_entities()
+        except Exception:
+            virtual_entities = []
+        for child in virtual_entities:
+            try:
+                child_kind = child.dxftype()
+            except Exception:
+                child_kind = ""
+            if child_kind == "TABLE":
+                key = id(child)
+                if key not in _seen_tables:
+                    _seen_tables.add(key)
+                    yield from _yield_table(child)
+            else:
+                yield from _yield_text(child)
+
+    def _yield_table(table: Any) -> Iterator[str]:
         try:
             n_rows = int(getattr(table.dxf, "n_rows", 0))
             n_cols = int(getattr(table.dxf, "n_cols", 0))
@@ -138,7 +196,7 @@ def iter_table_text(doc: Any) -> Iterator[str]:
             n_rows = 0
             n_cols = 0
         if n_rows <= 0 or n_cols <= 0:
-            continue
+            return
         try:
             for row_idx in range(n_rows):
                 row: list[str] = []
@@ -154,28 +212,29 @@ def iter_table_text(doc: Any) -> Iterator[str]:
                         text = cell.get_text()
                     except Exception:
                         text = ""
-                    row.append(text or "")
-                line = " | ".join(fragment.strip() for fragment in row if fragment)
+                    row.append(_normalize(text))
+                line = " | ".join(fragment for fragment in row if fragment)
                 if line:
                     yield line
         except Exception:
+            return
+
+    _seen_tables: set[int] = set()
+
+    for table in iter_table_entities(doc):
+        key = id(table)
+        if key in _seen_tables:
             continue
+        _seen_tables.add(key)
+        yield from _yield_table(table)
 
     for space in iter_spaces(doc):
         try:
-            entities = space.query("MTEXT,TEXT")
+            entities = space.query("MTEXT,TEXT,INSERT")
         except Exception:
             entities = []
         for entity in entities:
-            try:
-                if entity.dxftype() == "MTEXT":
-                    text = entity.plain_text()
-                else:
-                    text = entity.dxf.text
-            except Exception:
-                text = None
-            if text:
-                yield str(text)
+            yield from _yield_text(entity)
 
 
 def harvest_plate_dimensions(doc: Any, to_in: float) -> Dict[str, Any]:
