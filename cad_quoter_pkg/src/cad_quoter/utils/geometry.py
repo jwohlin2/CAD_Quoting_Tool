@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import math
+from collections import Counter
 from collections.abc import Iterable, Mapping, Sequence
 from typing import Any
 
@@ -180,8 +181,19 @@ def _ensure_geo_context_fields(
                     )
                     if thickness_mm_guess is not None:
                         thickness_in_guess = float(thickness_mm_guess) / 25.4
+                ops_claims_map = None
+                if isinstance(geom, Mapping):
+                    claims_candidate = geom.get("ops_claims")
+                    if isinstance(claims_candidate, Mapping):
+                        ops_claims_map = claims_candidate
+                    else:
+                        summary_candidate = geom.get("ops_summary")
+                        if isinstance(summary_candidate, Mapping):
+                            claims_candidate = summary_candidate.get("claims")
+                            if isinstance(claims_candidate, Mapping):
+                                ops_claims_map = claims_candidate
                 drill_groups = build_drill_groups_from_geometry(
-                    diams_seq, thickness_in_guess
+                    diams_seq, thickness_in_guess, ops_claims_map
                 )
                 for group in drill_groups:
                     try:
@@ -331,6 +343,7 @@ def _holes_removed_mass_g(geo: Mapping[str, Any] | None) -> float | None:
 def build_drill_groups_from_geometry(
     hole_diams_mm: Sequence[Any] | None,
     thickness_in: Any | None,
+    ops_claims: Mapping[str, Any] | None = None,
 ) -> list[dict[str, Any]]:
     """Create simple drill groups from hole diameters and plate thickness."""
 
@@ -342,6 +355,7 @@ def build_drill_groups_from_geometry(
         t_in = None
 
     groups: dict[float, dict[str, Any]] = {}
+    counts_by_diam: Counter[float] = Counter()
     if isinstance(hole_diams_mm, Sequence) and not isinstance(hole_diams_mm, (str, bytes, bytearray)):
         for raw in hole_diams_mm:
             d_mm = _coerce_positive_float(raw)
@@ -361,6 +375,32 @@ def build_drill_groups_from_geometry(
                 },
             )
             bucket["qty"] += 1
+            counts_by_diam[key] += 1
+
+    if counts_by_diam and isinstance(ops_claims, Mapping):
+        claimed = ops_claims.get("claimed_pilot_diams") if ops_claims else None
+        if claimed:
+            claimed_ctr = Counter(
+                round(float(d), 4) for d in claimed if d is not None
+            )
+
+            def _nearest_bin(val: float, bins: Sequence[float]) -> float:
+                return min(bins, key=lambda b: abs(b - val))
+
+            bins = list(counts_by_diam.keys())
+            for val, qty in claimed_ctr.items():
+                if not bins:
+                    break
+                target = _nearest_bin(val, bins)
+                if abs(target - val) <= 0.015:
+                    counts_by_diam[target] = max(0, counts_by_diam[target] - qty)
+
+            for key in list(groups.keys()):
+                qty_adj = int(counts_by_diam.get(key, 0))
+                if qty_adj <= 0:
+                    groups.pop(key, None)
+                else:
+                    groups[key]["qty"] = qty_adj
 
     ordered = [groups[k] for k in sorted(groups.keys())]
     return ordered

@@ -14377,10 +14377,22 @@ def compute_quote_from_df(  # type: ignore[reportGeneralTypeIssues]
         has_groups = bool(groups_existing)
 
     fallback_groups: list[dict[str, Any]] = []
+    ops_claims_map: Mapping[str, Any] | None = None
+    if isinstance(geo_payload, _MappingABC):
+        claims_candidate = geo_payload.get("ops_claims")
+        if isinstance(claims_candidate, _MappingABC):
+            ops_claims_map = claims_candidate
+        else:
+            summary_candidate = geo_payload.get("ops_summary")
+            if isinstance(summary_candidate, _MappingABC):
+                claims_candidate = summary_candidate.get("claims")
+                if isinstance(claims_candidate, _MappingABC):
+                    ops_claims_map = claims_candidate
     if not has_groups and hole_diams:
         fallback_groups = build_drill_groups_from_geometry(
             hole_diams,
             thickness_in,
+            ops_claims_map,
         )
 
     if fallback_groups:
@@ -16274,6 +16286,8 @@ def _normalize_ops_entries(
                     "depth_in": float(depth_in) if depth_in is not None else None,
                     "thru": bool(_truthy_flag(entry.get("thru"))),
                     "source": entry.get("source"),
+                    "claimed_by_tap": bool(op.get("claimed_by_tap")),
+                    "pilot_for_thread": op.get("pilot_for_thread"),
                 }
             )
 
@@ -16292,6 +16306,11 @@ def aggregate_ops(
     totals: defaultdict[str, int] = defaultdict(int)
     group_totals: defaultdict[str, dict[str, dict[str, dict[str, Any]]]] = defaultdict(dict)
     detail: list[dict[str, Any]] = []
+    drill_claim_bins: Counter[float] = Counter()
+    tap_claim_bins: Counter[float] = Counter()
+    drill_group_refs: dict[float, list[dict[str, Any]]] = defaultdict(list)
+    drill_detail_refs: dict[float, list[dict[str, Any]]] = defaultdict(list)
+    claimed_pilot_diams: list[float] = []
 
     rows_simple = list(legacy_summary.get("rows") or [])
     built_rows = int(legacy_summary.get("built_rows") or _count_ops_card_rows(rows_simple))
@@ -16352,6 +16371,15 @@ def aggregate_ops(
             "thru": bool(op.get("thru")),
             "source": op.get("source"),
         }
+        pilot_flag = bool(op.get("claimed_by_tap") or op.get("pilot_for_thread"))
+        dia_key: float | None = None
+        if ref_dia is not None and math.isfinite(ref_dia):
+            dia_key = round(float(ref_dia), 4)
+
+        if op.get("claimed_by_tap"):
+            detail_entry["claimed_by_tap"] = True
+        if op.get("pilot_for_thread"):
+            detail_entry["pilot_for_thread"] = op.get("pilot_for_thread")
         detail.append(detail_entry)
 
         for side_key in sides:
@@ -16385,15 +16413,60 @@ def aggregate_ops(
                 totals[f"csk_{'back' if side_norm == 'BACK' else 'front'}"] += qty
             elif op_type == "spot":
                 totals[f"spot_{'back' if side_norm == 'BACK' else 'front'}"] += qty
+            if op_type == "drill" and pilot_flag and dia_key is not None:
+                if bucket not in drill_group_refs.setdefault(dia_key, []):
+                    drill_group_refs[dia_key].append(bucket)
         if op_type == "drill":
             totals["drill"] += qty
+            if pilot_flag and dia_key is not None:
+                drill_claim_bins[dia_key] += qty
+                drill_detail_refs[dia_key].append(detail_entry)
         elif op_type == "jig_grind":
             totals["jig_grind"] += qty
+        if op_type == "tap" and dia_key is not None and dia_key > 0:
+            tap_claim_bins[dia_key] += qty
+            claimed_pilot_diams.extend([float(dia_key)] * qty)
 
     totals["tap_total"] = totals.get("tap_front", 0) + totals.get("tap_back", 0)
     totals["cbore_total"] = totals.get("cbore_front", 0) + totals.get("cbore_back", 0)
     totals["csk_total"] = totals.get("csk_front", 0) + totals.get("csk_back", 0)
     totals["spot_total"] = totals.get("spot_front", 0) + totals.get("spot_back", 0)
+
+    drill_subtracted_total = 0
+    for dia_key, claim_qty in tap_claim_bins.items():
+        available = drill_claim_bins.get(dia_key, 0)
+        subtract = min(available, claim_qty)
+        if subtract <= 0:
+            continue
+        drill_subtracted_total += subtract
+        remaining = subtract
+        for bucket in drill_group_refs.get(dia_key, []):
+            qty_val = int(_coerce_float_or_none(bucket.get("qty")) or 0)
+            if qty_val <= 0:
+                continue
+            take = min(qty_val, remaining)
+            bucket["qty"] = qty_val - take
+            remaining -= take
+            if remaining <= 0:
+                break
+        remaining_detail = subtract
+        for entry in drill_detail_refs.get(dia_key, []):
+            entry_qty = int(_coerce_float_or_none(entry.get("qty")) or 0)
+            if entry_qty <= 0:
+                continue
+            take = min(entry_qty, remaining_detail)
+            entry["qty"] = entry_qty - take
+            remaining_detail -= take
+            if remaining_detail <= 0:
+                break
+
+    if drill_subtracted_total:
+        totals["drill"] = max(0, totals.get("drill", 0) - drill_subtracted_total)
+        detail = [
+            entry
+            for entry in detail
+            if not (entry.get("type") == "drill" and int(_coerce_float_or_none(entry.get("qty")) or 0) <= 0)
+        ]
 
     actions_total = (
         totals.get("drill", 0)
@@ -16421,6 +16494,9 @@ def aggregate_ops(
         for ref_key, side_map in ref_map.items():
             grouped_final[type_key][ref_key] = {}
             for side_key, payload in side_map.items():
+                qty_val = int(_coerce_float_or_none(payload.get("qty")) or 0)
+                if qty_val <= 0:
+                    continue
                 depths = payload.pop("_depths", [])
                 depth_vals = [
                     _coerce_float_or_none(val)
@@ -16462,6 +16538,9 @@ def aggregate_ops(
         "built_rows": int(built_rows),
         "group_totals": grouped_final,
     }
+
+    if claimed_pilot_diams:
+        summary["claims"] = {"claimed_pilot_diams": [float(val) for val in claimed_pilot_diams]}
 
     if _parser_rules_v2_enabled():
         legacy_totals = (legacy_summary or {}).get("totals") or {}
@@ -16715,7 +16794,7 @@ def extract_hole_table_from_text(doc, y_tol: float = 0.04, min_rows: int = 5):
             if qty_val > 0:
                 entry["qty"] = qty_val
             if row.get("diameter_in") is not None:
-                entry.setdefault("ref_dia_in", row.get("diameter_in"))
+                entry["ref_dia_in"] = row.get("diameter_in")
             entry.setdefault("ref", ref_text)
             ops_entries.append(entry)
 
@@ -16729,6 +16808,9 @@ def extract_hole_table_from_text(doc, y_tol: float = 0.04, min_rows: int = 5):
     }
     if ops_summary:
         result["ops_summary"] = ops_summary
+        claims_payload = ops_summary.get("claims") if isinstance(ops_summary, dict) else None
+        if isinstance(claims_payload, dict) and claims_payload:
+            result["ops_claims"] = dict(claims_payload)
     return result
 
 
@@ -16946,7 +17028,7 @@ def hole_count_from_acad_table(doc) -> dict[str, Any]:
                     if qty_val > 0:
                         entry["qty"] = qty_val
                     if row.get("diameter_in") is not None:
-                        entry.setdefault("ref_dia_in", row.get("diameter_in"))
+                        entry["ref_dia_in"] = row.get("diameter_in")
                     entry.setdefault("ref", ref_val)
                     ops_entries.append(entry)
             ops_summary = (
@@ -16962,6 +17044,9 @@ def hole_count_from_acad_table(doc) -> dict[str, Any]:
             }
             if ops_summary:
                 result["ops_summary"] = ops_summary
+                claims_payload = ops_summary.get("claims") if isinstance(ops_summary, dict) else None
+                if isinstance(claims_payload, dict) and claims_payload:
+                    result["ops_claims"] = dict(claims_payload)
             if from_back:
                 result["from_back"] = True
             if double_sided:
