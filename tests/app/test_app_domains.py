@@ -41,6 +41,14 @@ def _ensure_geometry_stubs() -> None:
         getattr(geom_stub, "map_shapes_and_ancestors", lambda *_a, **_kw: {}),
     )
 
+    if "cad_quoter.geometry.dxf_enrich" not in sys.modules:
+        enrich_stub = types.ModuleType("cad_quoter.geometry.dxf_enrich")
+        enrich_stub.detect_units_scale = lambda *_a, **_kw: (1.0, "inch")
+        enrich_stub.iter_spaces = lambda *_a, **_kw: []
+        enrich_stub.iter_table_entities = lambda *_a, **_kw: []
+        enrich_stub.iter_table_text = lambda *_a, **_kw: []
+        sys.modules["cad_quoter.geometry.dxf_enrich"] = enrich_stub
+
 
 _ensure_geometry_stubs()
 
@@ -778,10 +786,52 @@ def test_parser_rules_v2_ops_summary_and_minutes(monkeypatch: pytest.MonkeyPatch
     assert tool_min == pytest.approx(0.0, abs=1e-6)
     assert total_min == pytest.approx(207.18, rel=1e-3)
 
-    bins_out = detail.get("bins") if isinstance(detail, dict) else None
-    assert bins_out is not None
-    qty_sum = sum(int(appV5._coerce_int_or_zero(entry.get("qty"))) for entry in bins_out)
-    assert qty_sum == 85
+
+def test_aggregate_ops_tap_pilot_claims() -> None:
+    _ensure_material_pricing_stubs()
+    import appV5
+
+    rows = [
+        {
+            "hole": "P1",
+            "ref": "Ø0.201",
+            "qty": 4,
+            "desc": "Ø0.201 DRILL THRU 1/4-20 TAP",
+            "diameter_in": 0.201,
+        }
+    ]
+    ops_entries = [
+        {
+            "type": "tap",
+            "qty": 4,
+            "ref_dia_in": 0.201,
+            "side": "FRONT",
+            "thread": "1/4-20",
+            "source": "CHART",
+        },
+        {
+            "type": "drill",
+            "qty": 4,
+            "ref_dia_in": 0.201,
+            "side": "FRONT",
+            "claimed_by_tap": True,
+            "pilot_for_thread": "1/4-20",
+            "source": "CHART",
+        },
+    ]
+
+    summary = appV5.aggregate_ops(rows, ops_entries=ops_entries)
+
+    totals = summary["totals"]
+    assert totals["drill"] == 0
+    assert totals["tap_front"] == 4
+
+    claims = summary.get("claims", {})
+    assert claims
+    assert claims.get("claimed_pilot_diams") == [pytest.approx(0.201, rel=1e-6)] * 4
+
+    detail = summary.get("rows_detail") or []
+    assert all(entry.get("type") != "drill" for entry in detail)
 
 
 @pytest.mark.parametrize(

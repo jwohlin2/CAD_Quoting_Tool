@@ -582,6 +582,11 @@ def _parse_hole_line(line: str, to_in: float, *, source: str | None = None) -> d
     if entry.get("thru") or entry.get("ref_dia_in"):
         drill_payload = _base_op_payload()
         drill_payload["type"] = "drill"
+        if entry.get("tap"):
+            drill_payload["claimed_by_tap"] = True
+            drill_payload["pilot_for_thread"] = entry.get("tap")
+            if entry.get("tap_is_npt"):
+                drill_payload["claimed_is_npt"] = True
         ops.append({k: v for k, v in drill_payload.items() if v not in (None, "")})
 
     if ops:
