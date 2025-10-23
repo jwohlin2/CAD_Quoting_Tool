@@ -10309,6 +10309,12 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
     )
     _push(lines, f"[DEBUG] extra_ops_appended_at_print={_appended_at_print}")
 
+    removal_summary_lines: list[str] = [
+        str(line)
+        for line in removal_card_lines
+        if isinstance(line, str)
+    ]
+
     append_lines(removal_card_lines)
 
     try:
@@ -10559,12 +10565,6 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
             if isinstance(c, dict) and c.get("material_group"):
                 return c["material_group"]
         return None
-
-    removal_summary_lines: list[str] = [
-        str(line)
-        for line in removal_card_lines
-        if isinstance(line, str)
-    ]
 
     try:
         ctx_a = locals().get("breakdown")
