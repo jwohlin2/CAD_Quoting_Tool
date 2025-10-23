@@ -516,23 +516,55 @@ def _get_chart_lines_for_ops(
 
 _QTY_PAREN_RE = re.compile(r"^\s*\((\d+)\)\s*")
 _CB_DIA_RE = re.compile(
-    # Case A: symbol BEFORE the number: "Ø .750 C'BORE" or "%%C .750 C'BORE"
     r"(?:(?:[Ø⌀\u00D8]|%%[Cc])\s*)?"
     r"(?P<numA>\d+(?:\.\d+)?|\.\d+|\d+\s*/\s*\d+)\s*"
     r"(?:C[’']?\s*BORE|CBORE|COUNTER\s*BORE)"
     r"|"
-    # Case B: symbol AFTER the number: ".750 Ø C'BORE" or ".750%%C C'BORE"
     r"(?P<numB>\d+(?:\.\d+)?|\.\d+|\d+\s*/\s*\d+)\s*"
     r"(?:[Ø⌀\u00D8]|%%[Cc])\s*"
     r"(?:C[’']?\s*BORE|CBORE|COUNTER\s*BORE)",
     re.I,
 )
-_X_DEPTH_RE = re.compile(r"[×x]\s*([0-9]+(?:\.[0-9]+)?)")
+_X_DEPTH_RE = re.compile(r"[×xX]\s*([0-9]+(?:\.[0-9]+)?)")
 _BACK_RE = re.compile(r"\bFROM\s+BACK\b", re.I)
 _FRONT_RE = re.compile(r"\bFROM\s+FRONT\b", re.I)
 _BOTH_RE = re.compile(r"\bFRONT\s*&\s*BACK|BOTH\s+SIDES|2\s+SIDES\b", re.I)
 _SPOT_RE_TXT = re.compile(r"(?:C[’']?\s*DRILL|CENTER\s*DRILL|SPOT\s*DRILL|SPOT\b)", re.I)
 _JIG_RE_TXT = re.compile(r"\bJIG\s*GRIND\b", re.I)
+_TAP_RE = re.compile(
+    r"\b(?:#?\d+[- ]\d+|[1-9]/\d+-\d+|[1-9]/\d+|[\d/]+-NPT|N\.?P\.?T\.?)\s*TAP\b",
+    re.I,
+)
+_DRILL_THRU = re.compile(r"\bDRILL\s+THRU\b", re.I)
+_SIZE_INCH_RE = re.compile(r"\((\d+(?:\.\d+)?|\.\d+)\)")
+_LETTER_RE = re.compile(r"\b([A-Z])\b")
+
+
+def _parse_qty(s: str) -> int:
+    m = re.match(r"\s*\((\d+)\)\s*", s)
+    if m:
+        return int(m.group(1))
+    m = re.search(r"(?<!\d)(\d+)\s*[xX×]\b?", s)
+    if m:
+        return int(m.group(1))
+    m = re.search(r"\bQTY[:\s]+(\d+)\b", s, re.I)
+    if m:
+        return int(m.group(1))
+    return 1
+
+
+def _side(U: str) -> str:
+    if _BOTH_RE.search(U):
+        return "BOTH"
+    has_back = bool(_BACK_RE.search(U) or re.search(r"\bBACK\b", U))
+    has_front = bool(_FRONT_RE.search(U) or re.search(r"\bFRONT\b", U))
+    if has_back and has_front:
+        return "BOTH"
+    if has_back:
+        return "BACK"
+    if has_front:
+        return "FRONT"
+    return "FRONT"
 
 
 def _bucket_add_minutes(
@@ -617,34 +649,22 @@ def _build_ops_cards_from_chart_lines(
         s = str(raw or "")
         if not s.strip():
             continue
-        qty = 1
-        mqty = _QTY_PAREN_RE.search(s)
-        if mqty:
-            try:
-                qty = int(mqty.group(1))
-            except Exception:
-                qty = 1
+
+        qty = _parse_qty(s)
 
         U = s.upper()
-        side = "FRONT"
-        if _BOTH_RE.search(U):
-            side = "BOTH"
-        elif _BACK_RE.search(U):
-            side = "BACK"
-        elif _FRONT_RE.search(U):  # ensure the single-underscore pattern is used
-            side = "FRONT"
+        side = _side(U)
 
         # Counterbore rows
         if ("CBORE" in U) or ("C'BORE" in U) or ("COUNTER BORE" in U) or _CB_DIA_RE.search(s):
             dia = None
             mcb = _CB_DIA_RE.search(s)
             if mcb:
-                raw = mcb.group("numA") or mcb.group("numB")
+                raw = (mcb.group("numA") or mcb.group("numB") or "").replace(" ", "")
                 if raw:
                     if "/" in raw:
                         try:
-                            num, den = raw.split("/", 1)
-                            dia = float(int(num) / int(den))
+                            dia = float(Fraction(raw))
                         except Exception:
                             dia = None
                     else:
@@ -657,17 +677,21 @@ def _build_ops_cards_from_chart_lines(
             if side == "BOTH":
                 for sd in ("FRONT", "BACK"):
                     cb_groups[(dia, sd, depth)] = cb_groups.get((dia, sd, depth), 0) + qty
-            else:
-                cb_groups[(dia, side, depth)] = cb_groups.get((dia, side, depth), 0) + qty
+                else:
+                    cb_groups[(dia, side, depth)] = cb_groups.get((dia, side, depth), 0) + qty
             continue
 
         # Spots (standalone)
-        if _SPOT_RE_TXT.search(U) and ("TAP" not in U) and ("THRU" not in U):
+        if (
+            _SPOT_RE_TXT.search(s)
+            and not _DRILL_THRU.search(s)
+            and not ("TAP" in U or _TAP_RE.search(s))
+        ):
             spot_qty += qty
             continue
 
         # Jig grind calls (standalone)
-        if _JIG_RE_TXT.search(U):
+        if _JIG_RE_TXT.search(s):
             jig_qty += qty
             continue
 
@@ -683,18 +707,17 @@ def _build_ops_cards_from_chart_lines(
                 if qty <= 0:
                     continue
                 # side/depth/dia from text
-                side = "BACK" if _BACK_RE.search(U) else ("FRONT" if _FRONT_RE.search(U) else "FRONT")
+                side = _side(U)
                 mdepth = _X_DEPTH_RE.search(s)
                 depth = float(mdepth.group(1)) if mdepth else None
                 dia = None
                 mcb = _CB_DIA_RE.search(s)
                 if mcb:
-                    raw = mcb.group("numA") or mcb.group("numB")
+                    raw = (mcb.group("numA") or mcb.group("numB") or "").replace(" ", "")
                     if raw:
                         if "/" in raw:
                             try:
-                                num, den = raw.split("/", 1)
-                                dia = float(int(num) / int(den))
+                                dia = float(Fraction(raw))
                             except Exception:
                                 dia = None
                         else:
@@ -709,10 +732,15 @@ def _build_ops_cards_from_chart_lines(
             if not s.strip():
                 continue
             U = s.upper()
-            if _SPOT_RE_TXT.search(U) and ("TAP" not in U) and ("THRU" not in U):
-                spot_qty += int((r or {}).get("qty") or 0)
-            if _JIG_RE_TXT.search(U):
-                jig_qty += int((r or {}).get("qty") or 0)
+            qty_val = int((r or {}).get("qty") or 0)
+            if (
+                _SPOT_RE_TXT.search(s)
+                and not _DRILL_THRU.search(s)
+                and not ("TAP" in U or _TAP_RE.search(s))
+            ):
+                spot_qty += qty_val
+            if _JIG_RE_TXT.search(s):
+                jig_qty += qty_val
 
     # --- Emit COUNTERBORE card ----------------------------------------------
     if cb_groups:
@@ -806,74 +834,56 @@ def _build_ops_cards_from_chart_lines(
 # --- Inline ops-cards builder from chart_lines (fallback to rows) ------------
 import re, math
 _JOIN_QTY_RE = re.compile(r"^\s*\((\d+)\)\s*")   # e.g. "(4) ..."
+
+# --- MTEXT cleaning ---------------------------------------------------------
+_MT_ALIGN_RE = re.compile(r"\\A\d;")
+_MT_BREAK_RE = re.compile(r"\\P", re.I)
+_MT_SYMS = {"%%C": "Ø", "%%c": "Ø", "%%D": "°", "%%d": "°", "%%P": "±", "%%p": "±"}
+
+
+def _clean_mtext(s: str) -> str:
+    if not isinstance(s, str):
+        return ""
+    for k, v in _MT_SYMS.items():
+        s = s.replace(k, v)
+    s = _MT_ALIGN_RE.sub("", s)
+    s = _MT_BREAK_RE.sub(" ", s)
+    return re.sub(r"\s+", " ", s).strip()
+
+
+# --- Row start tokens (incl Ø and %%C) -------------------------------------
 _JOIN_START_TOKENS = re.compile(
-    r"(?:^\s*\(\d+\)\s*)"               # starts with "(n)"
-    r"|(?:\bTAP\b)"                     # a TAP line starts a new row
-    r"|(?:C[’']?\s*BORE|CBORE|COUNTER\s*BORE)"  # counterbore token
-    r"|(?:%%[Cc]|[Ø⌀\u00D8])"            # diameter symbol / MTEXT %%C
-    r"|(?:C[’']?\s*DRILL|CENTER\s*DRILL|SPOT\s*DRILL\b)"  # spot callouts
-    , re.I
-)
-_MTEXT_LINEBREAK_RE = re.compile(r"\\P", re.I)
-_MTEXT_CONTROL_RE = re.compile(
-    r"\\(?:A[0-9]+|C[0-9A-F]+|F[^;]*|H[-0-9.]+|O|L|Q[^;]*|S[^;]*|T|W[^;]*);?",
+    r"(?:^\s*\(\d+\)\s*)"                   # "(n) ..."
+    r"|(?:\bTAP\b|N\.?P\.?T\.?)"            # TAP / NPT
+    r"|(?:C[’']?\s*BORE|CBORE|COUNTER\s*BORE)"
+    r"|(?:[Ø⌀\u00D8]|%%[Cc])"                  # Ø/%%C
+    r"|(?:C[’']?\s*DRILL|CENTER\s*DRILL|SPOT\s*DRILL\b)",
     re.I,
 )
-_MTEXT_ESCAPES: dict[str, str] = {
-    "\\~": "~",
-    "\\{": "{",
-    "\\}": "}",
-    "\\;": ";",
-    "\\%": "%",
-    "\\\\": "\\",
-}
-
-
-def _clean_mtext(value: Any) -> str:
-    """Normalize DXF MTEXT fragments for downstream parsing."""
-
-    text = "" if value is None else str(value)
-    if not text:
-        return ""
-
-    text = text.replace("\r", " ")
-    text = text.replace("\n", " ")
-    text = _MTEXT_LINEBREAK_RE.sub(" ", text)
-    for token, replacement in _MTEXT_ESCAPES.items():
-        text = text.replace(token, replacement)
-    text = _MTEXT_CONTROL_RE.sub(" ", text)
-    text = re.sub(r"\\[PpNn]", " ", text)
-    text = re.sub(r"\\+", " ", text)
-    text = re.sub(r"\s+", " ", text)
-    return text.strip()
 
 
 def _join_wrapped_chart_lines(chart_lines: list[str]) -> list[str]:
-    """
-    Coalesce wrapped hole-table lines:
-      - Start a new record if line has (n), TAP, C'BORE, Ø, or SPOT tokens.
-      - Otherwise append the line to the current record.
-    """
-    if not isinstance(chart_lines, list) or not chart_lines:
+    if not chart_lines:
         return []
-    out, buf = [], ""
+    out: list[str] = []
+    buf = ""
 
-    def _flush():
+    def flush() -> None:
         nonlocal buf
         if buf.strip():
             out.append(re.sub(r"\s+", " ", buf).strip())
         buf = ""
 
     for raw in chart_lines:
-        s = str(raw or "")
-        if not s.strip():
+        s = _clean_mtext(str(raw or ""))
+        if not s:
             continue
         if _JOIN_START_TOKENS.search(s):
-            _flush()
+            flush()
             buf = s
         else:
             buf += " " + s
-    _flush()
+    flush()
     return out
 _CB_DIA_RE = re.compile(
     # Case A: symbol BEFORE the number: "Ø .750 C'BORE" or "%%C .750 C'BORE"
@@ -894,16 +904,104 @@ _BOTH_RE      = re.compile(r"\bFRONT\s*&\s*BACK|BOTH\s+SIDES|2\s+SIDES\b", re.I)
 _SPOT_RE_TXT  = re.compile(r"(?:C[’']?\s*DRILL|CENTER\s*DRILL|SPOT\s*DRILL|SPOT\b)", re.I)
 _JIG_RE_TXT   = re.compile(r"\bJIG\s*GRIND\b", re.I)
 
+LETTER_DRILLS = {
+    "Q": 0.3320,
+    "R": 0.3390,
+    "S": 0.3480,
+    "T": 0.3580,
+}
 
-def _preseed_ops_from_chart_lines(*, chart_lines, rows, breakdown_mutable, rates) -> dict[str, int]:
-    """
-    Parse chart_lines (joined/cleaned) and seed bucket minutes + extra_bucket_ops,
-    without appending any visible lines. Returns counts dict.
-    """
+_SIZE_INCH_RE = re.compile(r"\(\s*(\d+(?:\.\d+)?|\.\d+)\s*\)")
+_LETTER_RE = re.compile(r"\b([A-Z])(?=\s*(?:\(|DRILL|$))")
+_DRILL_THRU = re.compile(r"\bDRILL\s+THRU\b", re.I)
+_TAP_RE = re.compile(r"\bTAP(?:PING)?\b", re.I)
+
+
+def _side(U: str) -> str:
+    if _BOTH_RE.search(U):
+        return "BOTH"
+    if _BACK_RE.search(U):
+        return "BACK"
+    if _FRONT_RE.search(U):
+        return "FRONT"
+    return "FRONT"
+
+
+def _parse_qty(s: str) -> int:
+    # (4) prefix, or 4X/4 x anywhere, or QTY 4
+    m = re.match(r"\s*\((\d+)\)\s*", s)
+    if m:
+        return int(m.group(1))
+    m = re.search(r"(?<!\d)(\d+)\s*[xX]\b", s)
+    if m:
+        return int(m.group(1))
+    m = re.search(r"\bQTY[:\s]+(\d+)\b", s, re.I)
+    if m:
+        return int(m.group(1))
+    return 1
+
+
+def _record_drill_claims(
+    breakdown_mutable: MutableMapping[str, Any] | None,
+    claimed: Iterable[float],
+) -> None:
+    if not claimed or breakdown_mutable is None:
+        return
+    if not isinstance(breakdown_mutable, (_MutableMappingABC, dict)):
+        return
+    try:
+        drilling_meta = breakdown_mutable.setdefault("drilling_meta", {})
+    except Exception:
+        return
+    if not isinstance(drilling_meta, (_MutableMappingABC, dict)):
+        try:
+            drilling_meta = dict(drilling_meta)  # type: ignore[arg-type]
+        except Exception:
+            return
+        try:
+            breakdown_mutable["drilling_meta"] = drilling_meta  # type: ignore[index]
+        except Exception:
+            return
+    if drilling_meta.get("claimed_pilot_diams"):
+        return
+    cleaned: list[float] = []
+    for value in claimed:
+        try:
+            num = float(value)
+        except Exception:
+            continue
+        if not math.isfinite(num):
+            continue
+        cleaned.append(num)
+    if not cleaned:
+        return
+    try:
+        drilling_meta["claimed_pilot_diams"] = list(cleaned)
+    except Exception:
+        return
+    try:
+        counts = Counter(round(val, 4) for val in cleaned)
+        drilling_meta["claimed_pilot_counts"] = {
+            f"{key:.4f}": int(count)
+            for key, count in counts.items()
+        }
+    except Exception:
+        pass
+
+def _parse_ops_and_claims(
+    chart_lines: Sequence[str] | None,
+    *,
+    rows: Sequence[Mapping[str, Any]] | None = None,
+) -> dict[str, int]:
+    """Extract operation claims (cbore/tap/spot/jig) from chart lines/rows."""
 
     cb_groups: dict[tuple[float | None, str, float | None], int] = {}
+    tap_qty = 0
+    npt_qty = 0
     spot_qty = 0
     jig_qty = 0
+    tap_qty = 0
+    npt_qty = 0
 
     def _side(U: str) -> str:
         if _BOTH_RE.search(U):
@@ -914,172 +1012,125 @@ def _preseed_ops_from_chart_lines(*, chart_lines, rows, breakdown_mutable, rates
             return "FRONT"
         return "FRONT"
 
+    def _qty_from_text(text: str) -> int:
+        mqty = re.match(r"\s*\((\d+)\)\s*", text)
+        if not mqty:
+            mqty = re.search(r"(?<!\d)(\d+)\s*[xX]\b", text)
+        try:
+            return int(mqty.group(1)) if mqty else 1
+        except Exception:
+            return 1
+
+    def _register_cb(diameter: float | None, side: str, depth: float | None, qty: int) -> None:
+        if side == "BOTH":
+            for sd in ("FRONT", "BACK"):
+                cb_groups[(diameter, sd, depth)] = cb_groups.get((diameter, sd, depth), 0) + qty
+        else:
+            cb_groups[(diameter, side, depth)] = cb_groups.get((diameter, side, depth), 0) + qty
+
+    def _parse_cb_tokens(text: str, qty: int, side: str) -> bool:
+        mcb = _CB_DIA_RE.search(text)
+        if not mcb:
+            return False
+        rawnum = mcb.group("numA") or mcb.group("numB")
+        diameter: float | None = None
+        if rawnum:
+            raw = rawnum.strip()
+            if "/" in raw:
+                try:
+                    num, den = raw.split("/", 1)
+                    diameter = float(int(num) / int(den))
+                except Exception:
+                    diameter = None
+            else:
+                try:
+                    diameter = float(raw)
+                except Exception:
+                    diameter = None
+        mdepth = _X_DEPTH_RE.search(text)
+        depth = None
+        if mdepth:
+            try:
+                depth = float(mdepth.group(1))
+            except Exception:
+                depth = None
+        _register_cb(diameter, side, depth, qty)
+        return True
+
     # Pass A: from chart_lines
-    if isinstance(chart_lines, list):
+    if isinstance(chart_lines, Sequence):
         for raw in chart_lines:
             s = _clean_mtext(str(raw or ""))
             if not s:
                 continue
+            qty = _qty_from_text(s)
             U = s.upper()
-            # qty: (n) or "4X"
-            mqty = re.match(r"\s*\((\d+)\)\s*", s) or re.search(r"(?<!\d)(\d+)\s*[xX]\b", s)
-            qty = int(mqty.group(1)) if mqty else 1
             side = _side(U)
-            mcb = _CB_DIA_RE.search(s)
-            if mcb:
-                rawnum = mcb.group("numA") or mcb.group("numB")
-                if rawnum and "/" in rawnum:
-                    try:
-                        num, den = rawnum.split("/", 1)
-                        dia = float(int(num) / int(den))
-                    except Exception:
-                        dia = None
-                else:
-                    dia = float(rawnum) if rawnum else None
-                mdepth = _X_DEPTH_RE.search(s)
-                depth = float(mdepth.group(1)) if mdepth else None
-                if side == "BOTH":
-                    for sd in ("FRONT", "BACK"):
-                        cb_groups[(dia, sd, depth)] = cb_groups.get((dia, sd, depth), 0) + qty
-                else:
-                    cb_groups[(dia, side, depth)] = cb_groups.get((dia, side, depth), 0) + qty
+            if _parse_cb_tokens(s, qty, side):
                 continue
+            if RE_NPT.search(s):
+                npt_qty += qty
+            elif RE_TAP.search(s):
+                tap_qty += qty
             if _SPOT_RE_TXT.search(U) and ("TAP" not in U) and ("THRU" not in U):
                 spot_qty += qty
-                continue
             if _JIG_RE_TXT.search(U):
                 jig_qty += qty
-                continue
 
-    # Pass B: optional fallback from rows
-    if not cb_groups and isinstance(rows, list):
-        for r in rows:
-            q = int((r or {}).get("qty") or 0)
-            if q <= 0:
+    # Pass B: optional fallback from rows (only if no cb claims yet)
+    if not cb_groups and isinstance(rows, Sequence):
+        for entry in rows:
+            if not isinstance(entry, _MappingABC):
                 continue
-            s = str((r or {}).get("desc") or "")
-            if not s.strip():
+            try:
+                qty_val = int(entry.get("qty") or 0)
+            except Exception:
+                qty_val = 0
+            if qty_val <= 0:
                 continue
-            U = s.upper()
+            desc = str(entry.get("desc") or "")
+            if not desc.strip():
+                continue
+            U = desc.upper()
             side = _side(U)
-            mcb = _CB_DIA_RE.search(s)
-            if mcb:
-                rawnum = mcb.group("numA") or mcb.group("numB")
-                dia = None
-                if rawnum:
-                    if "/" in rawnum:
-                        try:
-                            num, den = rawnum.split("/", 1)
-                            dia = float(int(num) / int(den))
-                        except Exception:
-                            dia = None
-                    else:
-                        dia = float(rawnum)
-                mdepth = _X_DEPTH_RE.search(s)
-                depth = float(mdepth.group(1)) if mdepth else None
-                if side == "BOTH":
-                    for sd in ("FRONT", "BACK"):
-                        cb_groups[(dia, sd, depth)] = cb_groups.get((dia, sd, depth), 0) + q
-                else:
-                    cb_groups[(dia, side, depth)] = cb_groups.get((dia, side, depth), 0) + q
-            else:
-                if _SPOT_RE_TXT.search(U) and ("TAP" not in U) and ("THRU" not in U):
-                    spot_qty += q
-                if _JIG_RE_TXT.search(U):
-                    jig_qty += q
+            if _parse_cb_tokens(desc, qty_val, side):
+                continue
+            if _SPOT_RE_TXT.search(U) and ("TAP" not in U) and ("THRU" not in U):
+                spot_qty += qty_val
+            if _JIG_RE_TXT.search(U):
+                jig_qty += qty_val
 
-    # Seed minutes/buckets + structured ops
+    # Pass C: taps from rows (always, to catch structured summaries)
+    if isinstance(rows, Sequence):
+        for entry in rows:
+            if not isinstance(entry, _MappingABC):
+                continue
+            try:
+                qty_val = int(entry.get("qty") or 0)
+            except Exception:
+                qty_val = 0
+            if qty_val <= 0:
+                continue
+            desc = str(entry.get("desc") or "")
+            if not desc.strip():
+                continue
+            if RE_NPT.search(desc):
+                npt_qty += qty_val
+            elif RE_TAP.search(desc):
+                tap_qty += qty_val
+
     total_cb = sum(cb_groups.values())
-    front_cb = sum(q for (d, s, dep), q in cb_groups.items() if s == "FRONT")
-    back_cb = sum(q for (d, s, dep), q in cb_groups.items() if s == "BACK")
-
-    # minutes
-    cb_minutes = 0.0
-    if total_cb > 0:
-        per = float(globals().get("CBORE_MIN_PER_SIDE_MIN") or 0.15)
-        cb_minutes = total_cb * per
-        try:
-            _set_bucket_minutes_cost(
-                breakdown_mutable.setdefault("bucket_view", {}),
-                "counterbore",
-                cb_minutes,
-                _lookup_bucket_rate("counterbore", rates)
-                or _lookup_bucket_rate("machine", rates)
-                or 53.76,
-                _lookup_bucket_rate("labor", rates) or 25.46,
-            )
-        except Exception:
-            pass
-        # ensure it appears below Drilling
-        try:
-            bv = breakdown_mutable.setdefault("bucket_view", {})
-            buckets = bv.setdefault("buckets", {})
-            order = bv.setdefault("order", [])
-            if "counterbore" in buckets and "counterbore" not in order:
-                if "drilling" in order:
-                    order.insert(order.index("drilling") + 1, "counterbore")
-                else:
-                    order.append("counterbore")
-        except Exception:
-            pass
-
-    if spot_qty > 0:
-        spot_min = spot_qty * 0.05
-        try:
-            _set_bucket_minutes_cost(
-                breakdown_mutable.setdefault("bucket_view", {}),
-                "drilling",
-                spot_min,
-                _lookup_bucket_rate("machine", rates) or 53.76,
-                _lookup_bucket_rate("labor", rates) or 25.46,
-            )
-        except Exception:
-            pass
-
-    if jig_qty > 0:
-        per_jig = float(globals().get("JIG_GRIND_MIN_PER_FEATURE") or 0.75)
-        jig_min = jig_qty * per_jig
-        try:
-            _set_bucket_minutes_cost(
-                breakdown_mutable.setdefault("bucket_view", {}),
-                "grinding",
-                jig_min,
-                _lookup_bucket_rate("grinding", rates)
-                or _lookup_bucket_rate("machine", rates)
-                or 53.76,
-                _lookup_bucket_rate("labor", rates) or 25.46,
-            )
-        except Exception:
-            pass
-
-    # publish structured ops for planner_ops_summary
-    try:
-        ebo = breakdown_mutable.setdefault("extra_bucket_ops", {})
-        if front_cb > 0:
-            ebo.setdefault("counterbore", []).append(
-                {"name": "Counterbore", "qty": int(front_cb), "side": "front"}
-            )
-        if back_cb > 0:
-            ebo.setdefault("counterbore", []).append(
-                {"name": "Counterbore", "qty": int(back_cb), "side": "back"}
-            )
-        if spot_qty > 0:
-            ebo.setdefault("spot", []).append(
-                {"name": "Spot drill", "qty": int(spot_qty), "side": "front"}
-            )
-        if jig_qty > 0:
-            ebo.setdefault("jig-grind", []).append(
-                {"name": "Jig-grind", "qty": int(jig_qty), "side": None}
-            )
-    except Exception:
-        pass
+    front_cb = sum(q for (_, side, _), q in cb_groups.items() if side == "FRONT")
+    back_cb = sum(q for (_, side, _), q in cb_groups.items() if side == "BACK")
 
     return {
-        "cb_total": total_cb,
-        "cb_front": front_cb,
-        "cb_back": back_cb,
-        "spot": spot_qty,
-        "jig": jig_qty,
+        "cb_total": int(total_cb),
+        "cb_front": int(front_cb),
+        "cb_back": int(back_cb),
+        "tap": int(tap_qty),
+        "npt": int(npt_qty),
+        "spot": int(spot_qty),
+        "jig": int(jig_qty),
     }
 
 
@@ -1091,28 +1142,9 @@ def _append_counterbore_spot_jig_cards(
     breakdown_mutable,
     rates,
 ) -> int:
-    cb_groups: dict[tuple[float|None,str,float|None], int] = {}  # (dia, side, depth) -> qty
+    cb_groups: dict[tuple[float | None, str, float | None], int] = {}  # (dia, side, depth) -> qty
     spot_qty = 0
-    jig_qty  = 0
-
-    def _side(U: str) -> str:
-        if _BOTH_RE.search(U):
-            return "BOTH"
-        if _BACK_RE.search(U):
-            return "BACK"
-        if _FRONT_RE.search(U):
-            return "FRONT"
-        return "FRONT"
-
-    def _parse_qty(s: str) -> int:
-        # (4) prefix, or 4X/4 x anywhere, or QTY 4
-        m = re.match(r"\s*\((\d+)\)\s*", s)
-        if m: return int(m.group(1))
-        m = re.search(r"(?<!\d)(\d+)\s*[xX]\b", s)
-        if m: return int(m.group(1))
-        m = re.search(r"\bQTY[:\s]+(\d+)\b", s, re.I)
-        if m: return int(m.group(1))
-        return 1
+    jig_qty = 0
 
     def _extract_counterbore_dia(text: str) -> float | None:
         """Return a numeric counterbore diameter from ``text`` if present."""
@@ -1120,19 +1152,21 @@ def _append_counterbore_spot_jig_cards(
         mcb = _CB_DIA_RE.search(text)
         if not mcb:
             return None
-        raw = mcb.group("numA") or mcb.group("numB")
+        raw = (mcb.group("numA") or mcb.group("numB") or "").replace(" ", "")
         if not raw:
             return None
         if "/" in raw:
             try:
-                num, den = raw.split("/", 1)
-                return float(int(num) / int(den))
+                return float(Fraction(raw))
             except Exception:
                 return None
         try:
-            return float(raw)
+            for raw in list(chart_lines):
+                cleaned = _clean_mtext(str(raw or ""))
+                if cleaned:
+                    chart_lines_list.append(cleaned)
         except Exception:
-            return None
+            chart_lines_list = []
 
     # ---------- PASS A: parse CHART LINES (what you already have: 10) ----------
     if isinstance(chart_lines, list):
@@ -1143,7 +1177,7 @@ def _append_counterbore_spot_jig_cards(
             s = str(raw or "")
             if not s.strip(): continue
             U = s.upper()
-            qty  = _parse_qty(s)
+            qty = _parse_qty(s)
             side = _side(U)
             dia = _extract_counterbore_dia(s)
             if dia is not None:
@@ -1155,12 +1189,16 @@ def _append_counterbore_spot_jig_cards(
                 else:
                     cb_groups[(dia, side, depth)] = cb_groups.get((dia, side, depth), 0) + qty
                 continue
-            # Spot-only (exclude THRU/TAP)
-            if _SPOT_RE_TXT.search(U) and ("TAP" not in U) and ("THRU" not in U):
-                spot_qty += qty; continue
-            # Jig grind
-            if _JIG_RE_TXT.search(U):
-                jig_qty += qty; continue
+            if (
+                _SPOT_RE_TXT.search(s)
+                and not _DRILL_THRU.search(s)
+                and not ("TAP" in U or _TAP_RE.search(s))
+            ):
+                spot_qty += qty
+                continue
+            if _JIG_RE_TXT.search(s):
+                jig_qty += qty
+                continue
 
     # ---------- PASS B: fallback to ROWS (your built_rows=3) ----------
     if not cb_groups and isinstance(rows, list):
@@ -1181,9 +1219,13 @@ def _append_counterbore_spot_jig_cards(
                 else:
                     cb_groups[(dia, side, depth)] = cb_groups.get((dia, side, depth), 0) + qty
             else:
-                if _SPOT_RE_TXT.search(U) and ("TAP" not in U) and ("THRU" not in U):
+                if (
+                    _SPOT_RE_TXT.search(s)
+                    and not _DRILL_THRU.search(s)
+                    and not ("TAP" in U or _TAP_RE.search(s))
+                ):
                     spot_qty += qty
-                if _JIG_RE_TXT.search(U):
+                if _JIG_RE_TXT.search(s):
                     jig_qty += qty
 
     appended = 0
@@ -3319,6 +3361,18 @@ def summarize_actions(removal_lines: list[str], planner_ops: list[dict]) -> None
         r'^\s*([0-9]+(?:\.[0-9]+)?|\.[0-9]+)"?\s*[×xX]\s*(\d+)\s*\((FRONT|BACK)\)',
         re.IGNORECASE,
     )
+    cbo_card_row_re = re.compile(
+        r'^\s*Ø\s*([0-9]+(?:\.[0-9]+)?|\.[0-9]+)"?.*?[×xX]\s*(\d+)\s*\((FRONT|BACK)\)',
+        re.IGNORECASE,
+    )
+    spot_card_row_re = re.compile(
+        r'^\s*Spot\s+drill.*?[×xX]\s*(\d+)\s*\((FRONT|BACK)\)',
+        re.IGNORECASE,
+    )
+    jig_card_row_re = re.compile(
+        r'^\s*Jig\s+grind.*?[×xX]\s*(\d+)\s*(?:\((FRONT|BACK)\))?',
+        re.IGNORECASE,
+    )
 
     card_counts = {"counterbore": False, "spot": False, "jig_grind": False}
     active_card: str | None = None
@@ -3337,6 +3391,14 @@ def summarize_actions(removal_lines: list[str], planner_ops: list[dict]) -> None
             continue
 
         if in_cbo:
+            simple_cbo = cbo_card_row_re.search(ln)
+            if simple_cbo:
+                qty = int(simple_cbo.group(2))
+                side = simple_cbo.group(3).upper()
+                total["counterbore"] += qty
+                by_side["counterbore"][side.lower()] += qty
+                card_counts["counterbore"] = True
+                continue
             m = cbo_line_re.search(ln)
             if m:
                 qty = int(m.group(2))
@@ -3386,6 +3448,24 @@ def summarize_actions(removal_lines: list[str], planner_ops: list[dict]) -> None
             continue
 
         if active_card in {"spot", "jig_grind"}:
+            if active_card == "spot":
+                spot_simple = spot_card_row_re.search(ln)
+                if spot_simple:
+                    qty = int(spot_simple.group(1))
+                    side = _side_from(ln)
+                    total["spot"] += qty
+                    by_side["spot"][side] += qty
+                    card_counts["spot"] = True
+                    continue
+            if active_card == "jig_grind":
+                jig_simple = jig_card_row_re.search(ln)
+                if jig_simple:
+                    qty = int(jig_simple.group(1))
+                    side = _side_from(ln)
+                    total["jig_grind"] += qty
+                    by_side["jig_grind"][side] += qty
+                    card_counts["jig_grind"] = True
+                    continue
             qty_match = qty_re.search(ln)
             if qty_match:
                 qty = int(qty_match.group(1))
@@ -8817,6 +8897,7 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
             drilling_time_per_hole_data = candidate_dtph
 
     removal_card_lines: list[str] = []
+    removal_summary_lines: list[str] = []
     removal_summary_extra_lines: list[str] = []
     removal_card_extra: dict[str, float] = {}
     speeds_feeds_table = None
@@ -11080,28 +11161,93 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
             # Persist chart lines for other consumers
             geo_map.setdefault("chart_lines", list(chart_lines_all))
 
-            # PRE-SEED buckets + structured ops (so Process table sees them)
+            # Clean + join lines
             joined_early = _join_wrapped_chart_lines([
                 _clean_mtext(x) for x in chart_lines_all
             ])
-            preseed_counts = _preseed_ops_from_chart_lines(
-                chart_lines=joined_early,
-                rows=built,
-                breakdown_mutable=breakdown_mutable,
-                rates=rates,
-            )
+            ops_claims = _parse_ops_and_claims(joined_early)
             _push(
                 lines,
-                f"[DEBUG] preseed_ops cb={preseed_counts['cb_total']} "
-                f"spot={preseed_counts['spot']} jig={preseed_counts['jig']}",
+                f"[DEBUG] preseed_ops cb={ops_claims['cb_total']} tap={ops_claims['tap']} "
+                f"npt={ops_claims['npt']} spot={ops_claims['spot']} jig={ops_claims['jig']}",
             )
+
+            # Publish structured ops for planner_ops_summary
             try:
-                if isinstance(geo_map, (_MutableMappingABC, dict)):
-                    geo_map.setdefault("ops_claims", dict(preseed_counts))
+                ebo = breakdown_mutable.setdefault("extra_bucket_ops", {})
+                if ops_claims["cb_front"] > 0:
+                    ebo.setdefault("counterbore", []).append(
+                        {"name": "Counterbore", "qty": int(ops_claims["cb_front"]), "side": "front"}
+                    )
+                if ops_claims["cb_back"] > 0:
+                    ebo.setdefault("counterbore", []).append(
+                        {"name": "Counterbore", "qty": int(ops_claims["cb_back"]), "side": "back"}
+                    )
+                if ops_claims["tap"] > 0:
+                    ebo.setdefault("tap", []).append(
+                        {"name": "Tap", "qty": int(ops_claims["tap"]), "side": "front"}
+                    )
+                if ops_claims["npt"] > 0:
+                    ebo.setdefault("tap", []).append(
+                        {"name": "NPT tap", "qty": int(ops_claims["npt"]), "side": "front"}
+                    )
+                if ops_claims["spot"] > 0:
+                    ebo.setdefault("spot", []).append(
+                        {"name": "Spot drill", "qty": int(ops_claims["spot"]), "side": "front"}
+                    )
+                if ops_claims["jig"] > 0:
+                    ebo.setdefault("jig-grind", []).append(
+                        {"name": "Jig-grind", "qty": int(ops_claims["jig"]), "side": None}
+                    )
             except Exception:
                 pass
+
+            # Seed minutes so Process table shows rows
             try:
-                _normalize_buckets(breakdown.get("bucket_view"))
+                bv = breakdown_mutable.setdefault("bucket_view", {})
+
+                def seed(name, minutes, mach, lab):
+                    if minutes <= 0:
+                        return
+                    _set_bucket_minutes_cost(bv, name, minutes, mach, lab)
+
+                # You can tune per-feature minutes as constants or from rates
+                cb_min = (ops_claims["cb_total"] or 0) * float(
+                    globals().get("CBORE_MIN_PER_SIDE_MIN") or 0.15
+                )
+                seed(
+                    "counterbore",
+                    cb_min,
+                    _lookup_bucket_rate("counterbore", rates)
+                    or _lookup_bucket_rate("machine", rates)
+                    or 53.76,
+                    _lookup_bucket_rate("labor", rates) or 25.46,
+                )
+                seed(
+                    "drilling",
+                    (ops_claims["spot"] or 0) * 0.05,
+                    _lookup_bucket_rate("machine", rates) or 53.76,
+                    _lookup_bucket_rate("labor", rates) or 25.46,
+                )
+                seed(
+                    "grinding",
+                    (ops_claims["jig"] or 0)
+                    * float(globals().get("JIG_GRIND_MIN_PER_FEATURE") or 0.75),
+                    _lookup_bucket_rate("grinding", rates)
+                    or _lookup_bucket_rate("machine", rates)
+                    or 53.76,
+                    _lookup_bucket_rate("labor", rates) or 25.46,
+                )
+
+                order = bv.setdefault("order", [])
+                if "counterbore" in bv.get("buckets", {}) and "counterbore" not in order:
+                    if "drilling" in order:
+                        order.insert(order.index("drilling") + 1, "counterbore")
+                    else:
+                        order.append("counterbore")
+                if "grinding" in bv.get("buckets", {}) and "grinding" not in order:
+                    order.append("grinding")
+                _normalize_buckets(bv)
             except Exception:
                 pass
 
@@ -11182,6 +11328,12 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
                 for entry in fallback_lines:
                     if isinstance(entry, str) and not entry.startswith("[DEBUG]"):
                         removal_summary_extra_lines.append(entry)
+
+        removal_summary_lines = [
+            str(line) for line in removal_card_lines if isinstance(line, str)
+        ]
+        if removal_summary_extra_lines:
+            removal_summary_lines.extend(removal_summary_extra_lines)
 
         actions_summary_ready = True
         try:
