@@ -51,6 +51,78 @@ def _calc_ipm(rpm: float | None, ipr: Number | None) -> float | None:
     return rpm * float(ipr)
 
 
+def _aggregate_counts_by_diameter(
+    groups: Sequence[Mapping[str, Any]]
+) -> dict[float, int]:
+    counts: dict[float, int] = {}
+    for group in groups:
+        dia = group.get("dia")
+        qty = group.get("qty")
+        if dia is None or qty is None:
+            continue
+        try:
+            dia_val = float(dia)
+            qty_int = int(qty)
+        except (TypeError, ValueError):
+            continue
+        if dia_val <= 0 or qty_int <= 0:
+            continue
+        counts[dia_val] = counts.get(dia_val, 0) + qty_int
+    return counts
+
+
+def _per_diameter_depths(groups: Sequence[Mapping[str, Any]]) -> dict[float, float]:
+    totals: dict[float, tuple[float, int]] = {}
+    for group in groups:
+        dia = group.get("dia")
+        depth = group.get("depth_in")
+        qty = group.get("qty")
+        if dia is None or depth is None or qty is None:
+            continue
+        try:
+            dia_val = float(dia)
+            depth_val = float(depth)
+            qty_int = int(qty)
+        except (TypeError, ValueError):
+            continue
+        if dia_val <= 0 or qty_int <= 0:
+            continue
+        acc_depth, acc_qty = totals.get(dia_val, (0.0, 0))
+        totals[dia_val] = (acc_depth + depth_val * qty_int, acc_qty + qty_int)
+
+    averages: dict[float, float] = {}
+    for dia, (depth_sum, qty_sum) in totals.items():
+        if qty_sum > 0:
+            averages[dia] = depth_sum / qty_sum
+    return averages
+
+
+def _classify_deep_std(
+    per_diam_depth: Mapping[float, float], counts: Mapping[float, int]
+) -> tuple[int, int]:
+    deep = std = 0
+    for diameter, qty in counts.items():
+        qty_int = int(qty)
+        if qty_int <= 0:
+            continue
+        depth = per_diam_depth.get(diameter)
+        if depth is None:
+            continue
+        if diameter > 0 and (depth / diameter) >= 3.0:
+            deep += qty_int
+        else:
+            std += qty_int
+    return deep, std
+
+
+def _format_range(lo: float | None, hi: float | None, places: int, suffix: str) -> str:
+    if lo is None or hi is None:
+        return "-"
+    if math.isclose(lo, hi, abs_tol=10 ** (-(places + 1))):
+        return f"{float(lo):.{places}f}{suffix}"
+    return f"{float(lo):.{places}f}–{float(hi):.{places}f}{suffix}"
+
+
 def _is_deep(group: Mapping[str, Any]) -> bool:
     depth = group.get("depth_in")
     dia = group.get("dia")
@@ -106,9 +178,27 @@ def render_drilling_section(
     drill_groups: Sequence[Mapping[str, Any]],
     overheads: Mapping[str, Number],
 ) -> str:
-    deep_ct, std_ct, total_ct = _holes_counts(drill_groups)
+    counts_by_diam = _aggregate_counts_by_diameter(drill_groups)
+    per_diam_depth = _per_diameter_depths(drill_groups)
+    deep_ct, std_ct = _classify_deep_std(per_diam_depth, counts_by_diam)
+    total_ct = deep_ct + std_ct
+    if total_ct == 0:
+        deep_ct, std_ct, total_ct = _holes_counts(drill_groups)
     deep_groups = [g for g in drill_groups if _is_deep(g)]
     std_groups = [g for g in drill_groups if not _is_deep(g)]
+
+    diameters = [dia for dia, qty in counts_by_diam.items() if qty > 0]
+    depths = [
+        per_diam_depth.get(dia)
+        for dia in diameters
+        if per_diam_depth.get(dia) is not None
+    ]
+    diam_min = min(diameters) if diameters else None
+    diam_max = max(diameters) if diameters else None
+    depth_min = min(depths) if depths else None
+    depth_max = max(depths) if depths else None
+    dia_range = _format_range(diam_min, diam_max, 3, '"')
+    depth_range = _format_range(depth_min, depth_max, 2, " in")
 
     lines: list[str] = []
     lines.append("MATERIAL REMOVAL – DRILLING")
@@ -118,8 +208,8 @@ def render_drilling_section(
     ops_str = "Deep-Drill (L/D ≥ 3), Drill" if deep_ct else "Drill"
     lines.append(f"  Operations ........ {ops_str}")
     lines.append(f"  Holes ............. {deep_ct} deep + {std_ct} std  = {total_ct}")
-    lines.append(f"  Diameter range .... {_dia_range(drill_groups)}\"")
-    lines.append(f"  Depth per hole .... {_depth_range(drill_groups)} in")
+    lines.append(f"  Diameter range .... {dia_range}")
+    lines.append(f"  Depth per hole .... {depth_range}")
     lines.append("")
     lines.append("Feeds & Speeds (used)")
     lines.append(
