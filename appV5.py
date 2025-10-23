@@ -609,7 +609,7 @@ def _build_ops_cards_from_chart_lines(
             side = "BOTH"
         elif _BACK_RE.search(U):
             side = "BACK"
-        elif _FRONT_RE.search(U):
+        elif _FRONT_RE.search(U):  # ensure the single-underscore pattern is used
             side = "FRONT"
 
         # Counterbore rows
@@ -760,9 +760,12 @@ def _append_counterbore_spot_jig_cards(
     jig_qty  = 0
 
     def _side(U: str) -> str:
-        if _BOTH_RE.search(U): return "BOTH"
-        if _BACK_RE.search(U): return "BACK"
-        if _FRONT_RE.search(U): return "FRONT"
+        if _BOTH_RE.search(U):
+            return "BOTH"
+        if _BACK_RE.search(U):
+            return "BACK"
+        if _FRONT_RE.search(U):
+            return "FRONT"
         return "FRONT"
 
     def _parse_qty(s: str) -> int:
