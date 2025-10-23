@@ -3527,6 +3527,37 @@ def summarize_actions(removal_lines: list[str], planner_ops: list[dict]) -> None
         if stripped.startswith("-") or stripped.startswith("="):
             continue
 
+        if not in_cbo:
+            cb_simple_line = cbo_card_row_re.search(ln)
+            if cb_simple_line:
+                qty = int(cb_simple_line.group(2))
+                side = cb_simple_line.group(3).upper()
+                total["counterbore"] += qty
+                by_side["counterbore"][side.lower()] += qty
+                card_counts["counterbore"] = True
+                continue
+
+        if active_card != "spot":
+            spot_simple_line = spot_card_row_re.search(ln)
+            if spot_simple_line:
+                qty = int(spot_simple_line.group(1))
+                side = spot_simple_line.group(2).upper()
+                total["spot"] += qty
+                by_side["spot"][side.lower()] += qty
+                card_counts["spot"] = True
+                continue
+
+        if active_card != "jig_grind":
+            jig_simple_line = jig_card_row_re.search(ln)
+            if jig_simple_line:
+                qty = int(jig_simple_line.group(1))
+                side_match = jig_simple_line.group(2) if jig_simple_line.lastindex and jig_simple_line.group(2) else None
+                side = (side_match or _side_from(ln)).lower()
+                total["jig_grind"] += qty
+                by_side["jig_grind"][side] += qty
+                card_counts["jig_grind"] = True
+                continue
+
         if active_card in {"spot", "jig_grind"}:
             if active_card == "spot":
                 spot_simple = spot_card_row_re.search(ln)
@@ -7650,6 +7681,13 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
     planner_line_items_meta = planner_total_meta.get("line_items") if isinstance(planner_total_meta, _MappingABC) else None
     bucket_ops_map: dict[str, list[PlannerBucketOp]] = {}
     planner_ops_summary: list[dict[str, Any]] = []
+    extra_bucket_ops: MutableMapping[str, Any] | dict[str, Any]
+    extra_bucket_ops = {}
+    if isinstance(breakdown, _MappingABC):
+        try:
+            extra_bucket_ops = dict(breakdown.get("extra_bucket_ops") or {})
+        except Exception:
+            extra_bucket_ops = {}
     if isinstance(planner_line_items_meta, list):
         for entry in planner_line_items_meta:
             if not isinstance(entry, _MappingABC):
@@ -7686,6 +7724,77 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
             if name_text:
                 planner_ops_summary.append(
                     {"name": name_text, "qty": qty_val, "side": side_val}
+                )
+
+    if isinstance(extra_bucket_ops, _MappingABC) and extra_bucket_ops:
+        seen_summary_keys = {
+            (
+                str(item.get("name") or "").strip(),
+                (str(item.get("side") or "").strip().lower() or None),
+            )
+            for item in planner_ops_summary
+            if isinstance(item, _MappingABC)
+        }
+        for raw_bucket, raw_entries in extra_bucket_ops.items():
+            if not isinstance(raw_entries, Sequence):
+                continue
+            bucket_key = _canonical_bucket_key(raw_bucket) or _planner_bucket_for_op(
+                str(raw_bucket)
+            )
+            for entry in raw_entries:
+                if not isinstance(entry, _MappingABC):
+                    continue
+                name_text = str(entry.get("name") or entry.get("op") or "").strip()
+                if not name_text:
+                    continue
+                qty_raw = entry.get("qty")
+                try:
+                    qty_val = int(float(qty_raw))
+                except Exception:
+                    qty_val = 0
+                side_val = entry.get("side")
+                side_key = (str(side_val or "").strip().lower() or None)
+                summary_key = (name_text, side_key)
+                if summary_key not in seen_summary_keys:
+                    planner_ops_summary.append(
+                        {"name": name_text, "qty": qty_val, "side": side_val}
+                    )
+                    seen_summary_keys.add(summary_key)
+                if not bucket_key:
+                    continue
+                minutes_val_raw = entry.get("minutes")
+                if minutes_val_raw in (None, ""):
+                    minutes_val_raw = entry.get("mins")
+                try:
+                    minutes_val = float(minutes_val_raw)
+                except Exception:
+                    minutes_val = 0.0
+                machine_raw = entry.get("machine") or entry.get("machine_cost")
+                try:
+                    machine_val = float(machine_raw)
+                except Exception:
+                    machine_val = 0.0
+                labor_raw = entry.get("labor") or entry.get("labor_cost")
+                try:
+                    labor_val = float(labor_raw)
+                except Exception:
+                    labor_val = 0.0
+                total_raw = entry.get("total") or entry.get("total_cost")
+                try:
+                    total_val = float(total_raw)
+                except Exception:
+                    total_val = machine_val + labor_val
+                if not any(value > 0 for value in (minutes_val, machine_val, labor_val, total_val)):
+                    continue
+                bucket_ops = bucket_ops_map.setdefault(bucket_key, [])
+                bucket_ops.append(
+                    {
+                        "op": name_text,
+                        "minutes": minutes_val,
+                        "machine": machine_val,
+                        "labor": labor_val,
+                        "total": total_val,
+                    }
                 )
 
     if bucket_ops_map:
@@ -11402,6 +11511,11 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
                 except Exception:
                     pass
 
+                try:
+                    _normalize_buckets(breakdown_mutable.get("bucket_view"))
+                except Exception:
+                    pass
+
                 # Append extra MATERIAL REMOVAL cards (Counterbore / Spot / Jig)
                 _appended = _append_counterbore_spot_jig_cards(
                     lines_out=removal_card_lines,
@@ -11518,17 +11632,18 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
 
             actions_summary_ready = True
             try:
-                extra_bucket_ops: MutableMapping[str, Any] | dict[str, Any]
-                extra_bucket_ops = {}
-                if isinstance(breakdown, _MappingABC):
-                    extra_bucket_ops = dict(breakdown.get("extra_bucket_ops") or {})
+                extra_bucket_ops_for_summary: dict[str, Any] = {}
+                if isinstance(extra_bucket_ops, _MappingABC):
+                    extra_bucket_ops_for_summary.update(extra_bucket_ops)
+                elif isinstance(extra_bucket_ops, dict):
+                    extra_bucket_ops_for_summary.update(extra_bucket_ops)
                 extra_map_candidate = getattr(bucket_state, "extra", None)
                 if isinstance(extra_map_candidate, _MappingABC):
                     extra_bucket_ops_candidate = extra_map_candidate.get("bucket_ops")
                     if isinstance(extra_bucket_ops_candidate, _MappingABC):
-                        extra_bucket_ops.update(extra_bucket_ops_candidate)
-                if isinstance(extra_bucket_ops, _MappingABC):
-                    for _, entries in extra_bucket_ops.items():
+                        extra_bucket_ops_for_summary.update(extra_bucket_ops_candidate)
+                if isinstance(extra_bucket_ops_for_summary, _MappingABC):
+                    for _, entries in extra_bucket_ops_for_summary.items():
                         if not isinstance(entries, Sequence):
                             continue
                         for entry in entries:
