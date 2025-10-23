@@ -877,6 +877,7 @@ def _parse_ops_and_claims(joined_lines: Sequence[str] | None) -> dict[str, Any]:
 def _adjust_drill_counts(
     counts_by_diam_raw: dict[float, int],
     ops_claims: dict,
+    _logger=None,
 ) -> dict[float, int]:
     """Return adjusted drill groups: subtract pilots, counterbores, and ignore large bores."""
 
@@ -884,7 +885,7 @@ def _adjust_drill_counts(
         return {}
 
     counts = {
-        round(float(d), 4): int(q)
+        round(float(d), 4): max(0, int(q))
         for d, q in counts_by_diam_raw.items()
         if int(q) > 0
     }
@@ -892,32 +893,45 @@ def _adjust_drill_counts(
     if not counts:
         return {}
 
-    def _nearest(bins: Sequence[float], val: float) -> float | None:
-        return min(bins, key=lambda b: abs(b - val)) if bins else None
-
     bins = sorted(counts.keys())
 
+    def _nearest(val: float) -> float | None:
+        return min(bins, key=lambda b: abs(b - val)) if bins else None
+
     # (a) subtract pilot drills claimed by TAP/NPT/explicit DRILL THRU, mapped to nearest geom bin
-    claimed_vals = Counter(
-        round(float(x), 4)
-        for x in (ops_claims.get("claimed_pilot_diams") or [])
-        if x is not None
-    )
-    for val, qty in claimed_vals.items():
-        tgt = _nearest(bins, val)
+    raw_claims = list(ops_claims.get("claimed_pilot_diams") or [])
+    claim_ctr: Counter[float] = Counter()
+    for value in raw_claims:
+        try:
+            num = float(value)
+        except Exception:
+            continue
+        if not 0.05 <= num <= 3.0:
+            continue
+        claim_ctr[round(num, 4)] += 1
+
+    for val, qty in claim_ctr.items():
+        tgt = _nearest(val)
         if tgt is not None and abs(tgt - val) <= 0.015:
-            counts[tgt] = max(0, counts[tgt] - int(qty))
+            counts[tgt] = max(0, counts[tgt] - max(0, int(qty)))
 
     # (b) subtract counterbore face diameters (don’t double-count big faces as drills)
     cb_face_ctr: Counter[float] = Counter()
     for (diam, _side, _depth), qty in (ops_claims.get("cb_groups") or {}).items():
         if diam is None:
             continue
-        cb_face_ctr[round(float(diam), 4)] += int(qty)
+        try:
+            num = float(diam)
+        except Exception:
+            continue
+        if not 0.05 <= num <= 3.0:
+            continue
+        cb_face_ctr[round(num, 4)] += max(0, int(qty))
+
     for face_dia, qty in cb_face_ctr.items():
-        tgt = _nearest(bins, face_dia)
+        tgt = _nearest(face_dia)
         if tgt is not None and abs(tgt - face_dia) <= 0.02:
-            counts[tgt] = max(0, counts[tgt] - int(qty))
+            counts[tgt] = max(0, counts[tgt] - max(0, int(qty)))
 
     # (c) treat very large diameters as bores/pockets (not drills)
     for dia in list(counts.keys()):

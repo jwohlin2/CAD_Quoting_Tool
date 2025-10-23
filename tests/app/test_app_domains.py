@@ -911,6 +911,28 @@ def test_adjust_drill_counts_subtracts_row_pilots() -> None:
     assert adjusted[round(0.3390, 4)] == 0
 
 
+def test_adjust_drill_counts_sanitizes_inputs() -> None:
+    import appV5
+
+    counts_raw = {0.25: 5, 0.5: 3, 1.25: 4}
+    ops_claims = {
+        "claimed_pilot_diams": ["0.251", 0.25, "888", None, "oops"],
+        "cb_groups": {
+            (0.248, "TOP", None): 10,
+            ("5.0", "BOT", None): 2,
+            (None, "", None): 7,
+        },
+    }
+
+    adjusted = appV5._adjust_drill_counts(counts_raw, ops_claims, None)
+
+    assert adjusted[round(0.25, 4)] == 0
+    assert adjusted[round(0.5, 4)] == 3
+    assert adjusted[round(1.25, 4)] == 0
+    for dia, qty in adjusted.items():
+        assert qty <= counts_raw.get(dia, 0)
+
+
 @pytest.mark.parametrize(
     "case",
     [
