@@ -516,23 +516,55 @@ def _get_chart_lines_for_ops(
 
 _QTY_PAREN_RE = re.compile(r"^\s*\((\d+)\)\s*")
 _CB_DIA_RE = re.compile(
-    # Case A: symbol BEFORE the number: "Ø .750 C'BORE" or "%%C .750 C'BORE"
     r"(?:(?:[Ø⌀\u00D8]|%%[Cc])\s*)?"
     r"(?P<numA>\d+(?:\.\d+)?|\.\d+|\d+\s*/\s*\d+)\s*"
     r"(?:C[’']?\s*BORE|CBORE|COUNTER\s*BORE)"
     r"|"
-    # Case B: symbol AFTER the number: ".750 Ø C'BORE" or ".750%%C C'BORE"
     r"(?P<numB>\d+(?:\.\d+)?|\.\d+|\d+\s*/\s*\d+)\s*"
     r"(?:[Ø⌀\u00D8]|%%[Cc])\s*"
     r"(?:C[’']?\s*BORE|CBORE|COUNTER\s*BORE)",
     re.I,
 )
-_X_DEPTH_RE = re.compile(r"[×x]\s*([0-9]+(?:\.[0-9]+)?)")
+_X_DEPTH_RE = re.compile(r"[×xX]\s*([0-9]+(?:\.[0-9]+)?)")
 _BACK_RE = re.compile(r"\bFROM\s+BACK\b", re.I)
 _FRONT_RE = re.compile(r"\bFROM\s+FRONT\b", re.I)
 _BOTH_RE = re.compile(r"\bFRONT\s*&\s*BACK|BOTH\s+SIDES|2\s+SIDES\b", re.I)
 _SPOT_RE_TXT = re.compile(r"(?:C[’']?\s*DRILL|CENTER\s*DRILL|SPOT\s*DRILL|SPOT\b)", re.I)
 _JIG_RE_TXT = re.compile(r"\bJIG\s*GRIND\b", re.I)
+_TAP_RE = re.compile(
+    r"\b(?:#?\d+[- ]\d+|[1-9]/\d+-\d+|[1-9]/\d+|[\d/]+-NPT|N\.?P\.?T\.?)\s*TAP\b",
+    re.I,
+)
+_DRILL_THRU = re.compile(r"\bDRILL\s+THRU\b", re.I)
+_SIZE_INCH_RE = re.compile(r"\((\d+(?:\.\d+)?|\.\d+)\)")
+_LETTER_RE = re.compile(r"\b([A-Z])\b")
+
+
+def _parse_qty(s: str) -> int:
+    m = re.match(r"\s*\((\d+)\)\s*", s)
+    if m:
+        return int(m.group(1))
+    m = re.search(r"(?<!\d)(\d+)\s*[xX×]\b?", s)
+    if m:
+        return int(m.group(1))
+    m = re.search(r"\bQTY[:\s]+(\d+)\b", s, re.I)
+    if m:
+        return int(m.group(1))
+    return 1
+
+
+def _side(U: str) -> str:
+    if _BOTH_RE.search(U):
+        return "BOTH"
+    has_back = bool(_BACK_RE.search(U) or re.search(r"\bBACK\b", U))
+    has_front = bool(_FRONT_RE.search(U) or re.search(r"\bFRONT\b", U))
+    if has_back and has_front:
+        return "BOTH"
+    if has_back:
+        return "BACK"
+    if has_front:
+        return "FRONT"
+    return "FRONT"
 
 
 def _bucket_add_minutes(
@@ -617,34 +649,22 @@ def _build_ops_cards_from_chart_lines(
         s = str(raw or "")
         if not s.strip():
             continue
-        qty = 1
-        mqty = _QTY_PAREN_RE.search(s)
-        if mqty:
-            try:
-                qty = int(mqty.group(1))
-            except Exception:
-                qty = 1
+
+        qty = _parse_qty(s)
 
         U = s.upper()
-        side = "FRONT"
-        if _BOTH_RE.search(U):
-            side = "BOTH"
-        elif _BACK_RE.search(U):
-            side = "BACK"
-        elif _FRONT_RE.search(U):  # ensure the single-underscore pattern is used
-            side = "FRONT"
+        side = _side(U)
 
         # Counterbore rows
         if ("CBORE" in U) or ("C'BORE" in U) or ("COUNTER BORE" in U) or _CB_DIA_RE.search(s):
             dia = None
             mcb = _CB_DIA_RE.search(s)
             if mcb:
-                raw = mcb.group("numA") or mcb.group("numB")
+                raw = (mcb.group("numA") or mcb.group("numB") or "").replace(" ", "")
                 if raw:
                     if "/" in raw:
                         try:
-                            num, den = raw.split("/", 1)
-                            dia = float(int(num) / int(den))
+                            dia = float(Fraction(raw))
                         except Exception:
                             dia = None
                     else:
@@ -657,17 +677,21 @@ def _build_ops_cards_from_chart_lines(
             if side == "BOTH":
                 for sd in ("FRONT", "BACK"):
                     cb_groups[(dia, sd, depth)] = cb_groups.get((dia, sd, depth), 0) + qty
-            else:
-                cb_groups[(dia, side, depth)] = cb_groups.get((dia, side, depth), 0) + qty
+                else:
+                    cb_groups[(dia, side, depth)] = cb_groups.get((dia, side, depth), 0) + qty
             continue
 
         # Spots (standalone)
-        if _SPOT_RE_TXT.search(U) and ("TAP" not in U) and ("THRU" not in U):
+        if (
+            _SPOT_RE_TXT.search(s)
+            and not _DRILL_THRU.search(s)
+            and not ("TAP" in U or _TAP_RE.search(s))
+        ):
             spot_qty += qty
             continue
 
         # Jig grind calls (standalone)
-        if _JIG_RE_TXT.search(U):
+        if _JIG_RE_TXT.search(s):
             jig_qty += qty
             continue
 
@@ -683,18 +707,17 @@ def _build_ops_cards_from_chart_lines(
                 if qty <= 0:
                     continue
                 # side/depth/dia from text
-                side = "BACK" if _BACK_RE.search(U) else ("FRONT" if _FRONT_RE.search(U) else "FRONT")
+                side = _side(U)
                 mdepth = _X_DEPTH_RE.search(s)
                 depth = float(mdepth.group(1)) if mdepth else None
                 dia = None
                 mcb = _CB_DIA_RE.search(s)
                 if mcb:
-                    raw = mcb.group("numA") or mcb.group("numB")
+                    raw = (mcb.group("numA") or mcb.group("numB") or "").replace(" ", "")
                     if raw:
                         if "/" in raw:
                             try:
-                                num, den = raw.split("/", 1)
-                                dia = float(int(num) / int(den))
+                                dia = float(Fraction(raw))
                             except Exception:
                                 dia = None
                         else:
@@ -709,10 +732,15 @@ def _build_ops_cards_from_chart_lines(
             if not s.strip():
                 continue
             U = s.upper()
-            if _SPOT_RE_TXT.search(U) and ("TAP" not in U) and ("THRU" not in U):
-                spot_qty += int((r or {}).get("qty") or 0)
-            if _JIG_RE_TXT.search(U):
-                jig_qty += int((r or {}).get("qty") or 0)
+            qty_val = int((r or {}).get("qty") or 0)
+            if (
+                _SPOT_RE_TXT.search(s)
+                and not _DRILL_THRU.search(s)
+                and not ("TAP" in U or _TAP_RE.search(s))
+            ):
+                spot_qty += qty_val
+            if _JIG_RE_TXT.search(s):
+                jig_qty += qty_val
 
     # --- Emit COUNTERBORE card ----------------------------------------------
     if cb_groups:
@@ -1029,28 +1057,9 @@ def _append_counterbore_spot_jig_cards(
     breakdown_mutable,
     rates,
 ) -> int:
-    cb_groups: dict[tuple[float|None,str,float|None], int] = {}  # (dia, side, depth) -> qty
+    cb_groups: dict[tuple[float | None, str, float | None], int] = {}  # (dia, side, depth) -> qty
     spot_qty = 0
-    jig_qty  = 0
-
-    def _side(U: str) -> str:
-        if _BOTH_RE.search(U):
-            return "BOTH"
-        if _BACK_RE.search(U):
-            return "BACK"
-        if _FRONT_RE.search(U):
-            return "FRONT"
-        return "FRONT"
-
-    def _parse_qty(s: str) -> int:
-        # (4) prefix, or 4X/4 x anywhere, or QTY 4
-        m = re.match(r"\s*\((\d+)\)\s*", s)
-        if m: return int(m.group(1))
-        m = re.search(r"(?<!\d)(\d+)\s*[xX]\b", s)
-        if m: return int(m.group(1))
-        m = re.search(r"\bQTY[:\s]+(\d+)\b", s, re.I)
-        if m: return int(m.group(1))
-        return 1
+    jig_qty = 0
 
     def _extract_counterbore_dia(text: str) -> float | None:
         """Return a numeric counterbore diameter from ``text`` if present."""
@@ -1058,13 +1067,12 @@ def _append_counterbore_spot_jig_cards(
         mcb = _CB_DIA_RE.search(text)
         if not mcb:
             return None
-        raw = mcb.group("numA") or mcb.group("numB")
+        raw = (mcb.group("numA") or mcb.group("numB") or "").replace(" ", "")
         if not raw:
             return None
         if "/" in raw:
             try:
-                num, den = raw.split("/", 1)
-                return float(int(num) / int(den))
+                return float(Fraction(raw))
             except Exception:
                 return None
         try:
@@ -1081,7 +1089,7 @@ def _append_counterbore_spot_jig_cards(
             s = str(raw or "")
             if not s.strip(): continue
             U = s.upper()
-            qty  = _parse_qty(s)
+            qty = _parse_qty(s)
             side = _side(U)
             dia = _extract_counterbore_dia(s)
             if dia is not None:
@@ -1093,12 +1101,16 @@ def _append_counterbore_spot_jig_cards(
                 else:
                     cb_groups[(dia, side, depth)] = cb_groups.get((dia, side, depth), 0) + qty
                 continue
-            # Spot-only (exclude THRU/TAP)
-            if _SPOT_RE_TXT.search(U) and ("TAP" not in U) and ("THRU" not in U):
-                spot_qty += qty; continue
-            # Jig grind
-            if _JIG_RE_TXT.search(U):
-                jig_qty += qty; continue
+            if (
+                _SPOT_RE_TXT.search(s)
+                and not _DRILL_THRU.search(s)
+                and not ("TAP" in U or _TAP_RE.search(s))
+            ):
+                spot_qty += qty
+                continue
+            if _JIG_RE_TXT.search(s):
+                jig_qty += qty
+                continue
 
     # ---------- PASS B: fallback to ROWS (your built_rows=3) ----------
     if not cb_groups and isinstance(rows, list):
@@ -1119,9 +1131,13 @@ def _append_counterbore_spot_jig_cards(
                 else:
                     cb_groups[(dia, side, depth)] = cb_groups.get((dia, side, depth), 0) + qty
             else:
-                if _SPOT_RE_TXT.search(U) and ("TAP" not in U) and ("THRU" not in U):
+                if (
+                    _SPOT_RE_TXT.search(s)
+                    and not _DRILL_THRU.search(s)
+                    and not ("TAP" in U or _TAP_RE.search(s))
+                ):
                     spot_qty += qty
-                if _JIG_RE_TXT.search(U):
+                if _JIG_RE_TXT.search(s):
                     jig_qty += qty
 
     appended = 0
