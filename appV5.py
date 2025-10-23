@@ -838,6 +838,70 @@ def _parse_ops_and_claims(joined_lines: Sequence[str] | None) -> dict[str, Any]:
     return _shared_parse_ops_and_claims(joined_lines, cleaner=_clean_mtext)
 
 
+def _adjust_drill_counts(
+    counts_by_diam_raw: dict[float, int],
+    ops_claims: dict,
+    ops_hint: dict | None = None,
+) -> dict[float, int]:
+    """Return adjusted drill groups: subtract pilots, counterbores, and ignore large bores."""
+
+    counts = {
+        round(float(d), 4): int(q)
+        for d, q in (counts_by_diam_raw or {}).items()
+    }
+
+    def nearest_bin(val: float, bins: list[float]) -> float:
+        return min(bins, key=lambda b: abs(b - val))
+
+    bins = sorted(counts.keys())
+
+    # (a) subtract pilot drills claimed by TAP/NPT/explicit DRILL THRU, mapped to nearest geom bin
+    claimed_vals = [
+        round(float(x), 4)
+        for x in (ops_claims.get("claimed_pilot_diams") or [])
+        if x is not None
+    ]
+    for val, qty in Counter(claimed_vals).items():
+        if not bins:
+            break
+        tgt = nearest_bin(val, bins)
+        if abs(tgt - val) <= 0.015:
+            counts[tgt] = max(0, counts[tgt] - int(qty))
+
+    # (b) subtract counterbore face diameters (don’t double-count big faces as drills)
+    cb_face_ctr: Counter[float] = Counter()
+    for (diam, _side, _depth), qty in (ops_claims.get("cb_groups") or {}).items():
+        if diam is None:
+            continue
+        cb_face_ctr[round(float(diam), 4)] += int(qty)
+    for face_dia, qty in cb_face_ctr.items():
+        if not bins:
+            break
+        tgt = nearest_bin(face_dia, bins)
+        if abs(tgt - face_dia) <= 0.02:
+            counts[tgt] = max(0, counts[tgt] - int(qty))
+
+    # (c) treat very large diameters as bores/pockets (not drills)
+    for dia in list(counts.keys()):
+        if dia >= 1.0:
+            counts[dia] = 0
+
+    # (d) optional: lock to blueprint totals if provided
+    if ops_hint and isinstance(ops_hint.get("drill"), (int, float)):
+        target = int(ops_hint["drill"])
+        current = sum(counts.values())
+        if current > target:
+            over = current - target
+            for dia in sorted(counts.keys(), reverse=True):
+                if over <= 0:
+                    break
+                take = min(over, counts[dia])
+                counts[dia] -= take
+                over -= take
+
+    return counts
+
+
 def _append_counterbore_spot_jig_cards(
     *,
     lines_out: list[str],
@@ -3727,6 +3791,96 @@ def _compute_drilling_removal_section(
                     "group_minutes": float(group_minutes),
                 }
             )
+        if sanitized_rows:
+            geo_map_for_drill: Mapping[str, Any] | dict[str, Any]
+            if isinstance(geo_map, (_MappingABC, dict)) and geo_map:
+                geo_map_for_drill = geo_map
+            else:
+                geo_map_for_drill = {}
+                if isinstance(breakdown, (_MappingABC, dict)):
+                    try:
+                        geo_candidate = breakdown.get("geo")  # type: ignore[index]
+                    except Exception:
+                        geo_candidate = None
+                    if isinstance(geo_candidate, (_MappingABC, dict)):
+                        geo_map_for_drill = geo_candidate
+                if not geo_map_for_drill:
+                    try:
+                        result_map = (
+                            result
+                            if isinstance(result, (_MappingABC, dict))
+                            else None
+                        )
+                    except NameError:
+                        result_map = None
+                    if isinstance(result_map, (_MappingABC, dict)):
+                        geo_candidate = result_map.get("geo")
+                        if isinstance(geo_candidate, (_MappingABC, dict)):
+                            geo_map_for_drill = geo_candidate
+            if not isinstance(geo_map_for_drill, (_MappingABC, dict)):
+                geo_map_for_drill = {}
+
+            chart_lines_all = list((geo_map_for_drill.get("chart_lines") or []))
+            joined_lines = _join_wrapped_chart_lines(
+                [_clean_mtext(x) for x in chart_lines_all]
+            )
+            ops_claims_raw = _parse_ops_and_claims(joined_lines)
+            if isinstance(ops_claims_raw, (_MappingABC, dict)):
+                ops_claims = dict(ops_claims_raw)
+            else:
+                ops_claims = {}
+
+            ops_hint: dict[str, Any] = {}
+            try:
+                hint_payload = geo_map_for_drill.get("ops_totals_hint")
+            except Exception:
+                hint_payload = None
+            if isinstance(hint_payload, (_MappingABC, dict)):
+                ops_hint = dict(hint_payload)
+
+            counts_by_diam_raw: dict[float, int] = {}
+            for row in sanitized_rows:
+                key = round(float(row.get("diameter_in", 0.0) or 0.0), 4)
+                qty_val = int(row.get("qty", 0))
+                if qty_val <= 0:
+                    continue
+                counts_by_diam_raw[key] = counts_by_diam_raw.get(key, 0) + qty_val
+
+            counts_by_diam = _adjust_drill_counts(
+                counts_by_diam_raw,
+                ops_claims,
+                ops_hint,
+            )
+            drill_actions = int(sum(counts_by_diam.values()))
+            _push(
+                lines,
+                f"[DEBUG] DRILL bins raw={sum(counts_by_diam_raw.values())} adj={drill_actions}",
+            )
+            ops_hole_count_from_table = drill_actions
+
+            remaining_counts = dict(counts_by_diam)
+            adjusted_rows: list[dict[str, Any]] = []
+            for row in sanitized_rows:
+                key = round(float(row.get("diameter_in", 0.0) or 0.0), 4)
+                available = int(remaining_counts.get(key, 0))
+                if available <= 0:
+                    continue
+                orig_qty = int(row.get("qty", 0))
+                use_qty = min(orig_qty, available)
+                if use_qty <= 0:
+                    continue
+                new_row = dict(row)
+                new_row["qty"] = use_qty
+                minutes_per = float(new_row.get("minutes_per_hole", 0.0) or 0.0)
+                new_row["group_minutes"] = minutes_per * float(use_qty)
+                remaining_counts[key] = max(0, available - use_qty)
+                adjusted_rows.append(new_row)
+
+            sanitized_rows = [row for row in adjusted_rows if int(row.get("qty", 0)) > 0]
+            subtotal_minutes = sum(
+                float(row.get("group_minutes", 0.0) or 0.0) for row in sanitized_rows
+            )
+
         if sanitized_rows:
             lines.append("MATERIAL REMOVAL – DRILLING")
             lines.append("=" * 64)
