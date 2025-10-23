@@ -466,6 +466,201 @@ def _normalize_buckets(bucket_view_obj: MutableMapping[str, Any] | Mapping[str, 
     logging.debug(f"[buckets-final] {buckets_snapshot or {}}")
 
 
+def _get_chart_lines_for_ops(
+    breakdown: Mapping[str, Any] | None, result: Mapping[str, Any] | None
+) -> list[str]:
+    def _geo(m):
+        if not isinstance(m, _MappingABC):
+            return {}
+        return m.get("geo_context") or m.get("geo") or m.get("geom") or {}
+
+    for src in (breakdown, result, (_MappingABC({}) if False else {})):
+        g = _geo(src)
+        if isinstance(g, _MappingABC):
+            cl = g.get("chart_lines")
+            if isinstance(cl, list) and cl:
+                return [str(x) for x in cl if isinstance(x, (str, bytes))]
+        if isinstance(src, _MappingABC):
+            cl = src.get("chart_lines")
+            if isinstance(cl, list) and cl:
+                return [str(x) for x in cl if isinstance(x, (str, bytes))]
+    return []
+
+
+_QTY_PAREN_RE = re.compile(r"^\s*\((\d+)\)\s*")
+_CB_DIA_RE = re.compile(
+    r"[Ø⌀\u00D8]?\s*([0-9]+(?:\.[0-9]+)?)\s*(?:C[’']?\s*BORE|CBORE|COUNTER\s*BORE)",
+    re.I,
+)
+_X_DEPTH_RE = re.compile(r"[×x]\s*([0-9]+(?:\.[0-9]+)?)")
+_BACK_RE = re.compile(r"\bFROM\s+BACK\b", re.I)
+_FRONT_RE = re.compile(r"\bFROM\s+FRONT\b", re.I)
+_BOTH_RE = re.compile(r"\bFRONT\s*&\s*BACK|BOTH\s+SIDES|2\s+SIDES\b", re.I)
+_SPOT_RE_TXT = re.compile(r"(?:C[’']?\s*DRILL|CENTER\s*DRILL|SPOT\s*DRILL|SPOT\b)", re.I)
+_JIG_RE_TXT = re.compile(r"\bJIG\s*GRIND\b", re.I)
+
+
+def _bucket_add_minutes(
+    breakdown_mutable: MutableMapping[str, Any],
+    key: str,
+    minutes: float,
+    rates: Mapping[str, Any] | None,
+) -> None:
+    if minutes <= 0:
+        return
+    # mirror drilling's bucket insertion
+    bucket_view_obj = breakdown_mutable.setdefault("bucket_view", {})
+    buckets_obj = bucket_view_obj.setdefault("buckets", {})
+    mode = _bucket_cost_mode(key)
+    rate = _lookup_bucket_rate(key, rates) or _lookup_bucket_rate("machine", rates) or 0.0
+    labor_rate = _lookup_bucket_rate("labor", rates) or 0.0
+    if mode == "labor":
+        labor_cost = round((minutes / 60.0) * (labor_rate if labor_rate > 0 else rate), 2)
+        machine_cost = 0.0
+    else:
+        machine_cost = round((minutes / 60.0) * rate, 2)
+        labor_cost = 0.0
+    total_cost = round(machine_cost + labor_cost, 2)
+    entry = buckets_obj.setdefault(
+        key, {"minutes": 0.0, "labor$": 0.0, "machine$": 0.0, "total$": 0.0}
+    )
+    entry["minutes"] = round(float(minutes), 2)
+    entry["labor$"] = labor_cost
+    entry["machine$"] = machine_cost
+    entry["total$"] = total_cost
+    order = bucket_view_obj.setdefault("order", [])
+    if key not in order:
+        order.append(key)
+
+
+def _build_ops_cards_from_chart_lines(
+    *,
+    breakdown: Mapping[str, Any] | None,
+    result: Mapping[str, Any] | None,
+    rates: Mapping[str, Any] | None,
+    breakdown_mutable: MutableMapping[str, Any] | None,
+) -> list[str]:
+    """Return extra MATERIAL REMOVAL cards for Counterbore / Spot / Jig."""
+
+    lines: list[str] = []
+    chart_lines = _get_chart_lines_for_ops(breakdown, result)
+    if not chart_lines:
+        return lines
+
+    # --- Aggregate groups from text lines ------------------------------------
+    cb_groups: dict[tuple[float | None, str, float | None], int] = {}
+    spot_qty = 0
+    jig_qty = 0
+
+    for raw in chart_lines:
+        s = str(raw or "")
+        if not s.strip():
+            continue
+        qty = 1
+        mqty = _QTY_PAREN_RE.search(s)
+        if mqty:
+            try:
+                qty = int(mqty.group(1))
+            except Exception:
+                qty = 1
+
+        U = s.upper()
+        side = "FRONT"
+        if _BOTH_RE.search(U):
+            side = "BOTH"
+        elif _BACK_RE.search(U):
+            side = "BACK"
+        elif _FRONT_RE.search(U):
+            side = "FRONT"
+
+        # Counterbore rows
+        if re.search(RE_CBORE, U):
+            md = _CB_DIA_RE.search(s)
+            dia = float(md.group(1)) if md else None
+            mdepth = _X_DEPTH_RE.search(s)
+            depth = float(mdepth.group(1)) if mdepth else None
+            if side == "BOTH":
+                for sd in ("FRONT", "BACK"):
+                    cb_groups[(dia, sd, depth)] = cb_groups.get((dia, sd, depth), 0) + qty
+            else:
+                cb_groups[(dia, side, depth)] = cb_groups.get((dia, side, depth), 0) + qty
+            continue
+
+        # Spots (standalone)
+        if _SPOT_RE_TXT.search(U) and ("TAP" not in U) and ("THRU" not in U):
+            spot_qty += qty
+            continue
+
+        # Jig grind calls (standalone)
+        if _JIG_RE_TXT.search(U):
+            jig_qty += qty
+            continue
+
+    # --- Emit COUNTERBORE card ----------------------------------------------
+    if cb_groups:
+        total_cb = sum(cb_groups.values())
+        front_cb = sum(q for (d, side, dep), q in cb_groups.items() if side == "FRONT")
+        back_cb = sum(q for (d, side, dep), q in cb_groups.items() if side == "BACK")
+        lines += [
+            "MATERIAL REMOVAL – COUNTERBORE",
+            "=" * 64,
+            "Inputs",
+            f"  Ops ............... Counterbore (front + back)",
+            f"  Counterbores ...... {total_cb} total  → {front_cb} front, {back_cb} back",
+            "",
+            "TIME PER HOLE – C’BORE GROUPS",
+            "-" * 66,
+        ]
+        cb_minutes = 0.0
+        per = float(CBORE_MIN_PER_SIDE_MIN or 0.15)
+        for (dia, side, depth), qty in sorted(
+            cb_groups.items(),
+            key=lambda k: ((k[0][0] or 0.0), k[0][1], (k[0][2] or 0.0)),
+        ):
+            dia_txt = "—" if dia is None else f'Ø{dia:.4f}"'
+            dep_txt = "—" if depth is None else f'{depth:.2f}"'
+            t_group = qty * per
+            cb_minutes += t_group
+            lines.append(
+                f"{dia_txt} × {qty}  ({side}) | depth {dep_txt} | t/hole {per:.2f} min | group {qty}×{per:.2f} = {t_group:.2f} min"
+            )
+        lines.append("")
+        if isinstance(breakdown_mutable, _MutableMappingABC):
+            _bucket_add_minutes(breakdown_mutable, "counterbore", cb_minutes, rates)
+
+    # --- Emit SPOT & JIG cards ----------------------------------------------
+    if spot_qty > 0:
+        per_spot = 0.05
+        t_group = spot_qty * per_spot
+        lines += [
+            "MATERIAL REMOVAL – SPOT (CENTER DRILL)",
+            "=" * 64,
+            "TIME PER HOLE – SPOT GROUPS",
+            "-" * 66,
+            f"Spot drill × {spot_qty} | t/hole {per_spot:.2f} min | group {spot_qty}×{per_spot:.2f} = {t_group:.2f} min",
+            "",
+        ]
+        if isinstance(breakdown_mutable, _MutableMappingABC):
+            _bucket_add_minutes(breakdown_mutable, "drilling", t_group, rates)
+
+    if jig_qty > 0:
+        per_jig = float((globals().get("JIG_GRIND_MIN_PER_FEATURE") or 15.0) / 60.0)
+        per_jig = float(JIG_GRIND_MIN_PER_FEATURE)
+        t_group = jig_qty * per_jig
+        lines += [
+            "MATERIAL REMOVAL – JIG GRIND",
+            "=" * 64,
+            "TIME PER FEATURE",
+            "-" * 66,
+            f"Jig grind × {jig_qty} | t/feat {per_jig:.2f} min | group {jig_qty}×{per_jig:.2f} = {t_group:.2f} min",
+            "",
+        ]
+        if isinstance(breakdown_mutable, _MutableMappingABC):
+            _bucket_add_minutes(breakdown_mutable, "grinding", t_group, rates)
+
+    return lines
+
+
 def _as_float(x: Any, default: float = 0.0) -> float:
     try:
         v = float(x)
@@ -9846,6 +10041,27 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
         except Exception:
             new_ops_lines = []
         removal_summary_lines.extend(new_ops_lines)
+
+        if not new_ops_lines:
+            breakdown_mutable: MutableMapping[str, Any] | None
+            if isinstance(breakdown, dict):
+                breakdown_mutable = breakdown
+            elif isinstance(breakdown, _MutableMappingABC):
+                breakdown_mutable = typing.cast(MutableMapping[str, Any], breakdown)
+            else:
+                breakdown_mutable = None
+
+            fallback_lines = _build_ops_cards_from_chart_lines(
+                breakdown=breakdown,
+                result=result,
+                rates=rates,
+                breakdown_mutable=breakdown_mutable,
+            )
+            if fallback_lines:
+                lines.extend(fallback_lines)
+                for entry in fallback_lines:
+                    if isinstance(entry, str) and not entry.startswith("[DEBUG]"):
+                        removal_summary_lines.append(entry)
 
         try:
             extra_bucket_ops = None
