@@ -544,7 +544,7 @@ def _parse_qty(s: str) -> int:
     m = re.match(r"\s*\((\d+)\)\s*", s)
     if m:
         return int(m.group(1))
-    m = re.search(r"(?<!\d)(\d+)\s*[xX×]\b?", s)
+    m = re.search(r"(?<![\d.])(\d+)\s*[xX×](?!\w)", s)
     if m:
         return int(m.group(1))
     m = re.search(r"\bQTY[:\s]+(\d+)\b", s, re.I)
@@ -677,8 +677,8 @@ def _build_ops_cards_from_chart_lines(
             if side == "BOTH":
                 for sd in ("FRONT", "BACK"):
                     cb_groups[(dia, sd, depth)] = cb_groups.get((dia, sd, depth), 0) + qty
-                else:
-                    cb_groups[(dia, side, depth)] = cb_groups.get((dia, side, depth), 0) + qty
+            else:
+                cb_groups[(dia, side, depth)] = cb_groups.get((dia, side, depth), 0) + qty
             continue
 
         # Spots (standalone)
@@ -938,7 +938,7 @@ def _parse_qty(s: str) -> int:
     m = re.match(r"\s*\((\d+)\)\s*", s)
     if m:
         return int(m.group(1))
-    m = re.search(r"(?<!\d)(\d+)\s*[xX]\b", s)
+    m = re.search(r"(?<![\d.])(\d+)\s*[xX×](?!\w)", s)
     if m:
         return int(m.group(1))
     m = re.search(r"\bQTY[:\s]+(\d+)\b", s, re.I)
@@ -2138,6 +2138,80 @@ def _emit_hole_table_ops_cards(
             bucket_view_obj = None
 
         tap_rows = _finalize_tapping_rows(rows, thickness_in=thickness_in)
+
+        def _extract_ops_claims_map(
+            *sources: Mapping[str, Any] | MutableMapping[str, Any] | None,
+        ) -> Mapping[str, Any] | None:
+            for candidate in sources:
+                if not isinstance(candidate, (_MappingABC, dict)):
+                    continue
+                try:
+                    claims_candidate = candidate.get("ops_claims")  # type: ignore[index]
+                except Exception:
+                    claims_candidate = None
+                if isinstance(claims_candidate, (_MappingABC, dict)):
+                    return typing.cast(Mapping[str, Any], claims_candidate)
+            return None
+
+        ops_claims_map = _extract_ops_claims_map(geo, breakdown, result)
+        if ops_claims_map is None and isinstance(ops_summary, _MappingABC):
+            try:
+                claims_candidate = ops_summary.get("claims")
+            except Exception:
+                claims_candidate = None
+            if isinstance(claims_candidate, (_MappingABC, dict)):
+                ops_claims_map = typing.cast(Mapping[str, Any], claims_candidate)
+
+        def _int_or_zero(value: Any) -> int:
+            try:
+                num = float(value)
+            except Exception:
+                return 0
+            if not math.isfinite(num):
+                return 0
+            return int(round(num))
+
+        npt_qty = _int_or_zero(ops_claims_map.get("npt")) if ops_claims_map else 0
+        if npt_qty <= 0:
+            npt_qty = 0
+            for entry in rows:
+                if not isinstance(entry, _MappingABC):
+                    continue
+                try:
+                    qty_val = int(entry.get("qty") or 0)
+                except Exception:
+                    qty_val = 0
+                if qty_val <= 0:
+                    continue
+                desc_text = str(entry.get("desc") or "").upper()
+                if "NPT" in desc_text and "TAP" not in desc_text:
+                    npt_qty += qty_val
+
+        if npt_qty > 0:
+            existing_npt = any(
+                "NPT" in str(row.get("thread") or row.get("desc") or "").upper()
+                for row in tap_rows
+            )
+            if not existing_npt:
+                depth_val = float(thickness_in or 0.0)
+                depth_display = f"{depth_val:.2f}\"" if depth_val > 0 else "THRU"
+                per_hole = 0.20
+                tap_rows.append(
+                    {
+                        "label": "1/8- NPT TAP",
+                        "desc": "1/8- NPT TAP",
+                        "thread": "1/8- NPT",
+                        "qty": int(npt_qty),
+                        "side": "FRONT",
+                        "t_per_hole_min": per_hole,
+                        "feed_fmt": "- ipr | - rpm | - ipm",
+                        "depth_in": depth_val,
+                        "depth_in_display": depth_display,
+                        "ipr": 0.0,
+                        "rpm": 0,
+                        "ipm": 0.0,
+                    }
+                )
         tap_total_min = 0.0
         if tap_rows:
             tap_total_min = _render_ops_card(
@@ -8905,6 +8979,7 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
     removal_card_lines: list[str] = []
     removal_summary_lines: list[str] = []
     removal_summary_extra_lines: list[str] = []
+    removal_summary_lines: list[str] = []
     removal_card_extra: dict[str, float] = {}
     speeds_feeds_table = None
     if isinstance(result, _MappingABC):
@@ -10785,6 +10860,37 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
 
     ops_claims: dict[str, int] = {}
 
+    def _normalize_ops_claims_map(candidate: Any) -> dict[str, int]:
+        if not isinstance(candidate, (_MappingABC, dict)):
+            return {}
+        normalized: dict[str, int] = {}
+        for key, value in candidate.items():
+            try:
+                normalized[str(key)] = int(round(float(value)))
+            except Exception:
+                continue
+        return normalized
+
+    def _stash_ops_claims(claims: dict[str, int]) -> None:
+        if not claims:
+            return
+        if isinstance(breakdown_mutable, _MutableMappingABC):
+            try:
+                breakdown_mutable["_ops_claims"] = dict(claims)
+            except Exception:
+                pass
+
+    try:
+        stashed_claims = (
+            breakdown_mutable.get("_ops_claims")
+            if isinstance(breakdown_mutable, _MappingABC)
+            else None
+        )
+    except Exception:
+        stashed_claims = None
+    if stashed_claims:
+        ops_claims = _normalize_ops_claims_map(stashed_claims)
+
     def _extract_ops_claims(source: Any) -> dict[str, int]:
         if not isinstance(source, (_MappingABC, dict)):
             return {}
@@ -10808,6 +10914,7 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
         extracted_claims = _extract_ops_claims(candidate_source)
         if extracted_claims:
             ops_claims = extracted_claims
+            _stash_ops_claims(dict(ops_claims))
             break
 
     if not ops_claims and (joined_lines or ops_rows_now):
@@ -10829,6 +10936,7 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
                     continue
             if extracted:
                 ops_claims = extracted
+                _stash_ops_claims(dict(ops_claims))
 
     # Append extra MATERIAL REMOVAL cards (Counterbore / Spot / Jig) from JOINED lines
     _appended_at_print = _append_counterbore_spot_jig_cards(
@@ -10847,8 +10955,19 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
                 return True
         return False
 
+    try:
+        ops_claims_for_cards = (
+            _normalize_ops_claims_map(breakdown_mutable.get("_ops_claims"))
+            if isinstance(breakdown_mutable, _MappingABC)
+            else {}
+        )
+    except Exception:
+        ops_claims_for_cards = {}
+    if not ops_claims_for_cards:
+        ops_claims_for_cards = dict(ops_claims)
+
     spot_heading = "MATERIAL REMOVAL – SPOT (CENTER DRILL)"
-    spot_qty = int(ops_claims.get("spot") or 0)
+    spot_qty = int(ops_claims_for_cards.get("spot") or 0)
     if spot_qty > 0 and not _card_heading_exists(spot_heading):
         removal_card_lines.extend([
             spot_heading,
@@ -10860,7 +10979,7 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
         ])
 
     jig_heading = "MATERIAL REMOVAL – JIG GRIND"
-    jig_qty = int(ops_claims.get("jig") or 0)
+    jig_qty = int(ops_claims_for_cards.get("jig") or 0)
     if jig_qty > 0 and not _card_heading_exists(jig_heading):
         per_jig = float(globals().get("JIG_GRIND_MIN_PER_FEATURE") or 0.75)
         removal_card_lines.extend([
@@ -10876,7 +10995,10 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
         str(line) for line in removal_card_lines if isinstance(line, str)
     ]
     if removal_summary_extra_lines:
-        removal_summary_lines.extend(removal_summary_extra_lines)
+        for entry in removal_summary_extra_lines:
+            entry_text = str(entry)
+            if entry_text not in removal_summary_lines:
+                removal_summary_lines.append(entry_text)
 
     append_lines(removal_card_lines)
 
@@ -11341,20 +11463,11 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
                     if isinstance(entry, str) and not entry.startswith("[DEBUG]"):
                         removal_summary_extra_lines.append(entry)
 
-        removal_card_line_strings = [
-            str(line) for line in removal_card_lines if isinstance(line, str)
-        ]
-        removal_summary_lines = list(removal_card_line_strings)
-        if removal_summary_extra_lines:
-            card_line_counts = Counter(removal_card_line_strings)
-            skipped_counts: Counter[str] = Counter()
-
-            for entry in removal_summary_extra_lines:
-                entry_str = entry if isinstance(entry, str) else str(entry)
-                if skipped_counts[entry_str] < card_line_counts.get(entry_str, 0):
-                    skipped_counts[entry_str] += 1
-                    continue
-                removal_summary_lines.append(entry_str)
+    removal_summary_lines = [
+        str(line) for line in removal_card_lines if isinstance(line, str)
+    ]
+    if removal_summary_extra_lines:
+        removal_summary_lines.extend(removal_summary_extra_lines)
 
         printed_sections = {
             "tapping": any(
@@ -11420,24 +11533,12 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
                                 {"name": name_text, "qty": qty_val, "side": side_val}
                             )
         except Exception as exc:
-            actions_summary_ready = False
             logging.debug(
                 "[actions-summary] skipped due to %s: %s",
                 exc.__class__.__name__,
                 exc,
                 exc_info=False,
             )
-
-        if actions_summary_ready:
-            try:
-                summarize_actions(removal_summary_lines, planner_ops_summary)
-            except Exception as exc:
-                logging.debug(
-                    "[actions-summary] skipped due to %s: %s",
-                    exc.__class__.__name__,
-                    exc,
-                    exc_info=False,
-                )
 
         milling_bucket_obj = None
         bucket_view_snapshot = (
@@ -11449,6 +11550,8 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
 
     except Exception as e:
         _push(lines, f"[DEBUG] material_removal_emit_skipped={e.__class__.__name__}: {e}")
+
+    removal_summary_lines = _collect_removal_summary_lines()
     # ========================================================================
 
     planner_ops_rows_for_audit: Any
@@ -11457,13 +11560,17 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
     else:
         planner_ops_rows_for_audit = ops_rows
 
+    removal_summary_lines_for_audit = locals().get("removal_summary_lines") or []
     removal_sections_text = "\n".join(
         str(line)
-        for line in removal_summary_lines
+        for line in removal_summary_lines_for_audit
         if isinstance(line, str)
     )
 
-    ops_counts = audit_operations(planner_ops_rows_for_audit, removal_sections_text)
+    ops_counts = audit_operations(
+        planner_ops_rows_for_audit,
+        removal_sections_text,
+    )
 
     print(
         f"[ops-audit] drills={ops_counts.get('drills', 0)} "
@@ -16480,7 +16587,6 @@ def aggregate_ops(
             totals["jig_grind"] += qty
         if op_type == "tap" and dia_key is not None and dia_key > 0:
             tap_claim_bins[dia_key] += qty
-            claimed_pilot_diams.extend([float(dia_key)] * qty)
 
     totals["tap_total"] = totals.get("tap_front", 0) + totals.get("tap_back", 0)
     totals["cbore_total"] = totals.get("cbore_front", 0) + totals.get("cbore_back", 0)
@@ -16488,12 +16594,45 @@ def aggregate_ops(
     totals["spot_total"] = totals.get("spot_front", 0) + totals.get("spot_back", 0)
 
     drill_subtracted_total = 0
+    processed_dia_keys: set[float] = set()
+    for dia_key, available in drill_claim_bins.items():
+        tap_claim_qty = tap_claim_bins.get(dia_key, 0)
+        subtract = min(available, tap_claim_qty) if tap_claim_qty else available
+        if subtract <= 0:
+            processed_dia_keys.add(dia_key)
+            continue
+        drill_subtracted_total += subtract
+        claimed_pilot_diams.extend([float(dia_key)] * subtract)
+        remaining = subtract
+        for bucket in drill_group_refs.get(dia_key, []):
+            qty_val = int(_coerce_float_or_none(bucket.get("qty")) or 0)
+            if qty_val <= 0:
+                continue
+            take = min(qty_val, remaining)
+            bucket["qty"] = qty_val - take
+            remaining -= take
+            if remaining <= 0:
+                break
+        remaining_detail = subtract
+        for entry in drill_detail_refs.get(dia_key, []):
+            entry_qty = int(_coerce_float_or_none(entry.get("qty")) or 0)
+            if entry_qty <= 0:
+                continue
+            take = min(entry_qty, remaining_detail)
+            entry["qty"] = entry_qty - take
+            remaining_detail -= take
+            if remaining_detail <= 0:
+                break
+        processed_dia_keys.add(dia_key)
     for dia_key, claim_qty in tap_claim_bins.items():
+        if dia_key in processed_dia_keys:
+            continue
         available = drill_claim_bins.get(dia_key, 0)
         subtract = min(available, claim_qty)
         if subtract <= 0:
             continue
         drill_subtracted_total += subtract
+        claimed_pilot_diams.extend([float(dia_key)] * subtract)
         remaining = subtract
         for bucket in drill_group_refs.get(dia_key, []):
             qty_val = int(_coerce_float_or_none(bucket.get("qty")) or 0)
