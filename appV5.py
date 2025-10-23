@@ -11090,6 +11090,7 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
             ])
 
             fallback_row_lines: list[str] = []
+            rows_for_parse: Sequence[Mapping[str, Any]] | None = None
             if not joined_early and isinstance(built, Sequence):
                 for entry in built:
                     if not isinstance(entry, _MappingABC):
@@ -11105,9 +11106,11 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
                         continue
                     fallback_row_lines.append(f"({qty_val}) {desc}")
 
+                rows_for_parse = built
+
             ops_claims = _parse_ops_and_claims(
                 joined_early or fallback_row_lines,
-                rows=built,
+                rows=rows_for_parse,
             )
             _push(
                 lines,
