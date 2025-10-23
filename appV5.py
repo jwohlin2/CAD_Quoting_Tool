@@ -10793,7 +10793,14 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
     geo_map = ((result or {}).get("geo") if isinstance(result, _MappingABC) else None) \
               or ((breakdown or {}).get("geo") if isinstance(breakdown, _MappingABC) else None) \
               or {}
-    chart_lines_all = list((geo_map.get("chart_lines") or []))
+    chart_lines_all = []
+    try:
+        if isinstance(geo_map, _MappingABC):
+            chart_lines_all = list((geo_map.get("chart_lines") or []))
+        elif isinstance(geo_map, Sequence) and not isinstance(geo_map, (str, bytes)):
+            chart_lines_all = list(geo_map)
+    except Exception:
+        chart_lines_all = []
     if not chart_lines_all:
         try:
             chart_lines_all = _collect_chart_lines_context(ctx, geo_map, ctx_a, ctx_b) or []
