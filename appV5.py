@@ -4632,6 +4632,7 @@ def _adjusted_drill_groups_for_display(
             thickness_in,
             ops_claims_map,
             primary_geo,
+            drop_large_holes=False,
         )
     except Exception:
         return []
