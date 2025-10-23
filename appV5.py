@@ -806,74 +806,56 @@ def _build_ops_cards_from_chart_lines(
 # --- Inline ops-cards builder from chart_lines (fallback to rows) ------------
 import re, math
 _JOIN_QTY_RE = re.compile(r"^\s*\((\d+)\)\s*")   # e.g. "(4) ..."
+
+# --- MTEXT cleaning ---------------------------------------------------------
+_MT_ALIGN_RE = re.compile(r"\\A\d;")
+_MT_BREAK_RE = re.compile(r"\\P", re.I)
+_MT_SYMS = {"%%C": "Ø", "%%c": "Ø", "%%D": "°", "%%d": "°", "%%P": "±", "%%p": "±"}
+
+
+def _clean_mtext(s: str) -> str:
+    if not isinstance(s, str):
+        return ""
+    for k, v in _MT_SYMS.items():
+        s = s.replace(k, v)
+    s = _MT_ALIGN_RE.sub("", s)
+    s = _MT_BREAK_RE.sub(" ", s)
+    return re.sub(r"\s+", " ", s).strip()
+
+
+# --- Row start tokens (incl Ø and %%C) -------------------------------------
 _JOIN_START_TOKENS = re.compile(
-    r"(?:^\s*\(\d+\)\s*)"               # starts with "(n)"
-    r"|(?:\bTAP\b)"                     # a TAP line starts a new row
-    r"|(?:C[’']?\s*BORE|CBORE|COUNTER\s*BORE)"  # counterbore token
-    r"|(?:%%[Cc]|[Ø⌀\u00D8])"            # diameter symbol / MTEXT %%C
-    r"|(?:C[’']?\s*DRILL|CENTER\s*DRILL|SPOT\s*DRILL\b)"  # spot callouts
-    , re.I
-)
-_MTEXT_LINEBREAK_RE = re.compile(r"\\P", re.I)
-_MTEXT_CONTROL_RE = re.compile(
-    r"\\(?:A[0-9]+|C[0-9A-F]+|F[^;]*|H[-0-9.]+|O|L|Q[^;]*|S[^;]*|T|W[^;]*);?",
+    r"(?:^\s*\(\d+\)\s*)"                   # "(n) ..."
+    r"|(?:\bTAP\b|N\.?P\.?T\.?)"            # TAP / NPT
+    r"|(?:C[’']?\s*BORE|CBORE|COUNTER\s*BORE)"
+    r"|(?:[Ø⌀\u00D8]|%%[Cc])"                  # Ø/%%C
+    r"|(?:C[’']?\s*DRILL|CENTER\s*DRILL|SPOT\s*DRILL\b)",
     re.I,
 )
-_MTEXT_ESCAPES: dict[str, str] = {
-    "\\~": "~",
-    "\\{": "{",
-    "\\}": "}",
-    "\\;": ";",
-    "\\%": "%",
-    "\\\\": "\\",
-}
-
-
-def _clean_mtext(value: Any) -> str:
-    """Normalize DXF MTEXT fragments for downstream parsing."""
-
-    text = "" if value is None else str(value)
-    if not text:
-        return ""
-
-    text = text.replace("\r", " ")
-    text = text.replace("\n", " ")
-    text = _MTEXT_LINEBREAK_RE.sub(" ", text)
-    for token, replacement in _MTEXT_ESCAPES.items():
-        text = text.replace(token, replacement)
-    text = _MTEXT_CONTROL_RE.sub(" ", text)
-    text = re.sub(r"\\[PpNn]", " ", text)
-    text = re.sub(r"\\+", " ", text)
-    text = re.sub(r"\s+", " ", text)
-    return text.strip()
 
 
 def _join_wrapped_chart_lines(chart_lines: list[str]) -> list[str]:
-    """
-    Coalesce wrapped hole-table lines:
-      - Start a new record if line has (n), TAP, C'BORE, Ø, or SPOT tokens.
-      - Otherwise append the line to the current record.
-    """
-    if not isinstance(chart_lines, list) or not chart_lines:
+    if not chart_lines:
         return []
-    out, buf = [], ""
+    out: list[str] = []
+    buf = ""
 
-    def _flush():
+    def flush() -> None:
         nonlocal buf
         if buf.strip():
             out.append(re.sub(r"\s+", " ", buf).strip())
         buf = ""
 
     for raw in chart_lines:
-        s = str(raw or "")
-        if not s.strip():
+        s = _clean_mtext(str(raw or ""))
+        if not s:
             continue
         if _JOIN_START_TOKENS.search(s):
-            _flush()
+            flush()
             buf = s
         else:
             buf += " " + s
-    _flush()
+    flush()
     return out
 _CB_DIA_RE = re.compile(
     # Case A: symbol BEFORE the number: "Ø .750 C'BORE" or "%%C .750 C'BORE"
