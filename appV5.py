@@ -944,7 +944,7 @@ def _collect_pilot_claims_from_rows(geo: Mapping[str, Any] | None) -> list[float
             qty = 1
 
         desc_compact = desc.replace(" ", "")
-        tap_hint = bool(re.search(r"\b(?:TAP|THREAD|THD)\b", desc))
+        tap_hint = bool(re.search(r"\b(?:TAP\w*|THREAD\w*|THD\w*)\b", desc))
         npt_hint = bool(re.search(r"\bN\.?P\.?T\.?\b", desc))
 
         # UN taps
