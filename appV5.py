@@ -3054,15 +3054,41 @@ def summarize_actions(removal_lines: list[str], planner_ops: list[dict]) -> None
     spotln_re = re.compile(r'^\s*MATERIAL REMOVAL – SPOT|Spot drill ×\s*(\d+)', re.IGNORECASE)
     jigln_re = re.compile(r'^\s*MATERIAL REMOVAL – JIG GRIND|Jig grind ×\s*(\d+)', re.IGNORECASE)
     qty_re = re.compile(r'[×x]\s*(\d+)')
+    cbo_hdr_re = re.compile(r'^\s*MATERIAL\s+REMOVAL\s*[–-]\s*COUNTERBORE', re.IGNORECASE)
+    cbo_line_re = re.compile(
+        r'^\s*(?:Ø|%%[Cc])?\s*'                  # optional Ø/%%C before number
+        r'([0-9]+(?:\.[0-9]+)?|\.[0-9]+|\d+/\d+)'  # dia: 0.750, .623, 13/32
+        r'(?:\s*"?\s*)?.*?'                      # optional inch mark & fluff
+        r'[×xX]\s*(\d+)'                         # "× 4" or "x4"
+        r'.*?\((FRONT|BACK)\)'                   # side in parens
+        ,
+        re.IGNORECASE,
+    )
+    cbo_line_noside_re = re.compile(
+        r'^\s*(?:Ø|%%[Cc])?\s*([0-9]+(?:\.[0-9]+)?|\.[0-9]+|\d+/\d+)'
+        r'(?:\s*"?\s*)?.*?[×xX]\s*(\d+)',
+        re.IGNORECASE,
+    )
 
     card_counts = {"counterbore": False, "spot": False, "jig_grind": False}
     active_card: str | None = None
+    in_cbo = False
 
     for ln in removal_lines or []:
         if not isinstance(ln, str):
             continue
 
         header = ln.upper().strip()
+        if cbo_hdr_re.search(header):
+            in_cbo = True
+        elif in_cbo and (
+            header.startswith("MATERIAL REMOVAL")
+            or header.startswith("TIME PER HOLE")
+            or not header
+        ):
+            if not cbo_hdr_re.search(header):
+                in_cbo = False
+
         if header.startswith("MATERIAL REMOVAL –"):
             if "COUNTERBORE" in header:
                 active_card = "counterbore"
@@ -3078,12 +3104,30 @@ def summarize_actions(removal_lines: list[str], planner_ops: list[dict]) -> None
 
         if not ln.strip():
             active_card = None
+            in_cbo = False
             continue
 
         if ln.strip().startswith("-") or ln.strip().startswith("="):
             continue
 
-        if active_card in {"counterbore", "spot", "jig_grind"}:
+        if in_cbo:
+            m = cbo_line_re.search(ln)
+            if m:
+                qty = int(m.group(2))
+                side = m.group(3).upper()
+                total["counterbore"] += qty
+                by_side["counterbore"][side.lower()] += qty
+                card_counts["counterbore"] = True
+                continue
+            m2 = cbo_line_noside_re.search(ln)
+            if m2:
+                qty = int(m2.group(2))
+                total["counterbore"] += qty
+                by_side["counterbore"]["front"] += qty
+                card_counts["counterbore"] = True
+                continue
+
+        if active_card in {"spot", "jig_grind"}:
             qty_match = qty_re.search(ln)
             if qty_match:
                 qty = int(qty_match.group(1))
