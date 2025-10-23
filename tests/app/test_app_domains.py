@@ -933,6 +933,95 @@ def test_adjust_drill_counts_sanitizes_inputs() -> None:
         assert qty <= counts_raw.get(dia, 0)
 
 
+def test_apply_ops_audit_counts_merges_claims() -> None:
+    import appV5
+
+    ops_counts: dict[str, int] = {
+        "drills": 0,
+        "taps_total": 0,
+        "taps_front": 0,
+        "taps_back": 0,
+        "counterbores_total": 0,
+        "counterbores_front": 0,
+        "counterbores_back": 0,
+        "spot": 0,
+        "counterdrill": 0,
+        "jig_grind": 0,
+        "actions_total": 0,
+    }
+
+    claims = {
+        "tap": 4,
+        "cb_groups": {
+            (0.5, "FRONT", None): 3,
+            (0.5, "BACK", None): 1,
+        },
+        "spot": 2,
+        "counterdrill": 1,
+        "jig": 5,
+    }
+
+    updated = appV5._apply_ops_audit_counts(
+        ops_counts,
+        drill_actions=6,
+        ops_claims=claims,
+    )
+
+    assert updated["drills"] == 6
+    assert updated["taps_total"] == 4
+    assert updated["counterbores_total"] == 4
+    assert updated["counterbores_front"] == 3
+    assert updated["counterbores_back"] == 1
+    assert updated["spot"] == 2
+    assert updated["counterdrill"] == 1
+    assert updated["jig_grind"] == 5
+    assert updated["actions_total"] == 6 + 4 + 4 + 1 + 2 + 5
+
+    audit_claims = updated.get("_audit_claims", {})
+    assert audit_claims.get("drill") == 6
+    assert audit_claims.get("tap") == 4
+    assert audit_claims.get("cbore") == 4
+
+
+def test_apply_ops_audit_counts_preserves_larger_existing() -> None:
+    import appV5
+
+    ops_counts: dict[str, int] = {
+        "drills": 9,
+        "taps_total": 7,
+        "taps_front": 7,
+        "taps_back": 0,
+        "counterbores_total": 5,
+        "counterbores_front": 5,
+        "counterbores_back": 0,
+        "spot": 3,
+        "counterdrill": 2,
+        "jig_grind": 1,
+        "actions_total": 27,
+    }
+
+    claims = {
+        "tap": 2,
+        "cb_groups": {},
+        "spot": 1,
+        "counterdrill": 1,
+        "jig": 0,
+    }
+
+    updated = appV5._apply_ops_audit_counts(
+        ops_counts,
+        drill_actions=3,
+        ops_claims=claims,
+    )
+
+    assert updated["drills"] == 9
+    assert updated["taps_total"] == 7
+    assert updated["counterbores_total"] == 5
+    assert updated["spot"] == 3
+    assert updated["counterdrill"] == 2
+    assert updated["jig_grind"] == 1
+    assert updated["actions_total"] == 9 + 7 + 5 + 2 + 3 + 1
+
 @pytest.mark.parametrize(
     "case",
     [
