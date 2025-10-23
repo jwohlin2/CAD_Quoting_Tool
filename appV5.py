@@ -11341,11 +11341,20 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
                     if isinstance(entry, str) and not entry.startswith("[DEBUG]"):
                         removal_summary_extra_lines.append(entry)
 
-        removal_summary_lines = [
+        removal_card_line_strings = [
             str(line) for line in removal_card_lines if isinstance(line, str)
         ]
+        removal_summary_lines = list(removal_card_line_strings)
         if removal_summary_extra_lines:
-            removal_summary_lines.extend(removal_summary_extra_lines)
+            card_line_counts = Counter(removal_card_line_strings)
+            skipped_counts: Counter[str] = Counter()
+
+            for entry in removal_summary_extra_lines:
+                entry_str = entry if isinstance(entry, str) else str(entry)
+                if skipped_counts[entry_str] < card_line_counts.get(entry_str, 0):
+                    skipped_counts[entry_str] += 1
+                    continue
+                removal_summary_lines.append(entry_str)
 
         printed_sections = {
             "tapping": any(
