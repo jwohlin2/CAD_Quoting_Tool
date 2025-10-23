@@ -904,7 +904,7 @@ def test_adjust_drill_counts_subtracts_row_pilots() -> None:
     ops_claims = {"claimed_pilot_diams": pilots}
 
     counts_raw = {0.1590: 4, 0.5312: 2, 0.3390: 1}
-    adjusted = appV5._adjust_drill_counts(counts_raw, ops_claims, None)
+    adjusted = appV5._adjust_drill_counts(counts_raw, ops_claims)
 
     assert adjusted[round(0.1590, 4)] == 0
     assert adjusted[round(0.5312, 4)] == 0
@@ -924,7 +924,7 @@ def test_adjust_drill_counts_sanitizes_inputs() -> None:
         },
     }
 
-    adjusted = appV5._adjust_drill_counts(counts_raw, ops_claims, None)
+    adjusted = appV5._adjust_drill_counts(counts_raw, ops_claims)
 
     assert adjusted[round(0.25, 4)] == 0
     assert adjusted[round(0.5, 4)] == 3
