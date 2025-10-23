@@ -45,6 +45,7 @@ from cad_quoter.app.op_parser import (  # noqa: E402  # pylint: disable=wrong-im
         (["(4) Center Drill", "(1) Spot Drill"], 0),
         (["COUNTERDRILL"], 1),
         (["(5) COUNTER DRILL", "(2) center drill"], 5),
+        (["(2) C’ DRILL"], 2),
     ],
 )
 def test_count_counterdrill(lines: list[str], expected: int) -> None:
