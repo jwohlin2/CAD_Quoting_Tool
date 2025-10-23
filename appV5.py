@@ -11583,6 +11583,17 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
         removal_sections_text,
     )
 
+    drill_actions = int(ops_counts.get("drills", 0))
+    for key in ("tap", "npt", "cb_total", "spot", "jig"):
+        if key not in ops_claims:
+            ops_claims[key] = 0
+    _push(
+        lines,
+        f"[DEBUG] OPS TALLY  drill={drill_actions} tap={ops_claims['tap']} "
+        f"npt={ops_claims['npt']} cbore={ops_claims['cb_total']} "
+        f"spot={ops_claims['spot']} jig={ops_claims['jig']}",
+    )
+
     print(
         f"[ops-audit] drills={ops_counts.get('drills', 0)} "
         f"taps_total={ops_counts.get('taps_total', 0)} "
