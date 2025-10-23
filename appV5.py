@@ -944,19 +944,25 @@ def _collect_pilot_claims_from_rows(geo: Mapping[str, Any] | None) -> list[float
             qty = 1
 
         desc_compact = desc.replace(" ", "")
+        tap_hint = bool(re.search(r"\b(?:TAP\w*|THREAD\w*|THD\w*)\b", desc))
+        npt_hint = bool(re.search(r"\bN\.?P\.?T\.?\b", desc))
+
         # UN taps
         for spec, dia in _TAP_PILOT_IN.items():
             if spec.replace(" ", "") in desc_compact:
                 vals.extend([float(dia)] * qty)
+                tap_hint = True
 
         # NPT taps
-        if "NPT" in desc:
+        if npt_hint:
             match = re.search(r"((?:\d+/\d+)|(?:\d+\.\d+)|(?:\d+))\s*-\s*27\s*NPT|\b1/8\b", desc)
             if match:
                 vals.extend([_NPT_PILOT_IN["1/8"]] * qty)
 
         # explicit decimals, e.g. "Ø0.201 DRILL THRU" or ".339 THRU"
-        match_decimal = re.search(r"(\d*\.\d+)\s*(?:DRILL\s*)?THRU", desc)
+        match_decimal = None
+        if tap_hint or npt_hint:
+            match_decimal = re.search(r"(\d*\.\d+)\s*(?:DRILL\s*)?THRU", desc)
         if match_decimal:
             try:
                 vals.extend([float(match_decimal.group(1))] * qty)
