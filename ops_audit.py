@@ -1,60 +1,33 @@
+from __future__ import annotations
+
 import re
+import sys
 from collections import defaultdict
+from pathlib import Path
 from typing import Any, Iterable, Mapping, Sequence
 
-_CB_DIA_RE = re.compile(
-    r"(?:(?:[Ø⌀\u00D8]|%%[Cc])\s*)?"
-    r"(?P<numA>\d+(?:\.\d+)?|\.\d+|\d+\s*/\s*\d+)\s*"
-    r"(?:C[’']?\s*BORE|CBORE|COUNTER\s*BORE)"
-    r"|"
-    r"(?P<numB>\d+(?:\.\d+)?|\.\d+|\d+\s*/\s*\d+)\s*"
-    r"(?:[Ø⌀\u00D8]|%%[Cc])\s*"
-    r"(?:C[’']?\s*BORE|CBORE|COUNTER\s*BORE)",
-    re.I,
+_PKG_SRC = Path(__file__).resolve().parent / "cad_quoter_pkg" / "src"
+if _PKG_SRC.is_dir():
+    _pkg_src_str = str(_PKG_SRC)
+    if _pkg_src_str not in sys.path:
+        sys.path.insert(0, _pkg_src_str)
+
+from cad_quoter.app.op_parser import (
+    _CB_DIA_RE,
+    _DRILL_THRU,
+    _JIG_RE_TXT,
+    _LETTER_RE,
+    _SIZE_INCH_RE,
+    _SPOT_RE_TXT,
+    _TAP_RE,
+    _parse_qty as _shared_parse_qty,
+    _side as _shared_side,
 )
-_X_DEPTH_RE = re.compile(r"[×xX]\s*([0-9]+(?:\.[0-9]+)?)")
-_BACK_RE = re.compile(r"\bFROM\s+BACK\b", re.I)
-_FRONT_RE = re.compile(r"\bFROM\s+FRONT\b", re.I)
-_BOTH_RE = re.compile(r"\bFRONT\s*&\s*BACK|BOTH\s+SIDES|2\s+SIDES\b", re.I)
-_SPOT_RE_TXT = re.compile(r"(?:C[’']?\s*DRILL|CENTER\s*DRILL|SPOT\s*DRILL|SPOT\b)", re.I)
-_JIG_RE_TXT = re.compile(r"\bJIG\s*GRIND\b", re.I)
-_TAP_RE = re.compile(
-    r"\b(?:#?\d+[- ]\d+|[1-9]/\d+-\d+|[1-9]/\d+|[\d/]+-NPT|N\.?P\.?T\.?)\s*TAP\b",
-    re.I,
-)
-_DRILL_THRU = re.compile(r"\bDRILL\s+THRU\b", re.I)
-_SIZE_INCH_RE = re.compile(r"\((\d+(?:\.\d+)?|\.\d+)\)")
-_LETTER_RE = re.compile(r"\b([A-Z])\b")
 _SIDE_RE = re.compile(r"\b(FRONT|BACK)\b", re.I)
 _DRILL_ROW_RE = re.compile(r'^Dia\s+([0-9.]+)"\s+×\s+(\d+)', re.I)
 _TAP_ROW_RE = re.compile(r'^\s*(#?\d+(?:-\d+)?|[0-9/]+-[0-9]+)\s+TAP.*×\s+(\d+)\s+\((FRONT|BACK)\)', re.I)
-
-
-def _parse_qty(s: str) -> int:
-    match = re.match(r"\s*\((\d+)\)\s*", s)
-    if match:
-        return int(match.group(1))
-    match = re.search(r"(?<!\d)(\d+)\s*[xX×]", s)
-    if match:
-        return int(match.group(1))
-    match = re.search(r"\bQTY[:\s]+(\d+)\b", s, re.I)
-    if match:
-        return int(match.group(1))
-    return 1
-
-
-def _side(U: str) -> str:
-    if _BOTH_RE.search(U):
-        return "BOTH"
-    has_back = bool(_BACK_RE.search(U) or re.search(r"\bBACK\b", U))
-    has_front = bool(_FRONT_RE.search(U) or re.search(r"\bFRONT\b", U))
-    if has_back and has_front:
-        return "BOTH"
-    if has_back:
-        return "BACK"
-    if has_front:
-        return "FRONT"
-    return "FRONT"
+_parse_qty = _shared_parse_qty
+_side = _shared_side
 
 
 def _side_of(text: str | None) -> str:

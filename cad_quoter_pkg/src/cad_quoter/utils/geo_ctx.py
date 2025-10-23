@@ -186,7 +186,10 @@ def _ensure_geo_context_fields(
                             if isinstance(claims_candidate, Mapping):
                                 ops_claims_map = claims_candidate
                 drill_groups = build_drill_groups_from_geometry(
-                    diams_seq, thickness_in_guess, ops_claims_map
+                    diams_seq,
+                    thickness_in_guess,
+                    ops_claims_map,
+                    geom,
                 )
                 for group in drill_groups:
                     try:

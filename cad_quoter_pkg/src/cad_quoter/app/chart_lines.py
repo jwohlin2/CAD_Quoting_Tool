@@ -45,6 +45,58 @@ _JIG_GRIND_INDEX_MIN = 0.25
 _MIN_IPM_DENOM = 0.1
 
 
+# --- Clean DXF MTEXT escapes (alignment + symbols) --------------------------
+_MT_ALIGN_RE = re.compile(r"\\A\d;")
+_MT_BREAK_RE = re.compile(r"\\P", re.I)
+_MT_SYMS = {"%%C": "Ø", "%%c": "Ø", "%%D": "°", "%%d": "°", "%%P": "±", "%%p": "±"}
+
+
+def _clean_mtext(s: str) -> str:
+    if not isinstance(s, str):
+        return ""
+    for token, replacement in _MT_SYMS.items():
+        s = s.replace(token, replacement)
+    s = _MT_ALIGN_RE.sub("", s)
+    s = _MT_BREAK_RE.sub(" ", s)
+    return re.sub(r"\s+", " ", s).strip()
+
+
+# --- Row start tokens (incl. Ø and %%C) -------------------------------------
+_JOIN_START_TOKENS = re.compile(
+    r"(?:^\s*\(\d+\)\s*)"
+    r"|(?:\bTAP\b|N\.?P\.?T\.?)"
+    r"|(?:C[’']?\s*BORE|CBORE|COUNTER\s*BORE)"
+    r"|(?:[Ø⌀\u00D8]|%%[Cc])"
+    r"|(?:C[’']?\s*DRILL|CENTER\s*DRILL|SPOT\s*DRILL\b)",
+    re.I,
+)
+
+
+def _join_wrapped_chart_lines(chart_lines: list[str]) -> list[str]:
+    if not chart_lines:
+        return []
+    out: list[str] = []
+    buf = ""
+
+    def _flush() -> None:
+        nonlocal buf
+        if buf.strip():
+            out.append(re.sub(r"\s+", " ", buf).strip())
+        buf = ""
+
+    for raw in chart_lines:
+        s = _clean_mtext(str(raw or ""))
+        if not s:
+            continue
+        if _JOIN_START_TOKENS.search(s):
+            _flush()
+            buf = s
+        else:
+            buf += " " + s
+    _flush()
+    return out
+
+
 def _safe_float(value: object) -> float | None:
     """Return ``value`` coerced to ``float`` when possible."""
 
@@ -242,7 +294,7 @@ def _build_ops_rows_from_lines_fallback(lines: list[str]) -> list[dict]:
             i += 1
             continue
         if _RE_CBORE.search(ln):
-            tail = " ".join([ln] + L[max(0, i - 1):i] + L[i + 1:i + 2])
+            tail = " ".join([ln] + L[i + 1:i + 2])
             mda = _RE_PAREN_DIA.search(tail) or _RE_MM_IN_DIA.search(tail) or _RE_DIA_ANY.search(tail)
             dia = None
             if mda:
@@ -365,8 +417,14 @@ def norm_line(value: str) -> str:
 def build_ops_rows_from_lines_fallback(lines: Iterable[str]) -> list[dict]:
     """Return conservative ops rows based on raw chart text."""
 
-    seq = list(lines) if not isinstance(lines, list) else lines
-    return _build_ops_rows_from_lines_fallback(seq)
+    seq = list(lines) if not isinstance(lines, list) else list(lines)
+    cleaned: list[str] = []
+    for raw in seq:
+        cleaned_line = _clean_mtext(str(raw or ""))
+        if cleaned_line:
+            cleaned.append(cleaned_line)
+    joined = _join_wrapped_chart_lines(cleaned)
+    return _build_ops_rows_from_lines_fallback(joined)
 
 
 def collect_chart_lines_context(*containers: Mapping[str, object] | None) -> list[str]:

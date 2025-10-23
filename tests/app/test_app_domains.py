@@ -5,6 +5,7 @@ import math
 import re
 import sys
 import types
+from collections import Counter
 from dataclasses import dataclass
 from typing import Callable, Iterable, Union
 
@@ -708,6 +709,36 @@ def _run_emit_ops_cards_bucket_view(_: pytest.FixtureRequest) -> None:
         assert any(entry.get("name") == "Tapping ops" for entry in ops.get("tapping", []))
 
 
+def test_emit_ops_cards_includes_npt_row() -> None:
+    import appV5
+
+    lines: list[str] = []
+    geo = {
+        "ops_summary": {
+            "rows": [
+                {"qty": 2, "desc": "2X TAP 1/4-20 THRU FROM FRONT"},
+                {"qty": 2, "desc": "2X TAP 5/16-18 THRU FROM BACK"},
+            ]
+        },
+        "ops_claims": {"npt": 1},
+    }
+
+    appV5._emit_hole_table_ops_cards(
+        lines,
+        geo=geo,
+        material_group="aluminum",
+        speeds_csv=None,
+    )
+
+    npt_line = next(
+        line
+        for line in lines
+        if "NPT" in line and "TAP" in line and not line.startswith("[")
+    )
+    assert "× 1" in npt_line
+    assert "0.20" in npt_line
+
+
 def _run_aggregate_ops_sets_built(_: pytest.FixtureRequest) -> None:
     import appV5
 
@@ -832,6 +863,74 @@ def test_aggregate_ops_tap_pilot_claims() -> None:
 
     detail = summary.get("rows_detail") or []
     assert all(entry.get("type") != "drill" for entry in detail)
+
+
+def test_collect_pilot_claims_from_rows() -> None:
+    import appV5
+
+    geo = {
+        "ops_summary": {
+            "rows": [
+                {"qty": "4X", "desc": "4X TAP #10-32 THRU"},
+                {"qty": 2, "desc": "2X TAP 5/8-11"},
+                {"qty": 1, "desc": "1/8-27 NPT TAP"},
+                {"qty": 1, "desc": ".339 THRU"},
+            ]
+        }
+    }
+
+    pilots = appV5._collect_pilot_claims_from_rows(geo)
+    counts = Counter(round(val, 4) for val in pilots)
+
+    assert counts[round(0.1590, 4)] == 4
+    assert counts[round(0.5312, 4)] == 2
+    assert counts[round(0.3390, 4)] == 2
+
+
+def test_adjust_drill_counts_subtracts_row_pilots() -> None:
+    import appV5
+
+    geo = {
+        "ops_summary": {
+            "rows": [
+                {"qty": "4X", "desc": "4X TAP #10-32 THRU"},
+                {"qty": 2, "desc": "5/8-11 TAP"},
+                {"qty": 1, "desc": "1/8-27 NPT TAP"},
+            ]
+        }
+    }
+
+    pilots = appV5._collect_pilot_claims_from_rows(geo)
+    ops_claims = {"claimed_pilot_diams": pilots}
+
+    counts_raw = {0.1590: 4, 0.5312: 2, 0.3390: 1}
+    adjusted = appV5._adjust_drill_counts(counts_raw, ops_claims, None)
+
+    assert adjusted[round(0.1590, 4)] == 0
+    assert adjusted[round(0.5312, 4)] == 0
+    assert adjusted[round(0.3390, 4)] == 0
+
+
+def test_adjust_drill_counts_sanitizes_inputs() -> None:
+    import appV5
+
+    counts_raw = {0.25: 5, 0.5: 3, 1.25: 4}
+    ops_claims = {
+        "claimed_pilot_diams": ["0.251", 0.25, "888", None, "oops"],
+        "cb_groups": {
+            (0.248, "TOP", None): 10,
+            ("5.0", "BOT", None): 2,
+            (None, "", None): 7,
+        },
+    }
+
+    adjusted = appV5._adjust_drill_counts(counts_raw, ops_claims, None)
+
+    assert adjusted[round(0.25, 4)] == 0
+    assert adjusted[round(0.5, 4)] == 3
+    assert adjusted[round(1.25, 4)] == 0
+    for dia, qty in adjusted.items():
+        assert qty <= counts_raw.get(dia, 0)
 
 
 @pytest.mark.parametrize(
