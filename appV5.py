@@ -539,12 +539,38 @@ def _build_ops_cards_from_chart_lines(
     result: Mapping[str, Any] | None,
     rates: Mapping[str, Any] | None,
     breakdown_mutable: MutableMapping[str, Any] | None,
+    ctx=None,
+    ctx_a=None,
+    ctx_b=None,
 ) -> list[str]:
     """Return extra MATERIAL REMOVAL cards for Counterbore / Spot / Jig."""
 
     lines: list[str] = []
-    chart_lines = _get_chart_lines_for_ops(breakdown, result)
+    # Pull chart lines exactly like your tapping fallback does
+    chart_lines: list[str] = []
+    geo_map = ((result or {}).get("geo") if isinstance(result, _MappingABC) else None) \
+              or ((breakdown or {}).get("geo") if isinstance(breakdown, _MappingABC) else None) \
+              or {}
+    try:
+        chart_lines = _collect_chart_lines_context(ctx, geo_map, ctx_a, ctx_b) or []
+    except Exception:
+        chart_lines = []
+    # If the collector returns empty, fall back to any chart_lines on result/breakdown
     if not chart_lines:
+        chart_lines = _get_chart_lines_for_ops(breakdown, result) or []
+
+    # Also expose rows if we’ve already built them (ops_summary.rows)
+    ops_rows = []
+    try:
+        ops_rows = (((geo_map or {}).get("ops_summary") or {}).get("rows") or [])
+    except Exception:
+        ops_rows = []
+    if not isinstance(ops_rows, list):
+        ops_rows = []
+
+    # Early debug
+    lines.append(f"[DEBUG] ops_cards_inputs: chart_lines={len(chart_lines)} rows={len(ops_rows)}")
+    if not chart_lines and not ops_rows:
         return lines
 
     # --- Aggregate groups from text lines ------------------------------------
@@ -574,7 +600,7 @@ def _build_ops_cards_from_chart_lines(
             side = "FRONT"
 
         # Counterbore rows
-        if re.search(RE_CBORE, U):
+        if ("CBORE" in U) or ("C'BORE" in U) or ("COUNTER BORE" in U) or _CB_DIA_RE.search(s):
             md = _CB_DIA_RE.search(s)
             dia = float(md.group(1)) if md else None
             mdepth = _X_DEPTH_RE.search(s)
@@ -595,6 +621,35 @@ def _build_ops_cards_from_chart_lines(
         if _JIG_RE_TXT.search(U):
             jig_qty += qty
             continue
+
+    # If no chart_lines produced groups, try building from ops_rows descriptions
+    if not cb_groups and ops_rows:
+        for r in ops_rows:
+            s = str((r or {}).get("desc") or "")
+            if not s.strip():
+                continue
+            U = s.upper()
+            if ("CBORE" in U) or ("C'BORE" in U) or ("COUNTER BORE" in U) or _CB_DIA_RE.search(s):
+                qty = int((r or {}).get("qty") or 0)
+                if qty <= 0:
+                    continue
+                # side/depth/dia from text
+                side = "BACK" if _BACK_RE.search(U) else ("FRONT" if _FRONT_RE.search(U) else "FRONT")
+                mdepth = _X_DEPTH_RE.search(s)
+                depth = float(mdepth.group(1)) if mdepth else None
+                md = _CB_DIA_RE.search(s)
+                dia = float(md.group(1)) if md else None
+                cb_groups[(dia, side, depth)] = cb_groups.get((dia, side, depth), 0) + qty
+        # Spots/Jig from rows text too
+        for r in ops_rows:
+            s = str((r or {}).get("desc") or "")
+            if not s.strip():
+                continue
+            U = s.upper()
+            if _SPOT_RE_TXT.search(U) and ("TAP" not in U) and ("THRU" not in U):
+                spot_qty += int((r or {}).get("qty") or 0)
+            if _JIG_RE_TXT.search(U):
+                jig_qty += int((r or {}).get("qty") or 0)
 
     # --- Emit COUNTERBORE card ----------------------------------------------
     if cb_groups:
