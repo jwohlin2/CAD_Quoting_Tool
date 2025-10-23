@@ -67,7 +67,16 @@ import math
 import re
 import time
 from functools import cmp_to_key, lru_cache
-from typing import Any, Mapping, MutableMapping, Sequence, TYPE_CHECKING, Protocol, TypeGuard
+from typing import (
+    Any,
+    Mapping,
+    MutableMapping,
+    MutableSet,
+    Sequence,
+    TYPE_CHECKING,
+    Protocol,
+    TypeGuard,
+)
 from collections import Counter, defaultdict
 from collections.abc import (
     Callable,
@@ -9862,10 +9871,40 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
     )
     if not isinstance(extra_ops_lines, list):
         extra_ops_lines = list(extra_ops_lines or [])
-    appended_extra_ops_lines = _append_extra_ops_lines(
-        extra_ops_lines,
-        include_in_removal_cards=True,
-    )
+
+    appended_extra_ops_lines: list[str] = []
+    attempted_append = False
+    if extra_ops_lines:
+        already_counterbore = any(
+            isinstance(entry, str)
+            and entry.strip().upper().startswith("MATERIAL REMOVAL – COUNTERBORE")
+            for entry in lines
+        )
+        flags: MutableSet[str] | None = None
+        try:
+            flags_candidate = breakdown_mutable.setdefault("_ops_cards_printed", set())
+            if isinstance(flags_candidate, MutableSet):
+                flags = flags_candidate
+        except Exception:
+            flags = None
+
+        should_append_extra_ops = not already_counterbore and (
+            flags is None or "cbore" not in flags
+        )
+
+        if should_append_extra_ops:
+            attempted_append = True
+            appended_extra_ops_lines = _append_extra_ops_lines(
+                extra_ops_lines,
+                include_in_removal_cards=True,
+            )
+            if appended_extra_ops_lines and flags is not None:
+                try:
+                    flags.add("cbore")
+                except Exception:
+                    pass
+    if not appended_extra_ops_lines:
+        appended_extra_ops_lines = []
     if appended_extra_ops_lines:
         for entry in appended_extra_ops_lines:
             if not entry.startswith("[DEBUG]"):
@@ -9874,7 +9913,7 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
             _normalize_buckets(breakdown.get("bucket_view"))
         except Exception:
             pass
-    elif extra_ops_lines:
+    elif extra_ops_lines and attempted_append:
         try:
             _push(
                 lines,
