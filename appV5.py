@@ -4307,14 +4307,68 @@ def _compute_drilling_removal_section(
                 counts_by_diam_raw = fallback_counts
                 counts_source = counts_by_diam_raw
 
-            # --- DRILL BIN SEEDING (place before adjust) ---
+            # --- DRILL BIN SEEDING ---
             geo_map = (
                 ((result or {}).get("geo") if isinstance(result, dict) else None)
                 or ((breakdown or {}).get("geo") if isinstance(breakdown, dict) else None)
                 or {}
             )
 
-            if not counts_by_diam_raw or sum(int(v) for v in counts_by_diam_raw.values()) == 0:
+            def _seed_drill_bins_from_geo(geo: dict) -> dict[float, int]:
+                out: dict[float, int] = {}
+                if not isinstance(geo, dict):
+                    return out
+
+                # Prefer pre-bucketed families if available
+                for key in (
+                    "hole_diam_families_geom_in",
+                    "hole_diam_families_in",
+                    "hole_diam_families_geom",
+                    "hole_diam_families",
+                ):
+                    fam = geo.get(key)
+                    if isinstance(fam, dict) and fam:
+                        for k, v in fam.items():
+                            try:
+                                d = float(str(k).replace('"', "").strip())
+                                q = int(v or 0)
+                                if q > 0:
+                                    out[round(d, 4)] = out.get(round(d, 4), 0) + q
+                            except Exception:
+                                pass
+                        if out:
+                            return out
+
+                # Fall back to raw lists
+                holes_in = geo.get("hole_diams_in") or geo.get("hole_diams_geom_in")
+                holes_mm = geo.get("hole_diams_mm") or geo.get("hole_diams_geom_mm")
+
+                def _acc(seq, mm=False):
+                    if not isinstance(seq, (list, tuple)):
+                        return
+                    for x in seq:
+                        try:
+                            d = float(x)
+                            if mm:
+                                d /= 25.4
+                            d = round(d, 3)
+                            out[d] = out.get(d, 0) + 1
+                        except Exception:
+                            pass
+
+                if holes_in:
+                    _acc(holes_in, mm=False)
+                if not out and holes_mm:
+                    _acc(holes_mm, mm=True)
+                return out
+
+            # If counts_by_diam_raw is empty/undefined, seed from GEO now
+            try:
+                _ = counts_by_diam_raw  # type: ignore[name-defined]
+            except NameError:
+                counts_by_diam_raw = {}  # type: ignore[assignment]
+
+            if not counts_by_diam_raw or sum(int(v) for v in (counts_by_diam_raw or {}).values()) == 0:
                 counts_by_diam_raw = _seed_drill_bins_from_geo(geo_map)
 
             raw_total = sum(int(v) for v in (counts_by_diam_raw or {}).values())
