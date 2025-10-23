@@ -15,6 +15,26 @@ HOLE_TOKENS = re.compile(
 )
 
 
+# --- Clean DXF MTEXT escapes (alignment, symbols, etc.) ----------------------
+_MT_ALIGN_RE = re.compile(r"\\A\d;")      # \A1; \A0; etc.
+_MT_BREAK_RE = re.compile(r"\\P", re.I)   # \P = line break
+_MT_SYMS = {
+    "%%C": "Ø", "%%c": "Ø",               # diameter
+    "%%D": "°", "%%d": "°",               # degree
+    "%%P": "±", "%%p": "±",               # plus/minus
+}
+
+
+def _clean_mtext(s: str) -> str:
+    if not isinstance(s, str):
+        return ""
+    for token, replacement in _MT_SYMS.items():
+        s = s.replace(token, replacement)
+    s = _MT_ALIGN_RE.sub("", s)
+    s = _MT_BREAK_RE.sub(" ", s)
+    return re.sub(r"\s+", " ", s).strip()
+
+
 def _normalize_text(value: object) -> str:
     text = "" if value is None else str(value)
     return re.sub(r"\s+", " ", text).strip()
@@ -59,9 +79,9 @@ def _iter_segments(entity: object) -> Iterator[tuple[str, Tuple[float, float] | 
             except Exception:
                 raw = ""
         for segment in re.split(r"\\P|\n", raw or ""):
-            normalized = _normalize_text(segment)
-            if normalized:
-                yield normalized, _extract_insert(entity)
+            cleaned = _clean_mtext(segment)
+            if cleaned:
+                yield cleaned, _extract_insert(entity)
     elif kind == "INSERT":
         yield from _iter_insert(entity)
 
