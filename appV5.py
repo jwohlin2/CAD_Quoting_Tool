@@ -12437,6 +12437,31 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
         removal_sections_text,
     )
 
+    def _resolve_drilling_summary_candidate(*containers: Mapping[str, Any] | None) -> Mapping[str, Any] | None:
+        for container in containers:
+            if not isinstance(container, _MappingABC):
+                continue
+            for key in ("drilling", "drilling_summary"):
+                candidate = container.get(key)
+                if isinstance(candidate, _MappingABC):
+                    return typing.cast(Mapping[str, Any], candidate)
+        return None
+
+    drilling_summary: Mapping[str, Any] | None = None
+    drilling_summary = _resolve_drilling_summary_candidate(
+        typing.cast(Mapping[str, Any] | None, locals().get("process_plan_summary")),
+        typing.cast(Mapping[str, Any] | None, breakdown.get("process_plan"))
+        if isinstance(breakdown, _MappingABC)
+        else None,
+        typing.cast(Mapping[str, Any] | None, result.get("process_plan"))
+        if isinstance(result, _MappingABC)
+        else None,
+        breakdown if isinstance(breakdown, _MappingABC) else None,
+        result if isinstance(result, _MappingABC) else None,
+    )
+    if drilling_summary is None:
+        drilling_summary = {}
+
     drill_actions = int(ops_counts.get("drills", 0))
 
     try:
