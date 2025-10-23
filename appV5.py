@@ -10840,15 +10840,44 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
     except Exception:
         geo_map = {}
 
-    # Re-collect raw chart lines (same source as earlier)
+    # Prefer persisted chart_lines from geo_map; fallback to collector
+    persisted_chart_lines = []
     try:
-        chart_lines_all = _collect_chart_lines_context(ctx, geo_map, ctx_a, ctx_b) or []
+        if isinstance(geo_map, _MappingABC):
+            persisted_raw = geo_map.get("chart_lines")
+            if isinstance(persisted_raw, Sequence) and not isinstance(persisted_raw, (str, bytes)):
+                persisted_chart_lines = list(persisted_raw)
     except Exception:
-        chart_lines_all = []
+        persisted_chart_lines = []
+
+    if persisted_chart_lines:
+        chart_lines_all = list(persisted_chart_lines)
+    else:
+        try:
+            chart_lines_all = _collect_chart_lines_context(ctx, geo_map, ctx_a, ctx_b) or []
+        except Exception:
+            chart_lines_all = []
 
     # CLEAN then JOIN
     cleaned = [_clean_mtext(x) for x in chart_lines_all]
     joined_lines = _join_wrapped_chart_lines(cleaned)
+
+    try:
+        ops_claims_preview = _parse_ops_and_claims(joined_lines)
+    except Exception:
+        ops_claims_preview = {}
+    if not isinstance(ops_claims_preview, dict):
+        ops_claims_preview = {}
+    _push(
+        lines,
+        "[DEBUG] at_print_ops cb={cb} tap={tap} npt={npt} spot={spot} jig={jig}".format(
+            cb=int(ops_claims_preview.get("cb_total", 0)),
+            tap=int(ops_claims_preview.get("tap", 0)),
+            npt=int(ops_claims_preview.get("npt", 0)),
+            spot=int(ops_claims_preview.get("spot", 0)),
+            jig=int(ops_claims_preview.get("jig", 0)),
+        ),
+    )
 
     # Use any rows already built earlier (if present)
     try:
@@ -10859,6 +10888,19 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
         ops_rows_now = []
 
     ops_claims: dict[str, int] = {}
+    try:
+        if any(int(ops_claims_preview.get(key, 0)) > 0 for key in ("cb_total", "tap", "npt", "spot", "jig")):
+            ops_claims = {
+                "cb_total": int(ops_claims_preview.get("cb_total", 0)),
+                "cb_front": int(ops_claims_preview.get("cb_front", 0)),
+                "cb_back": int(ops_claims_preview.get("cb_back", 0)),
+                "tap": int(ops_claims_preview.get("tap", 0)),
+                "npt": int(ops_claims_preview.get("npt", 0)),
+                "spot": int(ops_claims_preview.get("spot", 0)),
+                "jig": int(ops_claims_preview.get("jig", 0)),
+            }
+    except Exception:
+        ops_claims = {}
 
     def _normalize_ops_claims_map(candidate: Any) -> dict[str, int]:
         if not isinstance(candidate, (_MappingABC, dict)):
