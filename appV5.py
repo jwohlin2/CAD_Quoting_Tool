@@ -3547,6 +3547,30 @@ def _compute_drilling_removal_section(
         except Exception:
             pass
 
+    def _sum_count_values(candidate: Any) -> int:
+        """Best-effort sum of numeric values from mappings or sequences."""
+
+        if isinstance(candidate, (_MappingABC, dict)):
+            values = candidate.values()  # type: ignore[assignment]
+        elif isinstance(candidate, Sequence) and not isinstance(candidate, (str, bytes, bytearray)):
+            values = candidate
+        else:
+            return 0
+
+        total = 0
+        for value in values:
+            try:
+                total += int(round(float(value)))
+            except Exception:
+                try:
+                    total += int(value)  # type: ignore[arg-type]
+                except Exception:
+                    continue
+        return total
+
+    drill_bins_raw_total = 0
+    drill_bins_adj_total = 0
+
     pricing_buckets: MutableMapping[str, Any] | dict[str, Any] = {}
     bucket_view_obj: MutableMapping[str, Any] | Mapping[str, Any] | None = None
     try:
@@ -11279,6 +11303,33 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
                 except Exception:
                     pass
 
+                counts_by_diam_raw_obj = locals().get("counts_by_diam_raw")
+                counts_by_diam_obj = locals().get("counts_by_diam")
+                if not isinstance(counts_by_diam_raw_obj, (_MappingABC, dict, Sequence)):
+                    counts_by_diam_raw_obj = None
+                if not isinstance(counts_by_diam_obj, (_MappingABC, dict, Sequence)):
+                    counts_by_diam_obj = None
+                if counts_by_diam_raw_obj is None and isinstance(drilling_meta_container, _MappingABC):
+                    candidate = drilling_meta_container.get("counts_by_diam_raw")
+                    if isinstance(candidate, (_MappingABC, dict, Sequence)):
+                        counts_by_diam_raw_obj = candidate
+                if counts_by_diam_obj is None and isinstance(drilling_meta_container, _MappingABC):
+                    candidate = drilling_meta_container.get("counts_by_diam")
+                    if isinstance(candidate, (_MappingABC, dict, Sequence)):
+                        counts_by_diam_obj = candidate
+                drill_bins_raw_total = _sum_count_values(counts_by_diam_raw_obj)
+                drill_bins_adj_total = _sum_count_values(counts_by_diam_obj)
+                _push(lines, f"[DEBUG] chart_lines_found={len(chart_lines_all)}")
+                _push(
+                    lines,
+                    f"[DEBUG] at_print_ops cb={ops_claims.get('cb_total', 0)} tap={ops_claims.get('tap', 0)} "
+                    f"npt={ops_claims.get('npt', 0)} spot={ops_claims.get('spot', 0)} jig={ops_claims.get('jig', 0)}",
+                )
+                _push(
+                    lines,
+                    f"[DEBUG] DRILL bins raw={drill_bins_raw_total} adj={drill_bins_adj_total}",
+                )
+
                 # Seed minutes so Process table shows rows
                 try:
                     bv = breakdown_mutable.setdefault("bucket_view", {})
@@ -11562,6 +11613,18 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
     for key in ("tap", "npt", "cb_total", "spot", "jig"):
         if key not in ops_claims:
             ops_claims[key] = 0
+    counts_by_diam_current = locals().get("counts_by_diam")
+    drill_bins_adj_logged = _sum_count_values(counts_by_diam_current)
+    if drill_bins_adj_logged <= 0:
+        try:
+            drill_bins_adj_logged = int(drill_bins_adj_total)
+        except Exception:
+            drill_bins_adj_logged = 0
+    _push(
+        lines,
+        f"[DEBUG] OPS TALLY drill={drill_bins_adj_logged} tap={ops_claims.get('tap', 0) + ops_claims.get('npt', 0)} "
+        f"cbore={ops_claims.get('cb_total', 0)} spot={ops_claims.get('spot', 0)} jig={ops_claims.get('jig', 0)}",
+    )
     _push(
         lines,
         f"[DEBUG] OPS TALLY  drill={drill_actions} tap={ops_claims['tap']} "
