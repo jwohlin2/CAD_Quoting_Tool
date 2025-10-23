@@ -18042,7 +18042,6 @@ def extract_2d_features_from_dxf_or_dwg(path: str | Path) -> dict[str, Any]:
         if fragment:
             text_fragments.append(fragment)
     txt = " ".join(text_fragments).lower()
-    import re
     thickness_mm = None
     m = re.search(r"(thk|thickness)\s*[:=]?\s*([0-9.]+)\s*(mm|in|in\.|\")", txt)
     if m:
