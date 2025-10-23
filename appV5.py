@@ -12494,18 +12494,52 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
         drilling_summary = typing.cast(Mapping[str, Any], drilling_summary_candidate)
     else:
         drilling_summary = {}
-    drill_actions_adjusted_total: int | None = None
-    drill_actions_adjusted_display = drill_actions_adjusted_total
-    if drill_actions_adjusted_display is None:
+    def _coerce_adjusted_total(value: Any) -> int | None:
+        if value is None:
+            return None
         try:
-            hole_count_candidate = drilling_summary.get("hole_count")
+            numeric_val = float(value)
         except Exception:
-            hole_count_candidate = None
-        if hole_count_candidate is not None:
-            try:
-                drill_actions_adjusted_display = int(round(float(hole_count_candidate)))
-            except Exception:
-                drill_actions_adjusted_display = None
+            return None
+        if not math.isfinite(numeric_val):
+            return None
+        try:
+            return int(round(numeric_val))
+        except Exception:
+            return None
+
+    def _extract_adjusted_total(source: Any) -> int | None:
+        if isinstance(source, _MappingABC):
+            for key in (
+                "drill_actions_adjusted_total",
+                "actions_adjusted_total",
+                "adjusted_actions_total",
+                "adjusted_total",
+                "hole_count",
+            ):
+                try:
+                    candidate_value = source.get(key)
+                except Exception:
+                    candidate_value = None
+                candidate_int = _coerce_adjusted_total(candidate_value)
+                if candidate_int is not None:
+                    return candidate_int
+        return _coerce_adjusted_total(source)
+
+    drill_actions_adjusted_total: int | None = None
+    for candidate_source in (
+        drilling_summary,
+        result.get("drilling_summary") if isinstance(result, _MappingABC) else None,
+        breakdown.get("drilling_summary") if isinstance(breakdown, _MappingABC) else None,
+        result.get("drill_actions_adjusted_total") if isinstance(result, _MappingABC) else None,
+        breakdown.get("drill_actions_adjusted_total") if isinstance(breakdown, _MappingABC) else None,
+    ):
+        adjusted_candidate = _extract_adjusted_total(candidate_source)
+        if adjusted_candidate is not None:
+            drill_actions_adjusted_total = adjusted_candidate
+            break
+
+    drill_actions_adjusted_display = drill_actions_adjusted_total
     if drill_actions_adjusted_display is None:
         groups_payload = drilling_summary.get("groups") if isinstance(drilling_summary, _MappingABC) else None
         if isinstance(groups_payload, Sequence) and not isinstance(groups_payload, (str, bytes)):
@@ -12527,6 +12561,8 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
                     total_qty += qty_int
             if seen_entry:
                 drill_actions_adjusted_display = total_qty
+                if drill_actions_adjusted_total is None:
+                    drill_actions_adjusted_total = total_qty
     if drill_actions_adjusted_display is not None:
         _push(lines, f"[DEBUG] drill_actions_adjusted={int(drill_actions_adjusted_display)}")
     for key in ("tap", "npt", "cb_total", "spot", "counterdrill", "jig"):
