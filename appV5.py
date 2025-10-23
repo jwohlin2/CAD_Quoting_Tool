@@ -879,6 +879,12 @@ def _join_wrapped_chart_lines(chart_lines: list[str]) -> list[str]:
         if not s:
             continue
         if _JOIN_START_TOKENS.search(s):
+            # ✨ glue rule: if this line is the NPT continuation and the buffer ends with DRILL THRU,
+            # append instead of starting a new row. This keeps the pilot drill call-out together
+            # with the NPT note so downstream logic sees them as a single feature description.
+            if re.search(r"\bN\.?P\.?T\.?\b", s, re.I) and re.search(r"\bDRILL\s+THRU\b", buf or "", re.I):
+                buf += " " + s
+                continue
             flush()
             buf = s
         else:
