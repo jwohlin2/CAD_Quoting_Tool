@@ -920,6 +920,104 @@ def _pick_drill_minutes(
             pass
     return chosen_clamped
 
+
+# --- HOLE TABLE helpers for CBORE / SPOT / JIG --------------------------------
+def _row_txt(x):
+    return str((x or {}).get("desc") or "").upper()
+
+
+def _row_qty(x):
+    try:
+        return int(round(float((x or {}).get("qty") or 0)))
+    except Exception:
+        return 0
+
+
+def _row_side(txt: str) -> str:
+    u = (txt or "").upper()
+    if re.search(RE_FRONT_BACK, u):
+        # RE_FRONT_BACK already matches FRONT/BACK; prefer specificity if present
+        if "BACK" in u and "FRONT" not in u:
+            return "BACK"
+        if "FRONT" in u and "BACK" not in u:
+            return "FRONT"
+    if "FROM BACK" in u:
+        return "BACK"
+    if "FROM FRONT" in u:
+        return "FRONT"
+    return "FRONT"
+
+
+def _float_or_none(x):
+    try:
+        v = float(x)
+        return v if math.isfinite(v) and v > 0 else None
+    except Exception:
+        return None
+
+
+def _depth_from_text(txt: str) -> float | None:
+    m = RE_DEPTH.search(txt or "")
+    return _float_or_none(m.group(1)) if m else None
+
+
+def _cbore_dia_from_text(txt: str) -> float | None:
+    m = RE_DIA.search(txt or "")
+    return _float_or_none(m.group(1)) if m else None
+
+
+def _build_cbore_groups(rows: list[dict]) -> list[dict]:
+    groups = {}
+    for r in rows:
+        txt = _row_txt(r)
+        if not RE_CBORE.search(txt):  # uses imported RE_CBORE
+            continue
+        qty = _row_qty(r)
+        if qty <= 0:
+            continue
+        side = _row_side(txt)
+        depth = _depth_from_text(txt)
+        dia = _cbore_dia_from_text(txt)
+        key = (dia or -1.0, side, depth or -1.0)
+        groups[key] = groups.get(key, 0) + qty
+    out = []
+    for (dia, side, depth), qty in groups.items():
+        out.append(
+            {
+                "diam_in": None if dia < 0 else float(dia),
+                "side": side,
+                "depth_in": None if depth < 0 else float(depth),
+                "qty": int(qty),
+            }
+        )
+    return sorted(
+        out,
+        key=lambda g: ((g["diam_in"] or 0), g["side"], (g["depth_in"] or 0)),
+    )
+
+
+def _count_spot_and_jig(rows: list[dict]) -> tuple[int, int]:
+    spot = jig = 0
+    for r in rows:
+        txt = _row_txt(r)
+        qty = _row_qty(r)
+        if qty <= 0:
+            continue
+        spot_hit = False
+        try:
+            if hasattr(_SPOT_TOKENS, "search"):
+                spot_hit = bool(_SPOT_TOKENS.search(txt))
+            else:
+                spot_hit = any(tok in txt for tok in _SPOT_TOKENS)
+        except Exception:
+            spot_hit = False
+        if spot_hit:
+            spot += qty
+        if re.search(r"\bJIG\s*GRIND\b", txt):
+            jig += qty
+    return spot, jig
+
+
 def _emit_hole_table_ops_cards(
     lines: list[str],
     *,
@@ -958,24 +1056,6 @@ def _emit_hole_table_ops_cards(
             (result.get("geo") if isinstance(result, _MappingABC) else None),
         )
 
-        tap_rows = _finalize_tapping_rows(rows, thickness_in=thickness_in)
-        if not tap_rows:
-            return
-
-        tap_total_min = _render_ops_card(
-            lambda text: _push(lines, text),
-            title="Material Removal – Tapping",
-            rows=tap_rows,
-        )
-
-        tap_total_min = float(tap_total_min or 0.0)
-
-        try:
-            if isinstance(ops_summary, (_MutableMappingABC, dict)):
-                typing.cast(MutableMapping[str, Any], ops_summary)["tap_minutes_total"] = tap_total_min
-        except Exception:
-            pass
-
         bucket_view_obj: MutableMapping[str, Any] | Mapping[str, Any] | None = None
         try:
             if isinstance(breakdown, dict):
@@ -990,45 +1070,158 @@ def _emit_hole_table_ops_cards(
         except Exception:
             bucket_view_obj = None
 
-        tap_mrate = (
-            _lookup_bucket_rate("tapping", rates)
-            or _lookup_bucket_rate("machine", rates)
-            or 45.0
-        )
-        tap_labor_explicit: float | None = None
-        if isinstance(rates, _MappingABC):
-            for raw_key, raw_value in rates.items():
-                key_text = str(raw_key).strip().lower()
-                if key_text in {"tapping_labor", "tappinglaborrate", "tapping_labor_rate"}:
-                    candidate = _as_float(raw_value, 0.0)
-                    if candidate > 0:
-                        tap_labor_explicit = candidate
-                    break
-        if tap_labor_explicit is not None and tap_labor_explicit > 0:
-            tap_lrate = tap_labor_explicit
-        else:
-            tap_lrate = (
-                _lookup_bucket_rate("labor", rates)
-                or 45.0
+        tap_rows = _finalize_tapping_rows(rows, thickness_in=thickness_in)
+        tap_total_min = 0.0
+        if tap_rows:
+            tap_total_min = _render_ops_card(
+                lambda text: _push(lines, text),
+                title="Material Removal – Tapping",
+                rows=tap_rows,
             )
 
-        _set_bucket_minutes_cost(
-            bucket_view_obj,
-            "tapping",
-            tap_total_min,
-            float(tap_mrate or 0.0),
-            float(tap_lrate or 0.0),
-        )
+            tap_total_min = float(tap_total_min or 0.0)
 
-        _normalize_buckets(bucket_view_obj)
+            try:
+                if isinstance(ops_summary, (_MutableMappingABC, dict)):
+                    typing.cast(MutableMapping[str, Any], ops_summary)["tap_minutes_total"] = tap_total_min
+            except Exception:
+                pass
 
-        dbg_entry: Mapping[str, Any] | None = None
+            tap_mrate = (
+                _lookup_bucket_rate("tapping", rates)
+                or _lookup_bucket_rate("machine", rates)
+                or 45.0
+            )
+            tap_labor_explicit: float | None = None
+            if isinstance(rates, _MappingABC):
+                for raw_key, raw_value in rates.items():
+                    key_text = str(raw_key).strip().lower()
+                    if key_text in {"tapping_labor", "tappinglaborrate", "tapping_labor_rate"}:
+                        candidate = _as_float(raw_value, 0.0)
+                        if candidate > 0:
+                            tap_labor_explicit = candidate
+                        break
+            if tap_labor_explicit is not None and tap_labor_explicit > 0:
+                tap_lrate = tap_labor_explicit
+            else:
+                tap_lrate = (
+                    _lookup_bucket_rate("labor", rates)
+                    or 45.0
+                )
+
+            _set_bucket_minutes_cost(
+                bucket_view_obj,
+                "tapping",
+                tap_total_min,
+                float(tap_mrate or 0.0),
+                float(tap_lrate or 0.0),
+            )
+
+            dbg_entry: Mapping[str, Any] | None = None
+            try:
+                if isinstance(bucket_view_obj, _MappingABC):
+                    dbg_entry = (bucket_view_obj.get("buckets") or {}).get("tapping")  # type: ignore[assignment]
+            except Exception:
+                dbg_entry = None
+            dbg_payload = dbg_entry if dbg_entry is not None else {}
+            _push(lines, "[DEBUG] tapping_bucket=" + repr(dbg_payload))
+
+        # --- COUNTERBORE CARD --------------------------------------------------
+        cbores = _build_cbore_groups(rows)
+        if cbores:
+            _push(lines, "MATERIAL REMOVAL – COUNTERBORE")
+            _push(lines, "=" * 64)
+            total_cb = sum(g["qty"] for g in cbores)
+            front_cb = sum(g["qty"] for g in cbores if g["side"] == "FRONT")
+            back_cb = sum(g["qty"] for g in cbores if g["side"] == "BACK")
+            _push(lines, f"Inputs")
+            _push(lines, f"  Ops ............... Counterbore (front + back)")
+            _push(lines, f"  Counterbores ...... {total_cb} total  → {front_cb} front, {back_cb} back")
+            _push(lines, "")
+            _push(lines, "TIME PER HOLE – C’BORE GROUPS")
+            _push(lines, "-" * 66)
+
+            cb_minutes = 0.0
+            for g in cbores:
+                depth_txt = "—" if g["depth_in"] is None else f'{g["depth_in"]:.2f}"'
+                dia_txt = "—" if g["diam_in"] is None else f'Ø{g["diam_in"]:.4f}"'
+                # Use your calibrated per-side minute (imported from hole_ops)
+                per = max(float(CBORE_MIN_PER_SIDE_MIN or 0.07), 0.01)
+                t_group = g["qty"] * per
+                cb_minutes += t_group
+                _push(
+                    lines,
+                    f'{dia_txt} × {g["qty"]}  ({g["side"]}) | depth {depth_txt} | t/hole {per:.2f} min | group {g["qty"]}×{per:.2f} = {t_group:.2f} min',
+                )
+            _push(lines, "")
+
+            # push to buckets
+            bucket_view_obj = None
+            try:
+                if isinstance(breakdown, dict):
+                    bucket_view_obj = breakdown.setdefault("bucket_view", {})
+                elif isinstance(breakdown, _MutableMappingABC):
+                    bucket_view_obj = typing.cast(
+                        MutableMapping[str, Any],
+                        breakdown.setdefault("bucket_view", {}),
+                    )
+            except Exception:
+                bucket_view_obj = None
+
+            cb_mrate = _lookup_bucket_rate("counterbore", rates) or _lookup_bucket_rate("machine", rates) or 53.76
+            cb_lrate = _lookup_bucket_rate("labor", rates) or 25.46
+            _set_bucket_minutes_cost(bucket_view_obj, "counterbore", cb_minutes, cb_mrate, cb_lrate)
+
+        # --- SPOT & JIG-GRIND CARDS -------------------------------------------
+        spot_qty, jig_qty = _count_spot_and_jig(rows)
+        if spot_qty > 0:
+            _push(lines, "MATERIAL REMOVAL – SPOT (CENTER DRILL)")
+            _push(lines, "=" * 64)
+            per = 0.05  # light index & peck allowance
+            t_group = spot_qty * per
+            _push(lines, "TIME PER HOLE – SPOT GROUPS")
+            _push(lines, "-" * 66)
+            _push(lines, f"Spot drill × {spot_qty} | t/hole {per:.2f} min | group {spot_qty}×{per:.2f} = {t_group:.2f} min")
+            _push(lines, "")
+            # put spots into drilling bucket (alias normalized)
+            try:
+                bucket_view_obj = bucket_view_obj or breakdown.setdefault("bucket_view", {})  # type: ignore[assignment]
+            except Exception:
+                bucket_view_obj = bucket_view_obj or None
+            _set_bucket_minutes_cost(
+                bucket_view_obj,
+                "drilling",
+                t_group,
+                _lookup_bucket_rate("machine", rates) or 53.76,
+                _lookup_bucket_rate("labor", rates) or 25.46,
+            )
+
+        if jig_qty > 0:
+            _push(lines, "MATERIAL REMOVAL – JIG GRIND")
+            _push(lines, "=" * 64)
+            per = 0.75
+            t_group = jig_qty * per
+            _push(lines, "TIME PER FEATURE")
+            _push(lines, "-" * 66)
+            _push(lines, f"Jig grind × {jig_qty} | t/feat {per:.2f} min | group {jig_qty}×{per:.2f} = {t_group:.2f} min")
+            _push(lines, "")
+            try:
+                bucket_view_obj = bucket_view_obj or breakdown.setdefault("bucket_view", {})  # type: ignore[assignment]
+            except Exception:
+                bucket_view_obj = bucket_view_obj or None
+            _set_bucket_minutes_cost(
+                bucket_view_obj,
+                "grinding",
+                t_group,
+                _lookup_bucket_rate("grinding", rates) or _lookup_bucket_rate("machine", rates) or 53.76,
+                _lookup_bucket_rate("labor", rates) or 25.46,
+            )
+
+        # normalize once at the end
         try:
-            if isinstance(bucket_view_obj, _MappingABC):
-                dbg_entry = (bucket_view_obj.get("buckets") or {}).get("tapping")  # type: ignore[assignment]
+            _normalize_buckets(breakdown.get("bucket_view"))  # merges aliases like spotdrill→spot_drill
         except Exception:
-            dbg_entry = None
-        _push(lines, f"[DEBUG] tapping_bucket={dbg_entry or {}}")
+            pass
     except Exception as exc:
         _push(lines, f"[DEBUG] tapping_emit_skipped={exc.__class__.__name__}: {exc}")
         return
