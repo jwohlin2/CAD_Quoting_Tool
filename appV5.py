@@ -11251,6 +11251,9 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
                 return c["material_group"]
         return None
 
+    ops_summary_map = None
+    ops_rows: list[Any] = []
+
     try:
         ctx_a = locals().get("breakdown")
         ctx_b = locals().get("result")
@@ -11427,6 +11430,9 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
             rates=rates,
         )
 
+    except Exception as e:
+        _push(lines, f"[DEBUG] material_removal_emit_skipped={e.__class__.__name__}: {e}")
+    else:
         new_ops_lines = [
             entry
             for entry in lines[pre_ops_len:]
@@ -11535,16 +11541,13 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
                     exc_info=False,
                 )
 
-            milling_bucket_obj = None
-            bucket_view_snapshot = (
-                breakdown.get("bucket_view") if isinstance(breakdown, _MappingABC) else None
-            )
-            if isinstance(bucket_view_snapshot, (_MappingABC, dict)):
-                milling_bucket_obj = _extract_milling_bucket(bucket_view_snapshot)
-            _render_milling_removal_card(append_line, lines, milling_bucket_obj)
-
-    except Exception as e:
-        _push(lines, f"[DEBUG] material_removal_emit_skipped={e.__class__.__name__}: {e}")
+        milling_bucket_obj = None
+        bucket_view_snapshot = (
+            breakdown.get("bucket_view") if isinstance(breakdown, _MappingABC) else None
+        )
+        if isinstance(bucket_view_snapshot, (_MappingABC, dict)):
+            milling_bucket_obj = _extract_milling_bucket(bucket_view_snapshot)
+        _render_milling_removal_card(append_line, lines, milling_bucket_obj)
 
     removal_summary_lines = _collect_removal_summary_lines()
     # ========================================================================
