@@ -4307,31 +4307,12 @@ def _compute_drilling_removal_section(
                 counts_by_diam_raw = fallback_counts
                 counts_source = counts_by_diam_raw
 
-            geo_map: dict[str, Any] = {}
-            if isinstance(breakdown, dict):
-                geo_candidate = breakdown.get("geo")
-                if isinstance(geo_candidate, dict):
-                    geo_map = geo_candidate
-                elif isinstance(geo_candidate, _MappingABC):
-                    try:
-                        geo_map = dict(geo_candidate)
-                    except Exception:
-                        geo_map = {}
-            if not geo_map:
-                try:
-                    result_map = result if isinstance(result, dict) else {}
-                except NameError:
-                    result_map = {}
-                geo_candidate = (
-                    result_map.get("geo") if isinstance(result_map, dict) else {}
-                )
-                if isinstance(geo_candidate, dict):
-                    geo_map = geo_candidate
-                elif isinstance(geo_candidate, _MappingABC):
-                    try:
-                        geo_map = dict(geo_candidate)
-                    except Exception:
-                        geo_map = {}
+            # --- DRILL BIN SEEDING (place before adjust) ---
+            geo_map = (
+                ((result or {}).get("geo") if isinstance(result, dict) else None)
+                or ((breakdown or {}).get("geo") if isinstance(breakdown, dict) else None)
+                or {}
+            )
 
             if not counts_by_diam_raw or sum(int(v) for v in counts_by_diam_raw.values()) == 0:
                 counts_by_diam_raw = _seed_drill_bins_from_geo(geo_map)
