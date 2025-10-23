@@ -11278,10 +11278,16 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
         )
         _push(lines, f"[DEBUG] ops_rows_pre={len(ops_rows)}")
 
+    except Exception as e:
+        _push(lines, f"[DEBUG] material_removal_emit_skipped={e.__class__.__name__}: {e}")
+    else:
         if not ops_rows:
             chart_lines_all = _collect_chart_lines_context(ctx, geo_map, ctx_a, ctx_b)
             built = _build_ops_rows_from_lines_fallback(chart_lines_all)
-            _push(lines, f"[DEBUG] chart_lines_found={len(chart_lines_all)} built_rows={len(built)}")
+            _push(
+                lines,
+                f"[DEBUG] chart_lines_found={len(chart_lines_all)} built_rows={len(built)}",
+            )
             if built:
                 plate_thickness = _resolve_part_thickness_in(
                     geo_map,
@@ -11434,9 +11440,6 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
             rates=rates,
         )
 
-    except Exception as e:
-        _push(lines, f"[DEBUG] material_removal_emit_skipped={e.__class__.__name__}: {e}")
-    else:
         new_ops_lines = [
             entry
             for entry in lines[pre_ops_len:]
