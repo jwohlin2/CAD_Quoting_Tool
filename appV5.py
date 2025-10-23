@@ -1133,6 +1133,104 @@ def _adjust_drill_counts(
     return counts
 
 
+def _apply_ops_audit_counts(
+    ops_counts: MutableMapping[str, int],
+    *,
+    drill_actions: int,
+    ops_claims: Mapping[str, Any] | None,
+) -> MutableMapping[str, int]:
+    """Merge chart-derived action counts into ``ops_counts`` for audit display."""
+
+    def _coerce_int(value: Any) -> int:
+        try:
+            number = float(value)
+        except Exception:
+            return 0
+        if not math.isfinite(number):
+            return 0
+        try:
+            return int(round(number))
+        except Exception:
+            return 0
+
+    drill_total = max(0, _coerce_int(drill_actions))
+    if drill_total > _coerce_int(ops_counts.get("drills")):
+        ops_counts["drills"] = drill_total
+
+    claims = ops_claims if isinstance(ops_claims, Mapping) else None
+
+    tap_total = 0
+    cb_total = 0
+    cb_front = 0
+    cb_back = 0
+    spot_total = 0
+    counterdrill_total = 0
+    jig_total = 0
+
+    if claims:
+        tap_total = max(0, _coerce_int(claims.get("tap")))
+
+        cb_groups = claims.get("cb_groups")
+        if isinstance(cb_groups, Mapping):
+            for key, qty in cb_groups.items():
+                qty_int = max(0, _coerce_int(qty))
+                cb_total += qty_int
+                side = ""
+                if isinstance(key, tuple) and len(key) >= 2:
+                    try:
+                        side = str(key[1] or "")
+                    except Exception:
+                        side = ""
+                side_norm = side.upper()
+                if side_norm == "FRONT":
+                    cb_front += qty_int
+                elif side_norm == "BACK":
+                    cb_back += qty_int
+
+        spot_total = max(0, _coerce_int(claims.get("spot")))
+        counterdrill_total = max(0, _coerce_int(claims.get("counterdrill")))
+        jig_total = max(0, _coerce_int(claims.get("jig")))
+
+    if tap_total > _coerce_int(ops_counts.get("taps_total")):
+        ops_counts["taps_total"] = tap_total
+
+    if cb_total > _coerce_int(ops_counts.get("counterbores_total")):
+        ops_counts["counterbores_total"] = cb_total
+        if cb_front > _coerce_int(ops_counts.get("counterbores_front")):
+            ops_counts["counterbores_front"] = cb_front
+        if cb_back > _coerce_int(ops_counts.get("counterbores_back")):
+            ops_counts["counterbores_back"] = cb_back
+
+    if spot_total > _coerce_int(ops_counts.get("spot")):
+        ops_counts["spot"] = spot_total
+
+    if counterdrill_total > _coerce_int(ops_counts.get("counterdrill")):
+        ops_counts["counterdrill"] = counterdrill_total
+
+    if jig_total > _coerce_int(ops_counts.get("jig_grind")):
+        ops_counts["jig_grind"] = jig_total
+
+    ops_counts["actions_total"] = (
+        max(0, _coerce_int(ops_counts.get("drills")))
+        + max(0, _coerce_int(ops_counts.get("taps_total")))
+        + max(0, _coerce_int(ops_counts.get("counterbores_total")))
+        + max(0, _coerce_int(ops_counts.get("counterdrill")))
+        + max(0, _coerce_int(ops_counts.get("spot")))
+        + max(0, _coerce_int(ops_counts.get("jig_grind")))
+    )
+
+    ops_counts["_audit_claims"] = {
+        "drill": drill_total,
+        "tap": tap_total,
+        "cbore": cb_total,
+        "spot": spot_total,
+        "counterdrill": counterdrill_total,
+        "jig": jig_total,
+    }
+
+    return ops_counts
+
+
 def _append_counterbore_spot_jig_cards(
     *,
     lines_out: list[str],
@@ -4142,6 +4240,8 @@ def _compute_drilling_removal_section(
                 _seed_bucket_minutes(bucket_key, existing_minutes + float(minutes))
 
     ops_hole_count_from_table = 0
+    drill_actions_from_groups = 0
+    ops_claims: dict[str, Any] = {}
 
     dtph_map_candidate = (
         drilling_time_per_hole
@@ -4299,15 +4399,17 @@ def _compute_drilling_removal_section(
                     drill_entries.append(
                         {
                             "name": "Drill",
-                            "qty": int(sum(counts_by_diam.values())),
+                            "qty": int(sum(max(0, int(v)) for v in counts_by_diam.values())),
                             "side": None,
                         }
                     )
                 except Exception:
                     pass
-            drill_actions = int(sum(counts_by_diam.values()))
-            _push(lines, f"[DEBUG] DRILL bins adj={drill_actions}")
-            ops_hole_count_from_table = drill_actions
+            drill_actions_from_groups = int(
+                sum(max(0, int(v)) for v in counts_by_diam.values())
+            )
+            _push(lines, f"[DEBUG] DRILL bins adj={drill_actions_from_groups}")
+            ops_hole_count_from_table = drill_actions_from_groups
 
             remaining_counts = dict(counts_by_diam)
             adjusted_rows: list[dict[str, Any]] = []
@@ -4331,7 +4433,7 @@ def _compute_drilling_removal_section(
             printed_sum = sum(int(row.get("qty", 0)) for row in sanitized_rows)
             _push(
                 lines,
-                f"[DEBUG] DRILL printed_sum={printed_sum} audit_drill={drill_actions}",
+                f"[DEBUG] DRILL printed_sum={printed_sum} audit_drill={drill_actions_from_groups}",
             )
             subtotal_minutes = sum(
                 float(row.get("group_minutes", 0.0) or 0.0) for row in sanitized_rows
@@ -12481,6 +12583,12 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
     ops_counts = audit_operations(
         planner_ops_rows_for_audit,
         removal_sections_text,
+    )
+
+    ops_counts = _apply_ops_audit_counts(
+        typing.cast(MutableMapping[str, int], ops_counts),
+        drill_actions=drill_actions_from_groups,
+        ops_claims=ops_claims,
     )
 
     def _resolve_drilling_summary_candidate(*containers: Mapping[str, Any] | None) -> Mapping[str, Any] | None:
