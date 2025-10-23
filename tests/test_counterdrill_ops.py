@@ -31,9 +31,17 @@ except ModuleNotFoundError:  # pragma: no cover - load shim for tests
 
         setattr(_geometry_pkg, "dxf_enrich", module)
 
-from appV5 import _count_counterdrill, _count_jig  # noqa: E402  # pylint: disable=wrong-import-position
+from appV5 import (  # noqa: E402  # pylint: disable=wrong-import-position
+    _append_counterbore_spot_jig_cards,
+    _count_counterdrill,
+    _count_jig,
+    _count_spot_and_jig,
+)
 from cad_quoter.app.op_parser import (  # noqa: E402  # pylint: disable=wrong-import-position
     _parse_ops_and_claims,
+)
+from cad_quoter.app.chart_lines import (  # noqa: E402  # pylint: disable=wrong-import-position
+    build_ops_rows_from_lines_fallback as _build_chart_rows_from_lines,
 )
 
 
@@ -45,6 +53,7 @@ from cad_quoter.app.op_parser import (  # noqa: E402  # pylint: disable=wrong-im
         (["(4) Center Drill", "(1) Spot Drill"], 0),
         (["COUNTERDRILL"], 1),
         (["(5) COUNTER DRILL", "(2) center drill"], 5),
+        (["(2) C’ DRILL"], 2),
     ],
 )
 def test_count_counterdrill(lines: list[str], expected: int) -> None:
@@ -75,3 +84,39 @@ def test_parse_ops_and_claims_skips_center_for_counterdrill() -> None:
     claims = _parse_ops_and_claims(lines)
     assert claims["counterdrill"] == 1
     assert claims["spot"] >= 2
+
+
+def test_count_spot_and_jig_skips_counterdrill_rows() -> None:
+    rows = [
+        {"qty": 1, "desc": "Counterdrill"},
+        {"qty": 2, "desc": "Spot Drill"},
+        {"qty": 3, "desc": "Jig Grind"},
+    ]
+    spot, jig = _count_spot_and_jig(rows)
+    assert spot == 2
+    assert jig == 3
+
+
+def test_append_cards_publish_spot_without_counterbore() -> None:
+    lines_out: list[str] = []
+    breakdown: dict[str, object] = {}
+    appended = _append_counterbore_spot_jig_cards(
+        lines_out=lines_out,
+        chart_lines=None,
+        rows=[{"qty": 4, "desc": "Spot Drill"}],
+        breakdown_mutable=breakdown,
+        rates={},
+    )
+    assert appended >= 1
+    extra_bucket_ops = breakdown.get("extra_bucket_ops")
+    assert isinstance(extra_bucket_ops, dict)
+    assert not extra_bucket_ops.get("counterbore")
+    spot_entries = extra_bucket_ops.get("spot") if isinstance(extra_bucket_ops, dict) else None
+    assert isinstance(spot_entries, list)
+    assert spot_entries[-1]["qty"] == 4
+
+
+def test_chart_fallback_extracts_counterdrill_rows() -> None:
+    rows = _build_chart_rows_from_lines(["(3) Counterdrill"])
+    assert any(row.get("desc", "").upper().startswith("COUNTERDRILL") for row in rows)
+    assert any(row.get("qty") == 3 for row in rows)

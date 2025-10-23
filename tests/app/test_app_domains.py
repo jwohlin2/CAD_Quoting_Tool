@@ -865,7 +865,7 @@ def test_aggregate_ops_tap_pilot_claims() -> None:
     assert all(entry.get("type") != "drill" for entry in detail)
 
 
-def test_collect_pilot_claims_from_rows() -> None:
+def test_collect_pilot_claims_combines_sources() -> None:
     import appV5
 
     geo = {
@@ -879,12 +879,24 @@ def test_collect_pilot_claims_from_rows() -> None:
         }
     }
 
-    pilots = appV5._collect_pilot_claims_from_rows(geo)
+    chart = [
+        "(3) 5/16-24 TAP DRILL THRU",
+        "Ø0.261 DRILL THRU",
+        "1/8-27 NPT TAP",
+    ]
+
+    pilots = appV5._collect_pilot_claims(
+        geo,
+        chart,
+        geo["ops_summary"]["rows"],
+    )
     counts = Counter(round(val, 4) for val in pilots)
 
     assert counts[round(0.1590, 4)] == 4
     assert counts[round(0.5312, 4)] == 2
-    assert counts[round(0.3390, 4)] == 2
+    assert counts[round(0.3390, 4)] == 3
+    assert counts[round(0.2720, 4)] == 3
+    assert counts[round(0.2610, 4)] == 1
 
 
 def test_adjust_drill_counts_subtracts_row_pilots() -> None:
@@ -900,11 +912,14 @@ def test_adjust_drill_counts_subtracts_row_pilots() -> None:
         }
     }
 
-    pilots = appV5._collect_pilot_claims_from_rows(geo)
-    ops_claims = {"claimed_pilot_diams": pilots}
+    pilots = appV5._collect_pilot_claims(geo, [], geo["ops_summary"]["rows"])
 
     counts_raw = {0.1590: 4, 0.5312: 2, 0.3390: 1}
-    adjusted = appV5._adjust_drill_counts(counts_raw, ops_claims, None)
+    adjusted = appV5._adjust_drill_counts(
+        counts_raw,
+        pilot_claims=pilots,
+        cb_groups={},
+    )
 
     assert adjusted[round(0.1590, 4)] == 0
     assert adjusted[round(0.5312, 4)] == 0
@@ -915,16 +930,15 @@ def test_adjust_drill_counts_sanitizes_inputs() -> None:
     import appV5
 
     counts_raw = {0.25: 5, 0.5: 3, 1.25: 4}
-    ops_claims = {
-        "claimed_pilot_diams": ["0.251", 0.25, "888", None, "oops"],
-        "cb_groups": {
+    adjusted = appV5._adjust_drill_counts(
+        counts_raw,
+        pilot_claims=["0.251", 0.25, "888", None, "oops"],
+        cb_groups={
             (0.248, "TOP", None): 10,
             ("5.0", "BOT", None): 2,
             (None, "", None): 7,
         },
-    }
-
-    adjusted = appV5._adjust_drill_counts(counts_raw, ops_claims, None)
+    )
 
     assert adjusted[round(0.25, 4)] == 0
     assert adjusted[round(0.5, 4)] == 3

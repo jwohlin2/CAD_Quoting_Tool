@@ -203,6 +203,11 @@ _RE_MM_IN_DIA = re.compile(r"(?:%%[Cc]|Ø|⌀|O|DIA|\b)\s*([0-9.]+)")
 _RE_PAREN_DIA = re.compile(r"\(([0-9.]+)\s*Ø?\)")
 _RE_DIA_SIMPLE = re.compile(r"(?:%%[Cc]\s*|[Ø⌀\u00D8]\s*)?(\d+(?:\.\d+)?)", re.I)
 _RE_JIG_GRIND = re.compile(r"\bJIG\s*GRIND\b", re.I)
+_RE_COUNTERDRILL = re.compile(
+    r"\b(?:C[’']\s*DRILL|C\s*DRILL|COUNTER\s*DRILL|COUNTERDRILL)\b",
+    re.I,
+)
+_RE_CENTER_OR_SPOT = re.compile(r"\b(CENTER\s*DRILL|SPOT\s*DRILL|SPOT)\b", re.I)
 
 
 
@@ -327,6 +332,19 @@ def _build_ops_rows_from_lines_fallback(lines: list[str]) -> list[dict]:
                 row["t_per_hole_min"] = round(minutes, 3)
             row["feed_fmt"] = feed_fmt
             out.append(row)
+            i += 1
+            continue
+        if _RE_COUNTERDRILL.search(ln) and not _RE_CENTER_OR_SPOT.search(ln):
+            tail = " ".join([ln] + L[i + 1:i + 2])
+            depth_match = _RE_DEPTH_MULT.search(tail)
+            depth_value = depth_match.group(1) if depth_match else None
+            if not depth_value:
+                deep_match = _RE_DEPTH_DEEP.search(tail)
+                depth_value = deep_match.group(1) if deep_match else None
+            desc = "COUNTERDRILL"
+            if depth_value:
+                desc += f' × {float(depth_value):.2f}"'
+            out.append({"hole": "", "ref": "", "qty": qty, "desc": desc})
             i += 1
             continue
         if any(k in ln.upper() for k in ("C' DRILL", "C’DRILL", "CENTER DRILL", "SPOT DRILL")):
