@@ -879,6 +879,12 @@ def _join_wrapped_chart_lines(chart_lines: list[str]) -> list[str]:
         if not s:
             continue
         if _JOIN_START_TOKENS.search(s):
+            # ✨ glue rule: if this line is the NPT continuation and the buffer ends with DRILL THRU,
+            # append instead of starting a new row. This keeps the pilot drill call-out together
+            # with the NPT note so downstream logic sees them as a single feature description.
+            if re.search(r"\bN\.?P\.?T\.?\b", s, re.I) and re.search(r"\bDRILL\s+THRU\b", buf or "", re.I):
+                buf += " " + s
+                continue
             flush()
             buf = s
         else:
@@ -2132,6 +2138,80 @@ def _emit_hole_table_ops_cards(
             bucket_view_obj = None
 
         tap_rows = _finalize_tapping_rows(rows, thickness_in=thickness_in)
+
+        def _extract_ops_claims_map(
+            *sources: Mapping[str, Any] | MutableMapping[str, Any] | None,
+        ) -> Mapping[str, Any] | None:
+            for candidate in sources:
+                if not isinstance(candidate, (_MappingABC, dict)):
+                    continue
+                try:
+                    claims_candidate = candidate.get("ops_claims")  # type: ignore[index]
+                except Exception:
+                    claims_candidate = None
+                if isinstance(claims_candidate, (_MappingABC, dict)):
+                    return typing.cast(Mapping[str, Any], claims_candidate)
+            return None
+
+        ops_claims_map = _extract_ops_claims_map(geo, breakdown, result)
+        if ops_claims_map is None and isinstance(ops_summary, _MappingABC):
+            try:
+                claims_candidate = ops_summary.get("claims")
+            except Exception:
+                claims_candidate = None
+            if isinstance(claims_candidate, (_MappingABC, dict)):
+                ops_claims_map = typing.cast(Mapping[str, Any], claims_candidate)
+
+        def _int_or_zero(value: Any) -> int:
+            try:
+                num = float(value)
+            except Exception:
+                return 0
+            if not math.isfinite(num):
+                return 0
+            return int(round(num))
+
+        npt_qty = _int_or_zero(ops_claims_map.get("npt")) if ops_claims_map else 0
+        if npt_qty <= 0:
+            npt_qty = 0
+            for entry in rows:
+                if not isinstance(entry, _MappingABC):
+                    continue
+                try:
+                    qty_val = int(entry.get("qty") or 0)
+                except Exception:
+                    qty_val = 0
+                if qty_val <= 0:
+                    continue
+                desc_text = str(entry.get("desc") or "").upper()
+                if "NPT" in desc_text and "TAP" not in desc_text:
+                    npt_qty += qty_val
+
+        if npt_qty > 0:
+            existing_npt = any(
+                "NPT" in str(row.get("thread") or row.get("desc") or "").upper()
+                for row in tap_rows
+            )
+            if not existing_npt:
+                depth_val = float(thickness_in or 0.0)
+                depth_display = f"{depth_val:.2f}\"" if depth_val > 0 else "THRU"
+                per_hole = 0.20
+                tap_rows.append(
+                    {
+                        "label": "1/8- NPT TAP",
+                        "desc": "1/8- NPT TAP",
+                        "thread": "1/8- NPT",
+                        "qty": int(npt_qty),
+                        "side": "FRONT",
+                        "t_per_hole_min": per_hole,
+                        "feed_fmt": "- ipr | - rpm | - ipm",
+                        "depth_in": depth_val,
+                        "depth_in_display": depth_display,
+                        "ipr": 0.0,
+                        "rpm": 0,
+                        "ipm": 0.0,
+                    }
+                )
         tap_total_min = 0.0
         if tap_rows:
             tap_total_min = _render_ops_card(
@@ -10779,11 +10859,44 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
 
     ops_claims: dict[str, int] = {}
 
+    def _normalize_ops_claims_map(candidate: Any) -> dict[str, int]:
+        if not isinstance(candidate, (_MappingABC, dict)):
+            return {}
+        normalized: dict[str, int] = {}
+        for key, value in candidate.items():
+            try:
+                normalized[str(key)] = int(round(float(value)))
+            except Exception:
+                continue
+        return normalized
+
+    def _stash_ops_claims(claims: dict[str, int]) -> None:
+        if not claims:
+            return
+        if isinstance(breakdown_mutable, _MutableMappingABC):
+            try:
+                breakdown_mutable["_ops_claims"] = dict(claims)
+            except Exception:
+                pass
+
+    try:
+        stashed_claims = (
+            breakdown_mutable.get("_ops_claims")
+            if isinstance(breakdown_mutable, _MappingABC)
+            else None
+        )
+    except Exception:
+        stashed_claims = None
+    if stashed_claims:
+        ops_claims = _normalize_ops_claims_map(stashed_claims)
+
     def _extract_ops_claims(source: Any) -> dict[str, int]:
         if not isinstance(source, (_MappingABC, dict)):
             return {}
         try:
             claims_candidate = source.get("ops_claims")  # type: ignore[index]
+            if not isinstance(claims_candidate, (_MappingABC, dict)):
+                claims_candidate = source.get("_ops_claims")  # type: ignore[index]
         except Exception:
             return {}
         if not isinstance(claims_candidate, (_MappingABC, dict)):
@@ -10800,6 +10913,7 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
         extracted_claims = _extract_ops_claims(candidate_source)
         if extracted_claims:
             ops_claims = extracted_claims
+            _stash_ops_claims(dict(ops_claims))
             break
 
     if not ops_claims and (joined_lines or ops_rows_now):
@@ -10821,6 +10935,7 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
                     continue
             if extracted:
                 ops_claims = extracted
+                _stash_ops_claims(dict(ops_claims))
 
     # Append extra MATERIAL REMOVAL cards (Counterbore / Spot / Jig) from JOINED lines
     _appended_at_print = _append_counterbore_spot_jig_cards(
@@ -10839,8 +10954,19 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
                 return True
         return False
 
+    try:
+        ops_claims_for_cards = (
+            _normalize_ops_claims_map(breakdown_mutable.get("_ops_claims"))
+            if isinstance(breakdown_mutable, _MappingABC)
+            else {}
+        )
+    except Exception:
+        ops_claims_for_cards = {}
+    if not ops_claims_for_cards:
+        ops_claims_for_cards = dict(ops_claims)
+
     spot_heading = "MATERIAL REMOVAL – SPOT (CENTER DRILL)"
-    spot_qty = int(ops_claims.get("spot") or 0)
+    spot_qty = int(ops_claims_for_cards.get("spot") or 0)
     if spot_qty > 0 and not _card_heading_exists(spot_heading):
         removal_card_lines.extend([
             spot_heading,
@@ -10852,7 +10978,7 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
         ])
 
     jig_heading = "MATERIAL REMOVAL – JIG GRIND"
-    jig_qty = int(ops_claims.get("jig") or 0)
+    jig_qty = int(ops_claims_for_cards.get("jig") or 0)
     if jig_qty > 0 and not _card_heading_exists(jig_heading):
         per_jig = float(globals().get("JIG_GRIND_MIN_PER_FEATURE") or 0.75)
         removal_card_lines.extend([
@@ -11166,6 +11292,7 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
                 _clean_mtext(x) for x in chart_lines_all
             ])
             ops_claims = _parse_ops_and_claims(joined_early)
+            breakdown_mutable["_ops_claims"] = ops_claims
             _push(
                 lines,
                 f"[DEBUG] preseed_ops cb={ops_claims['cb_total']} tap={ops_claims['tap']} "
@@ -11215,6 +11342,10 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
                 cb_min = (ops_claims["cb_total"] or 0) * float(
                     globals().get("CBORE_MIN_PER_SIDE_MIN") or 0.15
                 )
+                spot_min = (ops_claims["spot"] or 0) * 0.05
+                jig_min = (ops_claims["jig"] or 0) * float(
+                    globals().get("JIG_GRIND_MIN_PER_FEATURE") or 0.75
+                )
                 seed(
                     "counterbore",
                     cb_min,
@@ -11224,18 +11355,17 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
                     _lookup_bucket_rate("labor", rates) or 25.46,
                 )
                 seed(
-                    "drilling",
-                    (ops_claims["spot"] or 0) * 0.05,
-                    _lookup_bucket_rate("machine", rates) or 53.76,
-                    _lookup_bucket_rate("labor", rates) or 25.46,
-                )
-                seed(
                     "grinding",
-                    (ops_claims["jig"] or 0)
-                    * float(globals().get("JIG_GRIND_MIN_PER_FEATURE") or 0.75),
+                    jig_min,
                     _lookup_bucket_rate("grinding", rates)
                     or _lookup_bucket_rate("machine", rates)
                     or 53.76,
+                    _lookup_bucket_rate("labor", rates) or 25.46,
+                )
+                seed(
+                    "drilling",
+                    spot_min + cb_min + jig_min,
+                    _lookup_bucket_rate("machine", rates) or 53.76,
                     _lookup_bucket_rate("labor", rates) or 25.46,
                 )
 
@@ -11335,47 +11465,69 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
     if removal_summary_extra_lines:
         removal_summary_lines.extend(removal_summary_extra_lines)
 
-    actions_summary_ready = True
-    try:
-        extra_bucket_ops: MutableMapping[str, Any] | dict[str, Any]
-        extra_bucket_ops = {}
-        if isinstance(breakdown, _MappingABC):
-            extra_bucket_ops = dict(breakdown.get("extra_bucket_ops") or {})
-        extra_map_candidate = getattr(bucket_state, "extra", None)
-        if isinstance(extra_map_candidate, _MappingABC):
-            extra_bucket_ops_candidate = extra_map_candidate.get("bucket_ops")
-            if isinstance(extra_bucket_ops_candidate, _MappingABC):
-                extra_bucket_ops.update(extra_bucket_ops_candidate)
-        if isinstance(extra_bucket_ops, _MappingABC):
-            for _, entries in extra_bucket_ops.items():
-                if not isinstance(entries, Sequence):
-                    continue
-                for entry in entries:
-                    if not isinstance(entry, _MappingABC):
-                        continue
-                    name_text = str(entry.get("name") or entry.get("op") or "").strip()
-                    qty_candidate = entry.get("qty")
-                    try:
-                        qty_val = int(float(qty_candidate))
-                    except Exception:
-                        qty_val = 0
-                    side_val = entry.get("side")
-                    if name_text:
-                        planner_ops_summary.append(
-                            {"name": name_text, "qty": qty_val, "side": side_val}
-                        )
-    except Exception as exc:
-        actions_summary_ready = False
-        logging.debug(
-            "[actions-summary] skipped due to %s: %s",
-            exc.__class__.__name__,
-            exc,
-            exc_info=False,
-        )
+        printed_sections = {
+            "tapping": any(
+                isinstance(s, str)
+                and s.strip().upper().startswith("MATERIAL REMOVAL – TAPPING")
+                for s in removal_card_lines
+            ),
+            "counterbore": any(
+                isinstance(s, str)
+                and s.strip().upper().startswith("MATERIAL REMOVAL – COUNTERBORE")
+                for s in removal_card_lines
+            ),
+            "spot": any(
+                isinstance(s, str)
+                and s.strip().upper().startswith("MATERIAL REMOVAL – SPOT")
+                for s in removal_card_lines
+            ),
+            "jig": any(
+                isinstance(s, str)
+                and s.strip().upper().startswith("MATERIAL REMOVAL – JIG")
+                for s in removal_card_lines
+            ),
+        }
 
-    if actions_summary_ready:
+        skip_names = set()
+        if printed_sections["tapping"]:
+            skip_names.update({"tap", "npt tap"})
+        if printed_sections["counterbore"]:
+            skip_names.add("counterbore")
+        if printed_sections["spot"]:
+            skip_names.add("spot drill")
+        if printed_sections["jig"]:
+            skip_names.add("jig-grind")
+
+        actions_summary_ready = True
         try:
-            summarize_actions(removal_summary_lines, planner_ops_summary)
+            extra_bucket_ops: MutableMapping[str, Any] | dict[str, Any]
+            extra_bucket_ops = {}
+            if isinstance(breakdown, _MappingABC):
+                extra_bucket_ops = dict(breakdown.get("extra_bucket_ops") or {})
+            extra_map_candidate = getattr(bucket_state, "extra", None)
+            if isinstance(extra_map_candidate, _MappingABC):
+                extra_bucket_ops_candidate = extra_map_candidate.get("bucket_ops")
+                if isinstance(extra_bucket_ops_candidate, _MappingABC):
+                    extra_bucket_ops.update(extra_bucket_ops_candidate)
+            if isinstance(extra_bucket_ops, _MappingABC):
+                for _, entries in extra_bucket_ops.items():
+                    if not isinstance(entries, Sequence):
+                        continue
+                    for entry in entries:
+                        if not isinstance(entry, _MappingABC):
+                            continue
+                        name_text = str(entry.get("name") or entry.get("op") or "").strip()
+                        name_lower = name_text.lower()
+                        qty_candidate = entry.get("qty")
+                        try:
+                            qty_val = int(float(qty_candidate))
+                        except Exception:
+                            qty_val = 0
+                        side_val = entry.get("side")
+                        if name_text and name_lower not in skip_names:
+                            planner_ops_summary.append(
+                                {"name": name_text, "qty": qty_val, "side": side_val}
+                            )
         except Exception as exc:
             logging.debug(
                 "[actions-summary] skipped due to %s: %s",
