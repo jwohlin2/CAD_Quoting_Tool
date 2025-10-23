@@ -10862,8 +10862,16 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
     cleaned = [_clean_mtext(x) for x in chart_lines_all]
     joined_lines = _join_wrapped_chart_lines(cleaned)
 
+    # Use any rows already built earlier (if present)
     try:
-        ops_claims_preview = _parse_ops_and_claims(joined_lines)
+        ops_rows_now = (((geo_map or {}).get("ops_summary") or {}).get("rows") or [])
+    except Exception:
+        ops_rows_now = []
+    if not isinstance(ops_rows_now, list):
+        ops_rows_now = []
+
+    try:
+        ops_claims_preview = _parse_ops_and_claims(joined_lines, rows=ops_rows_now)
     except Exception:
         ops_claims_preview = {}
     if not isinstance(ops_claims_preview, dict):
@@ -10878,14 +10886,6 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
             jig=int(ops_claims_preview.get("jig", 0)),
         ),
     )
-
-    # Use any rows already built earlier (if present)
-    try:
-        ops_rows_now = (((geo_map or {}).get("ops_summary") or {}).get("rows") or [])
-    except Exception:
-        ops_rows_now = []
-    if not isinstance(ops_rows_now, list):
-        ops_rows_now = []
 
     ops_claims: dict[str, int] = {}
     try:
