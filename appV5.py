@@ -3315,6 +3315,10 @@ def summarize_actions(removal_lines: list[str], planner_ops: list[dict]) -> None
         r'^\s*(?:Ø|%%[Cc])?\s*([0-9]+(?:\.[0-9]+)?|\.[0-9]+|\d+/\d+).*?[×xX]\s*(\d+)',
         re.IGNORECASE,
     )
+    cbo_simple_re = re.compile(
+        r'^\s*([0-9]+(?:\.[0-9]+)?|\.[0-9]+)"?\s*[×xX]\s*(\d+)\s*\((FRONT|BACK)\)',
+        re.IGNORECASE,
+    )
 
     card_counts = {"counterbore": False, "spot": False, "jig_grind": False}
     active_card: str | None = None
@@ -3346,6 +3350,14 @@ def summarize_actions(removal_lines: list[str], planner_ops: list[dict]) -> None
                 qty = int(m2.group(2))
                 total["counterbore"] += qty
                 by_side["counterbore"]["front"] += qty
+                card_counts["counterbore"] = True
+                continue
+            m3 = cbo_simple_re.search(ln)
+            if m3:
+                qty = int(m3.group(2))
+                side = m3.group(3).upper()
+                total["counterbore"] += qty
+                by_side["counterbore"][side.lower()] += qty
                 card_counts["counterbore"] = True
                 continue
 
@@ -10692,6 +10704,12 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
     )
     _push(lines, f"[DEBUG] extra_ops_appended_at_print={_appended_at_print}")
 
+    removal_summary_lines = [
+        str(line) for line in removal_card_lines if isinstance(line, str)
+    ]
+    if removal_summary_extra_lines:
+        removal_summary_lines.extend(removal_summary_extra_lines)
+
     append_lines(removal_card_lines)
 
     try:
@@ -11083,7 +11101,8 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
 
         actions_summary_ready = True
         try:
-            extra_bucket_ops: MutableMapping[str, Any] = {}
+            extra_bucket_ops: MutableMapping[str, Any] | dict[str, Any]
+            extra_bucket_ops = {}
             if isinstance(breakdown, _MappingABC):
                 extra_bucket_ops = dict(breakdown.get("extra_bucket_ops") or {})
             extra_map_candidate = getattr(bucket_state, "extra", None)
@@ -11117,12 +11136,6 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
                 exc,
                 exc_info=False,
             )
-
-        removal_summary_lines = [
-            str(line) for line in removal_card_lines if isinstance(line, str)
-        ]
-        if removal_summary_extra_lines:
-            removal_summary_lines.extend(removal_summary_extra_lines)
 
         if actions_summary_ready:
             try:
