@@ -11639,6 +11639,40 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
     )
 
     drill_actions = int(ops_counts.get("drills", 0))
+    drill_actions_adjusted_display = drill_actions_adjusted_total
+    if drill_actions_adjusted_display is None:
+        try:
+            hole_count_candidate = drilling_summary.get("hole_count")
+        except Exception:
+            hole_count_candidate = None
+        if hole_count_candidate is not None:
+            try:
+                drill_actions_adjusted_display = int(round(float(hole_count_candidate)))
+            except Exception:
+                drill_actions_adjusted_display = None
+    if drill_actions_adjusted_display is None:
+        groups_payload = drilling_summary.get("groups") if isinstance(drilling_summary, _MappingABC) else None
+        if isinstance(groups_payload, Sequence) and not isinstance(groups_payload, (str, bytes)):
+            total_qty = 0
+            seen_entry = False
+            for entry in groups_payload:
+                qty_candidate: Any
+                if isinstance(entry, _MappingABC):
+                    qty_candidate = entry.get("qty")
+                else:
+                    qty_candidate = getattr(entry, "qty", None)
+                if qty_candidate is not None:
+                    seen_entry = True
+                try:
+                    qty_int = int(round(float(qty_candidate))) if qty_candidate is not None else 0
+                except Exception:
+                    qty_int = 0
+                if qty_int > 0:
+                    total_qty += qty_int
+            if seen_entry:
+                drill_actions_adjusted_display = total_qty
+    if drill_actions_adjusted_display is not None:
+        _push(lines, f"[DEBUG] drill_actions_adjusted={int(drill_actions_adjusted_display)}")
     for key in ("tap", "npt", "cb_total", "spot", "jig"):
         if key not in ops_claims:
             ops_claims[key] = 0
@@ -14610,6 +14644,7 @@ def compute_quote_from_df(  # type: ignore[reportGeneralTypeIssues]
         if "rate" not in drilling_summary:
             drilling_summary["rate"] = float(drilling_rate)
 
+    drill_actions_adjusted_total = None
     groups_existing = drilling_summary.get("groups")
     has_groups = False
     if isinstance(groups_existing, Sequence) and not isinstance(groups_existing, (str, bytes)):
@@ -14632,6 +14667,7 @@ def compute_quote_from_df(  # type: ignore[reportGeneralTypeIssues]
             hole_diams,
             thickness_in,
             ops_claims_map,
+            geo_payload,
         )
 
     if fallback_groups:
@@ -14646,6 +14682,7 @@ def compute_quote_from_df(  # type: ignore[reportGeneralTypeIssues]
         drilling_summary["hole_count"] = fallback_hole_count
         drilling_meta_container["bins_list"] = fallback_groups
         drilling_meta_container["hole_count"] = fallback_hole_count
+        drill_actions_adjusted_total = fallback_hole_count
 
     # Establish authoritative drilling-minute totals before the buckets are
     # rendered so downstream consumers have a single source of truth.
