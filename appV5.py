@@ -10693,6 +10693,53 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
         ops_rows_now = (((geo_map or {}).get("ops_summary") or {}).get("rows") or [])
     except Exception:
         ops_rows_now = []
+    if not isinstance(ops_rows_now, list):
+        ops_rows_now = []
+
+    ops_claims: dict[str, int] = {}
+
+    def _extract_ops_claims(source: Any) -> dict[str, int]:
+        if not isinstance(source, (_MappingABC, dict)):
+            return {}
+        try:
+            claims_candidate = source.get("ops_claims")  # type: ignore[index]
+        except Exception:
+            return {}
+        if not isinstance(claims_candidate, (_MappingABC, dict)):
+            return {}
+        extracted: dict[str, int] = {}
+        for key, value in claims_candidate.items():
+            try:
+                extracted[str(key)] = int(round(float(value)))
+            except Exception:
+                continue
+        return extracted
+
+    for candidate_source in (geo_map, breakdown, result):
+        extracted_claims = _extract_ops_claims(candidate_source)
+        if extracted_claims:
+            ops_claims = extracted_claims
+            break
+
+    if not ops_claims and (joined_lines or ops_rows_now):
+        try:
+            computed_claims = _preseed_ops_from_chart_lines(
+                chart_lines=joined_lines,
+                rows=ops_rows_now,
+                breakdown_mutable={},
+                rates=rates,
+            )
+        except Exception:
+            computed_claims = {}
+        if isinstance(computed_claims, dict):
+            extracted: dict[str, int] = {}
+            for key, value in computed_claims.items():
+                try:
+                    extracted[str(key)] = int(round(float(value)))
+                except Exception:
+                    continue
+            if extracted:
+                ops_claims = extracted
 
     # Append extra MATERIAL REMOVAL cards (Counterbore / Spot / Jig) from JOINED lines
     _appended_at_print = _append_counterbore_spot_jig_cards(
@@ -10703,6 +10750,38 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
         rates=rates,
     )
     _push(lines, f"[DEBUG] extra_ops_appended_at_print={_appended_at_print}")
+
+    def _card_heading_exists(heading: str) -> bool:
+        heading_norm = heading.strip().upper()
+        for entry in removal_card_lines:
+            if isinstance(entry, str) and entry.strip().upper() == heading_norm:
+                return True
+        return False
+
+    spot_heading = "MATERIAL REMOVAL – SPOT (CENTER DRILL)"
+    spot_qty = int(ops_claims.get("spot") or 0)
+    if spot_qty > 0 and not _card_heading_exists(spot_heading):
+        removal_card_lines.extend([
+            spot_heading,
+            "=" * 64,
+            "TIME PER HOLE – SPOT GROUPS",
+            "-" * 66,
+            f"Spot drill × {spot_qty} | t/hole 0.05 min | group {spot_qty}×0.05 = {spot_qty * 0.05:.2f} min",
+            "",
+        ])
+
+    jig_heading = "MATERIAL REMOVAL – JIG GRIND"
+    jig_qty = int(ops_claims.get("jig") or 0)
+    if jig_qty > 0 and not _card_heading_exists(jig_heading):
+        per_jig = float(globals().get("JIG_GRIND_MIN_PER_FEATURE") or 0.75)
+        removal_card_lines.extend([
+            jig_heading,
+            "=" * 64,
+            "TIME PER FEATURE",
+            "-" * 66,
+            f"Jig grind × {jig_qty} | t/feat {per_jig:.2f} min | group {jig_qty}×{per_jig:.2f} = {jig_qty * per_jig:.2f} min",
+            "",
+        ])
 
     removal_summary_lines = [
         str(line) for line in removal_card_lines if isinstance(line, str)
@@ -11016,6 +11095,11 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
                 f"[DEBUG] preseed_ops cb={preseed_counts['cb_total']} "
                 f"spot={preseed_counts['spot']} jig={preseed_counts['jig']}",
             )
+            try:
+                if isinstance(geo_map, (_MutableMappingABC, dict)):
+                    geo_map.setdefault("ops_claims", dict(preseed_counts))
+            except Exception:
+                pass
             try:
                 _normalize_buckets(breakdown.get("bucket_view"))
             except Exception:
