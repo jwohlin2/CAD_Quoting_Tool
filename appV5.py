@@ -3749,6 +3749,37 @@ def _compute_drilling_removal_section(
                 geo_map = candidate_geo
     if not isinstance(geo_map, _MappingABC):
         geo_map = {}
+    try:
+        geo_map = (
+            ((breakdown or {}).get("geo") if isinstance(breakdown, dict) else {})
+            or (
+                (result or {}).get("geo") if isinstance(result, dict) else {}
+            )  # type: ignore[name-defined]
+            or geo_map
+            or {}
+        )
+    except NameError:
+        geo_map = (
+            ((breakdown or {}).get("geo") if isinstance(breakdown, dict) else {})
+            or geo_map
+            or {}
+        )
+    if not isinstance(geo_map, (_MappingABC, dict)):
+        geo_map = {}
+
+    fam = (
+        geo_map.get("hole_diam_families_geom_in")
+        or geo_map.get("hole_diam_families_in")
+        or {}
+    )
+    counts_by_diam_raw: dict[float, int] = {}
+    for k, v in (fam or {}).items():
+        try:
+            counts_by_diam_raw[float(k)] = int(v)
+        except Exception:
+            continue
+
+    _push(lines, f"[DEBUG] drill_families_from_geo={sum(counts_by_diam_raw.values())}")
 
     (
         tap_minutes_inferred,
@@ -3893,13 +3924,18 @@ def _compute_drilling_removal_section(
             if isinstance(hint_payload, (_MappingABC, dict)):
                 ops_hint = dict(hint_payload)
 
-            counts_by_diam_raw: dict[float, int] = {}
-            for row in sanitized_rows:
-                key = round(float(row.get("diameter_in", 0.0) or 0.0), 4)
-                qty_val = int(row.get("qty", 0))
-                if qty_val <= 0:
-                    continue
-                counts_by_diam_raw[key] = counts_by_diam_raw.get(key, 0) + qty_val
+            if counts_by_diam_raw:
+                counts_source = counts_by_diam_raw
+            else:
+                fallback_counts: dict[float, int] = {}
+                for row in sanitized_rows:
+                    key = round(float(row.get("diameter_in", 0.0) or 0.0), 4)
+                    qty_val = int(row.get("qty", 0))
+                    if qty_val <= 0:
+                        continue
+                    fallback_counts[key] = fallback_counts.get(key, 0) + qty_val
+                counts_by_diam_raw = fallback_counts
+                counts_source = counts_by_diam_raw
 
             geo_map: dict[str, Any] = {}
             if isinstance(breakdown, dict):
@@ -3921,7 +3957,7 @@ def _compute_drilling_removal_section(
             _push(lines, f"[DEBUG] DRILL bins raw={sum(counts_by_diam_raw.values())}")
 
             counts_by_diam = _adjust_drill_counts(
-                counts_by_diam_raw,
+                counts_source,
                 ops_claims,
                 ops_hint,
             )
