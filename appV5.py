@@ -151,6 +151,67 @@ _DRILL_REMOVAL_MINUTES_MIN = 0.0
 _DRILL_REMOVAL_MINUTES_MAX = 600.0
 
 
+def _seed_drill_bins_from_geo(geo: dict) -> dict[float, int]:
+    """
+    Robustly build {diam_in: qty} from GEO. Handles multiple shapes/keys and
+    gracefully falls back to raw hole lists.
+    """
+
+    if not isinstance(geo, dict):
+        return {}
+
+    # Preferred “families” maps people keep around in different names:
+    candidates = [
+        "hole_diam_families_geom_in",
+        "hole_diam_families_in",
+        "hole_diam_families_geom",
+        "hole_diam_families",
+    ]
+    out: dict[float, int] = {}
+
+    # 1) Direct family maps
+    for key in candidates:
+        fam = geo.get(key)
+        if isinstance(fam, dict) and fam:
+            for k, v in fam.items():
+                try:
+                    d = float(str(k).replace('"', '').strip())
+                    q = int(v) if v is not None else 0
+                    if q > 0:
+                        d = round(d, 4)
+                        out[d] = out.get(d, 0) + q
+                except Exception:
+                    continue
+            if out:
+                return out  # done
+
+    # 2) Rebuild from raw hole lists (in or mm)
+    holes_in = geo.get("hole_diams_in") or geo.get("hole_diams_geom_in")
+    holes_mm = geo.get("hole_diams_mm") or geo.get("hole_diams_geom_mm")
+
+    def _acc_from_list(seq, mm=False):
+        nonlocal out
+        if not isinstance(seq, (list, tuple)):
+            return
+        for x in seq:
+            try:
+                d = float(x)
+                if mm:
+                    d /= 25.4
+                # snap to 0.001” bins to avoid float scatter
+                d = round(d, 3)
+                out[d] = out.get(d, 0) + 1
+            except Exception:
+                continue
+
+    if holes_in:
+        _acc_from_list(holes_in, mm=False)
+    if not out and holes_mm:
+        _acc_from_list(holes_mm, mm=True)
+
+    return out
+
+
 def _parse_dim_to_mm(value: Any) -> float | None:
     """Parse a dimension string containing millimeter units to a float value."""
 
@@ -3665,37 +3726,6 @@ def _compute_drilling_removal_section(
                     continue
         return total
 
-    def _seed_drill_bins_from_geo(geo_map: dict) -> dict[float, int]:
-        """Build counts_by_diam_raw from GEO, robust to different shapes."""
-
-        if not isinstance(geo_map, dict):
-            return {}
-        families = (
-            geo_map.get("hole_diam_families_geom_in")
-            or geo_map.get("hole_diam_families_geom")
-            or geo_map.get("hole_diam_families_in")
-            or {}
-        )
-
-        def _as_float_key(k: Any) -> float | None:
-            # handles '0.5312"' and plain numbers
-            try:
-                return float(str(k).replace('"', "").strip())
-            except Exception:
-                return None
-
-        out: dict[float, int] = {}
-        for k, v in families.items():
-            fk = _as_float_key(k)
-            try:
-                q = int(v) if v is not None else 0
-            except Exception:
-                continue
-            if fk is not None and q > 0:
-                key = round(fk, 4)
-                out[key] = out.get(key, 0) + q
-        return out
-
     drill_bins_raw_total = 0
     drill_bins_adj_total = 0
 
@@ -3785,19 +3815,21 @@ def _compute_drilling_removal_section(
     try:
         geo_map = (
             ((breakdown or {}).get("geo") if isinstance(breakdown, dict) else {})
-            or (
-                (result or {}).get("geo") if isinstance(result, dict) else {}
-            )  # type: ignore[name-defined]
-            or geo_map
+            or ((result or {}).get("geo") if isinstance(result, dict) else {})
             or {}
         )
     except NameError:
         geo_map = (
             ((breakdown or {}).get("geo") if isinstance(breakdown, dict) else {})
-            or geo_map
             or {}
         )
-    if not isinstance(geo_map, (_MappingABC, dict)):
+
+    if isinstance(geo_map, _MappingABC) and not isinstance(geo_map, dict):
+        try:
+            geo_map = dict(geo_map)
+        except Exception:
+            geo_map = {}
+    if not isinstance(geo_map, dict):
         geo_map = {}
 
     fam = (
@@ -3811,6 +3843,9 @@ def _compute_drilling_removal_section(
             counts_by_diam_raw[float(k)] = int(v)
         except Exception:
             continue
+
+    if not counts_by_diam_raw or sum(int(v) for v in counts_by_diam_raw.values()) == 0:
+        counts_by_diam_raw = _seed_drill_bins_from_geo(geo_map)
 
     _push(lines, f"[DEBUG] drill_families_from_geo={sum(counts_by_diam_raw.values())}")
 
@@ -3981,17 +4016,29 @@ def _compute_drilling_removal_section(
                 geo_candidate = breakdown.get("geo")
                 if isinstance(geo_candidate, dict):
                     geo_map = geo_candidate
+                elif isinstance(geo_candidate, _MappingABC):
+                    try:
+                        geo_map = dict(geo_candidate)
+                    except Exception:
+                        geo_map = {}
             if not geo_map:
                 try:
                     result_map = result if isinstance(result, dict) else {}
                 except NameError:
                     result_map = {}
-                geo_candidate = result_map.get("geo") if isinstance(result_map, dict) else {}
+                geo_candidate = (
+                    result_map.get("geo") if isinstance(result_map, dict) else {}
+                )
                 if isinstance(geo_candidate, dict):
                     geo_map = geo_candidate
+                elif isinstance(geo_candidate, _MappingABC):
+                    try:
+                        geo_map = dict(geo_candidate)
+                    except Exception:
+                        geo_map = {}
 
             if not counts_by_diam_raw or sum(int(v) for v in counts_by_diam_raw.values()) == 0:
-                counts_by_diam_raw = _seed_drill_bins_from_geo(dict(geo_map))
+                counts_by_diam_raw = _seed_drill_bins_from_geo(geo_map)
 
             _push(lines, f"[DEBUG] DRILL bins raw={sum(counts_by_diam_raw.values())}")
 
