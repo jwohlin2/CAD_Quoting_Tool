@@ -153,45 +153,36 @@ _DRILL_REMOVAL_MINUTES_MAX = 600.0
 
 
 def _seed_drill_bins_from_geo(geo: dict) -> dict[float, int]:
-    """
-    Robustly build {diam_in: qty} from GEO. Handles multiple shapes/keys and
-    gracefully falls back to raw hole lists.
-    """
-
+    out: dict[float, int] = {}
     if not isinstance(geo, dict):
-        return {}
+        return out
 
-    # Preferred “families” maps people keep around in different names:
-    candidates = [
+    # preferred maps
+    for key in (
         "hole_diam_families_geom_in",
         "hole_diam_families_in",
         "hole_diam_families_geom",
         "hole_diam_families",
-    ]
-    out: dict[float, int] = {}
-
-    # 1) Direct family maps
-    for key in candidates:
+    ):
         fam = geo.get(key)
         if isinstance(fam, dict) and fam:
             for k, v in fam.items():
                 try:
-                    d = float(str(k).replace('"', '').strip())
-                    q = int(v) if v is not None else 0
+                    d = float(str(k).replace('"', "").strip())
+                    q = int(v or 0)
                     if q > 0:
                         d = round(d, 4)
                         out[d] = out.get(d, 0) + q
                 except Exception:
-                    continue
+                    pass
             if out:
-                return out  # done
+                return out
 
-    # 2) Rebuild from raw hole lists (in or mm)
+    # fallbacks from raw lists
     holes_in = geo.get("hole_diams_in") or geo.get("hole_diams_geom_in")
     holes_mm = geo.get("hole_diams_mm") or geo.get("hole_diams_geom_mm")
 
-    def _acc_from_list(seq, mm=False):
-        nonlocal out
+    def _acc(seq, mm=False):
         if not isinstance(seq, (list, tuple)):
             return
         for x in seq:
@@ -199,17 +190,15 @@ def _seed_drill_bins_from_geo(geo: dict) -> dict[float, int]:
                 d = float(x)
                 if mm:
                     d /= 25.4
-                # snap to 0.001” bins to avoid float scatter
                 d = round(d, 3)
                 out[d] = out.get(d, 0) + 1
             except Exception:
-                continue
+                pass
 
     if holes_in:
-        _acc_from_list(holes_in, mm=False)
+        _acc(holes_in, mm=False)
     if not out and holes_mm:
-        _acc_from_list(holes_mm, mm=True)
-
+        _acc(holes_mm, mm=True)
     return out
 
 
@@ -4383,7 +4372,8 @@ def _compute_drilling_removal_section(
             if not counts_by_diam_raw or sum(int(v) for v in counts_by_diam_raw.values()) == 0:
                 counts_by_diam_raw = _seed_drill_bins_from_geo(geo_map)
 
-            _push(lines, f"[DEBUG] DRILL bins raw={sum(counts_by_diam_raw.values())}")
+            raw_total = sum(int(v) for v in counts_by_diam_raw.values())
+            _push(lines, f"[DEBUG] DRILL bins raw={raw_total} (seeded from GEO)")
 
             counts_by_diam = _adjust_drill_counts(
                 counts_source,
