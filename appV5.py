@@ -2138,6 +2138,80 @@ def _emit_hole_table_ops_cards(
             bucket_view_obj = None
 
         tap_rows = _finalize_tapping_rows(rows, thickness_in=thickness_in)
+
+        def _extract_ops_claims_map(
+            *sources: Mapping[str, Any] | MutableMapping[str, Any] | None,
+        ) -> Mapping[str, Any] | None:
+            for candidate in sources:
+                if not isinstance(candidate, (_MappingABC, dict)):
+                    continue
+                try:
+                    claims_candidate = candidate.get("ops_claims")  # type: ignore[index]
+                except Exception:
+                    claims_candidate = None
+                if isinstance(claims_candidate, (_MappingABC, dict)):
+                    return typing.cast(Mapping[str, Any], claims_candidate)
+            return None
+
+        ops_claims_map = _extract_ops_claims_map(geo, breakdown, result)
+        if ops_claims_map is None and isinstance(ops_summary, _MappingABC):
+            try:
+                claims_candidate = ops_summary.get("claims")
+            except Exception:
+                claims_candidate = None
+            if isinstance(claims_candidate, (_MappingABC, dict)):
+                ops_claims_map = typing.cast(Mapping[str, Any], claims_candidate)
+
+        def _int_or_zero(value: Any) -> int:
+            try:
+                num = float(value)
+            except Exception:
+                return 0
+            if not math.isfinite(num):
+                return 0
+            return int(round(num))
+
+        npt_qty = _int_or_zero(ops_claims_map.get("npt")) if ops_claims_map else 0
+        if npt_qty <= 0:
+            npt_qty = 0
+            for entry in rows:
+                if not isinstance(entry, _MappingABC):
+                    continue
+                try:
+                    qty_val = int(entry.get("qty") or 0)
+                except Exception:
+                    qty_val = 0
+                if qty_val <= 0:
+                    continue
+                desc_text = str(entry.get("desc") or "").upper()
+                if "NPT" in desc_text and "TAP" not in desc_text:
+                    npt_qty += qty_val
+
+        if npt_qty > 0:
+            existing_npt = any(
+                "NPT" in str(row.get("thread") or row.get("desc") or "").upper()
+                for row in tap_rows
+            )
+            if not existing_npt:
+                depth_val = float(thickness_in or 0.0)
+                depth_display = f"{depth_val:.2f}\"" if depth_val > 0 else "THRU"
+                per_hole = 0.20
+                tap_rows.append(
+                    {
+                        "label": "1/8- NPT TAP",
+                        "desc": "1/8- NPT TAP",
+                        "thread": "1/8- NPT",
+                        "qty": int(npt_qty),
+                        "side": "FRONT",
+                        "t_per_hole_min": per_hole,
+                        "feed_fmt": "- ipr | - rpm | - ipm",
+                        "depth_in": depth_val,
+                        "depth_in_display": depth_display,
+                        "ipr": 0.0,
+                        "rpm": 0,
+                        "ipm": 0.0,
+                    }
+                )
         tap_total_min = 0.0
         if tap_rows:
             tap_total_min = _render_ops_card(
