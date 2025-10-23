@@ -146,6 +146,7 @@ _CENTER_OR_SPOT_RE = re.compile(
     r"\b(CENTER\s*DRILL|SPOT\s*DRILL|SPOT)\b",
     re.IGNORECASE,
 )
+_JIG_RE = re.compile(r"\bJIG\s*GRIND\b", re.IGNORECASE)
 
 _DRILL_REMOVAL_MINUTES_MIN = 0.0
 _DRILL_REMOVAL_MINUTES_MAX = 600.0
@@ -844,7 +845,7 @@ def _record_drill_claims(
         pass
 
 
-def _tally_counterdrill(lines_joined: Sequence[str] | None) -> int:
+def _count_counterdrill(lines_joined: Sequence[str] | None) -> int:
     total = 0
     if not lines_joined:
         return 0
@@ -862,10 +863,32 @@ def _tally_counterdrill(lines_joined: Sequence[str] | None) -> int:
             if prefix:
                 try:
                     total += int(prefix.group(1))
+                    continue
                 except Exception:
-                    total += 1
-            else:
-                total += 1
+                    pass
+            total += 1
+    return total
+
+
+def _count_jig(lines_joined: Sequence[str] | None) -> int:
+    total = 0
+    if not lines_joined:
+        return 0
+    for raw in lines_joined:
+        if raw is None:
+            continue
+        text = str(raw)
+        if not text.strip():
+            continue
+        if _JIG_RE.search(text):
+            prefix = re.match(r"\s*\((\d+)\)", text)
+            if prefix:
+                try:
+                    total += int(prefix.group(1))
+                    continue
+                except Exception:
+                    pass
+            total += 1
     return total
 
 
@@ -11241,7 +11264,7 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
     # CLEAN then JOIN
     cleaned = [_clean_mtext(x) for x in chart_lines_all]
     joined_lines = _join_wrapped_chart_lines(cleaned)
-    counterdrill_qty = _tally_counterdrill(joined_lines)
+    counterdrill_qty = _count_counterdrill(joined_lines)
 
     try:
         ops_claims_preview = _parse_ops_and_claims(joined_lines)
@@ -11257,6 +11280,9 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
         ops_claims_preview["counterdrill"] = counterdrill_qty
     else:
         ops_claims_preview["counterdrill"] = preview_counterdrill
+    jig_qty_fallback = _count_jig(joined_lines)
+    if jig_qty_fallback and int(ops_claims_preview.get("jig", 0) or 0) <= 0:
+        ops_claims_preview["jig"] = jig_qty_fallback
     _push(
         lines,
         "[DEBUG] at_print_ops cb={cb} tap={tap} npt={npt} spot={spot} counterdrill={counterdrill} jig={jig}".format(
@@ -11906,7 +11932,7 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
                 ops_claims = _parse_ops_and_claims(joined_early)
                 if not isinstance(ops_claims, dict):
                     ops_claims = {}
-                early_counterdrill = _tally_counterdrill(joined_early)
+                early_counterdrill = _count_counterdrill(joined_early)
                 try:
                     existing_counterdrill = int(round(float(ops_claims.get("counterdrill", 0))))
                 except Exception:
