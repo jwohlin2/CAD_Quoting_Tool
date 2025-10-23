@@ -12032,28 +12032,75 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
     except Exception as e:
         _push(lines, f"[DEBUG] material_removal_emit_skipped={e.__class__.__name__}: {e}")
     else:
-        if not ops_rows:
-            chart_lines_all = _collect_chart_lines_context(ctx, geo_map, ctx_a, ctx_b)
-            built = _build_ops_rows_from_lines_fallback(chart_lines_all)
-            _push(
-                lines,
-                f"[DEBUG] chart_lines_found={len(chart_lines_all)} built_rows={len(built)}",
-            )
-            if built:
-                plate_thickness = _resolve_part_thickness_in(
-                    geo_map,
-                    ctx.get("geo") if isinstance(ctx, _MappingABC) else None,
-                    ctx_a.get("geo") if isinstance(ctx_a, _MappingABC) else None,
+        try:
+            if not ops_rows:
+                chart_lines_all = _collect_chart_lines_context(ctx, geo_map, ctx_a, ctx_b)
+                built = _build_ops_rows_from_lines_fallback(chart_lines_all)
+                _push(
+                    lines,
+                    f"[DEBUG] chart_lines_found={len(chart_lines_all)} built_rows={len(built)}",
                 )
-                _finalize_tapping_rows(built, thickness_in=plate_thickness)
+                if built:
+                    plate_thickness = _resolve_part_thickness_in(
+                        geo_map,
+                        ctx.get("geo") if isinstance(ctx, _MappingABC) else None,
+                        ctx_a.get("geo") if isinstance(ctx_a, _MappingABC) else None,
+                    )
+                    _finalize_tapping_rows(built, thickness_in=plate_thickness)
 
-                # Persist ops-summary rows for other consumers
-                ops_summary_map = geo_map.setdefault("ops_summary", {})
-                ops_summary_map["rows"] = built
-                ops_rows = built
+                    # Persist ops-summary rows for other consumers
+                    ops_summary_map = geo_map.setdefault("ops_summary", {})
+                    ops_summary_map["rows"] = built
+                    ops_rows = built
 
-                # Persist chart lines for other consumers
-                geo_map.setdefault("chart_lines", list(chart_lines_all))
+                    # Persist chart lines for other consumers
+                    geo_map.setdefault("chart_lines", list(chart_lines_all))
+
+                    # Clean + join lines
+                    joined_early = _join_wrapped_chart_lines([
+                        _clean_mtext(x) for x in chart_lines_all
+                    ])
+                    ops_claims = _parse_ops_and_claims(joined_early)
+                    breakdown_mutable["_ops_claims"] = ops_claims
+                    _push(
+                        lines,
+                        f"[DEBUG] preseed_ops cb={ops_claims['cb_total']} tap={ops_claims['tap']} "
+                        f"npt={ops_claims['npt']} spot={ops_claims['spot']} jig={ops_claims['jig']}",
+                    )
+
+                    # Publish structured ops for planner_ops_summary
+                    try:
+                        ebo = breakdown_mutable.setdefault("extra_bucket_ops", {})
+                        if ops_claims["cb_front"] > 0:
+                            ebo.setdefault("counterbore", []).append(
+                                {"name": "Counterbore", "qty": int(ops_claims["cb_front"]), "side": "front"}
+                            )
+                        if ops_claims["cb_back"] > 0:
+                            ebo.setdefault("counterbore", []).append(
+                                {"name": "Counterbore", "qty": int(ops_claims["cb_back"]), "side": "back"}
+                            )
+                        if ops_claims["tap"] > 0:
+                            ebo.setdefault("tap", []).append(
+                                {"name": "Tap", "qty": int(ops_claims["tap"]), "side": "front"}
+                            )
+                        if ops_claims["npt"] > 0:
+                            ebo.setdefault("tap", []).append(
+                                {"name": "NPT tap", "qty": int(ops_claims["npt"]), "side": "front"}
+                            )
+                        if ops_claims["spot"] > 0:
+                            ebo.setdefault("spot", []).append(
+                                {"name": "Spot drill", "qty": int(ops_claims["spot"]), "side": "front"}
+                            )
+                        if ops_claims["jig"] > 0:
+                            ebo.setdefault("jig-grind", []).append(
+                                {"name": "Jig-grind", "qty": int(ops_claims["jig"]), "side": None}
+                            )
+                    except Exception:
+                        pass
+
+                    # Seed minutes so Process table shows rows
+                    try:
+                        bv = breakdown_mutable.setdefault("bucket_view", {})
 
                 # Clean + join lines
                 joined_early = _join_wrapped_chart_lines([
@@ -12076,24 +12123,29 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
                     f"counterdrill={ops_claims['counterdrill']} jig={ops_claims['jig']}",
                 )
 
-                # Publish structured ops for planner_ops_summary
-                try:
-                    ebo = breakdown_mutable.setdefault("extra_bucket_ops", {})
-                    if ops_claims["cb_front"] > 0:
-                        ebo.setdefault("counterbore", []).append(
-                            {"name": "Counterbore", "qty": int(ops_claims["cb_front"]), "side": "front"}
+                        # You can tune per-feature minutes as constants or from rates
+                        cb_min = (ops_claims["cb_total"] or 0) * float(
+                            globals().get("CBORE_MIN_PER_SIDE_MIN") or 0.15
                         )
-                    if ops_claims["cb_back"] > 0:
-                        ebo.setdefault("counterbore", []).append(
-                            {"name": "Counterbore", "qty": int(ops_claims["cb_back"]), "side": "back"}
+                        spot_min = (ops_claims["spot"] or 0) * 0.05
+                        jig_min = (ops_claims["jig"] or 0) * float(
+                            globals().get("JIG_GRIND_MIN_PER_FEATURE") or 0.75
                         )
-                    if ops_claims["tap"] > 0:
-                        ebo.setdefault("tap", []).append(
-                            {"name": "Tap", "qty": int(ops_claims["tap"]), "side": "front"}
+                        seed(
+                            "counterbore",
+                            cb_min,
+                            _lookup_bucket_rate("counterbore", rates)
+                            or _lookup_bucket_rate("machine", rates)
+                            or 53.76,
+                            _lookup_bucket_rate("labor", rates) or 25.46,
                         )
-                    if ops_claims["npt"] > 0:
-                        ebo.setdefault("tap", []).append(
-                            {"name": "NPT tap", "qty": int(ops_claims["npt"]), "side": "front"}
+                        seed(
+                            "grinding",
+                            jig_min,
+                            _lookup_bucket_rate("grinding", rates)
+                            or _lookup_bucket_rate("machine", rates)
+                            or 53.76,
+                            _lookup_bucket_rate("labor", rates) or 25.46,
                         )
                     if ops_claims.get("counterdrill", 0) > 0:
                         ebo.setdefault("counterdrill", []).append(
@@ -12175,68 +12227,32 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
                 try:
                     bv = breakdown_mutable.setdefault("bucket_view", {})
 
-                    def seed(name, minutes, mach, lab):
-                        if minutes <= 0:
-                            return
-                        _set_bucket_minutes_cost(bv, name, minutes, mach, lab)
+                        order = bv.setdefault("order", [])
+                        if "counterbore" in bv.get("buckets", {}) and "counterbore" not in order:
+                            if "drilling" in order:
+                                order.insert(order.index("drilling") + 1, "counterbore")
+                            else:
+                                order.append("counterbore")
+                        if "grinding" in bv.get("buckets", {}) and "grinding" not in order:
+                            order.append("grinding")
+                        _normalize_buckets(bv)
+                    except Exception:
+                        pass
 
-                    # You can tune per-feature minutes as constants or from rates
-                    cb_min = (ops_claims["cb_total"] or 0) * float(
-                        globals().get("CBORE_MIN_PER_SIDE_MIN") or 0.15
-                    )
-                    spot_min = (ops_claims["spot"] or 0) * 0.05
-                    jig_min = (ops_claims["jig"] or 0) * float(
-                        globals().get("JIG_GRIND_MIN_PER_FEATURE") or 0.75
-                    )
-                    seed(
-                        "counterbore",
-                        cb_min,
-                        _lookup_bucket_rate("counterbore", rates)
-                        or _lookup_bucket_rate("machine", rates)
-                        or 53.76,
-                        _lookup_bucket_rate("labor", rates) or 25.46,
-                    )
-                    seed(
-                        "grinding",
-                        jig_min,
-                        _lookup_bucket_rate("grinding", rates)
-                        or _lookup_bucket_rate("machine", rates)
-                        or 53.76,
-                        _lookup_bucket_rate("labor", rates) or 25.46,
-                    )
-                    seed(
-                        "drilling",
-                        spot_min + cb_min + jig_min,
-                        _lookup_bucket_rate("machine", rates) or 53.76,
-                        _lookup_bucket_rate("labor", rates) or 25.46,
-                    )
+                    try:
+                        _normalize_buckets(breakdown_mutable.get("bucket_view"))
+                    except Exception:
+                        pass
 
-                    order = bv.setdefault("order", [])
-                    if "counterbore" in bv.get("buckets", {}) and "counterbore" not in order:
-                        if "drilling" in order:
-                            order.insert(order.index("drilling") + 1, "counterbore")
-                        else:
-                            order.append("counterbore")
-                    if "grinding" in bv.get("buckets", {}) and "grinding" not in order:
-                        order.append("grinding")
-                    _normalize_buckets(bv)
-                except Exception:
-                    pass
-
-                try:
-                    _normalize_buckets(breakdown_mutable.get("bucket_view"))
-                except Exception:
-                    pass
-
-                # Append extra MATERIAL REMOVAL cards (Counterbore / Spot / Jig)
-                _appended = _append_counterbore_spot_jig_cards(
-                    lines_out=removal_card_lines,
-                    chart_lines=chart_lines_all,
-                    rows=built,
-                    breakdown_mutable=breakdown_mutable,
-                    rates=rates,
-                )
-                _push(lines, f"[DEBUG] extra_ops_appended={_appended}")
+                    # Append extra MATERIAL REMOVAL cards (Counterbore / Spot / Jig)
+                    _appended = _append_counterbore_spot_jig_cards(
+                        lines_out=removal_card_lines,
+                        chart_lines=chart_lines_all,
+                        rows=built,
+                        breakdown_mutable=breakdown_mutable,
+                        rates=rates,
+                    )
+                    _push(lines, f"[DEBUG] extra_ops_appended={_appended}")
 
             # Extra MATERIAL REMOVAL cards from HOLE TABLE text (Counterbore / Spot / Jig)
             extra_ops_lines = _build_ops_cards_from_chart_lines(
@@ -12270,38 +12286,43 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
                 rates=rates,
             )
 
-        pre_ops_start = locals().get("pre_ops_len", len(lines))
+            pre_ops_start = locals().get("pre_ops_len", len(lines))
 
-        new_ops_lines = [
-            entry
-            for entry in lines[pre_ops_start:]
-            if isinstance(entry, str) and not entry.startswith("[DEBUG]")
-        ]
-        removal_summary_extra_lines.extend(new_ops_lines)
+            new_ops_lines = [
+                entry
+                for entry in lines[pre_ops_start:]
+                if isinstance(entry, str) and not entry.startswith("[DEBUG]")
+            ]
+            removal_summary_extra_lines.extend(new_ops_lines)
 
-        if not new_ops_lines:
-            breakdown_mutable: MutableMapping[str, Any] | None
-            if isinstance(breakdown, dict):
-                breakdown_mutable = breakdown
-            elif isinstance(breakdown, _MutableMappingABC):
-                breakdown_mutable = typing.cast(MutableMapping[str, Any], breakdown)
-            else:
-                breakdown_mutable = None
+            if not new_ops_lines:
+                breakdown_mutable: MutableMapping[str, Any] | None
+                if isinstance(breakdown, dict):
+                    breakdown_mutable = breakdown
+                elif isinstance(breakdown, _MutableMappingABC):
+                    breakdown_mutable = typing.cast(MutableMapping[str, Any], breakdown)
+                else:
+                    breakdown_mutable = None
 
-            fallback_lines = _build_ops_cards_from_chart_lines(
-                breakdown=breakdown,
-                result=result,
-                rates=rates,
-                breakdown_mutable=breakdown_mutable,
-                ctx=ctx,
-                ctx_a=ctx_a,
-                ctx_b=ctx_b,
+                fallback_lines = _build_ops_cards_from_chart_lines(
+                    breakdown=breakdown,
+                    result=result,
+                    rates=rates,
+                    breakdown_mutable=breakdown_mutable,
+                    ctx=ctx,
+                    ctx_a=ctx_a,
+                    ctx_b=ctx_b,
+                )
+                if fallback_lines:
+                    lines.extend(fallback_lines)
+                    for entry in fallback_lines:
+                        if isinstance(entry, str) and not entry.startswith("[DEBUG]"):
+                            removal_summary_extra_lines.append(entry)
+        except Exception as e:
+            _push(
+                lines,
+                f"[DEBUG] material_removal_emit_skipped={e.__class__.__name__}: {e}",
             )
-            if fallback_lines:
-                lines.extend(fallback_lines)
-                for entry in fallback_lines:
-                    if isinstance(entry, str) and not entry.startswith("[DEBUG]"):
-                        removal_summary_extra_lines.append(entry)
 
         removal_summary_lines = [
             str(line) for line in removal_card_lines if isinstance(line, str)
