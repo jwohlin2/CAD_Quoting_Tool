@@ -294,7 +294,7 @@ def _build_ops_rows_from_lines_fallback(lines: list[str]) -> list[dict]:
             i += 1
             continue
         if _RE_CBORE.search(ln):
-            tail = " ".join([ln] + L[max(0, i - 1):i] + L[i + 1:i + 2])
+            tail = " ".join([ln] + L[i + 1:i + 2])
             mda = _RE_PAREN_DIA.search(tail) or _RE_MM_IN_DIA.search(tail) or _RE_DIA_ANY.search(tail)
             dia = None
             if mda:
@@ -417,8 +417,14 @@ def norm_line(value: str) -> str:
 def build_ops_rows_from_lines_fallback(lines: Iterable[str]) -> list[dict]:
     """Return conservative ops rows based on raw chart text."""
 
-    seq = list(lines) if not isinstance(lines, list) else lines
-    return _build_ops_rows_from_lines_fallback(seq)
+    seq = list(lines) if not isinstance(lines, list) else list(lines)
+    cleaned: list[str] = []
+    for raw in seq:
+        cleaned_line = _clean_mtext(str(raw or ""))
+        if cleaned_line:
+            cleaned.append(cleaned_line)
+    joined = _join_wrapped_chart_lines(cleaned)
+    return _build_ops_rows_from_lines_fallback(joined)
 
 
 def collect_chart_lines_context(*containers: Mapping[str, object] | None) -> list[str]:

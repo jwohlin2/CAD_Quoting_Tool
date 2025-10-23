@@ -1,60 +1,42 @@
+from __future__ import annotations
+
 import re
+import sys
 from collections import defaultdict
+from pathlib import Path
 from typing import Any, Iterable, Mapping, Sequence
 
-_CB_DIA_RE = re.compile(
-    r"(?:(?:[Ø⌀\u00D8]|%%[Cc])\s*)?"
-    r"(?P<numA>\d+(?:\.\d+)?|\.\d+|\d+\s*/\s*\d+)\s*"
-    r"(?:C[’']?\s*BORE|CBORE|COUNTER\s*BORE)"
-    r"|"
-    r"(?P<numB>\d+(?:\.\d+)?|\.\d+|\d+\s*/\s*\d+)\s*"
-    r"(?:[Ø⌀\u00D8]|%%[Cc])\s*"
-    r"(?:C[’']?\s*BORE|CBORE|COUNTER\s*BORE)",
-    re.I,
+_PKG_SRC = Path(__file__).resolve().parent / "cad_quoter_pkg" / "src"
+if _PKG_SRC.is_dir():
+    _pkg_src_str = str(_PKG_SRC)
+    if _pkg_src_str not in sys.path:
+        sys.path.insert(0, _pkg_src_str)
+
+from cad_quoter.app.op_parser import (
+    _CB_DIA_RE,
+    _DRILL_THRU,
+    _JIG_RE_TXT,
+    _LETTER_RE,
+    _SIZE_INCH_RE,
+    _SPOT_RE_TXT,
+    _TAP_RE,
+    _parse_qty as _shared_parse_qty,
+    _side as _shared_side,
 )
-_X_DEPTH_RE = re.compile(r"[×xX]\s*([0-9]+(?:\.[0-9]+)?)")
-_BACK_RE = re.compile(r"\bFROM\s+BACK\b", re.I)
-_FRONT_RE = re.compile(r"\bFROM\s+FRONT\b", re.I)
-_BOTH_RE = re.compile(r"\bFRONT\s*&\s*BACK|BOTH\s+SIDES|2\s+SIDES\b", re.I)
-_SPOT_RE_TXT = re.compile(r"(?:C[’']?\s*DRILL|CENTER\s*DRILL|SPOT\s*DRILL|SPOT\b)", re.I)
-_JIG_RE_TXT = re.compile(r"\bJIG\s*GRIND\b", re.I)
-_TAP_RE = re.compile(
-    r"\b(?:#?\d+[- ]\d+|[1-9]/\d+-\d+|[1-9]/\d+|[\d/]+-NPT|N\.?P\.?T\.?)\s*TAP\b",
-    re.I,
-)
-_DRILL_THRU = re.compile(r"\bDRILL\s+THRU\b", re.I)
-_SIZE_INCH_RE = re.compile(r"\((\d+(?:\.\d+)?|\.\d+)\)")
-_LETTER_RE = re.compile(r"\b([A-Z])\b")
 _SIDE_RE = re.compile(r"\b(FRONT|BACK)\b", re.I)
 _DRILL_ROW_RE = re.compile(r'^Dia\s+([0-9.]+)"\s+×\s+(\d+)', re.I)
 _TAP_ROW_RE = re.compile(r'^\s*(#?\d+(?:-\d+)?|[0-9/]+-[0-9]+)\s+TAP.*×\s+(\d+)\s+\((FRONT|BACK)\)', re.I)
+_parse_qty = _shared_parse_qty
+_side = _shared_side
 
-
-def _parse_qty(s: str) -> int:
-    match = re.match(r"\s*\((\d+)\)\s*", s)
-    if match:
-        return int(match.group(1))
-    match = re.search(r"(?<![\d.])(\d+)\s*[xX×](?!\w)", s)
-    if match:
-        return int(match.group(1))
-    match = re.search(r"\bQTY[:\s]+(\d+)\b", s, re.I)
-    if match:
-        return int(match.group(1))
-    return 1
-
-
-def _side(U: str) -> str:
-    if _BOTH_RE.search(U):
-        return "BOTH"
-    has_back = bool(_BACK_RE.search(U) or re.search(r"\bBACK\b", U))
-    has_front = bool(_FRONT_RE.search(U) or re.search(r"\bFRONT\b", U))
-    if has_back and has_front:
-        return "BOTH"
-    if has_back:
-        return "BACK"
-    if has_front:
-        return "FRONT"
-    return "FRONT"
+_COUNTERDRILL_RE = re.compile(
+    r"\b(?:C[’']\s*DRILL|C\s*DRILL|COUNTER\s*DRILL|COUNTERDRILL)\b",
+    re.IGNORECASE,
+)
+_CENTER_OR_SPOT_RE = re.compile(
+    r"\b(CENTER\s*DRILL|SPOT\s*DRILL|SPOT)\b",
+    re.IGNORECASE,
+)
 
 
 def _side_of(text: str | None) -> str:
@@ -83,6 +65,8 @@ def _row_kind(row: Any) -> str:
             return "tap"
         if _CB_DIA_RE.search(text) or any(token in U for token in ("C'BORE", "CBORE", "COUNTER BORE")):
             return "counterbore"
+        if _COUNTERDRILL_RE.search(text) and not _CENTER_OR_SPOT_RE.search(text):
+            return "counterdrill"
         if (
             _SPOT_RE_TXT.search(text)
             and not _DRILL_THRU.search(text)
@@ -176,6 +160,9 @@ def _extract_ops_from_text(text: str) -> dict[str, int]:
         if _JIG_RE_TXT.search(s):
             counts["jig_grind"] += qty
 
+        if _COUNTERDRILL_RE.search(s) and not _CENTER_OR_SPOT_RE.search(s):
+            counts["counterdrill"] += qty
+
     return dict(counts)
 
 
@@ -204,6 +191,8 @@ def audit_operations(planner_ops_rows: Any, removal_sections_text: str | None) -
                 counts["counterbores_front"] += qty
             elif side == "BACK":
                 counts["counterbores_back"] += qty
+        elif kind in {"counterdrill", "counter-drill", "counter drill"}:
+            counts["counterdrill"] += qty
         elif kind in {"spot", "spot_drill", "spot-drill", "spot drill"}:
             counts["spot"] += qty
         elif kind in {"jig_grind", "jig-grind", "jig grind"}:
@@ -245,11 +234,13 @@ def audit_operations(planner_ops_rows: Any, removal_sections_text: str | None) -
         counts["counterbores_back"] = text_counts.get("counterbores_back", 0)
     counts["spot"] = max(counts["spot"], text_counts.get("spot", 0))
     counts["jig_grind"] = max(counts["jig_grind"], text_counts.get("jig_grind", 0))
+    counts["counterdrill"] = max(counts["counterdrill"], text_counts.get("counterdrill", 0))
 
     counts["actions_total"] = (
         counts["drills"]
         + counts["taps_total"]
         + counts["counterbores_total"]
+        + counts["counterdrill"]
         + counts["spot"]
         + counts["jig_grind"]
     )
