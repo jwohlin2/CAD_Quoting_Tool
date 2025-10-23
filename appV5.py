@@ -729,6 +729,171 @@ def _build_ops_cards_from_chart_lines(
     return lines
 
 
+# --- Inline ops-cards builder from rows ---------------------------------------
+_CB_DIA_RE = re.compile(
+    r"[Ø⌀\u00D8]?\s*([0-9]+(?:\.[0-9]+)?)\s*(?:C[’']?\s*BORE|CBORE|COUNTER\s*BORE)",
+    re.I,
+)
+_X_DEPTH_RE = re.compile(r"[×x]\s*([0-9]+(?:\.[0-9]+)?)")
+_BACK_RE = re.compile(r"\bFROM\s+BACK\b", re.I)
+_FRONT_RE = re.compile(r"\bFROM\s+FRONT\b", re.I)
+_BOTH_RE = re.compile(r"\bFRONT\s*&\s*BACK|BOTH\s+SIDES|2\s+SIDES\b", re.I)
+_SPOT_RE_TXT = re.compile(r"(?:C[’']?\s*DRILL|CENTER\s*DRILL|SPOT\s*DRILL|SPOT\b)", re.I)
+_JIG_RE_TXT = re.compile(r"\bJIG\s*GRIND\b", re.I)
+
+
+def _append_counterbore_spot_jig_cards_from_rows(
+    *,
+    lines_out: list[str],
+    rows: list[dict],
+    breakdown_mutable,
+    rates,
+) -> int:
+    """Build & append COUNTERBORE / SPOT / JIG cards from already-built HOLE rows.
+       Returns number of lines appended."""
+
+    if not isinstance(rows, list) or not rows:
+        return 0
+
+    # Aggregate from row descriptions
+    cb_groups = {}  # (dia, side, depth) -> qty
+    spot_qty = 0
+    jig_qty = 0
+
+    for r in rows:
+        qty = int((r or {}).get("qty") or 0)
+        if qty <= 0:
+            continue
+        s = str((r or {}).get("desc") or "")
+        if not s.strip():
+            continue
+        U = s.upper()
+        side = "FRONT"
+        if _BOTH_RE.search(U):
+            side = "BOTH"
+        elif _BACK_RE.search(U):
+            side = "BACK"
+        elif _FRONT_RE.search(U):
+            side = "FRONT"
+
+        # Counterbore
+        mcb = _CB_DIA_RE.search(s)
+        if mcb:
+            dia = float(mcb.group(1))
+            mdepth = _X_DEPTH_RE.search(s)
+            depth = float(mdepth.group(1)) if mdepth else None
+            if side == "BOTH":
+                for sd in ("FRONT", "BACK"):
+                    cb_groups[(dia, sd, depth)] = cb_groups.get((dia, sd, depth), 0) + qty
+            else:
+                cb_groups[(dia, side, depth)] = cb_groups.get((dia, side, depth), 0) + qty
+        else:
+            # Spot-only rows (exclude THRU/TAP combos)
+            if _SPOT_RE_TXT.search(U) and ("TAP" not in U) and ("THRU" not in U):
+                spot_qty += qty
+            # Jig grind
+            if _JIG_RE_TXT.search(U):
+                jig_qty += qty
+
+    appended = 0
+
+    # Emit COUNTERBORE card
+    if cb_groups:
+        total_cb = sum(cb_groups.values())
+        front_cb = sum(q for (d, s, dep), q in cb_groups.items() if s == "FRONT")
+        back_cb = sum(q for (d, s, dep), q in cb_groups.items() if s == "BACK")
+        lines_out += [
+            "MATERIAL REMOVAL – COUNTERBORE",
+            "=" * 64,
+            "Inputs",
+            f"  Ops ............... Counterbore (front + back)",
+            f"  Counterbores ...... {total_cb} total  → {front_cb} front, {back_cb} back",
+            "",
+            "TIME PER HOLE – C’BORE GROUPS",
+            "-" * 66,
+        ]
+        # Simple minute model: one side pass per hole (tune constant as needed)
+        per = float(globals().get("CBORE_MIN_PER_SIDE_MIN") or 0.15)
+        cb_minutes = 0.0
+        for (dia, side, depth), qty in sorted(
+            cb_groups.items(),
+            key=lambda k: (k[0][0], k[0][1], k[0][2] or 0.0),
+        ):
+            dep_txt = "—" if depth is None else f'{depth:.2f}"'
+            t_group = qty * per
+            cb_minutes += t_group
+            lines_out.append(
+                f'Ø{dia:.4f}" × {qty}  ({side}) | depth {dep_txt} | t/hole {per:.2f} min | group {qty}×{per:.2f} = {t_group:.2f} min'
+            )
+        lines_out.append("")
+        # bucket minutes → "counterbore"
+        try:
+            _set_bucket_minutes_cost(
+                breakdown_mutable.setdefault("bucket_view", {}),
+                "counterbore",
+                cb_minutes,
+                _lookup_bucket_rate("counterbore", rates)
+                or _lookup_bucket_rate("machine", rates)
+                or 53.76,
+                _lookup_bucket_rate("labor", rates) or 25.46,
+            )
+        except Exception:
+            pass
+        appended += 1
+
+    # Emit SPOT card
+    if spot_qty > 0:
+        per_spot = 0.05
+        t_group = spot_qty * per_spot
+        lines_out += [
+            "MATERIAL REMOVAL – SPOT (CENTER DRILL)",
+            "=" * 64,
+            "TIME PER HOLE – SPOT GROUPS",
+            "-" * 66,
+            f"Spot drill × {spot_qty} | t/hole {per_spot:.2f} min | group {spot_qty}×{per_spot:.2f} = {t_group:.2f} min",
+            "",
+        ]
+        try:
+            _set_bucket_minutes_cost(
+                breakdown_mutable.setdefault("bucket_view", {}),
+                "drilling",
+                t_group,
+                _lookup_bucket_rate("machine", rates) or 53.76,
+                _lookup_bucket_rate("labor", rates) or 25.46,
+            )
+        except Exception:
+            pass
+        appended += 1
+
+    # Emit JIG GRIND card
+    if jig_qty > 0:
+        per_jig = float(globals().get("JIG_GRIND_MIN_PER_FEATURE") or 0.75)  # minutes/feature
+        t_group = jig_qty * per_jig
+        lines_out += [
+            "MATERIAL REMOVAL – JIG GRIND",
+            "=" * 64,
+            "TIME PER FEATURE",
+            "-" * 66,
+            f"Jig grind × {jig_qty} | t/feat {per_jig:.2f} min | group {jig_qty}×{per_jig:.2f} = {t_group:.2f} min",
+            "",
+        ]
+        try:
+            _set_bucket_minutes_cost(
+                breakdown_mutable.setdefault("bucket_view", {}),
+                "grinding",
+                t_group,
+                _lookup_bucket_rate("grinding", rates)
+                or _lookup_bucket_rate("machine", rates)
+                or 53.76,
+                _lookup_bucket_rate("labor", rates) or 25.46,
+            )
+        except Exception:
+            pass
+        appended += 1
+
+    return appended
+
+
 def _as_float(x: Any, default: float = 0.0) -> float:
     try:
         v = float(x)
@@ -10031,6 +10196,11 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
     # NOTE: Patch 3 keeps the hole-table hook active so downstream cards continue to render.
     append_lines(removal_card_lines)
 
+    try:
+        _normalize_buckets(breakdown.get("bucket_view"))
+    except Exception:
+        pass
+
     removal_drill_heading = "MATERIAL REMOVAL – DRILLING"
     removal_card_has_drill = False
     for line_text in removal_card_lines:
@@ -10315,6 +10485,21 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
                 ops_summary_map = geo_map.setdefault("ops_summary", {})
                 ops_summary_map["rows"] = built  # now emitter can read rows
                 ops_rows = built
+
+            # Persist the lines too (so later stages can see them)
+            try:
+                geo_map.setdefault("chart_lines", list(chart_lines_all))
+            except Exception:
+                pass
+
+            # Append extra MATERIAL REMOVAL cards inline from the rows we just built
+            _appended = _append_counterbore_spot_jig_cards_from_rows(
+                lines_out=removal_card_lines,
+                rows=built,
+                breakdown_mutable=breakdown_mutable,
+                rates=rates,
+            )
+            _push(lines, f"[DEBUG] extra_ops_appended_from_rows={_appended}")
 
         # Extra MATERIAL REMOVAL cards from HOLE TABLE text (Counterbore / Spot / Jig)
         extra_ops_lines = _build_ops_cards_from_chart_lines(
