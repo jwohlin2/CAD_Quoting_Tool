@@ -8597,12 +8597,6 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
         except Exception:
             pass
 
-    removal_summary_lines: list[str] = [
-        str(line)
-        for line in removal_card_lines
-        if isinstance(line, str)
-    ]
-
     if removal_card_extra.get("drill_machine_minutes") is not None:
         drill_machine_minutes_estimate = float(removal_card_extra["drill_machine_minutes"])
     if removal_card_extra.get("drill_labor_minutes") is not None:
@@ -10396,10 +10390,9 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
     )
     _push(lines, f"[DEBUG] extra_ops_appended_at_print={_appended_at_print}")
 
+    # (we already appended extra ops at print-time and logged extra_ops_appended_at_print)
     removal_summary_lines: list[str] = [
-        str(line)
-        for line in removal_card_lines
-        if isinstance(line, str)
+        str(line) for line in removal_card_lines if isinstance(line, str)
     ]
 
     append_lines(removal_card_lines)
