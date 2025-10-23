@@ -301,9 +301,23 @@ def harvest_hole_table(doc: Any) -> Dict[str, Any]:
     lines: List[str] = []
     family_guess: Counter[float] = Counter()
 
+    relevant_keywords = (
+        "HOLE",
+        "TAP",
+        "THRU",
+        "CBORE",
+        "C'BORE",
+        "DRILL",
+        "Ø",
+        "⌀",
+        "SPOT",
+        "SINK",
+        "JIG",
+    )
+
     for raw in iter_table_text(doc):
         upper = raw.upper()
-        if not any(keyword in upper for keyword in ("HOLE", "TAP", "THRU", "CBORE", "C'BORE", "DRILL", "Ø", "⌀")):
+        if not any(keyword in upper for keyword in relevant_keywords):
             continue
         lines.append(raw)
 
