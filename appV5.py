@@ -11427,16 +11427,11 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
             rates=rates,
         )
 
-        new_ops_lines = []
-        try:
-            for entry in lines[pre_ops_len:]:
-                if not isinstance(entry, str):
-                    continue
-                if entry.startswith("[DEBUG]"):
-                    continue
-                new_ops_lines.append(entry)
-        except Exception:
-            new_ops_lines = []
+        new_ops_lines = [
+            entry
+            for entry in lines[pre_ops_len:]
+            if isinstance(entry, str) and not entry.startswith("[DEBUG]")
+        ]
         removal_summary_extra_lines.extend(new_ops_lines)
 
         if not new_ops_lines:
