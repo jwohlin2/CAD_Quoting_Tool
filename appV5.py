@@ -4085,6 +4085,11 @@ def _compute_drilling_removal_section(
                 adjusted_rows.append(new_row)
 
             sanitized_rows = [row for row in adjusted_rows if int(row.get("qty", 0)) > 0]
+            printed_sum = sum(int(row.get("qty", 0)) for row in sanitized_rows)
+            _push(
+                lines,
+                f"[DEBUG] DRILL printed_sum={printed_sum} audit_drill={drill_actions}",
+            )
             subtotal_minutes = sum(
                 float(row.get("group_minutes", 0.0) or 0.0) for row in sanitized_rows
             )
