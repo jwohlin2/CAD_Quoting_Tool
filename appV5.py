@@ -85,6 +85,20 @@ from cad_quoter.app._value_utils import (
 )
 from typing import Any as _AnyForCoerce
 
+try:
+    from cad_quoter.geometry.dxf_text import (
+        HOLE_TOKENS as _DXF_HOLE_TOKENS,
+        harvest_text_lines as _harvest_dxf_text_lines,
+    )
+except Exception:
+    _DXF_HOLE_TOKENS = re.compile(
+        r"(?:\bTAP\b|C[’']?\s*BORE|CBORE|COUNTER\s*BORE|"
+        r"C[’']?\s*DRILL|CENTER\s*DRILL|SPOT\s*DRILL|"
+        r"\bJIG\s*GRIND\b|\bDRILL\s+THRU\b|\bN\.?P\.?T\.?\b)",
+        re.IGNORECASE,
+    )
+    _harvest_dxf_text_lines = None
+
 
 def _coerce_positive_float(value: _AnyForCoerce) -> float | None:
     """Best-effort positive finite float coercion without importing utils early.
@@ -17865,23 +17879,47 @@ def extract_2d_features_from_dxf_or_dwg(path: str | Path) -> dict[str, Any]:
 
     extractor = _extract_text_lines_from_dxf or geometry.extract_text_lines_from_dxf
     chart_lines = []
+    _chart_all_lines: list[str] = []
+    _chart_seen: set[str] = set()
+
+    def _append_chart_line(value: Any) -> None:
+        if not isinstance(value, str):
+            return
+        normalized = re.sub(r"\s+", " ", value).strip()
+        if not normalized:
+            return
+        if normalized in _chart_seen:
+            return
+        _chart_seen.add(normalized)
+        _chart_all_lines.append(normalized)
+
     if extractor and dxf_text_path:
         try:
-            chart_lines = extractor(dxf_text_path) or []
+            raw_lines = extractor(dxf_text_path, include_tables=True)
+        except TypeError:
+            try:
+                raw_lines = extractor(dxf_text_path)
+            except Exception:
+                raw_lines = []
         except Exception:
-            chart_lines = []
+            raw_lines = []
+        if raw_lines:
+            for ln in raw_lines:
+                _append_chart_line(ln)
+
     # Always also read ACAD_TABLE/MTEXT via ezdxf and merge/dedupe.
-    _lines_from_doc = _extract_text_lines_from_ezdxf_doc(doc) or []
-    if _lines_from_doc:
-        seen: set[str] = {ln for ln in chart_lines if isinstance(ln, str)}
-        for ln in _lines_from_doc:
-            if isinstance(ln, str):
-                if ln in seen:
-                    continue
-                seen.add(ln)
-            elif ln in chart_lines:
-                continue
-            chart_lines.append(ln)
+    _lines_from_doc = _extract_text_lines_from_ezdxf_doc(doc, include_tables=True) or []
+    for ln in _lines_from_doc:
+        _append_chart_line(ln)
+
+    if _DXF_HOLE_TOKENS is not None:
+        chart_lines = [ln for ln in _chart_all_lines if _DXF_HOLE_TOKENS.search(ln)]
+    else:
+        chart_lines = list(_chart_all_lines)
+    geo["debug_chart_counts"] = {
+        "all_text": len(_chart_all_lines),
+        "chart_lines": len(chart_lines),
+    }
 
     table_info = hole_count_from_acad_table(doc)
     table_counts_trusted = True
@@ -18139,11 +18177,19 @@ def extract_2d_features_from_dxf_or_dwg(path: str | Path) -> dict[str, Any]:
                         result[qty_key] = candidate
     result["units"] = units
     return result
-def _extract_text_lines_from_ezdxf_doc(doc: Any) -> list[str]:
+def _extract_text_lines_from_ezdxf_doc(
+    doc: Any, *, include_tables: bool = True
+) -> list[str]:
     """Harvest TEXT / MTEXT strings from an ezdxf Drawing."""
 
     if doc is None:
         return []
+
+    if _harvest_dxf_text_lines is not None:
+        try:
+            return _harvest_dxf_text_lines(doc, include_tables=include_tables)
+        except Exception:
+            pass
 
     try:
         msp = doc.modelspace()
@@ -18151,35 +18197,117 @@ def _extract_text_lines_from_ezdxf_doc(doc: Any) -> list[str]:
         return []
 
     lines: list[str] = []
-    for entity in msp:
+
+    def _append(text: Any) -> None:
+        if not isinstance(text, str):
+            text = str(text or "")
+        cleaned = re.sub(r"\s+", " ", text).strip()
+        if cleaned:
+            lines.append(cleaned)
+
+    def _harvest_insert(entity: Any) -> None:
         try:
-            kind = entity.dxftype()
+            virtuals = entity.virtual_entities()
         except Exception:
-            continue
-        if kind in ("TEXT", "MTEXT"):
-            text = _extract_entity_text(entity)
-            if text:
-                lines.append(text)
-        elif kind == "INSERT":
+            return
+        for child in virtuals:
             try:
-                for sub in entity.virtual_entities():
-                    try:
-                        sub_kind = sub.dxftype()
-                    except Exception:
-                        continue
-                    if sub_kind in ("TEXT", "MTEXT"):
-                        text = _extract_entity_text(sub)
-                        if text:
-                            lines.append(text)
+                ctype = child.dxftype()
             except Exception:
                 continue
+            if ctype in ("TEXT", "MTEXT"):
+                _append(_extract_entity_text(child))
+            elif ctype == "INSERT":
+                _harvest_insert(child)
 
-    joined = "\n".join(lines)
-    if "HOLE TABLE" in joined.upper():
-        upper = joined.upper()
-        start = upper.index("HOLE TABLE")
-        joined = joined[start:]
-    return [ln for ln in joined.splitlines() if ln.strip()]
+    def _harvest_entities(entities: Iterable[Any]) -> None:
+        for entity in entities:
+            try:
+                kind = entity.dxftype()
+            except Exception:
+                continue
+            if kind in ("TEXT", "MTEXT"):
+                _append(_extract_entity_text(entity))
+            elif kind == "INSERT":
+                _harvest_insert(entity)
+
+    _harvest_entities(msp)
+
+    if include_tables:
+        def _iter_table_strings(table: Any) -> Iterator[str]:
+            try:
+                cells = getattr(table, "cells")
+            except Exception:
+                cells = None
+
+            if cells is not None:
+                for cell in cells:  # type: ignore[assignment]
+                    try:
+                        text = getattr(cell, "text")
+                    except Exception:
+                        text = ""
+                    if callable(text):
+                        try:
+                            text = text()
+                        except Exception:
+                            text = ""
+                    normalized = re.sub(r"\s+", " ", str(text or "")).strip()
+                    if normalized:
+                        yield normalized
+                return
+
+            try:
+                nrows = int(getattr(table, "nrows", 0))
+                ncols = int(getattr(table, "ncols", 0))
+            except Exception:
+                nrows = ncols = 0
+
+            for row in range(max(nrows, 0)):
+                for col in range(max(ncols, 0)):
+                    try:
+                        cell = table.cell(row, col)  # type: ignore[call-arg]
+                    except Exception:
+                        continue
+                    try:
+                        text = getattr(cell, "text")
+                    except Exception:
+                        text = ""
+                    if callable(text):
+                        try:
+                            text = text()
+                        except Exception:
+                            text = ""
+                    normalized = re.sub(r"\s+", " ", str(text or "")).strip()
+                    if normalized:
+                        yield normalized
+
+        for table in getattr(msp, "query", lambda *_: [])("TABLE"):  # type: ignore[misc]
+            for text in _iter_table_strings(table):
+                _append(text)
+
+        try:
+            layouts = list(doc.layouts.names())
+        except Exception:
+            layouts = []
+        for name in layouts:
+            if isinstance(name, str) and name.lower() == "model":
+                continue
+            try:
+                layout = doc.layouts.get(name)
+            except Exception:
+                continue
+            if layout is None:
+                continue
+            space = getattr(layout, "entity_space", layout)
+            try:
+                _harvest_entities(space)
+            except Exception:
+                pass
+            for table in getattr(layout, "query", lambda *_: [])("TABLE"):  # type: ignore[misc]
+                for text in _iter_table_strings(table):
+                    _append(text)
+
+    return lines
 
 
 _MM_TO_IN = 1.0 / 25.4

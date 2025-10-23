@@ -49,6 +49,13 @@ def extract_text_lines_from_dxf(_path: str, *, include_tables: bool = False) -> 
     return []
 
 
+def harvest_text_lines(_doc: Any, *, include_tables: bool = False) -> list[str]:
+    return []
+
+
+HOLE_TOKENS = None
+
+
 def parse_hole_table_lines(_lines: Iterable[str], **_kwargs: Any) -> list[Mapping[str, Any]]:
     return []
 
