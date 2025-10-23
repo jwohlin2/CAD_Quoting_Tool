@@ -174,8 +174,19 @@ def _ensure_geo_context_fields(
                     )
                     if thickness_mm_guess is not None:
                         thickness_in_guess = float(thickness_mm_guess) / 25.4
+                ops_claims_map = None
+                if isinstance(geom, Mapping):
+                    claims_candidate = geom.get("ops_claims")
+                    if isinstance(claims_candidate, Mapping):
+                        ops_claims_map = claims_candidate
+                    else:
+                        summary_candidate = geom.get("ops_summary")
+                        if isinstance(summary_candidate, Mapping):
+                            claims_candidate = summary_candidate.get("claims")
+                            if isinstance(claims_candidate, Mapping):
+                                ops_claims_map = claims_candidate
                 drill_groups = build_drill_groups_from_geometry(
-                    diams_seq, thickness_in_guess
+                    diams_seq, thickness_in_guess, ops_claims_map
                 )
                 for group in drill_groups:
                     try:
