@@ -10785,6 +10785,37 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
 
     ops_claims: dict[str, int] = {}
 
+    def _normalize_ops_claims_map(candidate: Any) -> dict[str, int]:
+        if not isinstance(candidate, (_MappingABC, dict)):
+            return {}
+        normalized: dict[str, int] = {}
+        for key, value in candidate.items():
+            try:
+                normalized[str(key)] = int(round(float(value)))
+            except Exception:
+                continue
+        return normalized
+
+    def _stash_ops_claims(claims: dict[str, int]) -> None:
+        if not claims:
+            return
+        if isinstance(breakdown_mutable, _MutableMappingABC):
+            try:
+                breakdown_mutable["_ops_claims"] = dict(claims)
+            except Exception:
+                pass
+
+    try:
+        stashed_claims = (
+            breakdown_mutable.get("_ops_claims")
+            if isinstance(breakdown_mutable, _MappingABC)
+            else None
+        )
+    except Exception:
+        stashed_claims = None
+    if stashed_claims:
+        ops_claims = _normalize_ops_claims_map(stashed_claims)
+
     def _extract_ops_claims(source: Any) -> dict[str, int]:
         if not isinstance(source, (_MappingABC, dict)):
             return {}
@@ -10808,6 +10839,7 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
         extracted_claims = _extract_ops_claims(candidate_source)
         if extracted_claims:
             ops_claims = extracted_claims
+            _stash_ops_claims(dict(ops_claims))
             break
 
     if not ops_claims and (joined_lines or ops_rows_now):
@@ -10829,6 +10861,7 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
                     continue
             if extracted:
                 ops_claims = extracted
+                _stash_ops_claims(dict(ops_claims))
 
     # Append extra MATERIAL REMOVAL cards (Counterbore / Spot / Jig) from JOINED lines
     _appended_at_print = _append_counterbore_spot_jig_cards(
@@ -10847,8 +10880,19 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
                 return True
         return False
 
+    try:
+        ops_claims_for_cards = (
+            _normalize_ops_claims_map(breakdown_mutable.get("_ops_claims"))
+            if isinstance(breakdown_mutable, _MappingABC)
+            else {}
+        )
+    except Exception:
+        ops_claims_for_cards = {}
+    if not ops_claims_for_cards:
+        ops_claims_for_cards = dict(ops_claims)
+
     spot_heading = "MATERIAL REMOVAL – SPOT (CENTER DRILL)"
-    spot_qty = int(ops_claims.get("spot") or 0)
+    spot_qty = int(ops_claims_for_cards.get("spot") or 0)
     if spot_qty > 0 and not _card_heading_exists(spot_heading):
         removal_card_lines.extend([
             spot_heading,
@@ -10860,7 +10904,7 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
         ])
 
     jig_heading = "MATERIAL REMOVAL – JIG GRIND"
-    jig_qty = int(ops_claims.get("jig") or 0)
+    jig_qty = int(ops_claims_for_cards.get("jig") or 0)
     if jig_qty > 0 and not _card_heading_exists(jig_heading):
         per_jig = float(globals().get("JIG_GRIND_MIN_PER_FEATURE") or 0.75)
         removal_card_lines.extend([
