@@ -16471,7 +16471,6 @@ def aggregate_ops(
             totals["jig_grind"] += qty
         if op_type == "tap" and dia_key is not None and dia_key > 0:
             tap_claim_bins[dia_key] += qty
-            claimed_pilot_diams.extend([float(dia_key)] * qty)
 
     totals["tap_total"] = totals.get("tap_front", 0) + totals.get("tap_back", 0)
     totals["cbore_total"] = totals.get("cbore_front", 0) + totals.get("cbore_back", 0)
@@ -16479,12 +16478,45 @@ def aggregate_ops(
     totals["spot_total"] = totals.get("spot_front", 0) + totals.get("spot_back", 0)
 
     drill_subtracted_total = 0
+    processed_dia_keys: set[float] = set()
+    for dia_key, available in drill_claim_bins.items():
+        tap_claim_qty = tap_claim_bins.get(dia_key, 0)
+        subtract = min(available, tap_claim_qty) if tap_claim_qty else available
+        if subtract <= 0:
+            processed_dia_keys.add(dia_key)
+            continue
+        drill_subtracted_total += subtract
+        claimed_pilot_diams.extend([float(dia_key)] * subtract)
+        remaining = subtract
+        for bucket in drill_group_refs.get(dia_key, []):
+            qty_val = int(_coerce_float_or_none(bucket.get("qty")) or 0)
+            if qty_val <= 0:
+                continue
+            take = min(qty_val, remaining)
+            bucket["qty"] = qty_val - take
+            remaining -= take
+            if remaining <= 0:
+                break
+        remaining_detail = subtract
+        for entry in drill_detail_refs.get(dia_key, []):
+            entry_qty = int(_coerce_float_or_none(entry.get("qty")) or 0)
+            if entry_qty <= 0:
+                continue
+            take = min(entry_qty, remaining_detail)
+            entry["qty"] = entry_qty - take
+            remaining_detail -= take
+            if remaining_detail <= 0:
+                break
+        processed_dia_keys.add(dia_key)
     for dia_key, claim_qty in tap_claim_bins.items():
+        if dia_key in processed_dia_keys:
+            continue
         available = drill_claim_bins.get(dia_key, 0)
         subtract = min(available, claim_qty)
         if subtract <= 0:
             continue
         drill_subtracted_total += subtract
+        claimed_pilot_diams.extend([float(dia_key)] * subtract)
         remaining = subtract
         for bucket in drill_group_refs.get(dia_key, []):
             qty_val = int(_coerce_float_or_none(bucket.get("qty")) or 0)
