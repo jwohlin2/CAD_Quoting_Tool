@@ -3605,6 +3605,14 @@ def _compute_drilling_removal_section(
 
     lines: list[str] = []
 
+    breakdown_mutable: MutableMapping[str, Any] | None
+    if isinstance(breakdown, _MutableMappingABC):
+        breakdown_mutable = typing.cast(MutableMapping[str, Any], breakdown)
+    elif isinstance(breakdown, dict):
+        breakdown_mutable = breakdown
+    else:
+        breakdown_mutable = None
+
     def _push(target: list[str], text: Any) -> None:
         try:
             target.append(str(text))
@@ -3875,6 +3883,22 @@ def _compute_drilling_removal_section(
                 ops_claims,
                 ops_hint,
             )
+            if isinstance(breakdown_mutable, (_MutableMappingABC, dict)):
+                try:
+                    extra_bucket_ops = typing.cast(
+                        MutableMapping[str, Any],
+                        breakdown_mutable,
+                    ).setdefault("extra_bucket_ops", {})
+                    drill_entries = extra_bucket_ops.setdefault("drill", [])
+                    drill_entries.append(
+                        {
+                            "name": "Drill",
+                            "qty": int(sum(counts_by_diam.values())),
+                            "side": None,
+                        }
+                    )
+                except Exception:
+                    pass
             drill_actions = int(sum(counts_by_diam.values()))
             _push(
                 lines,
