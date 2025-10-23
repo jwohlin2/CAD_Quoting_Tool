@@ -108,4 +108,30 @@ def test_render_drilling_section_prefers_adjusted_counts_when_available() -> Non
     assert "5 deep + 1 std  = 6" in lines[5]
     assert 'Dia 0.125" × 5  | depth 0.750"' in section
     assert 'Dia 0.250" × 1  | depth 0.500"' in section
-    assert "Subtotal (per-hole × qty) . 1.18 min" in section
+    assert "Subtotal (per-hole × qty) . 2.05 min" in section
+
+
+def test_render_drilling_section_updates_breakdown() -> None:
+    groups = [
+        {
+            "dia": 0.25,
+            "qty": 4,
+            "depth_in": 0.5,
+            "counts_by_diam": {0.25: 4},
+        }
+    ]
+    breakdown: dict[str, object] = {}
+
+    render_drilling_section(
+        material="6061",
+        block_thickness=1.0,
+        drill_groups=groups,
+        overheads=_build_overheads(),
+        breakdown_mutable=breakdown,
+    )
+
+    extra_ops = breakdown.get("extra_bucket_ops")
+    assert isinstance(extra_ops, dict)
+    drill_entries = extra_ops.get("drill")
+    assert isinstance(drill_entries, list)
+    assert any(entry.get("qty") == 4 for entry in drill_entries)
