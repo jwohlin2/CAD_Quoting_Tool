@@ -893,6 +893,79 @@ _parse_qty = _shared_parse_qty
 _side = _shared_side
 
 
+_TAP_PILOT_IN: dict[str, float] = {
+    "#10-32": 0.1590,  # #21
+    "5/8-11": 0.5312,  # 17/32
+    "5/16-24": 0.2720,  # I
+    "5/16-18": 0.2610,  # G
+    "3/8-24": 0.3320,  # Q
+}
+
+_NPT_PILOT_IN: dict[str, float] = {
+    "1/8": 0.3390,  # R
+}
+
+
+def _collect_pilot_claims_from_rows(geo: Mapping[str, Any] | None) -> list[float]:
+    vals: list[float] = []
+    if not isinstance(geo, (_MappingABC, dict)):
+        return vals
+
+    ops_summary = geo.get("ops_summary") if isinstance(geo, (_MappingABC, dict)) else None
+    rows: Sequence[Mapping[str, Any]] | None = None
+    if isinstance(ops_summary, (_MappingABC, dict)):
+        candidate = ops_summary.get("rows")
+        if isinstance(candidate, Sequence):
+            rows = typing.cast(Sequence[Mapping[str, Any]], candidate)
+
+    if not rows:
+        return vals
+
+    for row in rows:
+        if not isinstance(row, (_MappingABC, dict)):
+            continue
+        desc_raw = row.get("desc") or row.get("name") or ""
+        desc = str(desc_raw or "").upper()
+        if not desc:
+            continue
+
+        qty_raw = row.get("qty", 1)
+        qty = 1
+        if isinstance(qty_raw, (int, float)):
+            qty = int(qty_raw)
+        elif isinstance(qty_raw, str):
+            match = re.search(r"(\d+)", qty_raw)
+            if match:
+                try:
+                    qty = int(match.group(1))
+                except Exception:
+                    qty = 1
+        if qty <= 0:
+            qty = 1
+
+        desc_compact = desc.replace(" ", "")
+        # UN taps
+        for spec, dia in _TAP_PILOT_IN.items():
+            if spec.replace(" ", "") in desc_compact:
+                vals.extend([float(dia)] * qty)
+
+        # NPT taps
+        if "NPT" in desc:
+            match = re.search(r"((?:\d+/\d+)|(?:\d+\.\d+)|(?:\d+))\s*-\s*27\s*NPT|\b1/8\b", desc)
+            if match:
+                vals.extend([_NPT_PILOT_IN["1/8"]] * qty)
+
+        # explicit decimals, e.g. "Ø0.201 DRILL THRU" or ".339 THRU"
+        match_decimal = re.search(r"(\d*\.\d+)\s*(?:DRILL\s*)?THRU", desc)
+        if match_decimal:
+            try:
+                vals.extend([float(match_decimal.group(1))] * qty)
+            except Exception:
+                pass
+
+    return vals
+
+
 def _record_drill_claims(
     breakdown_mutable: MutableMapping[str, Any] | None,
     claimed: Iterable[float],
@@ -4147,10 +4220,8 @@ def _compute_drilling_removal_section(
                 ops_claims = {}
 
             pilot_from_rows = _collect_pilot_claims_from_rows(geo_map_for_drill)
-            if pilot_from_rows:
-                ops_claims["claimed_pilot_diams"] = (
-                    list(ops_claims.get("claimed_pilot_diams") or []) + pilot_from_rows
-                )
+            pilot_from_chart = list(ops_claims.get("claimed_pilot_diams") or [])
+            ops_claims["claimed_pilot_diams"] = pilot_from_rows + pilot_from_chart
 
             ops_hint: dict[str, Any] = {}
             try:
