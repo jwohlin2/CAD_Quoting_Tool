@@ -4396,13 +4396,25 @@ def _compute_drilling_removal_section(
                         breakdown_mutable,
                     ).setdefault("extra_bucket_ops", {})
                     drill_entries = extra_bucket_ops.setdefault("drill", [])
-                    drill_entries.append(
-                        {
-                            "name": "Drill",
-                            "qty": int(sum(max(0, int(v)) for v in counts_by_diam.values())),
-                            "side": None,
-                        }
+                    adjusted_total = int(
+                        sum(max(0, int(v)) for v in counts_by_diam.values())
                     )
+                    existing_entry = next(
+                        (
+                            entry
+                            for entry in drill_entries
+                            if entry.get("name") == "Drill"
+                            and entry.get("side") in (None, "front")
+                        ),
+                        None,
+                    )
+                    if existing_entry is not None:
+                        existing_entry["qty"] = adjusted_total
+                        existing_entry["side"] = None
+                    else:
+                        drill_entries.append(
+                            {"name": "Drill", "qty": adjusted_total, "side": None}
+                        )
                 except Exception:
                     pass
             drill_actions_from_groups = int(
@@ -12587,7 +12599,7 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
 
     ops_counts = _apply_ops_audit_counts(
         typing.cast(MutableMapping[str, int], ops_counts),
-        drill_actions=drill_actions_from_groups,
+        drill_actions=int(locals().get("drill_actions_from_groups") or 0),
         ops_claims=ops_claims,
     )
 
@@ -12616,14 +12628,30 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
     if drilling_summary is None:
         drilling_summary = {}
 
-    drill_actions = int(ops_counts.get("drills", 0))
+    drill_actions = int(locals().get("drill_actions_from_groups") or 0)
+    if drill_actions <= 0:
+        drill_actions = int(ops_counts.get("drills", 0))
 
     try:
         extra_bucket_ops = breakdown_mutable.setdefault("extra_bucket_ops", {})
         if drill_actions > 0:
-            extra_bucket_ops.setdefault("drill", []).append(
-                {"name": "Drill", "qty": drill_actions, "side": None}
+            drill_entries = extra_bucket_ops.setdefault("drill", [])
+            existing_entry = next(
+                (
+                    entry
+                    for entry in drill_entries
+                    if entry.get("name") == "Drill"
+                    and entry.get("side") in (None, "front")
+                ),
+                None,
             )
+            if existing_entry is not None:
+                existing_entry["qty"] = drill_actions
+                existing_entry["side"] = None
+            else:
+                drill_entries.append(
+                    {"name": "Drill", "qty": drill_actions, "side": None}
+                )
         if (ops_claims.get("tap") or 0) > 0:
             extra_bucket_ops.setdefault("tap", []).append(
                 {"name": "Tap", "qty": int(ops_claims["tap"]), "side": "front"}
