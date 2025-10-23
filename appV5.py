@@ -11173,7 +11173,29 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
             joined_early = _join_wrapped_chart_lines([
                 _clean_mtext(x) for x in chart_lines_all
             ])
-            ops_claims = _parse_ops_and_claims(joined_early)
+            fallback_row_lines: list[str] = []
+            if built:
+                for row in built:
+                    try:
+                        desc = str((row or {}).get("desc") or "")
+                    except Exception:
+                        desc = ""
+                    if desc.strip():
+                        fallback_row_lines.append(desc)
+
+            rows_for_claims: Sequence[Mapping[str, Any]] | None
+            lines_for_claims: Sequence[str] | None
+            if joined_early:
+                lines_for_claims = joined_early
+                rows_for_claims = None
+            else:
+                lines_for_claims = fallback_row_lines or None
+                rows_for_claims = built if lines_for_claims else None
+
+            ops_claims = _parse_ops_and_claims(
+                lines_for_claims,
+                rows=rows_for_claims,
+            )
             breakdown_mutable["_ops_claims"] = ops_claims
             _push(
                 lines,
