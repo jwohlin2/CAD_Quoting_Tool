@@ -1794,7 +1794,7 @@ def _build_ops_cards_from_chart_lines(
 
         if out_lines:
             try:
-                _normalize_buckets(bucket_view_obj)
+                _normalize_buckets(breakdown.get("bucket_view"))
             except Exception:
                 pass
 
@@ -1956,6 +1956,24 @@ def _emit_hole_table_ops_cards(
             cb_mrate = _lookup_bucket_rate("counterbore", rates) or _lookup_bucket_rate("machine", rates) or 53.76
             cb_lrate = _lookup_bucket_rate("labor", rates) or 25.46
             _set_bucket_minutes_cost(bucket_view_obj, "counterbore", cb_minutes, cb_mrate, cb_lrate)
+            try:
+                bv: MutableMapping[str, Any] | None = None
+                if isinstance(breakdown, dict):
+                    bv = typing.cast(MutableMapping[str, Any], breakdown.setdefault("bucket_view", {}))
+                elif isinstance(breakdown, _MutableMappingABC):
+                    bv = typing.cast(MutableMapping[str, Any], breakdown).setdefault("bucket_view", {})
+                elif isinstance(bucket_view_obj, _MutableMappingABC):
+                    bv = typing.cast(MutableMapping[str, Any], bucket_view_obj)
+                if bv is not None:
+                    buckets = typing.cast(MutableMapping[str, Any], bv).setdefault("buckets", {})
+                    order = typing.cast(list[str], bv.setdefault("order", []))
+                    if "counterbore" in buckets and "counterbore" not in order:
+                        if "drilling" in order:
+                            order.insert(order.index("drilling") + 1, "counterbore")
+                        else:
+                            order.append("counterbore")
+            except Exception:
+                pass
 
         # --- SPOT & JIG-GRIND CARDS -------------------------------------------
         spot_qty, jig_qty = _count_spot_and_jig(rows)
