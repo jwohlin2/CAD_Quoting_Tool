@@ -8559,6 +8559,7 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
             drilling_time_per_hole_data = candidate_dtph
 
     removal_card_lines: list[str] = []
+    removal_summary_extra_lines: list[str] = []
     removal_card_extra: dict[str, float] = {}
     speeds_feeds_table = None
     if isinstance(result, _MappingABC):
@@ -10445,11 +10446,6 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
     )
     _push(lines, f"[DEBUG] extra_ops_appended_at_print={_appended_at_print}")
 
-    # (we already appended extra ops at print-time and logged extra_ops_appended_at_print)
-    removal_summary_lines: list[str] = [
-        str(line) for line in removal_card_lines if isinstance(line, str)
-    ]
-
     append_lines(removal_card_lines)
 
     try:
@@ -10766,9 +10762,9 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
             _push(lines, f"[DEBUG] extra_ops_lines={len(extra_ops_lines)}")
             for entry in extra_ops_lines:
                 if isinstance(entry, str):
-                    removal_summary_lines.append(entry)
+                    removal_summary_extra_lines.append(entry)
                 else:
-                    removal_summary_lines.append(str(entry))
+                    removal_summary_extra_lines.append(str(entry))
 
         # Emit the cards (will no-op if no TAP/CBore/Spot rows)
         pre_ops_len = len(lines)
@@ -10793,7 +10789,7 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
                 new_ops_lines.append(entry)
         except Exception:
             new_ops_lines = []
-        removal_summary_lines.extend(new_ops_lines)
+        removal_summary_extra_lines.extend(new_ops_lines)
 
         if not new_ops_lines:
             breakdown_mutable: MutableMapping[str, Any] | None
@@ -10817,8 +10813,9 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
                 lines.extend(fallback_lines)
                 for entry in fallback_lines:
                     if isinstance(entry, str) and not entry.startswith("[DEBUG]"):
-                        removal_summary_lines.append(entry)
+                        removal_summary_extra_lines.append(entry)
 
+        actions_summary_ready = True
         try:
             extra_bucket_ops: MutableMapping[str, Any] = {}
             if isinstance(breakdown, _MappingABC):
@@ -10846,14 +10843,31 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
                             planner_ops_summary.append(
                                 {"name": name_text, "qty": qty_val, "side": side_val}
                             )
-            summarize_actions(removal_summary_lines, planner_ops_summary)
         except Exception as exc:
+            actions_summary_ready = False
             logging.debug(
                 "[actions-summary] skipped due to %s: %s",
                 exc.__class__.__name__,
                 exc,
                 exc_info=False,
             )
+
+        removal_summary_lines = [
+            str(line) for line in removal_card_lines if isinstance(line, str)
+        ]
+        if removal_summary_extra_lines:
+            removal_summary_lines.extend(removal_summary_extra_lines)
+
+        if actions_summary_ready:
+            try:
+                summarize_actions(removal_summary_lines, planner_ops_summary)
+            except Exception as exc:
+                logging.debug(
+                    "[actions-summary] skipped due to %s: %s",
+                    exc.__class__.__name__,
+                    exc,
+                    exc_info=False,
+                )
 
         milling_bucket_obj = None
         bucket_view_snapshot = (
