@@ -9852,8 +9852,31 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
         ctx_b=ctx_b,
     )
     if extra_ops_lines:
-        removal_card_lines.extend(extra_ops_lines)
-        lines.extend(extra_ops_lines)
+        already_counterbore = any(
+            isinstance(x, str)
+            and x.strip().upper().startswith("MATERIAL REMOVAL – COUNTERBORE")
+            for x in lines
+        )
+        lines_to_append = extra_ops_lines
+        if already_counterbore:
+            filtered_lines: list[Any] = []
+            skip_counterbore = False
+            for entry in extra_ops_lines:
+                if isinstance(entry, str):
+                    stripped = entry.strip()
+                    upper = stripped.upper()
+                    if upper.startswith("MATERIAL REMOVAL – COUNTERBORE"):
+                        skip_counterbore = True
+                        continue
+                    if skip_counterbore and upper.startswith("MATERIAL REMOVAL –"):
+                        skip_counterbore = False
+                if skip_counterbore:
+                    continue
+                filtered_lines.append(entry)
+            lines_to_append = filtered_lines
+        if lines_to_append:
+            removal_card_lines.extend(lines_to_append)
+            lines.extend(lines_to_append)
         try:
             _normalize_buckets(breakdown.get("bucket_view"))
         except Exception:
@@ -12468,10 +12491,33 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
                     ctx_b=ctx_b,
                 )
                 if fallback_lines:
-                    lines.extend(fallback_lines)
-                    for entry in fallback_lines:
-                        if isinstance(entry, str) and not entry.startswith("[DEBUG]"):
-                            removal_summary_extra_lines.append(entry)
+                    already_counterbore = any(
+                        isinstance(x, str)
+                        and x.strip().upper().startswith("MATERIAL REMOVAL – COUNTERBORE")
+                        for x in lines
+                    )
+                    lines_to_append = fallback_lines
+                    if already_counterbore:
+                        filtered_lines: list[Any] = []
+                        skip_counterbore = False
+                        for entry in fallback_lines:
+                            if isinstance(entry, str):
+                                stripped = entry.strip()
+                                upper = stripped.upper()
+                                if upper.startswith("MATERIAL REMOVAL – COUNTERBORE"):
+                                    skip_counterbore = True
+                                    continue
+                                if skip_counterbore and upper.startswith("MATERIAL REMOVAL –"):
+                                    skip_counterbore = False
+                            if skip_counterbore:
+                                continue
+                            filtered_lines.append(entry)
+                        lines_to_append = filtered_lines
+                    if lines_to_append:
+                        lines.extend(lines_to_append)
+                        for entry in lines_to_append:
+                            if isinstance(entry, str) and not entry.startswith("[DEBUG]"):
+                                removal_summary_extra_lines.append(entry)
         except Exception as e:
             _push(
                 lines,
