@@ -34,7 +34,7 @@ def _parse_qty(s: str) -> int:
     match = re.match(r"\s*\((\d+)\)\s*", s)
     if match:
         return int(match.group(1))
-    match = re.search(r"(?<!\d)(\d+)\s*[xX×]", s)
+    match = re.search(r"(?<!\S)(\d+)\s*[xX×]\b", s)
     if match:
         return int(match.group(1))
     match = re.search(r"\bQTY[:\s]+(\d+)\b", s, re.I)
