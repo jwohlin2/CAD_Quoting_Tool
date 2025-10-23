@@ -14543,6 +14543,10 @@ def compute_quote_from_df(  # type: ignore[reportGeneralTypeIssues]
         cfg=cfg,
     )
     geo_context = geom
+    if isinstance(geo_context, _MappingABC) and not isinstance(geo_context, dict):
+        geo_context = dict(geo_context)
+    elif not isinstance(geo_context, dict):
+        geo_context = {}
     planner_inputs = dict(ui_vars or {})
     rates = dict(rates or {})
     geo_payload: dict[str, Any] = geo_context
@@ -14813,7 +14817,9 @@ def compute_quote_from_df(  # type: ignore[reportGeneralTypeIssues]
         "red_flags": [],
         "totals": totals_block,
     }
-    breakdown["geo_context"] = geo_context if isinstance(geo_context, dict) else {}
+    geo_for_breakdown = geo_context if isinstance(geo_context, dict) else {}
+    breakdown["geo_context"] = geo_for_breakdown
+    breakdown["geo"] = geo_for_breakdown
 
     mat_key = (
         str(((breakdown.get("material") or {}).get("material")) or "").lower()
