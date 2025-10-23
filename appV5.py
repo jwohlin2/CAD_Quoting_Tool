@@ -3056,17 +3056,11 @@ def summarize_actions(removal_lines: list[str], planner_ops: list[dict]) -> None
     qty_re = re.compile(r'[×x]\s*(\d+)')
     cbo_hdr_re = re.compile(r'^\s*MATERIAL\s+REMOVAL\s*[–-]\s*COUNTERBORE', re.IGNORECASE)
     cbo_line_re = re.compile(
-        r'^\s*(?:Ø|%%[Cc])?\s*'                  # optional Ø/%%C before number
-        r'([0-9]+(?:\.[0-9]+)?|\.[0-9]+|\d+/\d+)'  # dia: 0.750, .623, 13/32
-        r'(?:\s*"?\s*)?.*?'                      # optional inch mark & fluff
-        r'[×xX]\s*(\d+)'                         # "× 4" or "x4"
-        r'.*?\((FRONT|BACK)\)'                   # side in parens
-        ,
+        r'^\s*(?:Ø|%%[Cc])?\s*([0-9]+(?:\.[0-9]+)?|\.[0-9]+|\d+/\d+).*?[×xX]\s*(\d+).*?\((FRONT|BACK)\)',
         re.IGNORECASE,
     )
     cbo_line_noside_re = re.compile(
-        r'^\s*(?:Ø|%%[Cc])?\s*([0-9]+(?:\.[0-9]+)?|\.[0-9]+|\d+/\d+)'
-        r'(?:\s*"?\s*)?.*?[×xX]\s*(\d+)',
+        r'^\s*(?:Ø|%%[Cc])?\s*([0-9]+(?:\.[0-9]+)?|\.[0-9]+|\d+/\d+).*?[×xX]\s*(\d+)',
         re.IGNORECASE,
     )
 
@@ -3078,36 +3072,12 @@ def summarize_actions(removal_lines: list[str], planner_ops: list[dict]) -> None
         if not isinstance(ln, str):
             continue
 
-        header = ln.upper().strip()
+        u = ln.upper()
+        header = u.strip()
+        stripped = ln.strip()
+
         if cbo_hdr_re.search(header):
             in_cbo = True
-        elif in_cbo and (
-            header.startswith("MATERIAL REMOVAL")
-            or header.startswith("TIME PER HOLE")
-            or not header
-        ):
-            if not cbo_hdr_re.search(header):
-                in_cbo = False
-
-        if header.startswith("MATERIAL REMOVAL –"):
-            if "COUNTERBORE" in header:
-                active_card = "counterbore"
-            elif "SPOT" in header:
-                active_card = "spot"
-            elif "JIG" in header:
-                active_card = "jig_grind"
-            elif "TAPPING" in header:
-                active_card = "tap"
-            else:
-                active_card = None
-            continue
-
-        if not ln.strip():
-            active_card = None
-            in_cbo = False
-            continue
-
-        if ln.strip().startswith("-") or ln.strip().startswith("="):
             continue
 
         if in_cbo:
@@ -3126,6 +3096,30 @@ def summarize_actions(removal_lines: list[str], planner_ops: list[dict]) -> None
                 by_side["counterbore"]["front"] += qty
                 card_counts["counterbore"] = True
                 continue
+
+        if in_cbo and header.startswith("MATERIAL REMOVAL"):
+            in_cbo = False
+
+        if header.startswith("MATERIAL REMOVAL –"):
+            if "COUNTERBORE" in header:
+                active_card = "counterbore"
+            elif "SPOT" in header:
+                active_card = "spot"
+            elif "JIG" in header:
+                active_card = "jig_grind"
+            elif "TAPPING" in header:
+                active_card = "tap"
+            else:
+                active_card = None
+            continue
+
+        if not stripped:
+            active_card = None
+            in_cbo = False
+            continue
+
+        if stripped.startswith("-") or stripped.startswith("="):
+            continue
 
         if active_card in {"spot", "jig_grind"}:
             qty_match = qty_re.search(ln)
