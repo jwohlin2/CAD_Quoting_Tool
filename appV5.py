@@ -719,6 +719,29 @@ def _build_ops_cards_from_chart_lines(
         total_cb = sum(cb_groups.values())
         front_cb = sum(q for (d, side, dep), q in cb_groups.items() if side == "FRONT")
         back_cb = sum(q for (d, side, dep), q in cb_groups.items() if side == "BACK")
+        try:
+            ebo = breakdown_mutable.setdefault("extra_bucket_ops", {})
+            total_cb = sum(cb_groups.values())
+            if total_cb > 0:
+                if front_cb > 0:
+                    ebo.setdefault("counterbore", []).append(
+                        {"name": "Counterbore", "qty": int(front_cb), "side": "front"}
+                    )
+                if back_cb > 0:
+                    ebo.setdefault("counterbore", []).append(
+                        {"name": "Counterbore", "qty": int(back_cb), "side": "back"}
+                    )
+            if spot_qty > 0:
+                ebo.setdefault("spot", []).append(
+                    {"name": "Spot drill", "qty": int(spot_qty), "side": "front"}
+                )
+            if jig_qty > 0:
+                ebo.setdefault("jig-grind", []).append(
+                    {"name": "Jig-grind", "qty": int(jig_qty), "side": None}
+                )
+        except Exception:
+            pass
+
         lines += [
             "MATERIAL REMOVAL – COUNTERBORE",
             "=" * 64,
@@ -982,6 +1005,29 @@ def _append_counterbore_spot_jig_cards(
         total_cb = sum(cb_groups.values())
         front_cb = sum(q for (d,s,dep), q in cb_groups.items() if s=="FRONT")
         back_cb  = sum(q for (d,s,dep), q in cb_groups.items() if s=="BACK")
+        try:
+            ebo = breakdown_mutable.setdefault("extra_bucket_ops", {})
+            total_cb = sum(cb_groups.values())
+            if total_cb > 0:
+                if front_cb > 0:
+                    ebo.setdefault("counterbore", []).append(
+                        {"name": "Counterbore", "qty": int(front_cb), "side": "front"}
+                    )
+                if back_cb > 0:
+                    ebo.setdefault("counterbore", []).append(
+                        {"name": "Counterbore", "qty": int(back_cb), "side": "back"}
+                    )
+            if spot_qty > 0:
+                ebo.setdefault("spot", []).append(
+                    {"name": "Spot drill", "qty": int(spot_qty), "side": "front"}
+                )
+            if jig_qty > 0:
+                ebo.setdefault("jig-grind", []).append(
+                    {"name": "Jig-grind", "qty": int(jig_qty), "side": None}
+                )
+        except Exception:
+            pass
+
         lines_out.extend([
             "MATERIAL REMOVAL – COUNTERBORE",
             "="*64,
