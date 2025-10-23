@@ -4522,6 +4522,8 @@ def _compute_drilling_removal_section(
                 f"{drill_minutes_total:.2f} min  ("
                 f"{fmt_hours(minutes_to_hours(drill_minutes_total))})",
             )
+            _printed_sum = sum(int(v) for v in (counts_by_diam or {}).values())
+            _push(lines, f"[DEBUG] DRILL verify printed_sum={_printed_sum}")
             lines.append("")
 
             extras["drill_machine_minutes"] = float(drill_minutes_subtotal)
@@ -12757,6 +12759,16 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
         f"npt={ops_claims['npt']} cbore={ops_claims['cb_total']} "
         f"spot={ops_claims['spot']} counterdrill={ops_claims['counterdrill']} "
         f"jig={ops_claims['jig']}",
+    )
+
+    counts_by_diam_final = locals().get("counts_by_diam")
+    if not isinstance(counts_by_diam_final, (_MappingABC, dict)):
+        counts_by_diam_final = {}
+    _push(
+        lines,
+        f"[DEBUG] OPS TALLY (final) drill={int(sum(int(v) for v in counts_by_diam_final.values()))} "
+        f"tap={ops_claims.get('tap',0)} cbore={sum(int(q) for q in (ops_claims.get('cb_groups') or {}).values())} "
+        f"counterdrill={ops_claims.get('counterdrill',0)} jig={ops_claims.get('jig',0)}",
     )
 
     print(
