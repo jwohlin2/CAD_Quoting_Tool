@@ -3949,6 +3949,12 @@ def _compute_drilling_removal_section(
             else:
                 ops_claims = {}
 
+            pilot_from_rows = _collect_pilot_claims_from_rows(geo_map_for_drill)
+            if pilot_from_rows:
+                ops_claims["claimed_pilot_diams"] = (
+                    list(ops_claims.get("claimed_pilot_diams") or []) + pilot_from_rows
+                )
+
             ops_hint: dict[str, Any] = {}
             try:
                 hint_payload = geo_map_for_drill.get("ops_totals_hint")
