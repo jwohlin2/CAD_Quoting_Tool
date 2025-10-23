@@ -516,7 +516,15 @@ def _get_chart_lines_for_ops(
 
 _QTY_PAREN_RE = re.compile(r"^\s*\((\d+)\)\s*")
 _CB_DIA_RE = re.compile(
-    r"[Ø⌀\u00D8]?\s*([0-9]+(?:\.[0-9]+)?)\s*(?:C[’']?\s*BORE|CBORE|COUNTER\s*BORE)",
+    # Case A: symbol BEFORE the number: "Ø .750 C'BORE" or "%%C .750 C'BORE"
+    r"(?:(?:[Ø⌀\u00D8]|%%[Cc])\s*)?"
+    r"(?P<numA>\d+(?:\.\d+)?|\.\d+|\d+\s*/\s*\d+)\s*"
+    r"(?:C[’']?\s*BORE|CBORE|COUNTER\s*BORE)"
+    r"|"
+    # Case B: symbol AFTER the number: ".750 Ø C'BORE" or ".750%%C C'BORE"
+    r"(?P<numB>\d+(?:\.\d+)?|\.\d+|\d+\s*/\s*\d+)\s*"
+    r"(?:[Ø⌀\u00D8]|%%[Cc])\s*"
+    r"(?:C[’']?\s*BORE|CBORE|COUNTER\s*BORE)",
     re.I,
 )
 _X_DEPTH_RE = re.compile(r"[×x]\s*([0-9]+(?:\.[0-9]+)?)")
@@ -628,8 +636,22 @@ def _build_ops_cards_from_chart_lines(
 
         # Counterbore rows
         if ("CBORE" in U) or ("C'BORE" in U) or ("COUNTER BORE" in U) or _CB_DIA_RE.search(s):
-            md = _CB_DIA_RE.search(s)
-            dia = float(md.group(1)) if md else None
+            dia = None
+            mcb = _CB_DIA_RE.search(s)
+            if mcb:
+                raw = mcb.group("numA") or mcb.group("numB")
+                if raw:
+                    if "/" in raw:
+                        try:
+                            num, den = raw.split("/", 1)
+                            dia = float(int(num) / int(den))
+                        except Exception:
+                            dia = None
+                    else:
+                        try:
+                            dia = float(raw)
+                        except Exception:
+                            dia = None
             mdepth = _X_DEPTH_RE.search(s)
             depth = float(mdepth.group(1)) if mdepth else None
             if side == "BOTH":
@@ -664,8 +686,22 @@ def _build_ops_cards_from_chart_lines(
                 side = "BACK" if _BACK_RE.search(U) else ("FRONT" if _FRONT_RE.search(U) else "FRONT")
                 mdepth = _X_DEPTH_RE.search(s)
                 depth = float(mdepth.group(1)) if mdepth else None
-                md = _CB_DIA_RE.search(s)
-                dia = float(md.group(1)) if md else None
+                dia = None
+                mcb = _CB_DIA_RE.search(s)
+                if mcb:
+                    raw = mcb.group("numA") or mcb.group("numB")
+                    if raw:
+                        if "/" in raw:
+                            try:
+                                num, den = raw.split("/", 1)
+                                dia = float(int(num) / int(den))
+                            except Exception:
+                                dia = None
+                        else:
+                            try:
+                                dia = float(raw)
+                            except Exception:
+                                dia = None
                 cb_groups[(dia, side, depth)] = cb_groups.get((dia, side, depth), 0) + qty
         # Spots/Jig from rows text too
         for r in ops_rows:
@@ -785,11 +821,15 @@ def _join_wrapped_chart_lines(chart_lines: list[str]) -> list[str]:
     _flush()
     return out
 _CB_DIA_RE = re.compile(
-    # Case A: Ø before number  → "Ø .750 C'BORE"
-    r"(?:[Ø⌀\u00D8]\s*)?(?P<numA>(?:\d+(?:\.\d+)?|\.\d+|\d+\s*/\s*\d+))\s*(?:C[’']?\s*BORE|CBORE|COUNTER\s*BORE)"
+    # Case A: symbol BEFORE the number: "Ø .750 C'BORE" or "%%C .750 C'BORE"
+    r"(?:(?:[Ø⌀\u00D8]|%%[Cc])\s*)?"
+    r"(?P<numA>\d+(?:\.\d+)?|\.\d+|\d+\s*/\s*\d+)\s*"
+    r"(?:C[’']?\s*BORE|CBORE|COUNTER\s*BORE)"
     r"|"
-    # Case B: Ø after number   → ".750 Ø C'BORE" or ".750Ø C'BORE"
-    r"(?P<numB>(?:\d+(?:\.\d+)?|\.\d+|\d+\s*/\s*\d+))\s*[Ø⌀\u00D8]\s*(?:C[’']?\s*BORE|CBORE|COUNTER\s*BORE)",
+    # Case B: symbol AFTER the number: ".750 Ø C'BORE" or ".750%%C C'BORE"
+    r"(?P<numB>\d+(?:\.\d+)?|\.\d+|\d+\s*/\s*\d+)\s*"
+    r"(?:[Ø⌀\u00D8]|%%[Cc])\s*"
+    r"(?:C[’']?\s*BORE|CBORE|COUNTER\s*BORE)",
     re.I,
 )
 _X_DEPTH_RE   = re.compile(r"[×xX]\s*([0-9]+(?:\.[0-9]+)?)")      # × .62  or  x 0.63
@@ -837,13 +877,13 @@ def _append_counterbore_spot_jig_cards(
         mcb = _CB_DIA_RE.search(text)
         if not mcb:
             return None
-        raw = (mcb.group("numA") or mcb.group("numB") or "").strip()
+        raw = mcb.group("numA") or mcb.group("numB")
         if not raw:
             return None
         if "/" in raw:
             try:
                 num, den = raw.split("/", 1)
-                return float(int(num.strip()) / int(den.strip()))
+                return float(int(num) / int(den))
             except Exception:
                 return None
         try:
