@@ -1019,34 +1019,47 @@ _NPT_PILOT_IN: dict[str, float] = {
 }
 
 
-def _collect_pilot_claims(geo_map: dict, joined_chart: list[str]) -> list[float]:
+def _collect_pilot_claims(
+    geo_map: dict,
+    joined_chart: list[str],
+    ops_rows: Sequence[Mapping[str, Any]] | None,
+) -> list[float]:
     claims: list[float] = []
-
-    # from ops rows
-    rows = ((geo_map or {}).get("ops_summary") or {}).get("rows") or []
-    TAP_PILOT = {"#10-32": 0.1590, "5/8-11": 0.5312, "5/16-24": 0.2720, "5/16-18": 0.2610, "3/8-24": 0.3320}
+    TAP_PILOT = {
+        "#10-32": 0.1590,
+        "5/16-24": 0.2720,
+        "5/16-18": 0.2610,
+        "3/8-24": 0.3320,
+        "5/8-11": 0.5312,
+    }
     NPT_PILOT = {"1/8": 0.3390}
-    for r in rows:
+
+    # rows
+    if ops_rows is None:
+        try:
+            ops_rows = (
+                ((geo_map or {}).get("ops_summary") or {}).get("rows") or []
+            )
+        except Exception:
+            ops_rows = []
+    normalized_rows: list[Mapping[str, Any]] = []
+    if isinstance(ops_rows, Sequence):
+        for entry in ops_rows:
+            if isinstance(entry, Mapping):
+                normalized_rows.append(entry)
+    for r in normalized_rows:
         desc = str(r.get("desc") or r.get("name") or "").upper()
         qty_raw = r.get("qty")
         qty = 1
-        if isinstance(qty_raw, (int, float)):
-            try:
-                qty = int(qty_raw)
-            except Exception:
-                qty = 1
-        elif isinstance(qty_raw, str):
-            m_qty = re.search(r"(\d+)", qty_raw)
-            if m_qty:
+        try:
+            qty = int(qty_raw)
+        except Exception:
+            match = re.search(r"(\d+)", str(qty_raw or ""))
+            if match:
                 try:
-                    qty = int(m_qty.group(1))
+                    qty = int(match.group(1))
                 except Exception:
                     qty = 1
-        else:
-            try:
-                qty = int(qty_raw or 1)
-            except Exception:
-                qty = 1
         if qty <= 0:
             qty = 1
         for spec, dia in TAP_PILOT.items():
@@ -1058,7 +1071,7 @@ def _collect_pilot_claims(geo_map: dict, joined_chart: list[str]) -> list[float]
         if m:
             claims.extend([float(m.group(1))] * qty)
 
-    # from joined chart lines (quantity prefixes like “(2) 5/8-11 …”)
+    # chart
     for s in (joined_chart or []):
         u = s.upper()
         mqty = re.match(r"\s*\((\d+)\)\s*(.*)$", u)
@@ -1074,7 +1087,16 @@ def _collect_pilot_claims(geo_map: dict, joined_chart: list[str]) -> list[float]
         if m2:
             claims.extend([float(m2.group(1))] * qty)
 
-    return claims
+    # sanitize
+    out: list[float] = []
+    for v in claims:
+        try:
+            f = float(v)
+            if 0.05 <= f <= 3.0:
+                out.append(round(f, 4))
+        except Exception:
+            pass
+    return out
 
 
 def _record_drill_claims(
@@ -1172,8 +1194,11 @@ def _parse_ops_and_claims(joined_lines: Sequence[str] | None) -> dict[str, Any]:
 
 def _adjust_drill_counts(
     counts_by_diam_raw: dict[float, int],
-    ops_claims: dict,
+    *,
+    pilot_claims: Sequence[float] | None,
+    cb_groups: Mapping[tuple[Any, Any, Any], Any] | None,
 ) -> dict[float, int]:
+    """Purely subtractive, clamped, nearest-bin snapping; never fabricates counts."""
     if not counts_by_diam_raw:
         return {}
 
@@ -1182,46 +1207,43 @@ def _adjust_drill_counts(
         for d, q in counts_by_diam_raw.items()
         if int(q) > 0
     }
-    bins = sorted(counts.keys())
+    bins = sorted(counts)
 
     def _nearest(val: float) -> float | None:
         return min(bins, key=lambda b: abs(b - val)) if bins else None
 
-    # sanitize pilot claims (inches only, reasonable range)
-    raw_claims = list(ops_claims.get("claimed_pilot_diams") or [])
-    claims = []
-    for v in raw_claims:
+    pilot_counter: Counter[float] = Counter()
+    for claim in pilot_claims or []:
         try:
-            f = float(v)
-            if 0.05 <= f <= 3.0:
-                claims.append(round(f, 4))
+            f = float(claim)
         except Exception:
-            pass
+            continue
+        if not (0.05 <= f <= 3.0):
+            continue
+        pilot_counter[round(f, 4)] += 1
 
     # subtract pilots
-    for dia, qty in Counter(claims).items():
+    for dia, qty in pilot_counter.items():
         tgt = _nearest(dia)
-        if tgt is None:
-            continue
-        if abs(tgt - dia) <= 0.015:  # snap letter/number equivalent
+        if tgt is not None and abs(tgt - dia) <= 0.015:
             counts[tgt] = max(0, counts[tgt] - int(qty))
 
-    # subtract counterbore faces so they don't double-count as drills
-    cb_ctr = Counter()
-    for (d, _side, _depth), q in (ops_claims.get("cb_groups") or {}).items():
+    # subtract c'bore faces (don’t double count as drills)
+    face_ctr = Counter()
+    for (d, _side, _depth), q in (cb_groups or {}).items():
         try:
             f = float(d)
         except Exception:
             continue
         if 0.05 <= f <= 3.0:
-            cb_ctr[round(f, 4)] += int(q)
-    for face_d, face_q in cb_ctr.items():
+            face_ctr[round(f, 4)] += int(q)
+    for face_d, face_q in face_ctr.items():
         tgt = _nearest(face_d)
         if tgt is not None and abs(tgt - face_d) <= 0.02:
             counts[tgt] = max(0, counts[tgt] - int(face_q))
 
-    # filter out ≥1.0" if those are bores (matches your part)
-    for d in list(counts.keys()):
+    # filter out obvious bores (≥ 1.0") for this part
+    for d in list(counts):
         if d >= 1.0:
             counts[d] = 0
 
@@ -4245,10 +4267,24 @@ def _compute_drilling_removal_section(
                     geo_map_for_claims = {}
             else:
                 geo_map_for_claims = geo_map_for_drill
-            ops_claims["claimed_pilot_diams"] = _collect_pilot_claims(
+            ops_rows_for_claims_obj: Any
+            try:
+                ops_rows_for_claims_obj = (
+                    (geo_map_for_claims.get("ops_summary") or {}).get("rows")
+                )
+            except Exception:
+                ops_rows_for_claims_obj = []
+            ops_rows_for_claims: list[Mapping[str, Any]] = []
+            if isinstance(ops_rows_for_claims_obj, Sequence):
+                for entry in ops_rows_for_claims_obj:
+                    if isinstance(entry, Mapping):
+                        ops_rows_for_claims.append(entry)
+            pilot_claims = _collect_pilot_claims(
                 geo_map_for_claims,
                 joined_chart_for_claims,
+                ops_rows_for_claims,
             )
+            ops_claims["claimed_pilot_diams"] = list(pilot_claims)
 
             ops_hint: dict[str, Any] = {}
             try:
@@ -4303,9 +4339,16 @@ def _compute_drilling_removal_section(
             raw_total = sum(int(v) for v in (counts_by_diam_raw or {}).values())
             _push(lines, f"[DEBUG] DRILL bins raw={raw_total}")
 
+            cb_groups_for_adjust: Mapping[tuple[Any, Any, Any], Any] | None
+            candidate_cb_groups = ops_claims.get("cb_groups")
+            if isinstance(candidate_cb_groups, Mapping):
+                cb_groups_for_adjust = candidate_cb_groups
+            else:
+                cb_groups_for_adjust = None
             counts_by_diam = _adjust_drill_counts(
                 counts_source,
-                ops_claims,
+                pilot_claims=pilot_claims,
+                cb_groups=cb_groups_for_adjust,
             )
             adj_total = sum(int(v) for v in (counts_by_diam or {}).values())
             _push(lines, f"[DEBUG] DRILL bins raw={raw_total} adj={adj_total}")
