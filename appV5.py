@@ -11519,6 +11519,40 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
     )
 
     drill_actions = int(ops_counts.get("drills", 0))
+
+    try:
+        extra_bucket_ops = breakdown_mutable.setdefault("extra_bucket_ops", {})
+        if drill_actions > 0:
+            extra_bucket_ops.setdefault("drill", []).append(
+                {"name": "Drill", "qty": drill_actions, "side": None}
+            )
+        if (ops_claims.get("tap") or 0) > 0:
+            extra_bucket_ops.setdefault("tap", []).append(
+                {"name": "Tap", "qty": int(ops_claims["tap"]), "side": "front"}
+            )
+        if (ops_claims.get("npt") or 0) > 0:
+            extra_bucket_ops.setdefault("tap", []).append(
+                {"name": "NPT tap", "qty": int(ops_claims["npt"]), "side": "front"}
+            )
+        if (ops_claims.get("cb_front") or 0) > 0:
+            extra_bucket_ops.setdefault("counterbore", []).append(
+                {"name": "Counterbore", "qty": int(ops_claims["cb_front"]), "side": "front"}
+            )
+        if (ops_claims.get("cb_back") or 0) > 0:
+            extra_bucket_ops.setdefault("counterbore", []).append(
+                {"name": "Counterbore", "qty": int(ops_claims["cb_back"]), "side": "back"}
+            )
+        if (ops_claims.get("spot") or 0) > 0:
+            extra_bucket_ops.setdefault("spot", []).append(
+                {"name": "Spot drill", "qty": int(ops_claims["spot"]), "side": "front"}
+            )
+        if (ops_claims.get("jig") or 0) > 0:
+            extra_bucket_ops.setdefault("jig-grind", []).append(
+                {"name": "Jig-grind", "qty": int(ops_claims["jig"]), "side": None}
+            )
+    except Exception:
+        pass
+
     drilling_summary_candidate = locals().get("drilling_summary")
     if isinstance(drilling_summary_candidate, (_MappingABC, dict)):
         drilling_summary = typing.cast(Mapping[str, Any], drilling_summary_candidate)
