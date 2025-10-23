@@ -146,8 +146,6 @@ _CENTER_OR_SPOT_RE = re.compile(
     r"\b(CENTER\s*DRILL|SPOT\s*DRILL|SPOT)\b",
     re.IGNORECASE,
 )
-_JIG_RE = re.compile(r"\bJIG\s*GRIND\b", re.IGNORECASE)
-
 _DRILL_REMOVAL_MINUTES_MIN = 0.0
 _DRILL_REMOVAL_MINUTES_MAX = 600.0
 
@@ -1154,16 +1152,18 @@ def _record_drill_claims(
 def _count_counterdrill(lines_joined: Sequence[str] | None) -> int:
     total = 0
     for raw in lines_joined or []:
-        if not isinstance(raw, str):
+        if raw is None:
             continue
-        upper = raw.upper()
-        if _CENTER_OR_SPOT_RE.search(upper):
+        text = str(raw)
+        if not text.strip():
             continue
-        if _COUNTERDRILL_RE.search(upper):
-            prefix = re.match(r"\s*\((\d+)\)", raw)
-            if prefix:
+        if _CENTER_OR_SPOT_RE.search(text):  # exclude “spot” rows
+            continue
+        if _COUNTERDRILL_RE.search(text):
+            match = re.match(r"\s*\((\d+)\)", text)
+            if match:
                 try:
-                    total += int(prefix.group(1))
+                    total += int(match.group(1))
                     continue
                 except Exception:
                     pass
@@ -1179,11 +1179,11 @@ def _count_jig(lines_joined: Sequence[str] | None) -> int:
         text = str(raw)
         if not text.strip():
             continue
-        if _JIG_RE.search(text):
-            prefix = re.match(r"\s*\((\d+)\)", text)
-            if prefix:
+        if re.search(r"\bJIG\s*GRIND\b", text, re.IGNORECASE):
+            match = re.match(r"\s*\((\d+)\)", text)
+            if match:
                 try:
-                    total += int(prefix.group(1))
+                    total += int(match.group(1))
                     continue
                 except Exception:
                     pass
@@ -12333,6 +12333,8 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
                         cleaned_chart_lines.append(cleaned_line)
 
                 joined_early = _join_wrapped_chart_lines(cleaned_chart_lines)
+                counterdrill_qty = _count_counterdrill(joined_early)
+                jig_qty = _count_jig(joined_early)
                 built = _build_ops_rows_from_lines_fallback(joined_early)
                 _push(
                     lines,
@@ -12355,11 +12357,24 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
                     geo_map.setdefault("chart_lines", list(chart_lines_all))
 
                     ops_claims = _parse_ops_and_claims(joined_early)
+                    try:
+                        parsed_counterdrill = int(round(float(ops_claims.get("counterdrill", 0))))
+                    except Exception:
+                        parsed_counterdrill = 0
+                    try:
+                        parsed_jig = int(round(float(ops_claims.get("jig", 0))))
+                    except Exception:
+                        parsed_jig = 0
+                    counterdrill_qty = max(counterdrill_qty, parsed_counterdrill)
+                    jig_qty = max(jig_qty, parsed_jig)
+                    ops_claims["counterdrill"] = counterdrill_qty
+                    ops_claims["jig"] = jig_qty
                     breakdown_mutable["_ops_claims"] = ops_claims
                     _push(
                         lines,
                         f"[DEBUG] preseed_ops cb={ops_claims['cb_total']} tap={ops_claims['tap']} "
-                        f"npt={ops_claims['npt']} spot={ops_claims['spot']} jig={ops_claims['jig']}",
+                        f"npt={ops_claims['npt']} spot={ops_claims['spot']} counterdrill={ops_claims['counterdrill']} "
+                        f"jig={ops_claims['jig']}",
                     )
 
                     # Publish structured ops for planner_ops_summary
@@ -12385,9 +12400,17 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
                             ebo.setdefault("spot", []).append(
                                 {"name": "Spot drill", "qty": int(ops_claims["spot"]), "side": "front"}
                             )
-                        if ops_claims["jig"] > 0:
+                        if counterdrill_qty > 0:
+                            ebo.setdefault("counterdrill", []).append(
+                                {
+                                    "name": "Counterdrill",
+                                    "qty": int(counterdrill_qty),
+                                    "side": "front",
+                                }
+                            )
+                        if jig_qty > 0:
                             ebo.setdefault("jig-grind", []).append(
-                                {"name": "Jig-grind", "qty": int(ops_claims["jig"]), "side": None}
+                                {"name": "Jig-grind", "qty": int(jig_qty), "side": None}
                             )
                     except Exception:
                         pass
