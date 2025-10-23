@@ -755,6 +755,38 @@ _JOIN_START_TOKENS = re.compile(
     r"|(?:C[’']?\s*DRILL|CENTER\s*DRILL|SPOT\s*DRILL\b)"  # spot callouts
     , re.I
 )
+_MTEXT_LINEBREAK_RE = re.compile(r"\\P", re.I)
+_MTEXT_CONTROL_RE = re.compile(
+    r"\\(?:A[0-9]+|C[0-9A-F]+|F[^;]*|H[-0-9.]+|O|L|Q[^;]*|S[^;]*|T|W[^;]*);?",
+    re.I,
+)
+_MTEXT_ESCAPES: dict[str, str] = {
+    "\\~": "~",
+    "\\{": "{",
+    "\\}": "}",
+    "\\;": ";",
+    "\\%": "%",
+    "\\\\": "\\",
+}
+
+
+def _clean_mtext(value: Any) -> str:
+    """Normalize DXF MTEXT fragments for downstream parsing."""
+
+    text = "" if value is None else str(value)
+    if not text:
+        return ""
+
+    text = text.replace("\r", " ")
+    text = text.replace("\n", " ")
+    text = _MTEXT_LINEBREAK_RE.sub(" ", text)
+    for token, replacement in _MTEXT_ESCAPES.items():
+        text = text.replace(token, replacement)
+    text = _MTEXT_CONTROL_RE.sub(" ", text)
+    text = re.sub(r"\\[PpNn]", " ", text)
+    text = re.sub(r"\\+", " ", text)
+    text = re.sub(r"\s+", " ", text)
+    return text.strip()
 
 
 def _join_wrapped_chart_lines(chart_lines: list[str]) -> list[str]:
@@ -10304,8 +10336,9 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
     except Exception:
         chart_lines_all = []
 
-    # NEW: join wrapped lines into full rows so depth/side stick with the quantity line
-    joined_lines = _join_wrapped_chart_lines(chart_lines_all)
+    # CLEAN then JOIN
+    cleaned = [_clean_mtext(x) for x in chart_lines_all]
+    joined_lines = _join_wrapped_chart_lines(cleaned)
 
     # Use any rows already built earlier (if present)
     try:
