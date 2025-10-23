@@ -731,12 +731,13 @@ def _build_ops_cards_from_chart_lines(
 
 
 # --- Inline ops-cards builder from chart_lines (fallback to rows) ------------
-import re, math, fractions
+import re, math
 _CB_DIA_RE = re.compile(
-    r"(?:[Ø⌀\u00D8]\s*)?(?:"                       # optional diameter symbol
-    r"(?P<dec>\d+(?:\.\d+)?|\.\d+)"                 # decimal "1.000" or ".623"
-    r"|(?P<num>\d+)\s*/\s*(?P<den>\d+)"             # fraction "13/32"
-    r")\s*(?:C[’']?\s*BORE|CBORE|COUNTER\s*BORE)",  # C'BORE variants
+    # Case A: Ø before number  → "Ø .750 C'BORE"
+    r"(?:[Ø⌀\u00D8]\s*)?(?P<numA>(?:\d+(?:\.\d+)?|\.\d+|\d+\s*/\s*\d+))\s*(?:C[’']?\s*BORE|CBORE|COUNTER\s*BORE)"
+    r"|"
+    # Case B: Ø after number   → ".750 Ø C'BORE" or ".750Ø C'BORE"
+    r"(?P<numB>(?:\d+(?:\.\d+)?|\.\d+|\d+\s*/\s*\d+))\s*[Ø⌀\u00D8]\s*(?:C[’']?\s*BORE|CBORE|COUNTER\s*BORE)",
     re.I,
 )
 _X_DEPTH_RE   = re.compile(r"[×xX]\s*([0-9]+(?:\.[0-9]+)?)")      # × .62  or  x 0.63
@@ -775,16 +776,6 @@ def _append_counterbore_spot_jig_cards(
         if m: return int(m.group(1))
         return 1
 
-    def _parse_cbore_dia(s: str) -> float | None:
-        m = _CB_DIA_RE.search(s)
-        if not m: return None
-        if m.group("dec"):
-            return float(m.group("dec"))
-        if m.group("num") and m.group("den"):
-            try: return float(fractions.Fraction(int(m.group("num")), int(m.group("den"))))
-            except Exception: return None
-        return None
-
     # ---------- PASS A: parse CHART LINES (what you already have: 10) ----------
     if isinstance(chart_lines, list):
         # helpful debug
@@ -796,7 +787,22 @@ def _append_counterbore_spot_jig_cards(
             U = s.upper()
             qty  = _parse_qty(s)
             side = _side(U)
-            dia  = _parse_cbore_dia(s)
+            dia = None
+            mcb = _CB_DIA_RE.search(s)
+            if mcb:
+                raw = (mcb.group("numA") or mcb.group("numB") or "").strip()
+                if raw:
+                    if "/" in raw:
+                        try:
+                            num, den = raw.split("/", 1)
+                            dia = float(int(num.strip()) / int(den.strip()))
+                        except Exception:
+                            dia = None
+                    else:
+                        try:
+                            dia = float(raw)
+                        except Exception:
+                            dia = None
             if dia is not None:
                 mdepth = _X_DEPTH_RE.search(s)
                 depth = float(mdepth.group(1)) if mdepth else None
@@ -822,7 +828,22 @@ def _append_counterbore_spot_jig_cards(
             if not s.strip(): continue
             U = s.upper()
             side = _side(U)
-            dia  = _parse_cbore_dia(s)
+            dia = None
+            mcb = _CB_DIA_RE.search(s)
+            if mcb:
+                raw = (mcb.group("numA") or mcb.group("numB") or "").strip()
+                if raw:
+                    if "/" in raw:
+                        try:
+                            num, den = raw.split("/", 1)
+                            dia = float(int(num.strip()) / int(den.strip()))
+                        except Exception:
+                            dia = None
+                    else:
+                        try:
+                            dia = float(raw)
+                        except Exception:
+                            dia = None
             if dia is not None:
                 mdepth = _X_DEPTH_RE.search(s)
                 depth = float(mdepth.group(1)) if mdepth else None
