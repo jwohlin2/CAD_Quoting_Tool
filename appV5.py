@@ -9121,17 +9121,17 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
         material_group = _get_material_group(ctx, ctx_a, ctx_b)
 
         ops_summary_payload = geo_map.get("ops_summary") if isinstance(geo_map, _MappingABC) else None
-        if isinstance(ops_summary_payload, _MutableMappingABC):
-            ops_summary_map = typing.cast(MutableMapping[str, Any], ops_summary_payload)
-        elif isinstance(ops_summary_payload, dict):
-            ops_summary_map = ops_summary_payload
-        else:
-            ops_summary_map = None
-        ops_rows = (((ops_summary_map or {}).get("rows") or []) if isinstance(ops_summary_map, _MappingABC) else [])
+        ops_summary_map = ops_summary_payload if isinstance(
+            ops_summary_payload, (_MutableMappingABC, dict)
+        ) else None
+        ops_rows = (
+            ((ops_summary_map or {}).get("rows") or [])
+            if isinstance(ops_summary_map, _MappingABC)
+            else []
+        )
         _push(lines, f"[DEBUG] ops_rows_pre={len(ops_rows)}")
 
         if not ops_rows:
-            # collect chart text wherever it lives
             chart_lines_all = _collect_chart_lines_context(ctx, geo_map, ctx_a, ctx_b)
             built = _build_ops_rows_from_lines_fallback(chart_lines_all)
             _push(lines, f"[DEBUG] chart_lines_found={len(chart_lines_all)} built_rows={len(built)}")
@@ -9143,11 +9143,7 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
                 )
                 _finalize_tapping_rows(built, thickness_in=plate_thickness)
                 ops_summary_map = geo_map.setdefault("ops_summary", {})
-                if isinstance(ops_summary_map, _MutableMappingABC):
-                    typing.cast(MutableMapping[str, Any], ops_summary_map)["rows"] = built
-                else:
-                    ops_summary_map = typing.cast(dict[str, Any], ops_summary_map)
-                    ops_summary_map["rows"] = built
+                ops_summary_map["rows"] = built  # now emitter can read rows
                 ops_rows = built
 
         # Emit the cards (will no-op if no TAP/CBore/Spot rows)
