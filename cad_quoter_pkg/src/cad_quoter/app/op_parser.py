@@ -31,9 +31,14 @@ _CB_DIA_RE = re.compile(
 _X_DEPTH_RE = re.compile(r"[×xX]\s*([0-9]+(?:\.[0-9]+)?)")
 _BACK_RE = re.compile(r"\bFROM\s+BACK\b", re.I)
 _FRONT_RE = re.compile(r"\bFROM\s+FRONT\b", re.I)
-_BOTH_RE = re.compile(r"\bFRONT\s*&\s*BACK|BOTH\s+SIDES|2\s+SIDES\b", re.I)
+_BOTH_RE = re.compile(r"\bFRONT\s*(?:[&/]|AND)\s*BACK|BOTH\s+SIDES|2\s+SIDES\b", re.I)
 _SPOT_RE_TXT = re.compile(r"(?:C[’']?\s*DRILL|CENTER\s*DRILL|SPOT\s*DRILL|SPOT\b)", re.I)
 _JIG_RE_TXT = re.compile(r"\bJIG\s*GRIND\b", re.I)
+_COUNTERDRILL_RE = re.compile(
+    r"\b(?:C[’']\s*DRILL|C\s*DRILL|COUNTER\s*DRILL|COUNTERDRILL)\b",
+    re.I,
+)
+_CENTER_OR_SPOT_RE = re.compile(r"\b(CENTER\s*DRILL|SPOT\s*DRILL|SPOT)\b", re.I)
 _TAP_RE = re.compile(
     r"\b(?:#?\d+[- ]\d+|[1-9]/\d+-\d+|M\d+(?:[.\s×xX]\d+)?|[\d/]+-NPT|N\.?P\.?T\.?)\s*TAP\b",
     re.I,
@@ -64,11 +69,13 @@ def _parse_qty(s: str) -> int:
 
 
 def _side(U: str) -> str:
-    if _BOTH_RE.search(U):
+    has_front = bool(_FRONT_RE.search(U) or re.search(r"\bFRONT\b", U))
+    has_back = bool(_BACK_RE.search(U) or re.search(r"\bBACK\b", U))
+    if _BOTH_RE.search(U) or (has_front and has_back):
         return "BOTH"
-    if _BACK_RE.search(U) or re.search(r"\bBACK\b", U):
+    if has_back:
         return "BACK"
-    if _FRONT_RE.search(U) or re.search(r"\bFRONT\b", U):
+    if has_front:
         return "FRONT"
     return "FRONT"
 
@@ -85,6 +92,7 @@ def _parse_ops_and_claims(
     npt_qty = 0
     spot_qty = 0
     jig_qty = 0
+    counterdrill_qty = 0
     claimed_pilot_diams: list[float] = []
 
     _clean = cleaner or _shared_clean_mtext
@@ -124,6 +132,10 @@ def _parse_ops_and_claims(
                     cb_groups[(dia, sd, depth)] = cb_groups.get((dia, sd, depth), 0) + qty
             else:
                 cb_groups[(dia, side, depth)] = cb_groups.get((dia, side, depth), 0) + qty
+            continue
+
+        if _COUNTERDRILL_RE.search(U) and not _CENTER_OR_SPOT_RE.search(U):
+            counterdrill_qty += qty
             continue
 
         if _SPOT_RE_TXT.search(U) and ("TAP" not in U) and ("THRU" not in U):
@@ -195,5 +207,6 @@ def _parse_ops_and_claims(
         "npt": int(npt_qty),
         "spot": int(spot_qty),
         "jig": int(jig_qty),
+        "counterdrill": int(counterdrill_qty),
         "claimed_pilot_diams": cleaned_claims,
     }
