@@ -1629,6 +1629,12 @@ def summarize_actions(removal_lines: list[str], planner_ops: list[dict]) -> None
     #  '#10-32 TAP THRU × 2  (FRONT) | ...'
     drill_re = re.compile(r'^Dia\s+[\d\.]+"[ ]*[x×]\s*(\d+).*(\(.*?\))?', re.IGNORECASE)
     tap_re = re.compile(r'^\s*#?\d.*\bTAP\b.*[x×]\s+(\d+).*(\(.*?\))?', re.IGNORECASE)
+    cbore_re = re.compile(
+        r'^\s*(?:MATERIAL REMOVAL – COUNTERBORE|Ø[0-9.]+".*\sC’BORE|\bCBORE\b).*',
+        re.IGNORECASE,
+    )
+    spotln_re = re.compile(r'^\s*MATERIAL REMOVAL – SPOT|Spot drill ×\s*(\d+)', re.IGNORECASE)
+    jigln_re = re.compile(r'^\s*MATERIAL REMOVAL – JIG GRIND|Jig grind ×\s*(\d+)', re.IGNORECASE)
 
     for ln in removal_lines or []:
         if not isinstance(ln, str):
@@ -1646,6 +1652,32 @@ def summarize_actions(removal_lines: list[str], planner_ops: list[dict]) -> None
             side = _side_from(ln)
             total["tap"] += qty
             by_side["tap"][side] += qty
+            continue
+
+        if cbore_re.search(ln) or "C’BORE GROUPS" in ln or "CBORE" in ln:
+            m_qty = re.search(r'[×x]\s*(\d+)', ln)
+            if m_qty:
+                qty = int(m_qty.group(1))
+                side = _side_from(ln)
+                total["counterbore"] += qty
+                by_side["counterbore"][side] += qty
+                continue
+
+        m = spotln_re.search(ln)
+        if m:
+            qty = int(m.group(1)) if m.lastindex else 0
+            if qty:
+                total["spot"] += qty
+                by_side["spot"]["front"] += qty
+                continue
+
+        m = jigln_re.search(ln)
+        if m:
+            qty = int(m.group(1)) if m.lastindex else 0
+            if qty:
+                total["jig_grind"] += qty
+                by_side["jig_grind"]["unspecified"] += qty
+                continue
 
     # --- From planner ops (Counterbore / Spot / Jig-grind) ---
     # Expect planner_ops items like {'name': 'counterbore', 'qty': 3, 'side': 'FRONT'}
