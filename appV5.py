@@ -9775,27 +9775,27 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
                         replacement = header_lines + new_group_lines + [""] + tail_lines
                         removal_card_lines[start_idx:end_idx] = replacement
 
-    # Extra MATERIAL REMOVAL cards from HOLE TABLE text (Counterbore / Spot / Jig)
-    extra_ops_lines = _build_ops_cards_from_chart_lines(
-        breakdown=breakdown,
-        result=result,
-        rates=rates,
-        breakdown_mutable=breakdown_mutable,  # so buckets get minutes
-        ctx=ctx,
-        ctx_a=ctx_a,
-        ctx_b=ctx_b,
-    )
-    if extra_ops_lines:
-        already_counterbore = any(
-            isinstance(x, str)
-            and x.strip().upper().startswith("MATERIAL REMOVAL – COUNTERBORE")
-            for x in lines
-        )
-        lines_to_append = extra_ops_lines
+    def _append_extra_ops_lines(
+        extra_lines: Sequence[Any],
+        *,
+        include_in_removal_cards: bool,
+    ) -> list[str]:
+        if not extra_lines:
+            return []
+
+        def _is_counterbore(entry: Any) -> bool:
+            return (
+                isinstance(entry, str)
+                and entry.strip().upper().startswith("MATERIAL REMOVAL – COUNTERBORE")
+            )
+
+        already_counterbore = any(_is_counterbore(entry) for entry in lines)
+        lines_to_append: list[Any] = list(extra_lines)
+
         if already_counterbore:
             filtered_lines: list[Any] = []
             skip_counterbore = False
-            for entry in extra_ops_lines:
+            for entry in lines_to_append:
                 if isinstance(entry, str):
                     stripped = entry.strip()
                     upper = stripped.upper()
@@ -9808,14 +9808,49 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
                     continue
                 filtered_lines.append(entry)
             lines_to_append = filtered_lines
-        if lines_to_append:
-            removal_card_lines.extend(lines_to_append)
-            lines.extend(lines_to_append)
+
+        if not lines_to_append:
+            return []
+
+        contains_counterbore = any(_is_counterbore(entry) for entry in lines_to_append)
+        if contains_counterbore and already_counterbore:
+            return []
+
+        normalized_lines = [
+            entry if isinstance(entry, str) else str(entry) for entry in lines_to_append
+        ]
+
+        if include_in_removal_cards:
+            removal_card_lines.extend(normalized_lines)
+
+        lines.extend(normalized_lines)
+        return normalized_lines
+
+    # Extra MATERIAL REMOVAL cards from HOLE TABLE text (Counterbore / Spot / Jig)
+    extra_ops_lines = _build_ops_cards_from_chart_lines(
+        breakdown=breakdown,
+        result=result,
+        rates=rates,
+        breakdown_mutable=breakdown_mutable,  # so buckets get minutes
+        ctx=ctx,
+        ctx_a=ctx_a,
+        ctx_b=ctx_b,
+    )
+    if not isinstance(extra_ops_lines, list):
+        extra_ops_lines = list(extra_ops_lines or [])
+    appended_extra_ops_lines = _append_extra_ops_lines(
+        extra_ops_lines,
+        include_in_removal_cards=True,
+    )
+    if appended_extra_ops_lines:
+        for entry in appended_extra_ops_lines:
+            if not entry.startswith("[DEBUG]"):
+                removal_summary_extra_lines.append(entry)
         try:
             _normalize_buckets(breakdown.get("bucket_view"))
         except Exception:
             pass
-    else:
+    elif extra_ops_lines:
         try:
             _push(
                 lines,
@@ -12365,24 +12400,16 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
                 _push(lines, f"[DEBUG] extra_ops_appended={_appended}")
 
             # Extra MATERIAL REMOVAL cards from HOLE TABLE text (Counterbore / Spot / Jig)
-            extra_ops_lines = _build_ops_cards_from_chart_lines(
-                breakdown=breakdown,
-                result=result,
-                rates=rates,
-                breakdown_mutable=breakdown_mutable,  # so buckets get minutes
-                ctx=ctx,
-                ctx_a=ctx_a,
-                ctx_b=ctx_b,
+            appended_later_extra_ops_lines = _append_extra_ops_lines(
+                extra_ops_lines,
+                include_in_removal_cards=True,
             )
-            if extra_ops_lines:
-                removal_card_lines.extend(extra_ops_lines)
-                lines.extend(extra_ops_lines)
-                _push(lines, f"[DEBUG] extra_ops_lines={len(extra_ops_lines)}")
-                for entry in extra_ops_lines:
-                    if isinstance(entry, str):
-                        removal_summary_extra_lines.append(entry)
-                    else:
-                        removal_summary_extra_lines.append(str(entry))
+            if appended_later_extra_ops_lines:
+                _push(
+                    lines,
+                    f"[DEBUG] extra_ops_lines={len(appended_later_extra_ops_lines)}",
+                )
+                removal_summary_extra_lines.extend(appended_later_extra_ops_lines)
 
             # Emit the cards (will no-op if no TAP/CBore/Spot rows)
             pre_ops_len = len(lines)
@@ -12415,43 +12442,14 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
                 else:
                     breakdown_mutable = None
 
-                fallback_lines = _build_ops_cards_from_chart_lines(
-                    breakdown=breakdown,
-                    result=result,
-                    rates=rates,
-                    breakdown_mutable=breakdown_mutable,
-                    ctx=ctx,
-                    ctx_a=ctx_a,
-                    ctx_b=ctx_b,
+                appended_fallback_extra_ops_lines = _append_extra_ops_lines(
+                    extra_ops_lines,
+                    include_in_removal_cards=False,
                 )
-                if fallback_lines:
-                    already_counterbore = any(
-                        isinstance(x, str)
-                        and x.strip().upper().startswith("MATERIAL REMOVAL – COUNTERBORE")
-                        for x in lines
-                    )
-                    lines_to_append = fallback_lines
-                    if already_counterbore:
-                        filtered_lines: list[Any] = []
-                        skip_counterbore = False
-                        for entry in fallback_lines:
-                            if isinstance(entry, str):
-                                stripped = entry.strip()
-                                upper = stripped.upper()
-                                if upper.startswith("MATERIAL REMOVAL – COUNTERBORE"):
-                                    skip_counterbore = True
-                                    continue
-                                if skip_counterbore and upper.startswith("MATERIAL REMOVAL –"):
-                                    skip_counterbore = False
-                            if skip_counterbore:
-                                continue
-                            filtered_lines.append(entry)
-                        lines_to_append = filtered_lines
-                    if lines_to_append:
-                        lines.extend(lines_to_append)
-                        for entry in lines_to_append:
-                            if isinstance(entry, str) and not entry.startswith("[DEBUG]"):
-                                removal_summary_extra_lines.append(entry)
+                if appended_fallback_extra_ops_lines:
+                    for entry in appended_fallback_extra_ops_lines:
+                        if not entry.startswith("[DEBUG]"):
+                            removal_summary_extra_lines.append(entry)
         except Exception as e:
             _push(
                 lines,
