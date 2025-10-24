@@ -4683,7 +4683,7 @@ def _compute_drilling_removal_section(
                     except Exception:
                         continue
                     if key > 0.0 and qty_val > 0:
-                        fallback_counts[key] = qty_val
+                        fallback_counts[key] = fallback_counts.get(key, 0) + qty_val
                 if fallback_counts:
                     counts_by_diam_adj_obj = fallback_counts
                     drill_total_adj = _sum_count_values(counts_by_diam_adj_obj)
