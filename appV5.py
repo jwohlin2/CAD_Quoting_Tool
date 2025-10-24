@@ -216,25 +216,56 @@ def _score_table_info(info):
 
 
 def _better(a, b):
-    # prefer higher qty_sum; if tie, prefer more rows
-    (qa, ra), (qb, rb) = _score_table_info(a), _score_table_info(b)
-    return (qa, ra) >= (qb, rb)
+    # prefer higher qty sum; tie-break: more rows
+    return _score_table_info(a) >= _score_table_info(b)
 
 
-def _persist_rows_and_totals(geo, info):
+def _persist_rows_and_totals(geo, info, source_tag):
+    """Write ops_summary.rows & totals into the SAME geo the app reads."""
+
     if not isinstance(info, dict):
         return
     rows = info.get("rows") or []
     if not rows:
         return
-    # write where the app actually reads
     geo.setdefault("ops_summary", {})["rows"] = rows
-    # compute totals (tap/cbore/back/front etc.) in extractor once
-    if "totals" not in geo["ops_summary"]:
+    geo["ops_summary"]["source"] = source_tag
+    # minimal per-row aggregator (tap/cbore split by side)
+    totals: defaultdict[str, int] = defaultdict(int)
+    for r in rows:
         try:
-            geo["ops_summary"]["totals"] = aggregate_ops_from_rows(rows)["totals"]
+            q = int(float(r.get("qty") or 0))
         except Exception:
-            pass
+            continue
+        U = (r.get("desc", "") or "").upper()
+        back = "FROM BACK" in U
+        both = ("FRONT & BACK" in U) or ("BOTH SIDES" in U)
+        if "TAP" in U:
+            totals["tap"] += q
+            totals["drill"] += q
+            if both:
+                totals["tap_front"] += q
+                totals["tap_back"] += q
+            elif back:
+                totals["tap_back"] += q
+            else:
+                totals["tap_front"] += q
+        if ("CBORE" in U) or ("C'BORE" in U) or ("COUNTER BORE" in U):
+            totals["counterbore"] += q
+            if both:
+                totals["counterbore_front"] += q
+                totals["counterbore_back"] += q
+            elif back:
+                totals["counterbore_back"] += q
+            else:
+                totals["counterbore_front"] += q
+        if "JIG GRIND" in U:
+            totals["jig_grind"] += q
+        if ("SPOT" in U or "CENTER DRILL" in U) and ("THRU" not in U and "TAP" not in U):
+            totals["spot"] += q
+    geo["ops_summary"]["totals"] = dict(totals)
+    geo["provenance"] = geo.get("provenance", {})
+    geo["provenance"]["holes"] = "HOLE TABLE"
 
 from cad_quoter.app._value_utils import (
     _format_value,
@@ -21812,12 +21843,28 @@ def extract_2d_features_from_dxf_or_dwg(path: str | Path) -> dict[str, Any]:
     geo = _build_geo_from_ezdxf_doc(doc)
 
     acad_info = hole_count_from_acad_table(doc) or {}
-    text_info = {}
-    if not (acad_info.get("rows") or []):
+    try:
         text_info = extract_hole_table_from_text(doc) or {}
+    except Exception:
+        text_info = {}
 
     best_table_info = acad_info if _better(acad_info, text_info) else text_info
-    _persist_rows_and_totals(geo, best_table_info)
+    if best_table_info.get("rows"):
+        source_tag = "acad_table" if best_table_info is acad_info else "text_table"
+        _persist_rows_and_totals(geo, best_table_info, source_tag)
+        try:
+            geo["hole_count"] = int(
+                best_table_info.get("hole_count")
+                or _rows_qty_sum(best_table_info.get("rows") or [])
+            )
+        except Exception:
+            pass
+
+    persisted_rows = (geo.get("ops_summary") or {}).get("rows") or []
+    print(
+        f"[EXTRACTOR] wrote ops rows: {len(persisted_rows)} (qty_sum={_rows_qty_sum(persisted_rows)})"
+    )
+
     table_info = best_table_info or {}
 
     sp = doc.modelspace()
@@ -22295,30 +22342,32 @@ def extract_2d_features_from_dxf_or_dwg(path: str | Path) -> dict[str, Any]:
         table_counts_trusted = False
 
     acad2 = hole_count_from_acad_table(doc) or {}
-    text2 = {}
-    if not (acad2.get("rows") or []):
-        try:
-            text2 = extract_hole_table_from_text(doc) or {}
-        except Exception:
-            text2 = {}
+    try:
+        text2 = extract_hole_table_from_text(doc) or {}
+    except Exception:
+        text2 = {}
     if text2 and text2.get("hole_count"):
         text2 = dict(text2)
         text2.setdefault("provenance", "HOLE TABLE (TEXT)")
 
     candidate = acad2 if _better(acad2, text2) else text2
-    if _better(candidate, best_table_info):
-        best_table_info = candidate
-        _persist_rows_and_totals(geo, best_table_info)
 
-    try:
-        if "hole_count" in (best_table_info or {}):
+    have_rows = (geo.get("ops_summary") or {}).get("rows") or []
+    if _better(candidate, {"rows": have_rows}):
+        best_table_info = candidate
+        source_tag = "acad_table" if candidate is acad2 else "text_table"
+        _persist_rows_and_totals(geo, candidate, source_tag)
+        try:
             geo["hole_count"] = int(
-                best_table_info.get("hole_count")
-                or geo.get("hole_count")
-                or 0
+                candidate.get("hole_count")
+                or _rows_qty_sum(candidate.get("rows") or [])
             )
-    except Exception:
-        pass
+        except Exception:
+            pass
+        updated_rows = (geo.get("ops_summary") or {}).get("rows") or []
+        print(
+            f"[EXTRACTOR] wrote ops rows: {len(updated_rows)} (qty_sum={_rows_qty_sum(updated_rows)})"
+        )
 
     table_info = best_table_info or {}
     if not table_counts_trusted:
@@ -22342,11 +22391,6 @@ def extract_2d_features_from_dxf_or_dwg(path: str | Path) -> dict[str, Any]:
             geo["provenance"] = provenance_entry
         else:
             geo["provenance"] = {"holes": prov}
-
-    rows = ((geo.get("ops_summary") or {}).get("rows") or [])
-    print(
-        f"[EXTRACTOR] wrote ops rows: {len(rows)} (qty_sum={_rows_qty_sum(rows)})"
-    )
 
     if chart_lines:
         chart_summary = summarize_hole_chart_lines(chart_lines)
