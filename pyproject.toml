@@ -34,6 +34,16 @@ ignore = []
 [tool.black]
 line-length = 100
 
+[tool.setuptools]
+package-dir = { "" = "cad_quoter_pkg/src" }
+
+[tool.setuptools.packages.find]
+where = ["cad_quoter_pkg/src"]
+include = ["cad_quoter*"]
+
+[tool.pytest.ini_options]
+pythonpath = ["cad_quoter_pkg/src"]
+
 [build-system]
 requires = ["setuptools>=68", "wheel"]
 build-backend = "setuptools.build_meta"

@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from cad_quoter_pkg.src.cad_quoter.ui.editor_controls import (
+from cad_quoter.ui.editor_controls import (
     EditorControlSpec,
     coerce_checkbox_state,
     derive_editor_control_spec,

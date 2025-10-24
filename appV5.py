@@ -391,7 +391,7 @@ from cad_quoter.utils.machining import (
     _rpm_from_sfm_diam,
 )
 if TYPE_CHECKING:
-    from cad_quoter_pkg.src.cad_quoter.resources import default_app_settings_json
+    from cad_quoter.resources import default_app_settings_json
 else:
     from cad_quoter.resources import (
         default_app_settings_json,
@@ -416,7 +416,7 @@ from cad_quoter.utils.scrap import (
     build_drill_groups_from_geometry,
 )
 if TYPE_CHECKING:
-    from cad_quoter_pkg.src.cad_quoter.utils.render_utils import (
+    from cad_quoter.utils.render_utils import (
         QuoteDocRecorder as _QuoteDocRecorder,
         fmt_hours as _fmt_hours,
         fmt_money as _fmt_money,
@@ -429,7 +429,7 @@ if TYPE_CHECKING:
         format_weight_lb_oz as _format_weight_lb_oz,
         render_quote_doc as _render_quote_doc,
     )
-    from cad_quoter_pkg.src.cad_quoter.pricing import load_backup_prices_csv
+    from cad_quoter.pricing import load_backup_prices_csv
 else:
     from cad_quoter.utils.render_utils import (
         fmt_hours as _fmt_hours,
@@ -2544,7 +2544,7 @@ def _emit_hole_table_ops_cards(
         _push(lines, f"[DEBUG] tapping_emit_skipped={exc.__class__.__name__}: {exc}")
         return
 if TYPE_CHECKING:
-    from cad_quoter_pkg.src.cad_quoter.estimators import drilling_legacy as _drilling_legacy
+    from cad_quoter.estimators import drilling_legacy as _drilling_legacy
 else:
     from cad_quoter.estimators import drilling_legacy as _drilling_legacy
 from cad_quoter.estimators.base import SpeedsFeedsUnavailableError
@@ -2564,15 +2564,15 @@ from cad_quoter.domain import (
 )
 
 if typing.TYPE_CHECKING:  # pragma: no cover - aid static analysers in monorepo layout
-    from cad_quoter_pkg.src.cad_quoter.domain_models.state import QuoteState
+    from cad_quoter.domain_models.state import QuoteState
 else:  # pragma: no cover - runtime shim retains the existing fallback behaviour
     try:
         from cad_quoter.domain import QuoteState
     except ImportError:
-        from cad_quoter_pkg.src.cad_quoter.domain_models.state import QuoteState
+        from cad_quoter.domain_models.state import QuoteState
 
 if typing.TYPE_CHECKING:  # pragma: no cover - make vendor shim visible to Pylance
-    from cad_quoter_pkg.src.cad_quoter.vendors import ezdxf as _ezdxf_vendor
+    from cad_quoter.vendors import ezdxf as _ezdxf_vendor
 else:
     from cad_quoter.vendors import ezdxf as _ezdxf_vendor
 
@@ -2586,8 +2586,8 @@ from cad_quoter.geometry.dxf_enrich import (
 from cad_quoter.pricing.process_buckets import BUCKET_ROLE, PROCESS_BUCKETS, bucketize
 
 if typing.TYPE_CHECKING:  # pragma: no cover - expose rich geometry types to analysers
-    from cad_quoter_pkg.src.cad_quoter import geometry as geometry
-    from cad_quoter_pkg.src.cad_quoter.geometry import (
+    from cad_quoter import geometry as geometry
+    from cad_quoter.geometry import (
         upsert_var_row as geometry_upsert_var_row,
     )
 else:
@@ -2596,7 +2596,7 @@ else:
     try:
         from cad_quoter.geometry import upsert_var_row as geometry_upsert_var_row
     except ImportError:  # pragma: no cover - development fallback
-        from cad_quoter_pkg.src.cad_quoter.geometry import (
+        from cad_quoter.geometry import (
             upsert_var_row as geometry_upsert_var_row,
         )
 
@@ -5870,7 +5870,7 @@ if typing.TYPE_CHECKING:
     from pandas import DataFrame as PandasDataFrame  # type: ignore[import-not-found]
     from pandas import Index as PandasIndex  # type: ignore[import-not-found]
     from pandas import Series as PandasSeries  # type: ignore[import-not-found]
-    from cad_quoter_pkg.src.cad_quoter.geometry import GeometryService as GeometryServiceType
+    from cad_quoter.geometry import GeometryService as GeometryServiceType
 else:
     try:
         import pandas as pd  # type: ignore[import-not-found]
@@ -5978,7 +5978,7 @@ _LABOR_SECTION_ABS_EPSILON = 0.51
 _PLANNER_BUCKET_ABS_EPSILON = 0.51
 
 if typing.TYPE_CHECKING:  # pragma: no cover - guide static analysis to the concrete modules
-    from cad_quoter_pkg.src.cad_quoter.domain_models.materials import (
+    from cad_quoter.domain_models.materials import (
         DEFAULT_MATERIAL_DISPLAY,
         DEFAULT_MATERIAL_KEY,
         MATERIAL_DENSITY_G_CC_BY_KEY,
@@ -5990,7 +5990,7 @@ if typing.TYPE_CHECKING:  # pragma: no cover - guide static analysis to the conc
         MATERIAL_OTHER_KEY,
         normalize_material_key,
     )
-    from cad_quoter_pkg.src.cad_quoter.domain_models import (
+    from cad_quoter.domain_models import (
         coerce_float_or_none as _coerce_float_or_none,
     )
 else:  # pragma: no cover - retain runtime namespace package fallback
@@ -6009,7 +6009,7 @@ else:  # pragma: no cover - retain runtime namespace package fallback
             normalize_material_key,
         )
     except ImportError:
-        from cad_quoter_pkg.src.cad_quoter.domain_models.materials import (
+        from cad_quoter.domain_models.materials import (
             DEFAULT_MATERIAL_DISPLAY,
             DEFAULT_MATERIAL_KEY,
             MATERIAL_DENSITY_G_CC_BY_KEY,
@@ -6021,7 +6021,7 @@ else:  # pragma: no cover - retain runtime namespace package fallback
             MATERIAL_OTHER_KEY,
             normalize_material_key,
         )
-        from cad_quoter_pkg.src.cad_quoter.domain_models import (
+        from cad_quoter.domain_models import (
             coerce_float_or_none as _coerce_float_or_none,
         )
 from cad_quoter.domain_models.values import safe_float as _safe_float, to_float, to_int
@@ -23126,7 +23126,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     from cad_quoter.app.cli import main as _cli_main
 
     if typing.TYPE_CHECKING:
-        from cad_quoter_pkg.src.cad_quoter.pricing import (
+        from cad_quoter.pricing import (
             PricingEngine as _PricingEngine,
             create_default_registry as _create_default_registry,
         )
