@@ -4313,10 +4313,6 @@ def _compute_drilling_removal_section(
         except Exception:
             continue
 
-    if not counts_by_diam_raw or sum(int(v) for v in counts_by_diam_raw.values()) == 0:
-        _log_geo_seed_debug(lines, geo_map)
-        counts_by_diam_raw = _seed_drill_bins_from_geo(geo_map)
-
     _push(lines, f"[DEBUG] drill_families_from_geo={sum(counts_by_diam_raw.values())}")
 
     (
@@ -4692,9 +4688,8 @@ def _compute_drilling_removal_section(
             _adj_total = sum(_drill_bins_adj.values())
             _push(
                 lines,
-                "[DEBUG] DRILL bins adj="
-                f"{_adj_total} (bins={len(_drill_bins_adj)}) "
-                f"top5={sorted(_drill_bins_adj.items())[:5]}",
+                f"[DEBUG] DRILL bins adjusted total={_adj_total} "
+                f"(bins={len(_drill_bins_adj)}) top5={sorted(_drill_bins_adj.items())[:5]}",
             )
             # ========= END DRILL PIPELINE =========
 
@@ -4739,7 +4734,7 @@ def _compute_drilling_removal_section(
                     _push(
                         lines,
                         f"[DEBUG] DRILL publish raw={sum(_drill_bins_raw.values())} "
-                        f"adj={derived_ops['drill_total']}",
+                        f"adjusted_total={derived_ops['drill_total']}",
                     )
                 except Exception:
                     pass
