@@ -4729,16 +4729,60 @@ def _compute_drilling_removal_section(
 
         def _parse_diam(raw: Any) -> float | None:
             text = str(raw).replace('"', "").strip()
+            if not text:
+                return None
+
+            text = re.sub(r"^[^0-9+\-]+", "", text)
+            if not text:
+                return None
+
             try:
                 return float(text)
             except Exception:
-                match = re.search(r"[-+]?\d*\.\d+|[-+]?\d+", text)
-                if not match:
-                    return None
-                try:
-                    return float(match.group(0))
-                except Exception:
-                    return None
+                pass
+
+            def _parse_fraction(candidate: str) -> float | None:
+                simple = re.match(r"\s*([+-]?\d+)\s*/\s*(\d+)", candidate)
+                if simple:
+                    end = simple.end()
+                    remainder = candidate[end:].strip()
+                    if remainder and re.match(r"[-\d]", remainder):
+                        return None
+                    try:
+                        return float(Fraction(int(simple.group(1)), int(simple.group(2))))
+                    except Exception:
+                        return None
+
+                mixed = re.match(r"\s*([+-]?\d+)[\s-]+(\d+)\s*/\s*(\d+)", candidate)
+                if mixed:
+                    end = mixed.end()
+                    remainder = candidate[end:].strip()
+                    if remainder and re.match(r"[-\d]", remainder):
+                        return None
+                    try:
+                        whole = int(mixed.group(1))
+                        frac = Fraction(int(mixed.group(2)), int(mixed.group(3)))
+                        sign = -1 if mixed.group(1).strip().startswith("-") else 1
+                        return float(sign * (abs(whole) + frac))
+                    except Exception:
+                        return None
+
+                return None
+
+            fraction = _parse_fraction(text)
+            if fraction is not None:
+                return fraction
+
+            if "/" in text:
+                return None
+
+            match = re.search(r"[-+]?\d*\.\d+|[-+]?\d+", text)
+            if not match:
+                return None
+            try:
+                return float(match.group(0))
+            except Exception:
+                return None
 
         have_inch_source = False
 
