@@ -1297,7 +1297,7 @@ def _build_ops_cards_from_chart_lines(
 ) -> list[str]:
     """Return extra MATERIAL REMOVAL cards for Counterbore / Spot / Jig."""
 
-    # hard guard: only build once per render pass
+    # guard: only build once per render pass
     try:
         root_state = breakdown_mutable or breakdown or {}
         if isinstance(root_state, dict):
@@ -1419,8 +1419,7 @@ def _build_ops_cards_from_chart_lines(
                     if isinstance(entry, _MappingABC):
                         ops_rows.append(entry)
 
-    chart_claims = _parse_ops_and_claims(joined_chart)
-
+    chart_claims: dict[str, Any] = {}
     cb_groups: dict[tuple[float | None, str, float | None], int] = {}
     # 3a) Try to build cbore groups from ops rows (best source: table rows)
     if isinstance(rows_obj, list) and rows_obj:
@@ -1469,7 +1468,15 @@ def _build_ops_cards_from_chart_lines(
             if RE_CBORE.search(desc or ""):
                 key = (dia_val, side_txt, dep_val)
                 cb_groups[key] = cb_groups.get(key, 0) + qty
-    # 3b) If still empty, fall back to claims from the chart parser
+    # 3b) Parse chart claims (fallback source)
+    try:
+        parsed_claims = _parse_ops_and_claims(joined_chart)
+    except Exception:
+        parsed_claims = {}
+    if isinstance(parsed_claims, dict):
+        chart_claims = parsed_claims
+    else:
+        chart_claims = {}
     if not cb_groups:
         cb_groups = dict(chart_claims.get("cb_groups") or {})
 
@@ -1531,9 +1538,6 @@ def _build_ops_cards_from_chart_lines(
             derived_candidate["cb_groups"] = serial  # type: ignore[index]
         except Exception:
             pass
-    spot_qty = int(chart_claims.get("spot") or 0)
-    jig_qty = int(chart_claims.get("jig") or 0)
-
     row_lines: list[str] = []
     for entry in ops_rows:
         desc = str(entry.get("desc") or entry.get("name") or "")
@@ -1546,13 +1550,28 @@ def _build_ops_cards_from_chart_lines(
         prefix = f"({qty_val}) " if qty_val > 0 else ""
         row_lines.append(prefix + desc)
 
-    if row_lines:
-        row_claims = _parse_ops_and_claims(row_lines)
-        if not cb_groups and row_claims.get("cb_groups"):
-            cb_groups = dict(row_claims["cb_groups"])
+    spot_qty = 0
+    jig_qty = 0
 
-        spot_qty = max(spot_qty, int(row_claims.get("spot") or 0))
-        jig_qty = max(jig_qty, int(row_claims.get("jig") or 0))
+    if row_lines:
+        try:
+            row_claims = _parse_ops_and_claims(row_lines)
+        except Exception:
+            row_claims = {}
+        if isinstance(row_claims, dict):
+            if not cb_groups and row_claims.get("cb_groups"):
+                try:
+                    cb_groups = dict(row_claims["cb_groups"])
+                except Exception:
+                    pass
+            try:
+                spot_qty = max(spot_qty, int(row_claims.get("spot") or 0))
+            except Exception:
+                pass
+            try:
+                jig_qty = max(jig_qty, int(row_claims.get("jig") or 0))
+            except Exception:
+                pass
 
     fallback_rows: list[dict[str, Any]] = []
     if joined_chart:
@@ -1580,6 +1599,15 @@ def _build_ops_cards_from_chart_lines(
         spot_from_rows, jig_from_rows = _count_spot_and_jig(fallback_rows)
         spot_qty = max(spot_qty, spot_from_rows)
         jig_qty = max(jig_qty, jig_from_rows)
+
+    try:
+        spot_qty = max(spot_qty, int(chart_claims.get("spot") or 0))
+    except Exception:
+        pass
+    try:
+        jig_qty = max(jig_qty, int(chart_claims.get("jig") or 0))
+    except Exception:
+        pass
 
     total_cb = int(sum(cb_groups.values()))
 
@@ -4502,46 +4530,27 @@ def _render_time_per_hole(
     return subtotal_minutes, seen_deep, seen_std, drill_groups
 
 
-# ---------- HOLE TABLE: Table Row Reviewer (debug/visibility) ----------
-def _get_geo_map(result: dict | None = None, breakdown: dict | None = None) -> dict:
-    """Best-effort: fetch the nested geo map from result or breakdown."""
-
-    if isinstance(result, dict):
-        g = result.get("geo")
-        if isinstance(g, dict):
-            return g
-    if isinstance(breakdown, dict):
-        g = breakdown.get("geo")
-        if isinstance(g, dict):
-            return g
+# ---------- HOLE TABLE: Table Row Reviewer ----------
+def _get_geo_map(result=None, breakdown=None):
+    if isinstance(result, dict) and isinstance(result.get("geo"), dict):
+        return result["geo"]
+    if isinstance(breakdown, dict) and isinstance(breakdown.get("geo"), dict):
+        return breakdown["geo"]
     return {}
 
 
-def _ops_rows_from_geo(geo_map: dict | None) -> list[dict]:
+def _ops_rows_from_geo(geo_map):
     try:
-        if not isinstance(geo_map, (_MappingABC, dict)):
-            return []
-        ops = geo_map.get("ops_summary") or {}
+        ops = (geo_map or {}).get("ops_summary") or {}
         rows = ops.get("rows")
         return rows if isinstance(rows, list) else []
     except Exception:
         return []
 
 
-def _row_side_from_desc(desc: str) -> str:
-    U = (desc or "").upper()
-    if _re.search(r"\bFROM\s+BACK\b", U):
-        return "BACK"
-    if _re.search(r"FRONT\s*&\s*BACK", U) or _re.search(r"BOTH\s+SIDES", U):
-        return "FRONT+BACK"
-    if _re.search(r"\bFROM\s+FRONT\b", U):
-        return "FRONT"
-    return "-"  # unknown/not specified
-
-
-def _sum_qty(rows: list[dict]) -> int:
+def _sum_qty(rows):
     s = 0
-    for r in rows:
+    for r in rows or []:
         try:
             s += int(float(r.get("qty") or 0))
         except Exception:
@@ -4549,23 +4558,25 @@ def _sum_qty(rows: list[dict]) -> int:
     return s
 
 
-def _render_table_row_reviewer(
-    *, result: dict | None, breakdown: dict | None, max_rows: int = 10
-) -> list[str]:
-    """Emit a debug card showing what's inside geo.ops_summary.rows (or why it's empty)."""
+def _row_side_from_desc(desc: str) -> str:
+    U = (desc or "").upper()
+    if "FRONT & BACK" in U or "BOTH SIDES" in U:
+        return "FRONT+BACK"
+    if "FROM BACK" in U:
+        return "BACK"
+    if "FROM FRONT" in U:
+        return "FRONT"
+    return "-"
 
+
+def _render_table_row_reviewer(*, result=None, breakdown=None, max_rows=10) -> list[str]:
     geo = _get_geo_map(result, breakdown)
-    lines: list[str] = []
     rows = _ops_rows_from_geo(geo)
-    lines.append("TABLE ROW REVIEW – HOLE TABLE (ops rows)")
-    lines.append("=" * 66)
+    lines = ["TABLE ROW REVIEW – HOLE TABLE (ops rows)", "=" * 66]
     if rows:
-        qty_sum = _sum_qty(rows)
         lines.append(f"rows ............... {len(rows)}")
-        lines.append(f"qty sum (QTY col) .. {qty_sum}")
-        lines.append("")
-        lines.append("First rows")
-        lines.append("-" * 66)
+        lines.append(f"qty sum (QTY col) .. {_sum_qty(rows)}")
+        lines += ["", "First rows", "-" * 66]
         for i, r in enumerate(rows[:max_rows]):
             hole = (r.get("hole") or r.get("id") or "").strip()
             ref = (r.get("ref") or "").strip()
@@ -4575,28 +4586,18 @@ def _render_table_row_reviewer(
                 qty = r.get("qty")
             desc = (r.get("desc") or "").strip()
             side = _row_side_from_desc(desc)
-            lines.append(
-                f"[{i:02}] {hole:>2} | QTY={qty} | REF={ref} | SIDE={side} | {desc}"
-            )
+            lines.append(f"[{i:02}] {hole:>2} | QTY={qty} | REF={ref} | SIDE={side} | {desc}")
         lines.append("")
     else:
-        # No rows: show why (keys present, any families, provenance)
-        ops = geo.get("ops_summary") if isinstance(geo, dict) else None
-        prov = (geo.get("provenance", {}) or {}).get("holes") if isinstance(geo, dict) else None
-        lines.append("rows ............... 0  (no ops_summary.rows found)")
+        lines.append("rows ............... 0 (no geo.ops_summary.rows)")
+        ops = (geo or {}).get("ops_summary")
         if isinstance(ops, dict):
             lines.append("ops_summary keys ... " + ", ".join(sorted(ops.keys())))
         else:
             lines.append("ops_summary ........ (missing)")
-        fam = geo.get("hole_diam_families_in") if isinstance(geo, dict) else None
-        if isinstance(fam, dict) and fam:
-            lines.append(
-                "families (table/geom) count ...... "
-                f"{len(fam)} (sum={_sum_qty([{'qty': v} for v in fam.values()])})"
-            )
+        prov = (geo.get("provenance", {}) or {}).get("holes") if isinstance(geo, dict) else None
         if prov:
             lines.append(f"provenance.holes .... {prov}")
-        # If you stash chart lines in geo, show how many
         ch = geo.get("chart_lines") if isinstance(geo, dict) else None
         if isinstance(ch, list):
             lines.append(f"chart_lines ......... {len(ch)}")
