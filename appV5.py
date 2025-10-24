@@ -1889,6 +1889,47 @@ def _build_ops_cards_from_chart_lines(
             pass
 
     lines.extend(out_lines)
+
+    reviewer_renderer = None
+    try:
+        reviewer_renderer = globals().get("_render_table_row_reviewer")
+    except Exception:
+        reviewer_renderer = None
+
+    if callable(reviewer_renderer):
+        try:
+            result_map = locals().get("result") or {}
+        except Exception:
+            result_map = {}
+        if not isinstance(result_map, (_MappingABC, dict)):
+            result_map = {}
+
+        try:
+            breakdown_map = (breakdown_mutable or breakdown or {})
+        except Exception:
+            breakdown_map = {}
+        if not isinstance(breakdown_map, (_MappingABC, dict)):
+            breakdown_map = {}
+
+        try:
+            reviewer_lines = reviewer_renderer(
+                result=result_map,
+                breakdown=breakdown_map,
+                max_rows=10,
+            )
+        except Exception:
+            reviewer_lines = []
+
+        if reviewer_lines:
+            try:
+                lines.extend(reviewer_lines)
+            except Exception:
+                for entry in reviewer_lines:
+                    try:
+                        lines.append(str(entry))
+                    except Exception:
+                        continue
+
     return lines
 
 
