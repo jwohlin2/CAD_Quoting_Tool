@@ -21790,6 +21790,34 @@ def extract_2d_features_from_dxf_or_dwg(path: str | Path) -> dict[str, Any]:
                 chart_summary=chart_summary,
                 apply_built_rows=_apply_built_rows,
             )
+            rows_for_totals: list[dict[str, Any]] = []
+            if isinstance(ops_rows, (_MappingABC, dict)):
+                candidate_rows = ops_rows.get("rows") if isinstance(ops_rows, dict) else None
+                if isinstance(candidate_rows, list):
+                    rows_for_totals = [
+                        dict(row)
+                        for row in candidate_rows
+                        if isinstance(row, (_MappingABC, dict))
+                    ]
+            elif isinstance(ops_rows, list):
+                rows_for_totals = [
+                    dict(row)
+                    for row in ops_rows
+                    if isinstance(row, (_MappingABC, dict))
+                ]
+            if rows_for_totals:
+                ops_summary_map = geo.setdefault("ops_summary", {})
+                ops_summary_map["rows"] = rows_for_totals
+                try:
+                    totals_map = aggregate_ops(
+                        rows_for_totals,
+                        ops_entries=chart_ops,
+                    ).get("totals", {})
+                except Exception:
+                    totals_map = {}
+                ops_summary_map["totals"] = dict(totals_map) if isinstance(
+                    totals_map, (_MappingABC, dict)
+                ) else {}
         except Exception:
             ops_rows = []
         # --- end publish rows ---
