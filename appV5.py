@@ -1221,7 +1221,7 @@ def _build_ops_cards_from_chart_lines(
         pass
 
     try:
-        geo_map = _get_geo_map(locals().get("result"), breakdown_mutable or breakdown)
+        geo_map = _get_geo_map(locals().get("result"), breakdown_mutable, breakdown)
         pre_rows = _ops_rows_from_geo(geo_map)
         lines: list[str] = [f"[DEBUG] ops_rows_pre={len(pre_rows)}"]
     except Exception:
