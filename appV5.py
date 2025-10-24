@@ -20219,26 +20219,54 @@ def _merge_wrapped_text_rows(
 ) -> list[dict[str, str]]:
     """Merge wrapped HOLE TABLE rows captured from text entities.
 
-    A row is considered to start when the first non-empty field begins with
-    ``(n)``. Subsequent rows without that marker are appended to the most recent
-    starter, preserving column assignments (hole/ref/qty/desc) while collapsing
-    whitespace. ``qty`` is backfilled from the ``(n)`` token when missing.
+    A row is considered to start when the concatenated text (or explicit
+    quantity column) begins with ``(n)``. Subsequent rows without that marker
+    are appended to the most recent starter, preserving column assignments
+    (hole/ref/qty/desc) while collapsing whitespace. ``qty`` is backfilled from
+    the ``(n)`` token when missing.
     """
 
     merged: list[dict[str, str]] = []
     if not rows:
         return merged
 
+    col_order = ("hole", "ref", "qty", "desc")
+
     for raw in rows:
-        base = {key: " ".join(str(raw.get(key, "")).split()) for key in ("hole", "ref", "qty", "desc")}
-        lead = next((base[key] for key in ("hole", "ref", "qty", "desc") if base[key]), "")
-        starts_new = bool(_RE_TEXT_ROW_START.match(lead))
+        base = {key: " ".join(str(raw.get(key, "")).split()) for key in col_order}
+        joined = " ".join(value for value in (base[k] for k in col_order) if value).strip()
+        qty_field = base.get("qty", "")
+        m_line = _RE_TEXT_ROW_START.match(joined)
+        m_qty_field = _RE_TEXT_ROW_START.match(qty_field)
+        starts_new = bool(m_line or m_qty_field)
+
         if starts_new or not merged:
-            if not base.get("qty"):
-                m_hint = _RE_TEXT_ROW_START.match(lead)
-                if m_hint:
-                    base["qty"] = m_hint.group(1)
-            merged.append(base)
+            qty_val = None
+            if m_line:
+                qty_val = m_line.group(1)
+            elif m_qty_field:
+                qty_val = m_qty_field.group(1)
+
+            cleaned = dict(base)
+
+            if qty_val:
+                cleaned["qty"] = qty_val
+
+            for key in col_order:
+                value = cleaned.get(key, "")
+                if not value:
+                    continue
+                trimmed = value.lstrip()
+                m_token = _RE_TEXT_ROW_START.match(trimmed)
+                if not m_token:
+                    continue
+                trimmed = trimmed[m_token.end():].lstrip()
+                cleaned[key] = trimmed
+
+            if qty_val:
+                cleaned["qty"] = qty_val
+
+            merged.append(cleaned)
             continue
         prev = merged[-1]
         for key, value in base.items():
@@ -20253,9 +20281,14 @@ def _merge_wrapped_text_rows(
         if row.get("qty"):
             continue
         for key in ("hole", "ref", "desc"):
-            m_qty = _RE_TEXT_ROW_START.match(row.get(key, ""))
+            value = row.get(key, "")
+            if not value:
+                continue
+            trimmed = value.lstrip()
+            m_qty = _RE_TEXT_ROW_START.match(trimmed)
             if m_qty:
                 row["qty"] = m_qty.group(1)
+                row[key] = trimmed[m_qty.end():].lstrip()
                 break
 
     return merged
