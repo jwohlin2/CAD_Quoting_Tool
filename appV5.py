@@ -21898,6 +21898,10 @@ def extract_2d_features_from_dxf_or_dwg(path: str | Path) -> dict[str, Any]:
         text_info = extract_hole_table_from_text(doc) or {}
     except Exception:
         text_info = {}
+    print(
+        f"[EXTRACTOR] acad_rows={len(acad_info.get('rows') or [])} "
+        f"text_rows={len(text_info.get('rows') or [])}"
+    )
     acad_rows_count = (
         len((acad_info.get("rows") if isinstance(acad_info, _MappingABC) else []) or [])
     )
@@ -22418,6 +22422,10 @@ def extract_2d_features_from_dxf_or_dwg(path: str | Path) -> dict[str, Any]:
         text2 = extract_hole_table_from_text(doc) or {}
     except Exception:
         text2 = {}
+    print(
+        f"[EXTRACTOR] acad_rows={len(acad2.get('rows') or [])} "
+        f"text_rows={len(text2.get('rows') or [])}"
+    )
     acad2_rows_count = (
         len((acad2.get("rows") if isinstance(acad2, _MappingABC) else []) or [])
     )
