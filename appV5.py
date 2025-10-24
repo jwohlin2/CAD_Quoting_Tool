@@ -4146,6 +4146,7 @@ def _render_milling_removal_card(
 def _compute_drilling_removal_section(
     *,
     breakdown: Mapping[str, Any] | MutableMapping[str, Any],
+    result_context: Mapping[str, Any] | MutableMapping[str, Any] | None = None,
     rates: Mapping[str, Any] | MutableMapping[str, Any],
     drilling_meta_source: Mapping[str, Any] | None,
     drilling_card_detail: Mapping[str, Any] | None,
@@ -4170,11 +4171,25 @@ def _compute_drilling_removal_section(
         breakdown_mutable = None
 
     # ---- BEGIN SAFE INITIALIZATION ----
-    geo_map: Mapping[str, Any] | dict[str, Any] = (
-        ((result or {}).get("geo") if isinstance(result, dict) else None)
-        or ((breakdown or {}).get("geo") if isinstance(breakdown, dict) else None)
-        or {}
-    )
+    geo_map_candidate: Mapping[str, Any] | MutableMapping[str, Any] | dict[str, Any] | None = None
+
+    if isinstance(result_context, (_MappingABC, dict)):
+        try:
+            geo_map_candidate = result_context.get("geo")  # type: ignore[index]
+        except Exception:
+            geo_map_candidate = None
+
+    if geo_map_candidate is None and isinstance(breakdown, (_MappingABC, dict)):
+        try:
+            geo_map_candidate = breakdown.get("geo")  # type: ignore[index]
+        except Exception:
+            geo_map_candidate = None
+
+    if isinstance(geo_map_candidate, (_MappingABC, dict)):
+        geo_map = geo_map_candidate
+    else:
+        geo_map = {}
+
     if isinstance(geo_map, _MappingABC) and not isinstance(geo_map, dict):
         try:
             geo_map = dict(geo_map)
@@ -10105,6 +10120,11 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
         process_plan_summary_local,
     ) = _compute_drilling_removal_section(
         breakdown=breakdown,
+        result_context=(
+            typing.cast(Mapping[str, Any], result)
+            if isinstance(result, _MappingABC)
+            else None
+        ),
         rates=rates,
         drilling_meta_source=drilling_meta_map,
         drilling_card_detail=drilling_card_detail,
