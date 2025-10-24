@@ -28,6 +28,9 @@ def _to_inch(num_text: str) -> float | None:
         try:
             from fractions import Fraction
 
+            if " " in s:
+                num, denom = s.split("/", 1)
+                s = f"{num.strip()}/{denom.strip()}"
             return float(Fraction(s))
         except Exception:
             return None
