@@ -687,6 +687,29 @@ def _build_ops_cards_from_chart_lines(
     cb_groups: dict[tuple[float | None, str, float | None], int] = dict(
         chart_claims.get("cb_groups") or {}
     )
+
+    try:
+        if isinstance(breakdown_mutable, dict):
+            derived = breakdown_mutable.setdefault("derived_ops", {})
+        elif isinstance(breakdown_mutable, _MutableMappingABC):
+            derived = typing.cast(
+                MutableMapping[str, Any],
+                breakdown_mutable,
+            ).setdefault("derived_ops", {})
+        else:
+            derived = None
+        if isinstance(derived, (_MutableMappingABC, dict)):
+            serial: dict[tuple[float | None, str, float | None], int] = {}
+            for (dia, side, depth), qty in cb_groups.items():
+                key = (
+                    float(dia) if dia is not None else None,
+                    str(side),
+                    float(depth) if depth is not None else None,
+                )
+                serial[key] = int(qty or 0)
+            derived["cb_groups"] = serial  # type: ignore[index]
+    except Exception:
+        pass
     spot_qty = int(chart_claims.get("spot") or 0)
     jig_qty = int(chart_claims.get("jig") or 0)
 
@@ -747,6 +770,39 @@ def _build_ops_cards_from_chart_lines(
             target_breakdown = breakdown
         elif isinstance(breakdown, _MutableMappingABC):
             target_breakdown = typing.cast(MutableMapping[str, Any], breakdown)
+
+    printed_flags: set[str] | None = None
+    try:
+        if isinstance(breakdown_mutable, dict):
+            printed_flags = breakdown_mutable.setdefault("_ops_cards_printed", set())
+        elif isinstance(breakdown_mutable, _MutableMappingABC):
+            printed_flags = typing.cast(
+                MutableMapping[str, Any],
+                breakdown_mutable,
+            ).setdefault("_ops_cards_printed", set())
+    except Exception:
+        printed_flags = None
+
+    if printed_flags is not None and not isinstance(printed_flags, set):
+        try:
+            printed_flags = set(printed_flags)  # type: ignore[arg-type]
+        except Exception:
+            printed_flags = set()
+        try:
+            if isinstance(breakdown_mutable, dict):
+                breakdown_mutable["_ops_cards_printed"] = printed_flags
+            elif isinstance(breakdown_mutable, _MutableMappingABC):
+                typing.cast(
+                    MutableMapping[str, Any],
+                    breakdown_mutable,
+                )["_ops_cards_printed"] = printed_flags
+        except Exception:
+            pass
+
+    if isinstance(printed_flags, set):
+        if "cbore" in printed_flags:
+            return lines
+        printed_flags.add("cbore")
 
     bucket_view_obj: MutableMapping[str, Any] | Mapping[str, Any] | None = None
     if isinstance(target_breakdown, dict):
