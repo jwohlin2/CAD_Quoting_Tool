@@ -20,6 +20,23 @@ def test_merge_wrapped_text_rows_merges_follow_on_lines():
     assert merged[1]["desc"] == "SPOT DRILL 90°"
 
 
+def test_merge_wrapped_text_rows_only_quantity_token_starts_new_row():
+    rows_in = [
+        {"hole": "(2)", "ref": "Ø.201", "qty": "", "desc": "THRU"},
+        {"hole": "", "ref": "", "qty": "", "desc": "COUNTERBORE BACK"},
+        {"hole": "", "ref": "", "qty": "", "desc": "TYP (2) PLACES"},
+        {"hole": "(3)", "ref": "Ø.312", "qty": "", "desc": "SPOTFACE"},
+    ]
+
+    merged = appV5._merge_wrapped_text_rows(rows_in)
+
+    assert len(merged) == 2
+    assert merged[0]["qty"] == "2"
+    assert merged[0]["desc"] == "THRU COUNTERBORE BACK TYP (2) PLACES"
+    assert merged[1]["qty"] == "3"
+    assert merged[1]["desc"] == "SPOTFACE"
+
+
 @pytest.mark.parametrize(
     "rows_in, expected_qty",
     [

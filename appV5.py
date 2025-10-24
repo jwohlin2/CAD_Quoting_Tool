@@ -20219,26 +20219,54 @@ def _merge_wrapped_text_rows(
 ) -> list[dict[str, str]]:
     """Merge wrapped HOLE TABLE rows captured from text entities.
 
-    A row is considered to start when the first non-empty field begins with
-    ``(n)``. Subsequent rows without that marker are appended to the most recent
-    starter, preserving column assignments (hole/ref/qty/desc) while collapsing
-    whitespace. ``qty`` is backfilled from the ``(n)`` token when missing.
+    A row is considered to start when the concatenated text (or explicit
+    quantity column) begins with ``(n)``. Subsequent rows without that marker
+    are appended to the most recent starter, preserving column assignments
+    (hole/ref/qty/desc) while collapsing whitespace. ``qty`` is backfilled from
+    the ``(n)`` token when missing.
     """
 
     merged: list[dict[str, str]] = []
     if not rows:
         return merged
 
+    col_order = ("hole", "ref", "qty", "desc")
+
     for raw in rows:
-        base = {key: " ".join(str(raw.get(key, "")).split()) for key in ("hole", "ref", "qty", "desc")}
-        lead = next((base[key] for key in ("hole", "ref", "qty", "desc") if base[key]), "")
-        starts_new = bool(_RE_TEXT_ROW_START.match(lead))
+        base = {key: " ".join(str(raw.get(key, "")).split()) for key in col_order}
+        joined = " ".join(value for value in (base[k] for k in col_order) if value).strip()
+        qty_field = base.get("qty", "")
+        m_line = _RE_TEXT_ROW_START.match(joined)
+        m_qty_field = _RE_TEXT_ROW_START.match(qty_field)
+        starts_new = bool(m_line or m_qty_field)
+
         if starts_new or not merged:
-            if not base.get("qty"):
-                m_hint = _RE_TEXT_ROW_START.match(lead)
-                if m_hint:
-                    base["qty"] = m_hint.group(1)
-            merged.append(base)
+            qty_val = None
+            if m_line:
+                qty_val = m_line.group(1)
+            elif m_qty_field:
+                qty_val = m_qty_field.group(1)
+
+            cleaned = dict(base)
+
+            if qty_val:
+                cleaned["qty"] = qty_val
+
+            for key in col_order:
+                value = cleaned.get(key, "")
+                if not value:
+                    continue
+                trimmed = value.lstrip()
+                m_token = _RE_TEXT_ROW_START.match(trimmed)
+                if not m_token:
+                    continue
+                trimmed = trimmed[m_token.end():].lstrip()
+                cleaned[key] = trimmed
+
+            if qty_val:
+                cleaned["qty"] = qty_val
+
+            merged.append(cleaned)
             continue
         prev = merged[-1]
         for key, value in base.items():
@@ -20253,12 +20281,124 @@ def _merge_wrapped_text_rows(
         if row.get("qty"):
             continue
         for key in ("hole", "ref", "desc"):
-            m_qty = _RE_TEXT_ROW_START.match(row.get(key, ""))
+            value = row.get(key, "")
+            if not value:
+                continue
+            trimmed = value.lstrip()
+            m_qty = _RE_TEXT_ROW_START.match(trimmed)
             if m_qty:
                 row["qty"] = m_qty.group(1)
+                row[key] = trimmed[m_qty.end():].lstrip()
                 break
 
     return merged
+
+
+def _normalize_text_table_rows(
+    rows: Sequence[Mapping[str, str]] | None,
+) -> tuple[list[dict[str, Any]], int, dict[str, int]]:
+    """Normalise HOLE TABLE rows harvested from text entities."""
+
+    merged_rows = _merge_wrapped_text_rows(rows)
+
+    def parse_qty(s: str) -> int:
+        try:
+            return int(float((s or "").strip()))
+        except Exception:
+            m = re.search(r"\d+", s or "")
+            return int(m.group()) if m else 0
+
+    def parse_dia_inch(s: str) -> float | None:
+        s = (s or "").strip().lstrip("Ø⌀\u00D8 ").strip()
+        if re.fullmatch(r"\d+/\d+", s):
+            try:
+                return float(Fraction(s))
+            except Exception:
+                return None
+        if re.fullmatch(r"(?:\d+)?\.\d+|\d+(?:\.\d+)?", s):
+            try:
+                return float(s)
+            except Exception:
+                return None
+        return None
+
+    total = 0
+    families: dict[str, int] = {}
+    clean_rows: list[dict[str, Any]] = []
+    for row in merged_rows:
+        q = parse_qty(row.get("qty", ""))
+        if q <= 0:
+            continue
+        d = parse_dia_inch(row.get("ref", ""))
+        if d is None:
+            desc_val = row.get("desc", "")
+            mm = re.search(
+                r"[Ø⌀\u00D8]?\s*((?:\d+)?\.\d+|\d+/\d+|\d+(?:\.\d+)?)",
+                desc_val,
+            )
+            d = parse_dia_inch(mm.group(1)) if mm else None
+        if d is None:
+            continue
+        key = f'{d:.4f}"'
+        families[key] = families.get(key, 0) + q
+        total += q
+        clean_rows.append(
+            {
+                **row,
+                "qty": q,
+                "ref": key,
+                "diameter_in": d,
+            }
+        )
+
+    return clean_rows, total, families
+
+
+def _normalize_text_table_lines(
+    lines: Sequence[str] | None,
+) -> tuple[list[dict[str, Any]], int, dict[str, int]]:
+    """Parse and normalise raw HOLE TABLE text lines."""
+
+    if not lines:
+        return [], 0, {}
+
+    cleaned = [str(raw).strip() for raw in lines if raw]
+    if not cleaned:
+        return [], 0, {}
+
+    header_idx = None
+    for i, text in enumerate(cleaned):
+        if "HOLE TABLE" in text.upper():
+            header_idx = i
+            break
+    if header_idx is None:
+        return [], 0, {}
+
+    rows: list[dict[str, str]] = []
+    for raw in cleaned[header_idx + 1 :]:
+        upper = raw.upper()
+        if not upper:
+            continue
+        if "DESCRIPTION" in upper:
+            continue
+        if "LIST OF COORDINATES" in upper or "SEE SHEET" in upper:
+            break
+        if set(raw.strip()) <= {"-", " "}:
+            continue
+        if "|" in raw:
+            parts = [part.strip() for part in raw.split("|")]
+            while len(parts) < 4:
+                parts.append("")
+            hole, ref, qty = parts[:3]
+            desc = " ".join(part for part in parts[3:] if part).strip()
+        else:
+            hole = ""
+            ref = ""
+            qty = ""
+            desc = raw.strip()
+        rows.append({"hole": hole, "ref": ref, "qty": qty, "desc": desc})
+
+    return _normalize_text_table_rows(rows)
 
 
 def extract_hole_table_from_text(doc, y_tol: float = 0.04, min_rows: int = 5):
@@ -20351,161 +20491,7 @@ def extract_hole_table_from_text(doc, y_tol: float = 0.04, min_rows: int = 5):
     if len(rows) < min_rows:
         return {}
 
-    total_qty = 0
-    families: dict[str, int] = {}
-
-    def _clean_text(value: str) -> str:
-        return re.sub(r"\s+", " ", (value or "").replace("\u00A0", " ").strip())
-
-    _qty_patterns = [
-        re.compile(r"\(\s*(\d+)\s*(?:PL|PLCS|PLACES|X)?\s*\)", re.I),
-        re.compile(r"\bQTY[:\s]*(\d+)\b", re.I),
-        re.compile(r"\b(\d+)\s*(?:X|EA|EACH|PLCS?|PLACES?|HOLES?)\b", re.I),
-    ]
-    _qty_simple = re.compile(r"(?<![\d/])(\d+)(?![\d/])")
-
-    def _extract_qty(text: str, *, allow_simple_digit: bool) -> tuple[int | None, str]:
-        cleaned = _clean_text(text)
-        patterns = list(_qty_patterns)
-        if allow_simple_digit:
-            patterns.append(_qty_simple)
-        for pat in patterns:
-            match = pat.search(cleaned)
-            if not match:
-                continue
-            value_str = next((group for group in match.groups() if group), None)
-            if not value_str:
-                continue
-            try:
-                qty_val = int(value_str)
-            except Exception:
-                continue
-            cleaned = f"{cleaned[: match.start()]} {cleaned[match.end():]}".strip()
-            cleaned = re.sub(r"\s+", " ", cleaned)
-            return qty_val, cleaned
-        return None, cleaned
-
-    def _parse_diameter_value(token: str) -> tuple[float | None, str | None]:
-        if not token:
-            return None, None
-        text = (
-            token.replace("\u00D8", "Ø")
-            .replace("ø", "Ø")
-            .replace("“", '"')
-            .replace("”", '"')
-        )
-        text = re.sub(r"\bDIA(?:METER)?\.?\b", " ", text, flags=re.I)
-        text = re.sub(r"\bIN(?:CH(?:ES)?)?\.?\b", " ", text, flags=re.I)
-        text = text.replace("Ø", " ").replace("⌀", " ").replace("'", " ").replace('"', " ")
-        text = text.replace("±", " ").replace("+/-", " ")
-        text = re.sub(r"\s+", " ", text).strip()
-        if not text:
-            return None, None
-
-        frac = re.search(r"(?<![\d/])(\d+)\s*/\s*(\d+)(?![\d/])", text)
-        if frac:
-            try:
-                value = float(Fraction(int(frac.group(1)), int(frac.group(2))))
-            except Exception:
-                value = None
-        else:
-            dec = re.search(r"(?<!\d)(\d*\.\d+)(?!\d)", text)
-            if dec:
-                try:
-                    value = float(dec.group(1))
-                except Exception:
-                    value = None
-            else:
-                whole = re.search(r"(?<!\d)(\d+)(?!\d)", text)
-                if whole:
-                    try:
-                        value = float(whole.group(1))
-                    except Exception:
-                        value = None
-                else:
-                    value = None
-
-        if value is None:
-            return None, None
-        if value <= 0 or value >= 6:
-            return None, None
-        formatted = f"{value:.4f}\""
-        return value, formatted
-
-    _diam_ctx = re.compile(
-        r"(?:Ø|⌀|\u00D8|DIA(?:METER)?\.?|DIAM\.?)\s*([0-9]+\s*/\s*[0-9]+|[0-9]*\.\d+|\d+(?:\.\d+)?)",
-        re.I,
-    )
-    _diam_leading_dot = re.compile(r"(?<![\d/])(\.\d+)(?!\d)")
-
-    def _find_diameter_token(text: str) -> str | None:
-        if not text:
-            return None
-        ctx = _diam_ctx.search(text)
-        if ctx:
-            return ctx.group(1)
-        dot = _diam_leading_dot.search(text)
-        if dot:
-            return dot.group(1)
-        return None
-
-    clean_rows: list[dict[str, Any]] = []
-    from_back = False
-    double_sided = False
-
-    for r in rows:
-        hole_txt = _clean_text(r.get("hole", ""))
-        ref_txt = _clean_text(r.get("ref", ""))
-        qty_txt = _clean_text(r.get("qty", ""))
-        desc_txt = _clean_text(r.get("desc", ""))
-
-        qty_val, qty_txt = _extract_qty(qty_txt, allow_simple_digit=True)
-        desc_qty, desc_txt = _extract_qty(desc_txt, allow_simple_digit=False)
-        if qty_val is None and desc_qty is not None:
-            qty_val = desc_qty
-        hole_qty: int | None = None
-        if qty_val is None:
-            hole_qty, hole_txt = _extract_qty(hole_txt, allow_simple_digit=False)
-            if hole_qty is not None:
-                qty_val = hole_qty
-                if not hole_txt:
-                    hole_txt = str(hole_qty)
-        qty = int(qty_val or 0)
-        if qty > 0:
-            total_qty += qty
-
-        dia_val, dia_formatted = _parse_diameter_value(ref_txt)
-        if dia_val is None:
-            token = _find_diameter_token(desc_txt)
-            if token:
-                dia_val, dia_formatted = _parse_diameter_value(token)
-        if dia_val is None:
-            token = _find_diameter_token(hole_txt)
-            if token:
-                dia_val, dia_formatted = _parse_diameter_value(token)
-
-        ref_value = dia_formatted if dia_formatted else ref_txt
-        if dia_val is not None and qty > 0 and dia_formatted:
-            families[dia_formatted] = families.get(dia_formatted, 0) + qty
-
-        desc_upper = desc_txt.upper()
-        if "FRONT & BACK" in desc_upper or "BOTH SIDES" in desc_upper:
-            double_sided = True
-            from_back = True
-        elif "FROM BACK" in desc_upper:
-            from_back = True
-
-        hole_txt = re.sub(r"^\(\s*(\d+)\s*\)\s*", r"\1 ", hole_txt).strip()
-
-        clean_rows.append(
-            {
-                "hole": hole_txt,
-                "ref": ref_value,
-                "qty": qty,
-                "desc": desc_txt,
-                "diameter_in": dia_val,
-            }
-        )
+    clean_rows, total, families = _normalize_text_table_rows(rows)
 
     if total_qty <= 0:
         return {}
@@ -20799,54 +20785,22 @@ def hole_count_from_acad_table(doc) -> dict[str, Any]:
 
     return result
 
-def hole_count_from_text_table(doc, lines: Sequence[str] | None = None) -> tuple[int, dict] | tuple[None, None]:
+def hole_count_from_text_table(
+    doc,
+    lines: Sequence[str] | None = None,
+) -> tuple[int, dict] | tuple[None, None]:
+    source_lines: Sequence[str] | None
     if lines is None:
         source_lines = _iter_table_text(doc) or []
     else:
         source_lines = lines
-    cleaned = [str(raw).strip() for raw in source_lines if raw]
-    if not cleaned:
+
+    _, total, families = _normalize_text_table_lines(source_lines)
+
+    if total <= 0:
         return None, None
 
-    idx = None
-    for i, s in enumerate(cleaned):
-        if "HOLE TABLE" in s.upper():
-            idx = i
-            break
-    if idx is None:
-        return None, None
-
-    total = 0
-    fam: dict[float, int] = {}
-    for s in cleaned[idx + 1 :]:
-        u = s.upper()
-        if not u or "DESCRIPTION" in u:
-            continue
-        if "LIST OF COORDINATES" in u or "SEE SHEET" in u:
-            break
-
-        mqty = re.search(r"\bQTY\b[:\s]*([0-9]+)", u)
-        if not mqty:
-            cols = [c.strip() for c in u.split("|")]
-            for c in cols:
-                if c.isdigit():
-                    mqty = re.match(r"(\d+)$", c)
-                    if mqty:
-                        break
-        if mqty:
-            q = int(mqty.group(1))
-            total += q
-        else:
-            q = None
-
-        mref = re.search(r"\bREF\s*[Ø⌀]?\s*(\d+(?:\.\d+)?)", u)
-        if not mref:
-            mref = re.search(r"[Ø⌀]\s*(\d+(?:\.\d+)?)", u)
-        if mref and mqty:
-            d = round(float(mref.group(1)), 4)
-            fam[d] = fam.get(d, 0) + int(mqty.group(1))
-
-    return (total, fam) if total else (None, None)
+    return total, families
 
 
 def hole_count_from_geometry(doc, to_in, plate_bbox=None) -> tuple[int, dict]:
@@ -22018,6 +21972,10 @@ def extract_2d_features_from_dxf_or_dwg(path: str | Path) -> dict[str, Any]:
         text_info = extract_hole_table_from_text(doc) or {}
     except Exception:
         text_info = {}
+    print(
+        f"[EXTRACTOR] acad_rows={len(acad_info.get('rows') or [])} "
+        f"text_rows={len(text_info.get('rows') or [])}"
+    )
     acad_rows_count = (
         len((acad_info.get("rows") if isinstance(acad_info, _MappingABC) else []) or [])
     )
@@ -22538,6 +22496,10 @@ def extract_2d_features_from_dxf_or_dwg(path: str | Path) -> dict[str, Any]:
         text2 = extract_hole_table_from_text(doc) or {}
     except Exception:
         text2 = {}
+    print(
+        f"[EXTRACTOR] acad_rows={len(acad2.get('rows') or [])} "
+        f"text_rows={len(text2.get('rows') or [])}"
+    )
     acad2_rows_count = (
         len((acad2.get("rows") if isinstance(acad2, _MappingABC) else []) or [])
     )
@@ -22666,7 +22628,29 @@ def extract_2d_features_from_dxf_or_dwg(path: str | Path) -> dict[str, Any]:
                 ]
             if rows_for_totals:
                 ops_summary_map = geo.setdefault("ops_summary", {})
-                ops_summary_map["rows"] = rows_for_totals
+                existing_rows_raw = ops_summary_map.get("rows")
+                if isinstance(existing_rows_raw, list):
+                    existing_rows_seq = existing_rows_raw
+                elif isinstance(existing_rows_raw, (_MappingABC, dict)):
+                    try:
+                        existing_rows_seq = list(existing_rows_raw.values())
+                    except Exception:
+                        existing_rows_seq = []
+                elif existing_rows_raw is None:
+                    existing_rows_seq = []
+                else:
+                    try:
+                        existing_rows_seq = list(existing_rows_raw)
+                    except Exception:
+                        existing_rows_seq = []
+                existing_score = (
+                    _score_table({"rows": existing_rows_seq}) if existing_rows_seq else 0
+                )
+                chart_score = _score_table({"rows": rows_for_totals})
+                debug_chart_bucket = ops_summary_map.setdefault("chart_debug", {})
+                if isinstance(debug_chart_bucket, dict):
+                    debug_chart_bucket["rows"] = rows_for_totals
+                    debug_chart_bucket["score"] = chart_score
                 try:
                     totals_map = aggregate_ops(
                         rows_for_totals,
@@ -22674,9 +22658,17 @@ def extract_2d_features_from_dxf_or_dwg(path: str | Path) -> dict[str, Any]:
                     ).get("totals", {})
                 except Exception:
                     totals_map = {}
-                ops_summary_map["totals"] = dict(totals_map) if isinstance(
-                    totals_map, (_MappingABC, dict)
-                ) else {}
+                if isinstance(debug_chart_bucket, dict):
+                    debug_chart_bucket["totals"] = (
+                        dict(totals_map)
+                        if isinstance(totals_map, (_MappingABC, dict))
+                        else {}
+                    )
+                if chart_score > existing_score:
+                    print(
+                        "[EXTRACTOR] chart rows scored higher than canonical table; "
+                        "retaining canonical rows"
+                    )
         except Exception:
             ops_rows = []
         # --- end publish rows ---
