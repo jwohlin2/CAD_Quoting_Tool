@@ -151,6 +151,22 @@ def _get_core_geo_map(geo_map: dict | None) -> dict:
     """Return the dict that actually holds the hole lists / feature counts."""
 
     g = geo_map or {}
+    if not isinstance(g, dict):
+        return {}
+
+    _family_keys = (
+        "hole_diam_families_geom_in",
+        "hole_diam_families_in",
+        "hole_diam_families_geom",
+        "hole_diam_families",
+    )
+
+    # If the outer map already provides drill families, prefer it so callers can
+    # still read the aggregated counts even when nested GEO metadata exists.
+    for key in _family_keys:
+        if key in g:
+            return g
+
     if isinstance(g.get("geo"), dict):
         g2 = g["geo"]
         for key in (
@@ -160,6 +176,7 @@ def _get_core_geo_map(geo_map: dict | None) -> dict:
             "hole_diams_mm_precise",
             "hole_sets",
             "feature_counts",
+            *_family_keys,
         ):
             if key in g2:
                 return g2
