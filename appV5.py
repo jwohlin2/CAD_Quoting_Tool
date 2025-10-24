@@ -14899,6 +14899,27 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
     counts_by_diam_final = locals().get("counts_by_diam")
     if not isinstance(counts_by_diam_final, (_MappingABC, dict)):
         counts_by_diam_final = {}
+
+    def _coerce_nonneg_int(value: Any) -> int:
+        try:
+            num = int(round(float(value)))
+        except Exception:
+            return 0
+        return num if num > 0 else 0
+
+    tallies: dict[str, int] = {
+        "drill": _coerce_nonneg_int(
+            drill_actions_adjusted_total
+            if drill_actions_adjusted_total is not None
+            else (drill_actions or drill_bins_adj_logged)
+        ),
+        "tap": _coerce_nonneg_int(ops_claims.get("tap", 0)) + _coerce_nonneg_int(ops_claims.get("npt", 0)),
+        "counterbore": _coerce_nonneg_int(ops_claims.get("cb_total", 0)),
+        "counterdrill": _coerce_nonneg_int(ops_claims.get("counterdrill", 0)),
+        "spot": _coerce_nonneg_int(ops_claims.get("spot", 0)),
+        "jig-grind": _coerce_nonneg_int(ops_claims.get("jig", 0)),
+    }
+
     def _safe_int(value: Any) -> int:
         try:
             numeric = float(value)
@@ -14911,32 +14932,37 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
         except Exception:
             return 0
 
+    base_state = (breakdown_mutable or breakdown) or {}
+    source: Mapping[str, Any] | MutableMapping[str, Any] | None = None
     try:
-        base_state = (breakdown_mutable or breakdown) or {}
         if isinstance(base_state, (_MappingABC, dict)):
-            derived_payload = base_state.get("derived_ops", {})  # type: ignore[attr-defined]
+            source = typing.cast(Mapping[str, Any] | MutableMapping[str, Any], base_state)
+            derived_payload = source.get("derived_ops", {})  # type: ignore[attr-defined]
         else:
-            source = None
+            derived_payload = {}
+    except Exception:
+        source = None
+        derived_payload = {}
 
-        derived_ops_map: Mapping[str, Any] | None = None
-        derived_ops_mut: MutableMapping[str, Any] | None = None
-        if isinstance(source, (_MappingABC, dict)):
-            try:
-                derived_candidate = source.get("derived_ops")  # type: ignore[index]
-            except Exception:
-                derived_candidate = None
-            if isinstance(derived_candidate, MutableMapping):
+    derived_ops_map: Mapping[str, Any] | None = None
+    derived_ops_mut: MutableMapping[str, Any] | None = None
+    if isinstance(source, (_MappingABC, dict)):
+        try:
+            derived_candidate = source.get("derived_ops")  # type: ignore[index]
+        except Exception:
+            derived_candidate = None
+        if isinstance(derived_candidate, MutableMapping):
+            derived_ops_mut = typing.cast(MutableMapping[str, Any], derived_candidate)
+            derived_ops_map = derived_ops_mut
+        elif isinstance(derived_candidate, dict):
+            derived_ops_map = derived_candidate
+            if isinstance(source, (_MutableMappingABC, dict)):
                 derived_ops_mut = typing.cast(MutableMapping[str, Any], derived_candidate)
-                derived_ops_map = derived_ops_mut
-            elif isinstance(derived_candidate, dict):
-                derived_ops_map = derived_candidate
-                if isinstance(source, (_MutableMappingABC, dict)):
-                    derived_ops_mut = typing.cast(MutableMapping[str, Any], derived_candidate)
-            elif isinstance(derived_candidate, _MappingABC):
-                derived_ops_map = dict(derived_candidate)
-                if isinstance(source, (_MutableMappingABC, dict)):
-                    source["derived_ops"] = derived_ops_map  # type: ignore[index]
-                    derived_ops_mut = typing.cast(MutableMapping[str, Any], derived_ops_map)
+        elif isinstance(derived_candidate, _MappingABC):
+            derived_ops_map = dict(derived_candidate)
+            if isinstance(source, (_MutableMappingABC, dict)):
+                source["derived_ops"] = derived_ops_map  # type: ignore[index]
+                derived_ops_mut = typing.cast(MutableMapping[str, Any], derived_ops_map)
 
         if isinstance(derived_ops_map, (_MappingABC, dict)):
             try:
@@ -15026,8 +15052,6 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
                     typing.cast(MutableMapping[str, Any], existing_counts).update(aggregated_copy)
                 else:
                     source["ops_counts"] = dict(aggregated_copy)  # type: ignore[index]
-
-        return tallies
 
     if isinstance(derived_payload, (_MappingABC, dict)):
         dops_map: Mapping[str, Any] = typing.cast(Mapping[str, Any], derived_payload)
@@ -25013,23 +25037,71 @@ class App(tk.Tk):
                 else None
             )
 
+            def _ensure_report_text(report: Any) -> str:
+                if isinstance(report, str):
+                    return report
+                if isinstance(report, Mapping):
+                    for key in ("text", "rendered", "content", "full_text", "value"):
+                        candidate = report.get(key)
+                        if isinstance(candidate, str) and candidate.strip():
+                            return candidate
+                    try:
+                        return json.dumps(report, indent=2, default=str)
+                    except Exception:
+                        return repr(report)
+                if isinstance(report, Sequence) and not isinstance(report, (str, bytes, bytearray)):
+                    return "\n".join(str(item) for item in report)
+                return str(report)
+
             try:
-                simplified_report = render_quote(
-                    res,
-                    currency="$",
-                    show_zeros=False,
-                    llm_explanation=llm_explanation,
-                    cfg=cfg,
-                    geometry=geometry_ctx,
+                simplified_report = _ensure_report_text(
+                    render_quote(
+                        res,
+                        currency="$",
+                        show_zeros=False,
+                        llm_explanation=llm_explanation,
+                        cfg=cfg,
+                        geometry=geometry_ctx,
+                    )
                 )
-                full_report = render_quote(
-                    res,
-                    currency="$",
-                    show_zeros=True,
-                    llm_explanation=llm_explanation,
-                    cfg=cfg,
-                    geometry=geometry_ctx,
+                full_report = _ensure_report_text(
+                    render_quote(
+                        res,
+                        currency="$",
+                        show_zeros=True,
+                        llm_explanation=llm_explanation,
+                        cfg=cfg,
+                        geometry=geometry_ctx,
+                    )
                 )
+            except Exception:
+                raise
+
+            try:
+                if (not simplified_report or not str(simplified_report).strip()) and full_report:
+                    append_debug_log(
+                        "",
+                        "[render_quote] Simplified report empty; using full report fallback.",
+                    )
+                    simplified_report = full_report
+                try:
+                    append_debug_log(
+                        "",
+                        "[render_quote] Report types: "
+                        f"simplified={type(simplified_report).__name__}, "
+                        f"full={type(full_report).__name__}",
+                    )
+                    append_debug_log(
+                        "",
+                        "[render_quote] Report lengths: simplified="
+                        f"{len(simplified_report or '')}, full={len(full_report or '')}",
+                    )
+                    snippet_simple = repr((simplified_report or "")[:120])
+                    snippet_full = repr((full_report or "")[:120])
+                    append_debug_log("", f"[render_quote] Simplified snippet: {snippet_simple}")
+                    append_debug_log("", f"[render_quote] Full snippet: {snippet_full}")
+                except Exception:
+                    pass
                 # Persist reports for diagnosis even if UI widgets fail to update
                 try:
                     with open("latest_quote_simplified.txt", "w", encoding="utf-8") as f:
