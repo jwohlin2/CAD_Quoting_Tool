@@ -1325,26 +1325,75 @@ def _ebo_append_unique(
 # --- compatibility shim: some callsites use _build_extra_ops_lines_list ---
 
 
-def _normalize_geo_map(geo_obj: Mapping[str, Any] | None) -> Mapping[str, Any] | None:
-    """Normalize a geo map, merging legacy nested ``geo.geo`` payloads."""
+def _flatten_geo_payload(
+    geo_obj: Mapping[str, Any] | MutableMapping[str, Any] | None,
+) -> dict[str, Any] | None:
+    """Return a dict for ``geo_obj`` with nested ``geo`` merged into the top-level."""
 
     if not isinstance(geo_obj, (_MappingABC, dict)):
         return None
 
-    geo_map = dict(geo_obj) if not isinstance(geo_obj, dict) else dict(geo_obj)
+    base = geo_obj if isinstance(geo_obj, dict) else dict(geo_obj)
     try:
-        nested_geo = geo_map.get("geo")
+        nested = base.get("geo")
     except Exception:
-        nested_geo = None
+        nested = None
 
-    if (
-        isinstance(nested_geo, (_MappingABC, dict))
-        and "ops_summary" not in geo_map
-    ):
-        for key, value in nested_geo.items():
-            geo_map.setdefault(key, value)
+    if isinstance(nested, (_MappingABC, dict)):
+        merged = nested if isinstance(nested, dict) else dict(nested)
+        for key, value in base.items():
+            if key == "geo":
+                continue
+            merged[key] = value
+        merged.pop("geo", None)
+        return merged
 
-    return geo_map
+    base.pop("geo", None)
+    return base if isinstance(base, dict) else dict(base)
+
+
+def _normalize_geo_map(geo_obj: Mapping[str, Any] | None) -> Mapping[str, Any] | None:
+    """Normalize a geo map, merging legacy nested ``geo.geo`` payloads."""
+
+    flattened = _flatten_geo_payload(geo_obj)
+    return flattened if flattened is not None else None
+
+
+def _ensure_result_geo_map(
+    result_candidate: Mapping[str, Any] | MutableMapping[str, Any] | None,
+    fallback: Mapping[str, Any] | MutableMapping[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Ensure ``result_candidate['geo']`` is a flattened dict, with fallback support."""
+
+    def _assign_geo(container: Mapping[str, Any] | MutableMapping[str, Any] | None, geo_map: dict[str, Any]) -> None:
+        if isinstance(container, dict):
+            container["geo"] = geo_map
+        elif isinstance(container, _MutableMappingABC):
+            try:
+                typing.cast(MutableMapping[str, Any], container)["geo"] = geo_map
+            except Exception:
+                pass
+
+    def _extract_geo(container: Mapping[str, Any] | MutableMapping[str, Any] | None) -> dict[str, Any] | None:
+        if not isinstance(container, (_MappingABC, dict)):
+            return None
+        try:
+            geo_candidate = container.get("geo")  # type: ignore[attr-defined]
+        except Exception:
+            geo_candidate = None
+        return _flatten_geo_payload(geo_candidate)
+
+    merged = _extract_geo(result_candidate)
+    if merged is not None:
+        _assign_geo(result_candidate, merged)
+        return merged
+
+    merged = _extract_geo(fallback)
+    if merged is not None:
+        _assign_geo(result_candidate, merged)
+        return merged
+
+    return {}
 
 
 def _get_geo_map(
@@ -1353,33 +1402,14 @@ def _get_geo_map(
 ) -> Mapping[str, Any]:
     """Return a merged geo map, flattening legacy ``geo.geo`` payloads."""
 
-    g: Mapping[str, Any] | dict[str, Any] = {}
+    primary = result if isinstance(result, (_MappingABC, dict)) else None
+    fallback = breakdown if isinstance(breakdown, (_MappingABC, dict)) else None
+    geo_map = _ensure_result_geo_map(primary, fallback)
+    if geo_map:
+        return geo_map
 
-    for candidate in (result, breakdown):
-        if not isinstance(candidate, (_MappingABC, dict)):
-            continue
-        try:
-            geo_candidate = candidate.get("geo")  # type: ignore[attr-defined]
-        except Exception:
-            geo_candidate = None
-        if isinstance(geo_candidate, (_MappingABC, dict)):
-            g = geo_candidate if isinstance(geo_candidate, dict) else dict(geo_candidate)
-            break
-
-    if isinstance(g, (_MappingABC, dict)):
-        try:
-            nested_geo = g.get("geo")  # type: ignore[attr-defined]
-        except Exception:
-            nested_geo = None
-        merged: dict[str, Any] = {}
-        if isinstance(nested_geo, (_MappingABC, dict)):
-            merged.update(
-                nested_geo if isinstance(nested_geo, dict) else dict(nested_geo)
-            )
-        merged.update(g if isinstance(g, dict) else dict(g))
-        return merged
-
-    return {}
+    secondary = _ensure_result_geo_map(fallback, None)
+    return secondary if secondary else {}
 
 
 def _ops_rows_from_geo(geo_map: Mapping[str, Any] | None) -> list[Mapping[str, Any]]:
@@ -1491,76 +1521,49 @@ def _build_ops_cards_from_chart_lines(
     except Exception:
         pass
 
-    geo_map = _get_geo_map(locals().get("result"), breakdown_mutable or breakdown)
+    result_container: Mapping[str, Any] | MutableMapping[str, Any] | None = (
+        result if isinstance(result, (_MappingABC, dict)) else None
+    )
+    fallback_container: Mapping[str, Any] | MutableMapping[str, Any] | None = None
+    if isinstance(breakdown_mutable, (_MappingABC, dict)):
+        fallback_container = breakdown_mutable
+    elif isinstance(breakdown, (_MappingABC, dict)):
+        fallback_container = breakdown
 
-    ops_summary_obj: Any = {}
-    if isinstance(geo_map, (_MappingABC, dict)):
-        try:
-            ops_summary_obj = geo_map.get("ops_summary")  # type: ignore[attr-defined]
-        except Exception:
-            ops_summary_obj = {}
+    geo_map = _ensure_result_geo_map(result_container, fallback_container)
 
-    rows_obj: Any = []
-    ops_source: Any = "?"
-    if isinstance(ops_summary_obj, (_MappingABC, dict)):
-        rows_obj = ops_summary_obj.get("rows") or []
-        try:
-            ops_source = ops_summary_obj.get("source") or "?"
-        except Exception:
-            ops_source = "?"
+    rows, ops_source = _extract_ops_rows_and_source(geo_map)
 
-    rows: list[Any] = []
-    if isinstance(rows_obj, list):
-        rows = rows_obj
-    elif isinstance(rows_obj, (_MappingABC, dict)):
-        try:
-            rows = [value for value in rows_obj.values() if value is not None]
-        except Exception:
-            rows = []
-
-    debug_row_msg = f"[DEBUG] ops_rows_pre={len(rows)}  source={ops_source}"
+    debug_row_msg = f"[DEBUG] ops_rows_pre={len(rows)} source={ops_source}"
     print(debug_row_msg)
     lines: list[str] = [debug_row_msg]
     if not rows:
-        built_rows = ensure_ops_rows_in_geo_from_chart(
-            geo=geo_map if isinstance(geo_map, dict) else None
-        )
+        target_geo = geo_map if isinstance(geo_map, dict) else None
+        built_rows = ensure_ops_rows_in_geo_from_chart(geo=target_geo)
         chart_count = 0
-        try:
-            if isinstance(geo_map, dict):
-                chart_count = len(geo_map.get("chart_lines") or [])
-        except Exception:
-            chart_count = 0
-        print(
-            f"[DEBUG] chart_lines_found={chart_count} built_rows={built_rows}"
-        )
-        lines.append(
-            f"[DEBUG] chart_lines_found={chart_count} built_rows={built_rows}"
-        )
-        if not rows:
+        if isinstance(target_geo, dict):
             try:
-                refreshed_geo = _get_geo_map(
-                    locals().get("result"),
-                    breakdown_mutable or breakdown,
-                )
+                chart_count = len(target_geo.get("chart_lines") or [])
             except Exception:
-                refreshed_geo = {}
-            if isinstance(refreshed_geo, dict):
+                chart_count = 0
+        if chart_count == 0 and isinstance(fallback_container, (_MappingABC, dict)):
+            try:
+                fallback_geo = _ensure_result_geo_map(fallback_container, None)
+            except Exception:
+                fallback_geo = {}
+            if isinstance(fallback_geo, dict):
                 try:
-                    post_rows = (
-                        (refreshed_geo.get("ops_summary") or {}).get("rows") or []
-                    )
+                    chart_count = len(fallback_geo.get("chart_lines") or [])
                 except Exception:
-                    post_rows = []
-                if isinstance(post_rows, list):
-                    rows = post_rows
-                    geo_map = refreshed_geo
-                elif isinstance(post_rows, (_MappingABC, dict)):
-                    try:
-                        rows = [value for value in post_rows.values() if value is not None]
-                    except Exception:
-                        rows = []
-                    geo_map = refreshed_geo
+                    chart_count = 0
+        debug_chart_msg = f"[DEBUG] chart_lines_found={chart_count} built_rows={built_rows}"
+        print(debug_chart_msg)
+        lines.append(debug_chart_msg)
+        if not rows:
+            refreshed_geo = _ensure_result_geo_map(result_container, fallback_container)
+            if refreshed_geo:
+                geo_map = refreshed_geo
+            rows, ops_source = _extract_ops_rows_and_source(geo_map)
 
     rows = rows if isinstance(rows, list) else []
 
@@ -1592,19 +1595,21 @@ def _build_ops_cards_from_chart_lines(
         except Exception:
             extra_bucket_ops = None
 
-    try:
-        chart_lines = _collect_chart_lines_context(ctx, geo_map, ctx_a, ctx_b) or []
-    except Exception:
-        chart_lines = []
+    chart_lines: list[str] = []
+    if not rows:
+        try:
+            chart_lines = _collect_chart_lines_context(ctx, geo_map, ctx_a, ctx_b) or []
+        except Exception:
+            chart_lines = []
 
-    if not chart_lines:
-        chart_lines = _get_chart_lines_for_ops(
-            breakdown,
-            result,
-            ctx=ctx,
-            ctx_a=ctx_a,
-            ctx_b=ctx_b,
-        ) or []
+        if not chart_lines:
+            chart_lines = _get_chart_lines_for_ops(
+                breakdown,
+                result,
+                ctx=ctx,
+                ctx_a=ctx_a,
+                ctx_b=ctx_b,
+            ) or []
 
     ops_rows: list[Mapping[str, Any]] = []
     for entry in rows:
@@ -4820,18 +4825,35 @@ def _render_time_per_hole(
 # ---------- HOLE TABLE: Table Row Reviewer ----------
 
 
-def _ops_rows_from_geo(geo_map):
+def _extract_ops_rows_and_source(
+    geo_map: Mapping[str, Any] | MutableMapping[str, Any] | None,
+) -> tuple[list[Any], str]:
+    rows: list[Any] = []
+    source = "-"
+    if not isinstance(geo_map, (_MappingABC, dict)):
+        return rows, source
     try:
-        ops = (geo_map or {}).get("ops_summary") or {}
-        if not isinstance(ops, (_MappingABC, dict)):
-            return []
-        for key in ("rows", "rows_detail", "rows_raw"):
-            rows = ops.get(key)
-            if isinstance(rows, list) and rows:
-                return rows
-        return []
+        ops_summary = (geo_map or {}).get("ops_summary") or {}
     except Exception:
-        return []
+        ops_summary = {}
+    if isinstance(ops_summary, (_MappingABC, dict)):
+        try:
+            src_val = ops_summary.get("source")
+        except Exception:
+            src_val = None
+        source_txt = str(src_val).strip() if src_val is not None else ""
+        source = source_txt or "-"
+        for key in ("rows", "rows_detail", "rows_raw"):
+            rows_obj = ops_summary.get(key)
+            if isinstance(rows_obj, list) and rows_obj:
+                rows = rows_obj
+                break
+    return rows, source
+
+
+def _ops_rows_from_geo(geo_map):
+    rows, _ = _extract_ops_rows_and_source(geo_map)
+    return rows
 
 
 def _sum_qty(rows):
@@ -4842,17 +4864,6 @@ def _sum_qty(rows):
         except Exception:
             pass
     return s
-
-
-def _row_side_from_desc(desc: str) -> str:
-    U = (desc or "").upper()
-    if "FRONT & BACK" in U or "BOTH SIDES" in U:
-        return "FRONT+BACK"
-    if "FROM BACK" in U:
-        return "BACK"
-    if "FROM FRONT" in U:
-        return "FRONT"
-    return "-"
 
 
 def _render_table_row_reviewer(*, result=None, breakdown=None, max_rows=10) -> list[str]:
@@ -4871,60 +4882,79 @@ def _render_table_row_reviewer(*, result=None, breakdown=None, max_rows=10) -> l
         for value in candidates:
             if value is None:
                 continue
-            try:
-                num = float(value)
-            except Exception:
+            num: float | None = None
+            if isinstance(value, (int, float)):
+                try:
+                    num = float(value)
+                except Exception:
+                    num = None
+            if num is None:
                 text = _coerce_str(value)
                 if text:
-                    return text
-                continue
-            if math.isfinite(num):
+                    num = _to_inch(text)
+                    if num is None and text:
+                        return text
+                else:
+                    continue
+            if num is not None and math.isfinite(num):
                 return f"{num:.4f}\""
         return "-"
 
-    geo = _get_geo_map(result, breakdown)
-    rows = _ops_rows_from_geo(geo)
+    def _format_side(row: Mapping[str, Any], desc: str) -> str:
+        raw_side = _coerce_str(row.get("side") or row.get("side_text") or "")
+        if raw_side:
+            return raw_side.upper()
+        sides = _extract_sides_from_desc((desc or "").upper())
+        if not sides:
+            return "-"
+        if len(sides) == 1:
+            return sides[0]
+        return "+".join(sides)
+
+    result_container = result if isinstance(result, (_MappingABC, dict)) else None
+    fallback_container = breakdown if isinstance(breakdown, (_MappingABC, dict)) else None
+    geo = _ensure_result_geo_map(result_container, fallback_container)
+    rows, source = _extract_ops_rows_and_source(geo)
+    qty_total = _sum_qty(rows)
+
     lines = ["TABLE ROW REVIEW – HOLE TABLE (ops rows)", "=" * 66]
+    lines.append(f"rows .......... {len(rows)}")
+    lines.append(f"qty sum ....... {qty_total}")
+    lines.append(f"source ........ {source}")
+    lines.append("")
+    lines.append("first rows (hole/ref/qty/side/desc)")
+    lines.append("-" * 66)
+
     if rows:
-        lines.append(f"rows ............... {len(rows)}")
-        lines.append(f"qty sum (QTY col) .. {_sum_qty(rows)}")
-        lines += ["", "First rows", "-" * 66]
-        for i, raw_row in enumerate(rows[:max_rows]):
+        limit = max_rows if max_rows else len(rows)
+        for i, raw_row in enumerate(rows[:limit]):
             row = raw_row if isinstance(raw_row, Mapping) else {}
             hole = _coerce_str(row.get("hole") or row.get("id") or "") or "-"
+            qty_entry = row.get("qty")
             try:
-                qty = int(float(row.get("qty") or 0))
+                qty_val = int(float(qty_entry or 0))
+                qty_text = str(qty_val)
             except Exception:
-                qty = row.get("qty")
+                qty_text = _coerce_str(qty_entry) or "-"
             desc = _coerce_str(
                 row.get("desc")
                 or row.get("description")
                 or row.get("text")
-                or ""
+                or "",
             )
             if desc:
                 desc = re.sub(r"\s+", " ", desc)
-            side = _row_side_from_desc(desc)
             ref = _format_ref(row)
+            side = _format_side(row, desc)
             lines.append(
-                f"[{i:02}] {hole} | QTY={qty} | REF={ref} | SIDE={side} | {desc}"
+                f"[{i:02}] {hole} | REF={ref} | QTY={qty_text} | SIDE={side} | {desc}"
             )
-        if len(rows) > max_rows:
+        if len(rows) > limit:
             lines.append("...")
-        lines.append("")
     else:
-        lines.append("rows ............... 0 (no geo.ops_summary.rows)")
-        ops = (geo or {}).get("ops_summary")
-        if isinstance(ops, dict):
-            lines.append("ops_summary keys ... " + ", ".join(sorted(ops.keys())))
-        else:
-            lines.append("ops_summary ........ (missing)")
-        prov = (geo.get("provenance", {}) or {}).get("holes") if isinstance(geo, dict) else None
-        if prov:
-            lines.append(f"provenance.holes .... {prov}")
-        ch = geo.get("chart_lines") if isinstance(geo, dict) else None
-        if isinstance(ch, list):
-            lines.append(f"chart_lines ......... {len(ch)}")
+        lines.append("(no rows)")
+
+    lines.append("")
     return lines
 
 
