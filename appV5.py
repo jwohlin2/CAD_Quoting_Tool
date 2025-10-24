@@ -407,6 +407,8 @@ def _seed_drill_bins_from_geo(geo: dict) -> dict[float, int]:
 
     core_geo = _get_core_geo_map(geo)
 
+    family_consumed = False
+
     for key in (
         "hole_diam_families_geom_in",
         "hole_diam_families_in",
@@ -415,6 +417,7 @@ def _seed_drill_bins_from_geo(geo: dict) -> dict[float, int]:
     ):
         fam = core_geo.get(key)
         if isinstance(fam, dict) and fam:
+            family_consumed = True
             for k, v in fam.items():
                 try:
                     d = float(str(k).replace('"', "").strip())
@@ -426,6 +429,9 @@ def _seed_drill_bins_from_geo(geo: dict) -> dict[float, int]:
                     pass
             if out:
                 return out
+
+    if family_consumed:
+        return out
 
     fallback = _seed_drill_bins_from_geo__local(core_geo)
     if fallback:
