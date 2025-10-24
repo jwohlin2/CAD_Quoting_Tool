@@ -654,6 +654,79 @@ def _get_chart_lines_for_ops(
     return []
 
 
+def _ebo_append_unique(
+    breakdown_mutable: MutableMapping[str, Any] | Mapping[str, Any] | None,
+    bucket: str,
+    payload: Mapping[str, Any],
+) -> None:
+    if not isinstance(breakdown_mutable, (_MutableMappingABC, dict)):
+        return
+    owner = typing.cast(MutableMapping[str, Any], breakdown_mutable)
+    try:
+        extra_ops_obj = owner.setdefault("extra_bucket_ops", {})
+    except Exception:
+        return
+    if not isinstance(extra_ops_obj, (_MutableMappingABC, dict)):
+        try:
+            extra_ops_obj = dict(extra_ops_obj)  # type: ignore[arg-type]
+        except Exception:
+            extra_ops_obj = {}
+        try:
+            owner["extra_bucket_ops"] = extra_ops_obj  # type: ignore[index]
+        except Exception:
+            pass
+    extra_ops = typing.cast(MutableMapping[str, Any], extra_ops_obj)
+    try:
+        entries_obj = extra_ops.setdefault(bucket, [])
+    except Exception:
+        return
+    if isinstance(entries_obj, list):
+        entries = entries_obj
+    else:
+        try:
+            entries = list(entries_obj)  # type: ignore[arg-type]
+        except Exception:
+            entries = []
+        try:
+            extra_ops[bucket] = entries  # type: ignore[index]
+        except Exception:
+            pass
+    try:
+        seen_obj = owner.setdefault("_ebo_seen", set())
+    except Exception:
+        seen_obj = None
+    seen: MutableSet[tuple[Any, ...]] | None = None
+    if isinstance(seen_obj, (_MutableSetABC, set)):
+        seen = typing.cast(MutableSet[tuple[Any, ...]], seen_obj)
+    elif seen_obj is not None:
+        try:
+            seen = set(typing.cast(Iterable[tuple[Any, ...]], seen_obj))
+        except Exception:
+            seen = set()
+        try:
+            owner["_ebo_seen"] = seen  # type: ignore[index]
+        except Exception:
+            pass
+    else:
+        seen = set()
+        try:
+            owner["_ebo_seen"] = seen  # type: ignore[index]
+        except Exception:
+            pass
+    try:
+        qty_val = int(payload.get("qty") or 0)
+    except Exception:
+        qty_val = 0
+    key = (bucket, payload.get("name"), payload.get("side"), qty_val)
+    if key in seen:
+        return
+    try:
+        entries.append(dict(payload))
+    except Exception:
+        entries.append({"name": payload.get("name"), "qty": qty_val, "side": payload.get("side")})
+    seen.add(key)
+
+
 def _build_ops_cards_from_chart_lines(
     *,
     breakdown: Mapping[str, Any] | None,
@@ -796,97 +869,69 @@ def _build_ops_cards_from_chart_lines(
         except Exception:
             bucket_view_obj = None
 
-    extra_bucket_ops: MutableMapping[str, Any] | None = None
-    if isinstance(target_breakdown, dict):
-        extra_bucket_ops = target_breakdown.setdefault("extra_bucket_ops", {})
-    elif isinstance(target_breakdown, _MutableMappingABC):
-        try:
-            extra_bucket_ops = typing.cast(
-                MutableMapping[str, Any],
-                target_breakdown.setdefault("extra_bucket_ops", {}),
-            )
-        except Exception:
-            extra_bucket_ops = None
+    mutation_owner: MutableMapping[str, Any] | None = None
+    if isinstance(target_breakdown, (_MutableMappingABC, dict)):
+        mutation_owner = typing.cast(MutableMapping[str, Any], target_breakdown)
 
-    def _ebo_append(bucket: str, payload: Mapping[str, Any]) -> None:
-        nonlocal extra_bucket_ops
-        if extra_bucket_ops is None:
-            return
+    printed_set: MutableSet[str] | None = None
+    if mutation_owner is not None:
         try:
-            entries = extra_bucket_ops.setdefault(bucket, [])
+            printed_candidate = mutation_owner.setdefault("_ops_cards_printed", set())
         except Exception:
-            return
-        if isinstance(entries, list):
-            entries.append(dict(payload))
-        else:
+            printed_candidate = None
+        if isinstance(printed_candidate, (_MutableSetABC, set)):
+            printed_set = typing.cast(MutableSet[str], printed_candidate)
+        elif printed_candidate is not None:
             try:
-                fallback_list = list(entries)  # type: ignore[arg-type]
+                printed_set = set(typing.cast(Iterable[str], printed_candidate))
             except Exception:
-                fallback_list = []
-            fallback_list.append(dict(payload))
+                printed_set = set()
             try:
-                extra_bucket_ops[bucket] = fallback_list  # type: ignore[index]
+                mutation_owner["_ops_cards_printed"] = printed_set  # type: ignore[index]
             except Exception:
                 pass
+        else:
+            printed_set = set()
+            try:
+                mutation_owner["_ops_cards_printed"] = printed_set  # type: ignore[index]
+            except Exception:
+                pass
+
+    def _print_once(tag: str) -> bool:
+        if printed_set is None:
+            return True
+        aliases = {tag}
+        if tag == "counterbore":
+            aliases.add("cbore")
+        if any(alias in printed_set for alias in aliases):
+            return False
+        for alias in aliases:
+            printed_set.add(alias)
+        return True
 
     out_lines: list[str] = []
 
-    if cb_groups:
-        printed_owner: MutableMapping[str, Any] | None = None
-        if isinstance(breakdown_mutable, dict):
-            printed_owner = breakdown_mutable
-        elif isinstance(breakdown_mutable, _MutableMappingABC):
-            printed_owner = typing.cast(MutableMapping[str, Any], breakdown_mutable)
-
-        printed: MutableSet[str] | None = None
-        if printed_owner is not None:
+    if cb_groups and _print_once("counterbore"):
+        if isinstance(mutation_owner, (_MutableMappingABC, dict)):
+            derived_owner: MutableMapping[str, Any] | None = None
             try:
-                printed_candidate = printed_owner.setdefault("_ops_cards_printed", set())
-            except Exception:
-                printed_candidate = None
-            if isinstance(printed_candidate, (_MutableSetABC, set)):
-                printed = typing.cast(MutableSet[str], printed_candidate)
-            elif printed_candidate is not None:
-                try:
-                    printed = set(printed_candidate)  # type: ignore[arg-type]
-                except Exception:
-                    printed = set()
-                try:
-                    printed_owner["_ops_cards_printed"] = printed  # type: ignore[index]
-                except Exception:
-                    pass
-
-        if printed is not None:
-            if "cbore" in printed:
-                return lines
-            printed.add("cbore")
-
-        derived_owner: MutableMapping[str, Any] | None = None
-        if isinstance(breakdown_mutable, dict):
-            derived_owner = breakdown_mutable.setdefault("derived_ops", {})
-        elif isinstance(breakdown_mutable, _MutableMappingABC):
-            try:
-                derived_owner = typing.cast(
-                    MutableMapping[str, Any],
-                    breakdown_mutable,
-                ).setdefault("derived_ops", {})
+                derived_owner = mutation_owner.setdefault("derived_ops", {})
             except Exception:
                 derived_owner = None
-
-        if isinstance(derived_owner, (_MutableMappingABC, dict)):
-            serial_cb: dict[tuple[float | None, str, float | None], int] = {}
-            for (dia, side, depth), qty in cb_groups.items():
-                serial_cb[
-                    (
-                        float(dia) if dia is not None else None,
-                        str(side or ""),
-                        float(depth) if depth is not None else None,
-                    )
-                ] = int(qty or 0)
-            try:
-                derived_owner["cb_groups"] = serial_cb  # type: ignore[index]
-            except Exception:
-                pass
+            if isinstance(derived_owner, (_MutableMappingABC, dict)):
+                serial_cb: dict[tuple[float | None, str, float | None], int] = {}
+                for (dia, side, depth), qty in cb_groups.items():
+                    serial_cb[
+                        (
+                            float(dia) if dia is not None else None,
+                            str(side or ""),
+                            float(depth) if depth is not None else None,
+                        )
+                    ] = int(qty or 0)
+                try:
+                    derived_owner["cb_groups"] = serial_cb  # type: ignore[index]
+                except Exception:
+                    pass
 
         front_cb = sum(
             int(qty)
@@ -937,12 +982,14 @@ def _build_ops_cards_from_chart_lines(
         out_lines.append("")
 
         if front_cb > 0:
-            _ebo_append(
+            _ebo_append_unique(
+                mutation_owner,
                 "counterbore",
                 {"name": "Counterbore", "qty": int(front_cb), "side": "front"},
             )
         if back_cb > 0:
-            _ebo_append(
+            _ebo_append_unique(
+                mutation_owner,
                 "counterbore",
                 {"name": "Counterbore", "qty": int(back_cb), "side": "back"},
             )
@@ -978,7 +1025,7 @@ def _build_ops_cards_from_chart_lines(
         except Exception:
             pass
 
-    if spot_qty > 0:
+    if spot_qty > 0 and _print_once("spot"):
         per_spot = 0.05
         t_group = spot_qty * per_spot
         out_lines.extend(
@@ -998,12 +1045,13 @@ def _build_ops_cards_from_chart_lines(
             _lookup_bucket_rate("machine", rates) or 53.76,
             _lookup_bucket_rate("labor", rates) or 25.46,
         )
-        _ebo_append(
+        _ebo_append_unique(
+            mutation_owner,
             "spot",
             {"name": "Spot drill", "qty": int(spot_qty), "side": "front"},
         )
 
-    if jig_qty > 0:
+    if jig_qty > 0 and _print_once("jig-grind"):
         per_jig = float(globals().get("JIG_GRIND_MIN_PER_FEATURE") or 0.75)
         t_group = jig_qty * per_jig
         out_lines.extend(
@@ -1025,7 +1073,8 @@ def _build_ops_cards_from_chart_lines(
             or 53.76,
             _lookup_bucket_rate("labor", rates) or 25.46,
         )
-        _ebo_append(
+        _ebo_append_unique(
+            mutation_owner,
             "jig-grind",
             {"name": "Jig-grind", "qty": int(jig_qty), "side": None},
         )
@@ -10313,7 +10362,8 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
             flags = None
 
         should_append_extra_ops = not already_counterbore and (
-            flags is None or "cbore" not in flags
+            flags is None
+            or all(alias not in flags for alias in ("counterbore", "cbore"))
         )
 
         if should_append_extra_ops:
@@ -10326,10 +10376,11 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
                 extra_ops_lines_appended = 1
                 extra_ops_lines_cache = list(appended_extra_ops_lines)
                 if flags is not None:
-                    try:
-                        flags.add("cbore")
-                    except Exception:
-                        pass
+                    for alias in ("counterbore", "cbore"):
+                        try:
+                            flags.add(alias)
+                        except Exception:
+                            pass
     if not appended_extra_ops_lines:
         appended_extra_ops_lines = []
     if appended_extra_ops_lines:
