@@ -57,6 +57,7 @@ from cad_quoter.app.quote_doc import (
     build_quote_header_lines,
     _sanitize_render_text,
 )
+from cad_quoter.pricing.machining_report import _drill_time_model
 
 
 
@@ -4323,43 +4324,18 @@ def _compute_drilling_removal_section(
                 pilot_claims=pilot_claims,
                 cb_groups=cb_groups_payload,
             )
-            adj_total = sum(int(v) for v in (counts_by_diam or {}).values())
+            _drill_bins_adj = {
+                round(float(d), 4): int(v)
+                for d, v in (counts_by_diam or {}).items()
+                if int(v) > 0
+            }
+            adj_total = sum(int(v) for v in _drill_bins_adj.values())
             _push(lines, f"[DEBUG] DRILL bins raw={raw_total} adj={adj_total}")
-            if isinstance(breakdown_mutable, (_MutableMappingABC, dict)):
-                try:
-                    extra_bucket_ops = typing.cast(
-                        MutableMapping[str, Any],
-                        breakdown_mutable,
-                    ).setdefault("extra_bucket_ops", {})
-                    drill_entries = extra_bucket_ops.setdefault("drill", [])
-                    adjusted_total = int(
-                        sum(max(0, int(v)) for v in counts_by_diam.values())
-                    )
-                    existing_entry = next(
-                        (
-                            entry
-                            for entry in drill_entries
-                            if entry.get("name") == "Drill"
-                            and entry.get("side") in (None, "front")
-                        ),
-                        None,
-                    )
-                    if existing_entry is not None:
-                        existing_entry["qty"] = adjusted_total
-                        existing_entry["side"] = None
-                    else:
-                        drill_entries.append(
-                            {"name": "Drill", "qty": adjusted_total, "side": None}
-                        )
-                except Exception:
-                    pass
-            drill_actions_from_groups = int(
-                sum(max(0, int(v)) for v in counts_by_diam.values())
-            )
+            drill_actions_from_groups = adj_total
             _push(lines, f"[DEBUG] DRILL bins adj={drill_actions_from_groups}")
             ops_hole_count_from_table = drill_actions_from_groups
 
-            remaining_counts = dict(counts_by_diam)
+            remaining_counts = dict(_drill_bins_adj)
             adjusted_rows: list[dict[str, Any]] = []
             for row in sanitized_rows:
                 key = round(float(row.get("diameter_in", 0.0) or 0.0), 4)
@@ -4383,21 +4359,71 @@ def _compute_drilling_removal_section(
                 lines,
                 f"[DEBUG] DRILL printed_sum={printed_sum} audit_drill={drill_actions_from_groups}",
             )
-            subtotal_minutes = sum(
-                float(row.get("group_minutes", 0.0) or 0.0) for row in sanitized_rows
-            )
 
-        if sanitized_rows:
+        subtotal_minutes = 0.0
+
+        if _drill_bins_adj:
             lines.append("MATERIAL REMOVAL – DRILLING")
             lines.append("=" * 64)
             lines.append("TIME PER HOLE – DRILL GROUPS")
             lines.append("-" * 66)
+
+            depth_lookup: dict[float, float] = {}
             for row in sanitized_rows:
-                lines.append(
-                    f'Dia {row["diameter_in"]:.3f}" × {row["qty"]}  | depth {row["depth_in"]:.3f}" | '
-                    f"{int(round(row['sfm']))} sfm | {row['ipr']:.4f} ipr | t/hole {row['minutes_per_hole']:.2f} min | "
-                    f"group {row['qty']}×{row['minutes_per_hole']:.2f} = {row['group_minutes']:.2f} min"
+                try:
+                    key = round(float(row.get("diameter_in", 0.0) or 0.0), 4)
+                    depth_lookup[key] = float(row.get("depth_in", 0.0) or 0.0)
+                except Exception:
+                    continue
+
+            drill_group_lines: list[str] = []
+            _total_drills = 0
+
+            def _depth_for_diam(d: float) -> float:
+                try:
+                    key = round(float(d), 4)
+                except Exception:
+                    key = round(0.0, 4)
+                depth_val = depth_lookup.get(key)
+                if depth_val is None or not math.isfinite(depth_val):
+                    return 2.0
+                return float(depth_val)
+
+            for d in sorted(_drill_bins_adj.keys()):
+                q = int(_drill_bins_adj[d])
+                if q <= 0:
+                    continue
+                _total_drills += q
+                depth = float(_depth_for_diam(d))
+                ld = (depth / d) if d > 0 else 0
+                sfm, ipr = ((39, 0.0020) if ld >= 3.0 else (80, 0.0060))
+                rpm = (sfm * 3.82) / max(d, 0.001)
+                ipm = rpm * ipr
+                _ = ipm
+                t_hole = _drill_time_model(depth, rpm, ipr)
+                subtotal_minutes += q * t_hole
+                drill_group_lines.append(
+                    f'Dia {d:.3f}" × {q}  | depth {depth:.3f}" | {sfm} sfm | {ipr:.4f} ipr | '
+                    f't/hole {t_hole:.2f} min | group {q}×{t_hole:.2f} = {(q * t_hole):.2f} min'
                 )
+
+            for ln in drill_group_lines:
+                lines.append(ln)
+
+            if isinstance(breakdown_mutable, (_MutableMappingABC, dict)):
+                try:
+                    extra_bucket_ops = typing.cast(
+                        MutableMapping[str, Any], breakdown_mutable
+                    ).setdefault("extra_bucket_ops", {})
+                    extra_bucket_ops.setdefault("drill", []).append(
+                        {"name": "Drill", "qty": int(_total_drills), "side": None}
+                    )
+                except Exception:
+                    pass
+            _push(lines, f"[DEBUG] OPS DRILL publish={_total_drills}")
+            drill_actions_from_groups = int(_total_drills)
+            ops_hole_count_from_table = drill_actions_from_groups
+
             lines.append("")
 
             component_labels: list[str] = []
