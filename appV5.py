@@ -13273,11 +13273,50 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
     counts_by_diam_final = locals().get("counts_by_diam")
     if not isinstance(counts_by_diam_final, (_MappingABC, dict)):
         counts_by_diam_final = {}
+    def _audit_tallies(
+        extra_ops: _MappingABC[str, Any] | None, derived: _MappingABC[str, Any] | None
+    ) -> dict[str, int]:
+        tallies: dict[str, int] = {
+            "drill": 0,
+            "tap": 0,
+            "counterbore": 0,
+            "counterdrill": 0,
+            "jig-grind": 0,
+            "spot": 0,
+        }
+        for bucket, entries in (extra_ops or {}).items():
+            if bucket in tallies:
+                for entry in entries or []:
+                    if isinstance(entry, _MappingABC):
+                        try:
+                            tallies[bucket] += int(entry.get("qty") or 0)
+                        except Exception:
+                            continue
+        try:
+            if derived and "drill_total" in derived:
+                tallies["drill"] = int(derived["drill_total"])
+        except Exception:
+            pass
+        return tallies
+
+    derived_ops_candidate = (
+        breakdown.get("derived_ops") if isinstance(breakdown, _MappingABC) else None
+    )
+    derived_ops = (
+        derived_ops_candidate if isinstance(derived_ops_candidate, _MappingABC) else None
+    )
+    extra_ops_candidate = (
+        breakdown_mutable.get("extra_bucket_ops")
+        if isinstance(breakdown_mutable, _MappingABC)
+        else None
+    )
+    extra_ops = (
+        extra_ops_candidate if isinstance(extra_ops_candidate, _MappingABC) else None
+    )
+    _tallies = _audit_tallies(extra_ops, derived_ops)
     _push(
         lines,
-        f"[DEBUG] OPS TALLY (final) drill={int(sum(int(v) for v in counts_by_diam_final.values()))} "
-        f"tap={ops_claims.get('tap',0)} cbore={sum(int(q) for q in (ops_claims.get('cb_groups') or {}).values())} "
-        f"counterdrill={ops_claims.get('counterdrill',0)} jig={ops_claims.get('jig',0)}",
+        f"[DEBUG] OPS TALLY (final) {', '.join(f'{k}={v}' for k, v in _tallies.items())}",
     )
 
     print(
@@ -13294,19 +13333,23 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
 
     lines.append("OPERATION AUDIT – Action counts")
     lines.append("-" * 66)
-    lines.append(f" Drills:        {ops_counts.get('drills', 0)}")
+    lines.append(f" Drills:        {_tallies.get('drill', 0)}")
     lines.append(
         " Taps:          "
-        f"{ops_counts.get('taps_total', 0)}  (Front {ops_counts.get('taps_front', 0)} / Back {ops_counts.get('taps_back', 0)})"
+        f"{_tallies.get('tap', 0)}  (Front {ops_counts.get('taps_front', 0)} / Back {ops_counts.get('taps_back', 0)})"
     )
     lines.append(
         " Counterbores:  "
-        f"{ops_counts.get('counterbores_total', 0)}  (Front {ops_counts.get('counterbores_front', 0)} / Back {ops_counts.get('counterbores_back', 0)})"
+        f"{_tallies.get('counterbore', 0)}  (Front {ops_counts.get('counterbores_front', 0)} / Back {ops_counts.get('counterbores_back', 0)})"
     )
-    lines.append(f" Spot:          {ops_counts.get('spot', 0)}")
-    lines.append(f" Counterdrill:  {ops_counts.get('counterdrill', 0)}")
-    lines.append(f" Jig-grind:     {ops_counts.get('jig_grind', 0)}")
-    lines.append(f" Actions total: {ops_counts.get('actions_total', 0)}")
+    lines.append(f" Spot:          {_tallies.get('spot', 0)}")
+    lines.append(f" Counterdrill:  {_tallies.get('counterdrill', 0)}")
+    lines.append(f" Jig-grind:     {_tallies.get('jig-grind', 0)}")
+    actions_total = sum(
+        _tallies.get(key, 0)
+        for key in ("drill", "tap", "counterbore", "counterdrill", "spot", "jig-grind")
+    )
+    lines.append(f" Actions total: {actions_total}")
     lines.append("")
 
     # ---- Pricing ladder ------------------------------------------------------
