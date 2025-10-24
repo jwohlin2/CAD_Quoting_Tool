@@ -556,14 +556,18 @@ def prepare_render_rates(
     prepared_flat = two_bucket_to_flat(normalized_two_bucket)
 
     separate_labor = bool(getattr(cfg, "separate_machine_labor", False)) if cfg else False
+    programmer_override_explicit = False
     if separate_labor:
-        labor_override = _positive_float(getattr(cfg, "labor_rate_per_hr", None))
+        configured_labor_override = _positive_float(getattr(cfg, "labor_rate_per_hr", None))
+        labor_override = configured_labor_override
         if labor_override <= 0.0:
             labor_override = _positive_float(prepared_flat.get("LaborRate"))
         if labor_override > 0.0:
             prepared_flat["LaborRate"] = labor_override
             prepared_flat["ProgrammerRate"] = labor_override
             prepared_flat["ProgrammingRate"] = labor_override
+            if configured_labor_override > 0.0:
+                programmer_override_explicit = True
 
     machine_override = _positive_float(getattr(cfg, "machine_rate_per_hr", None)) if cfg else 0.0
     if machine_override > 0.0:
@@ -593,7 +597,11 @@ def prepare_render_rates(
         programmer_value = _positive_float(prepared_flat.get("ProgrammingRate"))
     if programmer_value <= 0.0 and programmer_floor > 0.0:
         programmer_value = programmer_floor
-    if programmer_floor > 0.0 and programmer_value > 0.0:
+    if (
+        programmer_floor > 0.0
+        and programmer_value > 0.0
+        and not programmer_override_explicit
+    ):
         programmer_value = max(programmer_value, programmer_floor)
     if programmer_value > 0.0:
         prepared_flat["ProgrammerRate"] = programmer_value
