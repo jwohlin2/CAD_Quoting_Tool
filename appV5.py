@@ -4499,9 +4499,6 @@ def _compute_drilling_removal_section(
         if isinstance(derived_ops_owner, (_MutableMappingABC, dict)):
             derived_ops_owner["derived_ops"] = derived_ops
 
-    counts_by_diam_raw_obj: dict[float, int] = dict(derived_ops.get("drill_bins_raw") or {})
-    counts_by_diam_adj_obj: dict[float, int] = dict(derived_ops.get("drill_bins_adj") or {})
-    drill_total_adj: int = int(derived_ops.get("drill_total") or 0)
     # ---- END SAFE INITIALIZATION ----
 
     def _seed_drill_bins_from_geo__local(
@@ -5143,22 +5140,64 @@ def _compute_drilling_removal_section(
                 f"[DEBUG] DRILL printed_sum={printed_sum} audit_drill={drill_actions_from_groups}",
             )
 
-        if not counts_by_diam_raw_obj:
-            counts_by_diam_raw_obj = _seed_drill_bins_from_geo__local(geo_map) or {}
-            derived_ops["drill_bins_raw"] = dict(counts_by_diam_raw_obj)
+        geo_map = (
+            ((result or {}).get("geo") if isinstance(result, dict) else None)
+            or ((breakdown or {}).get("geo") if isinstance(breakdown, dict) else None)
+            or {}
+        )
 
-        if not counts_by_diam_adj_obj:
-            pilot_claims = derived_ops.get("pilot_claims") or {}
-            cb_groups = derived_ops.get("cb_groups") or {}
-            counts_by_diam_adj_obj = (
-                _adjust_drill_counts__local(counts_by_diam_raw_obj, pilot_claims, cb_groups)
-                or {}
-            )
-            derived_ops["drill_bins_adj"] = dict(counts_by_diam_adj_obj)
+        owner_candidate: MutableMapping[str, Any] | dict[str, Any] | Mapping[str, Any] | None
+        if isinstance(breakdown_mutable, (_MutableMappingABC, dict)):
+            owner_candidate = typing.cast(MutableMapping[str, Any], breakdown_mutable)
+        elif isinstance(breakdown, (_MutableMappingABC, dict)):
+            owner_candidate = typing.cast(MutableMapping[str, Any], breakdown)
+        else:
+            owner_candidate = None
 
-        if not drill_total_adj:
-            drill_total_adj = int(sum(counts_by_diam_adj_obj.values()))
-            derived_ops["drill_total"] = drill_total_adj
+        if isinstance(owner_candidate, dict):
+            derived_obj = owner_candidate.setdefault("derived_ops", derived_ops)
+        elif isinstance(owner_candidate, _MutableMappingABC):
+            derived_obj = owner_candidate.setdefault("derived_ops", derived_ops)
+        else:
+            derived_obj = derived_ops
+
+        if isinstance(derived_obj, Mapping) and not isinstance(derived_obj, dict):
+            try:
+                derived_obj = dict(derived_obj)
+            except Exception:
+                derived_obj = {}
+
+        if not isinstance(derived_obj, dict):
+            derived_obj = {}
+
+        if isinstance(owner_candidate, (_MutableMappingABC, dict)):
+            owner_candidate["derived_ops"] = derived_obj  # type: ignore[index]
+
+        derived_ops = typing.cast(MutableMapping[str, Any] | dict[str, Any], derived_obj)
+
+        if "drill_bins_raw" not in derived_ops:
+            seed = _seed_drill_bins_from_geo__local(geo_map) or {}
+            derived_ops["drill_bins_raw"] = dict(seed)
+
+        cb_groups = derived_ops.get("cb_groups") or {}
+
+        if "drill_bins_adj" not in derived_ops:
+            adj = _adjust_drill_counts__local(
+                derived_ops.get("drill_bins_raw") or {},
+                derived_ops.get("pilot_claims") or {},
+                cb_groups,
+            ) or {}
+            derived_ops["drill_bins_adj"] = dict(adj)
+            derived_ops["drill_total"] = int(sum(adj.values()))
+
+        counts_by_diam_raw_obj = dict(derived_ops.get("drill_bins_raw") or {})
+        counts_by_diam_adj_obj = dict(derived_ops.get("drill_bins_adj") or {})
+        drill_total_adj = int(derived_ops.get("drill_total") or 0)
+
+        _push(
+            lines,
+            f"[DEBUG] DRILL publish raw={sum(counts_by_diam_raw_obj.values())} adj={drill_total_adj}",
+        )
 
         drill_bins_adj_total = int(sum(counts_by_diam_adj_obj.values()))
 
