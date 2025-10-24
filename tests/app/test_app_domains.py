@@ -254,26 +254,30 @@ def test_environment_utilities(case: Case, request: pytest.FixtureRequest) -> No
 
 
 def _run_vendor_lead_time_alignment(_: pytest.FixtureRequest) -> None:
-    from cad_quoter.pricing import vendor_lead_times, vendor_utils
+    from cad_quoter.pricing import vendor_lead_times
 
-    for raw in ["3-5 days", "rush", 10, None]:
-        assert vendor_utils.coerce_lead_time_days(raw) == vendor_lead_times.coerce_lead_time_days(raw)
+    cases = [
+        ("3-5 days", 5),
+        ("rush", 1),
+        (10, 10),
+        (None, None),
+    ]
+    for raw, expected in cases:
+        assert vendor_lead_times.coerce_lead_time_days(raw) == expected
 
 
 def _run_vendor_lead_time_adjustment(_: pytest.FixtureRequest) -> None:
-    from cad_quoter.pricing import vendor_lead_times, vendor_utils
+    from cad_quoter.pricing import vendor_lead_times
 
-    for base, includes_weekends, rush in [
-        (10, False, False),
-        (10, True, True),
-        ("2 weeks", True, False),
-        (None, False, False),
+    for base, includes_weekends, rush, expected in [
+        (10, False, False, 10),
+        (10, True, True, 6),
+        ("2 weeks", True, False, 10),
+        (None, False, False, None),
     ]:
-        assert vendor_utils.apply_lead_time_adjustments(
+        assert vendor_lead_times.apply_lead_time_adjustments(
             base, includes_weekends=includes_weekends, rush=rush
-        ) == vendor_lead_times.apply_lead_time_adjustments(
-            base, includes_weekends=includes_weekends, rush=rush
-        )
+        ) == expected
 
 
 @pytest.mark.parametrize(
@@ -921,9 +925,9 @@ def test_adjust_drill_counts_subtracts_row_pilots() -> None:
         cb_groups={},
     )
 
-    assert adjusted[round(0.1590, 4)] == 0
-    assert adjusted[round(0.5312, 4)] == 0
-    assert adjusted[round(0.3390, 4)] == 0
+    assert round(0.1590, 4) not in adjusted
+    assert round(0.5312, 4) not in adjusted
+    assert round(0.3390, 4) not in adjusted
 
 
 def test_adjust_drill_counts_sanitizes_inputs() -> None:
@@ -940,9 +944,9 @@ def test_adjust_drill_counts_sanitizes_inputs() -> None:
         },
     )
 
-    assert adjusted[round(0.25, 4)] == 0
+    assert round(0.25, 4) not in adjusted
     assert adjusted[round(0.5, 4)] == 3
-    assert adjusted[round(1.25, 4)] == 0
+    assert round(1.25, 4) not in adjusted
     for dia, qty in adjusted.items():
         assert qty <= counts_raw.get(dia, 0)
 
