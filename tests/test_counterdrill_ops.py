@@ -7,29 +7,30 @@ import pytest
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
-PKG_SRC = PROJECT_ROOT / "cad_quoter_pkg" / "src"
-if str(PKG_SRC) not in sys.path:
-    sys.path.insert(0, str(PKG_SRC))
 
 try:  # pragma: no cover - test bootstrap helper
     import cad_quoter.geometry.dxf_enrich  # type: ignore[import-not-found]
 except ModuleNotFoundError:  # pragma: no cover - load shim for tests
-    spec = importlib.util.spec_from_file_location(
-        "cad_quoter.geometry.dxf_enrich",
-        PROJECT_ROOT
-        / "cad_quoter_pkg"
-        / "src"
-        / "cad_quoter"
-        / "geometry"
-        / "dxf_enrich.py",
+    geometry_dir = (
+        PROJECT_ROOT / "cad_quoter_pkg" / "src" / "cad_quoter" / "geometry"
     )
-    if spec and spec.loader:
-        module = importlib.util.module_from_spec(spec)
-        sys.modules[spec.name] = module
-        spec.loader.exec_module(module)  # type: ignore[attr-defined]
-        import cad_quoter.geometry as _geometry_pkg  # type: ignore[import-not-found]
 
-        setattr(_geometry_pkg, "dxf_enrich", module)
+    for _module_name in ("dxf_text", "dxf_enrich"):
+        spec = importlib.util.spec_from_file_location(
+            f"cad_quoter.geometry.{_module_name}",
+            geometry_dir / f"{_module_name}.py",
+        )
+        if spec and spec.loader:
+            module = importlib.util.module_from_spec(spec)
+            sys.modules[spec.name] = module
+            spec.loader.exec_module(module)  # type: ignore[attr-defined]
+
+    import cad_quoter.geometry as _geometry_pkg  # type: ignore[import-not-found]
+
+    for _module_name in ("dxf_text", "dxf_enrich"):
+        module = sys.modules.get(f"cad_quoter.geometry.{_module_name}")
+        if module is not None:
+            setattr(_geometry_pkg, _module_name, module)
 
 from appV5 import (  # noqa: E402  # pylint: disable=wrong-import-position
     _append_counterbore_spot_jig_cards,
