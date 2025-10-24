@@ -13459,25 +13459,22 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
     geo_map = _get_geo_map(ctx, locals().get("geo"), ctx_a, ctx_b)
     material_group = _get_material_group(ctx, ctx_a, ctx_b)
 
-    drilling_meta_snapshot: Any = {}
+    drilling_meta_snapshot: Mapping[str, Any] = {}
     try:
-        if isinstance(ctx_b, (_MappingABC, dict)):
+        if isinstance(result, (_MappingABC, dict)):
             drilling_meta_snapshot = (
-                ctx_b.get("drilling_meta")
-                or ctx_b.get("speeds_feeds_table")
+                result.get("drilling_meta")
+                or result.get("speeds_feeds_table")
                 or {}
             )
-    except Exception:
-        drilling_meta_snapshot = {}
-    if not drilling_meta_snapshot and isinstance(breakdown, (_MappingABC, dict)):
-        try:
+        if not drilling_meta_snapshot and isinstance(breakdown, (_MappingABC, dict)):
             drilling_meta_snapshot = (
                 breakdown.get("drilling_meta")
                 or breakdown.get("speeds_feeds_table")
                 or {}
             )
-        except Exception:
-            drilling_meta_snapshot = {}
+    except Exception:
+        drilling_meta_snapshot = {}
 
     ops_summary_map = None
     ops_rows: list[Any] = []
