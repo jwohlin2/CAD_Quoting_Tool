@@ -12621,6 +12621,7 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
     except Exception as e:
         _push(lines, f"[DEBUG] material_removal_emit_skipped={e.__class__.__name__}: {e}")
     else:
+        extra_ops_lines_appended = 0
         try:
             if not ops_rows:
                 chart_lines_all = _collect_chart_lines_context(ctx, geo_map, ctx_a, ctx_b)
@@ -12853,7 +12854,7 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
                     f"[DEBUG] extra_ops_lines={len(appended_later_extra_ops_lines)}",
                 )
                 removal_summary_extra_lines.extend(appended_later_extra_ops_lines)
-                extra_ops_lines_appended = True
+                extra_ops_lines_appended = 1
 
             # Emit the cards (will no-op if no TAP/CBore/Spot rows)
             pre_ops_len = len(lines)
@@ -12899,7 +12900,7 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
                     for entry in appended_fallback_extra_ops_lines:
                         if not entry.startswith("[DEBUG]"):
                             removal_summary_extra_lines.append(entry)
-                    extra_ops_lines_appended = True
+                    extra_ops_lines_appended = 1
         except Exception as e:
             _push(
                 lines,
