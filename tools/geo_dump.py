@@ -1,10 +1,20 @@
 from __future__ import annotations
 
 import argparse
+import os
+import sys
 from collections.abc import Mapping
+from pathlib import Path
+from typing import Sequence
+
+REPO_ROOT = Path(__file__).resolve().parent.parent
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
 
 from cad_quoter import geo_extractor
 from cad_quoter.geo_extractor import extract_geo_from_path
+
+DEFAULT_SAMPLE_PATH = REPO_ROOT / "Cad Files" / "301_redacted.dwg"
 
 
 def _sum_qty(rows: list[Mapping[str, object]] | None) -> int:
@@ -19,9 +29,9 @@ def _sum_qty(rows: list[Mapping[str, object]] | None) -> int:
     return total
 
 
-def main() -> None:
+def main(argv: Sequence[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Dump GEO operations summary from a DXF/DWG file")
-    parser.add_argument("path", help="Path to the DXF or DWG file")
+    parser.add_argument("path", nargs="?", help="Path to the DXF or DWG file")
     parser.add_argument("--no-oda", dest="use_oda", action="store_false", help="Disable ODA fallback")
     parser.add_argument("--debug", action="store_true", help="Print the first 10 rows for inspection")
     parser.add_argument(
@@ -29,7 +39,12 @@ def main() -> None:
         action="store_true",
         help="Print helper resolution diagnostics",
     )
-    args = parser.parse_args()
+    args = parser.parse_args(argv)
+
+    path = (args.path or os.environ.get("GEO_DUMP_PATH") or "").strip()
+    if not path:
+        path = str(DEFAULT_SAMPLE_PATH)
+        print(f"[geo_dump] Using default sample: {path}")
 
     if args.show_helpers:
         acad_helper = geo_extractor._resolve_app_callable("hole_count_from_acad_table")
@@ -43,7 +58,7 @@ def main() -> None:
             )
         )
 
-    geo = extract_geo_from_path(args.path, use_oda=args.use_oda)
+    geo = extract_geo_from_path(path, use_oda=args.use_oda)
     ops_summary = geo.get("ops_summary") if isinstance(geo, Mapping) else {}
     if not isinstance(ops_summary, Mapping):
         ops_summary = {}
@@ -75,6 +90,7 @@ def main() -> None:
                 f"  [{idx:02d}] QTY={qty} REF={ref} SIDE={row.get('side') if isinstance(row, Mapping) else ''} DESC={desc} HOLE={hole}"
             )
 
+    return 0
 
 if __name__ == "__main__":  # pragma: no cover - CLI entry point
-    main()
+    raise SystemExit(main())
