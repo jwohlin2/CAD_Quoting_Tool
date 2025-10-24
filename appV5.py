@@ -2098,6 +2098,38 @@ def _ops_counts_from_geo_and_locals(
         if cb_total > counts["counterbore"]:
             counts["counterbore"] = cb_total
 
+    # NEW: prefer explicit totals from geo.ops_summary.totals if available
+    try:
+        ops_totals = (
+            core_geo.get("ops_summary", {}).get("totals", {})
+            if isinstance(core_geo, (_MappingABC, dict))
+            else {}
+        )
+    except Exception:
+        ops_totals = {}
+    if isinstance(ops_totals, (_MappingABC, dict)) and ops_totals:
+
+        def _sum_keys(substrs: tuple[str, ...]) -> int:
+            s = 0
+            for k, v in ops_totals.items():
+                kl = str(k).lower()
+                if any(sub in kl for sub in substrs):
+                    try:
+                        s += int(round(float(v)))
+                    except Exception:
+                        continue
+            return s
+
+        counts["tap"] = max(counts["tap"], _sum_keys(("tap",)))
+        counts["counterbore"] = max(
+            counts["counterbore"], _sum_keys(("counterbore", "cbore"))
+        )
+        counts["counterdrill"] = max(
+            counts["counterdrill"], _sum_keys(("counterdrill",))
+        )
+        counts["jig-grind"] = max(counts["jig-grind"], _sum_keys(("jig",)))
+        # don't try to infer "drill" actions from ops_totals—geometry/engine handles drilling
+
     drill_candidates: list[int] = [counts["drill"]]
     tap_candidates: list[int] = [counts["tap"]]
     cb_candidates: list[int] = [counts["counterbore"]]
