@@ -129,15 +129,31 @@ def test_prepare_render_rates_backfills_missing_entries() -> None:
 
 
 def test_prepare_render_rates_preserves_explicit_values() -> None:
-    flat_rates: dict[str, float] = {"InspectionRate": 22.5}
+    flat_rates: dict[str, float] = {"FinishingRate": 62.5}
 
     prepared = rates.prepare_render_rates(
         flat_rates,
         default_two_bucket=_sample_two_bucket_defaults(),
     )
 
-    assert prepared["InspectionRate"] == pytest.approx(22.5)
-    assert flat_rates["InspectionRate"] == pytest.approx(22.5)
+    assert prepared["FinishingRate"] == pytest.approx(62.5)
+    assert flat_rates["FinishingRate"] == pytest.approx(62.5)
+
+
+def test_prepare_render_rates_clamps_programming_and_inspection_to_defaults() -> None:
+    flat_rates: dict[str, float] = {"ProgrammingRate": 20.0, "InspectionRate": 10.0}
+
+    prepared = rates.prepare_render_rates(
+        flat_rates,
+        default_two_bucket=_sample_two_bucket_defaults(),
+    )
+
+    assert prepared["ProgrammingRate"] == pytest.approx(55.0)
+    assert prepared["ProgrammerRate"] == pytest.approx(55.0)
+    assert prepared["InspectionRate"] == pytest.approx(40.0)
+    assert prepared["InspectorRate"] == pytest.approx(40.0)
+    assert flat_rates["ProgrammingRate"] == pytest.approx(55.0)
+    assert flat_rates["InspectionRate"] == pytest.approx(40.0)
 
 
 def test_prepare_render_rates_applies_cfg_overrides() -> None:
