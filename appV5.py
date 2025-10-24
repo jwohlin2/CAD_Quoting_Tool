@@ -1387,11 +1387,21 @@ def _build_ops_cards_from_chart_lines(
 
     # guard: only build once per render pass
     try:
-        root_state = breakdown_mutable or breakdown or {}
+        root_state: MutableMapping[str, Any] | None = None
+        if breakdown_mutable is not None:
+            root_state = breakdown_mutable
+        elif breakdown is not None:
+            root_state = breakdown
+
         if isinstance(root_state, dict):
             if root_state.get("_ops_cards_once"):
                 return ["[DEBUG] extra_ops_appended=1 (skipped duplicate)"]
             root_state["_ops_cards_once"] = True
+        elif isinstance(root_state, _MutableMappingABC):
+            root_state_mut = typing.cast(MutableMapping[str, Any], root_state)
+            if root_state_mut.get("_ops_cards_once"):
+                return ["[DEBUG] extra_ops_appended=1 (skipped duplicate)"]
+            root_state_mut["_ops_cards_once"] = True
     except Exception:
         pass
 
