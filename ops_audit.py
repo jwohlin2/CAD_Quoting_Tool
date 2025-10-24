@@ -30,7 +30,7 @@ _parse_qty = _shared_parse_qty
 _side = _shared_side
 
 _COUNTERDRILL_RE = re.compile(
-    r"\b(?:C[’']\s*DRILL|C[-\s]*DRILL|COUNTER[-\s]*DRILL)\b",
+    r"\b(?:C[’']\s*DRILL|C\s*DRILL|COUNTER[-\s]*DRILL)\b",
     re.IGNORECASE,
 )
 _CENTER_OR_SPOT_RE = re.compile(

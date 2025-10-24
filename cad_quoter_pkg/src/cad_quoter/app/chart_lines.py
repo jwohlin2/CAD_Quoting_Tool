@@ -204,7 +204,7 @@ _RE_PAREN_DIA = re.compile(r"\(([0-9.]+)\s*Ø?\)")
 _RE_DIA_SIMPLE = re.compile(r"(?:%%[Cc]\s*|[Ø⌀\u00D8]\s*)?(\d+(?:\.\d+)?)", re.I)
 _RE_JIG_GRIND = re.compile(r"\bJIG\s*GRIND\b", re.I)
 _RE_COUNTERDRILL = re.compile(
-    r"\b(?:C[’']\s*DRILL|C\s*DRILL|COUNTER\s*DRILL|COUNTERDRILL)\b",
+    r"\b(?:C[’']\s*DRILL|C\s*DRILL|COUNTER[-\s]*DRILL)\b",
     re.I,
 )
 _RE_CENTER_OR_SPOT = re.compile(r"\b(CENTER\s*DRILL|SPOT\s*DRILL|SPOT)\b", re.I)
@@ -334,7 +334,11 @@ def _build_ops_rows_from_lines_fallback(lines: list[str]) -> list[dict]:
             out.append(row)
             i += 1
             continue
-        if _RE_COUNTERDRILL.search(ln) and not _RE_CENTER_OR_SPOT.search(ln):
+        if (
+            _RE_COUNTERDRILL.search(ln)
+            and not _RE_CENTER_OR_SPOT.search(ln)
+            and "DRILL THRU" not in ln.upper()
+        ):
             tail = " ".join([ln] + L[i + 1:i + 2])
             depth_match = _RE_DEPTH_MULT.search(tail)
             depth_value = depth_match.group(1) if depth_match else None
