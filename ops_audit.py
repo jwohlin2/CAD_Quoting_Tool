@@ -30,7 +30,7 @@ _parse_qty = _shared_parse_qty
 _side = _shared_side
 
 _COUNTERDRILL_RE = re.compile(
-    r"\b(?:C[’']\s*DRILL|C\s*DRILL|COUNTER\s*DRILL|COUNTERDRILL)\b",
+    r"\b(?:C[’']\s*DRILL|C[-\s]*DRILL|COUNTER[-\s]*DRILL)\b",
     re.IGNORECASE,
 )
 _CENTER_OR_SPOT_RE = re.compile(
@@ -65,7 +65,11 @@ def _row_kind(row: Any) -> str:
             return "tap"
         if _CB_DIA_RE.search(text) or any(token in U for token in ("C'BORE", "CBORE", "COUNTER BORE")):
             return "counterbore"
-        if _COUNTERDRILL_RE.search(text) and not _CENTER_OR_SPOT_RE.search(text):
+        if (
+            _COUNTERDRILL_RE.search(text)
+            and not _CENTER_OR_SPOT_RE.search(text)
+            and not _DRILL_THRU.search(text)
+        ):
             return "counterdrill"
         if (
             _SPOT_RE_TXT.search(text)
@@ -150,7 +154,11 @@ def _extract_ops_from_text(text: str) -> dict[str, int]:
             else:
                 counts["counterbores_front"] += qty
 
-        counterdrill_hit = _COUNTERDRILL_RE.search(s) and not _CENTER_OR_SPOT_RE.search(s)
+        counterdrill_hit = (
+            _COUNTERDRILL_RE.search(s)
+            and not _CENTER_OR_SPOT_RE.search(s)
+            and not _DRILL_THRU.search(s)
+        )
         if counterdrill_hit:
             counts["counterdrill"] += qty
         elif (

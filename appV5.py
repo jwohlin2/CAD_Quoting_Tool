@@ -85,6 +85,7 @@ from collections.abc import (
     Iterator,
     Mapping as _MappingABC,
     MutableMapping as _MutableMappingABC,
+    MutableSet as _MutableSetABC,
     Sequence,
 )
 from dataclasses import dataclass, field, replace
@@ -149,7 +150,7 @@ _MM_DIM_TOKEN = re.compile(
 )
 
 _COUNTERDRILL_RE = re.compile(
-    r"\b(?:C[’']\s*DRILL|C\s*DRILL|COUNTER\s*DRILL|COUNTERDRILL)\b",
+    r"\b(?:C[’']\s*DRILL|C[-\s]*DRILL|COUNTER[-\s]*DRILL)\b",
     re.IGNORECASE,
 )
 _CENTER_OR_SPOT_RE = re.compile(
@@ -722,28 +723,54 @@ def _build_ops_cards_from_chart_lines(
         chart_claims.get("cb_groups") or {}
     )
 
+    printed_candidate: Any = None
     try:
         if isinstance(breakdown_mutable, dict):
-            derived = breakdown_mutable.setdefault("derived_ops", {})
+            printed_candidate = breakdown_mutable.setdefault(
+                "_ops_cards_printed", set()
+            )
         elif isinstance(breakdown_mutable, _MutableMappingABC):
-            derived = typing.cast(
+            printed_candidate = typing.cast(
+                MutableMapping[str, Any],
+                breakdown_mutable,
+            ).setdefault("_ops_cards_printed", set())
+    except Exception:
+        printed_candidate = None
+
+    printed: MutableSet[str] | None = None
+    if isinstance(printed_candidate, (_MutableSetABC, set)):
+        printed = typing.cast(MutableSet[str], printed_candidate)
+
+    if printed is not None:
+        if "cbore" in printed:
+            return lines
+        printed.add("cbore")
+
+    derived_candidate: Any = None
+    try:
+        if isinstance(breakdown_mutable, dict):
+            derived_candidate = breakdown_mutable.setdefault("derived_ops", {})
+        elif isinstance(breakdown_mutable, _MutableMappingABC):
+            derived_candidate = typing.cast(
                 MutableMapping[str, Any],
                 breakdown_mutable,
             ).setdefault("derived_ops", {})
-        else:
-            derived = None
-        if isinstance(derived, (_MutableMappingABC, dict)):
-            serial: dict[tuple[float | None, str, float | None], int] = {}
-            for (dia, side, depth), qty in cb_groups.items():
-                key = (
-                    float(dia) if dia is not None else None,
-                    str(side),
-                    float(depth) if depth is not None else None,
-                )
-                serial[key] = int(qty or 0)
-            derived["cb_groups"] = serial  # type: ignore[index]
     except Exception:
-        pass
+        derived_candidate = None
+
+    if isinstance(derived_candidate, (_MutableMappingABC, dict)):
+        serial: dict[tuple[float | None, str, float | None], int] = {}
+        for (dia, side, depth), qty in cb_groups.items():
+            key = (
+                float(dia) if dia is not None else None,
+                str(side),
+                float(depth) if depth is not None else None,
+            )
+            serial[key] = int(qty or 0)
+        try:
+            derived_candidate["cb_groups"] = serial  # type: ignore[index]
+        except Exception:
+            pass
     spot_qty = int(chart_claims.get("spot") or 0)
     jig_qty = int(chart_claims.get("jig") or 0)
 
@@ -1119,6 +1146,8 @@ _NPT_PILOT_IN: dict[str, float] = {
 def _count_counterdrill_from_chart(cleaned: list[str]) -> int:
     tot = 0
     for s in (cleaned or []):
+        if _DRILL_THRU.search(s):  # exclude straight drill-thru rows
+            continue
         if _CENTER_OR_SPOT_RE.search(s):  # exclude “spot”
             continue
         if _COUNTERDRILL_RE.search(s):
@@ -1137,10 +1166,12 @@ def _count_jig_from_chart(cleaned: list[str]) -> int:
 
 
 def _collect_pilot_claims(
-    geo_map: dict,
+    geo_map: Mapping[str, Any] | None,
+    chart_lines: Sequence[str] | None = None,
+    rows: Sequence[Mapping[str, Any]] | None = None,
     *,
-    breakdown,
-    result,
+    breakdown: Mapping[str, Any] | None = None,
+    result: Mapping[str, Any] | None = None,
 ) -> list[float]:
     """Tap/NPT/pilot claims harvested from chart lines and ops rows."""
 
@@ -1155,38 +1186,51 @@ def _collect_pilot_claims(
     NPT_PILOT = {"1/8": 0.3390}
 
     # ---- rows from ops_summary (if any)
-    rows = (((geo_map or {}).get("ops_summary") or {}).get("rows") or [])
-    if isinstance(rows, dict):
-        rows = list(rows.values())
-    if not isinstance(rows, list):
-        rows = []
-    for r in rows:
+    rows_seq: Sequence[Any]
+    if rows is not None:
+        rows_seq = rows
+    else:
+        rows_seq = (((geo_map or {}).get("ops_summary") or {}).get("rows") or [])  # type: ignore[union-attr]
+    if isinstance(rows_seq, dict):
+        rows_seq = list(rows_seq.values())
+    if not isinstance(rows_seq, list):
+        rows_seq = []
+    for r in rows_seq:
         if not isinstance(r, dict):
             continue
         desc = str(r.get("desc") or r.get("name") or "")
-        qty = int(r.get("qty") or 1)
+        qty_raw = r.get("qty")
+        try:
+            qty = int(qty_raw)
+        except Exception:
+            qty = _parse_qty(str(qty_raw or "")) if qty_raw is not None else 0
+        if qty <= 0:
+            qty = 1
         U = desc.upper().replace(" ", "")
         for spec, dia in TAP_PILOT.items():
             if spec.replace(" ", "") in U:
                 claims.extend([dia] * qty)
         if "NPT" in U and "1/8" in U:
             claims.extend([NPT_PILOT["1/8"]] * qty)
-        m = re.search(r"(\d+\.\d+)\s*DRILL\s*THRU", desc, re.I)
+        m = re.search(r"(\d*\.\d+)[^0-9]*DRILL\s*THRU", desc, re.I)
         if m:
             claims.extend([float(m.group(1))] * qty)
 
     # ---- chart lines (existing collectors)
-    try:
-        chart_lines = (
-            _collect_chart_lines_context(None, geo_map, None, None)
-            or _get_chart_lines_for_ops(breakdown, result, ctx=None, ctx_a=None, ctx_b=None)
-            or []
-        )
-    except Exception:
-        chart_lines = []
+    if chart_lines is None:
+        try:
+            chart_lines = (
+                _collect_chart_lines_context(None, geo_map, None, None)
+                or _get_chart_lines_for_ops(
+                    breakdown, result, ctx=None, ctx_a=None, ctx_b=None
+                )
+                or []
+            )
+        except Exception:
+            chart_lines = []
 
     cleaned: list[str] = []
-    for s in chart_lines:
+    for s in chart_lines or []:
         try:
             c = _clean_mtext(str(s or ""))
             if c:
@@ -1205,7 +1249,7 @@ def _collect_pilot_claims(
         if "N.P.T" in body or "NPT" in body:
             if "1/8" in body:
                 claims.extend([NPT_PILOT["1/8"]] * qty)
-        m2 = re.search(r"([0-9]+\.[0-9]+)\s*DRILL\s*THRU", body)
+        m2 = re.search(r"(\d*\.\d+)[^0-9]*DRILL\s*THRU", body)
         if m2:
             claims.extend([float(m2.group(1))] * qty)
 
@@ -1317,14 +1361,18 @@ def _adjust_drill_counts(
         return {}
 
     bins = sorted(counts)
-
-    def _nearest(val: float) -> float | None:
-        return min(bins, key=lambda b: abs(b - val)) if bins else None
+    nearest = (
+        lambda val: min(bins, key=lambda b: abs(b - val)) if bins else None
+    )
 
     # subtract pilots
     for dia, qty in Counter(pilot_claims or []).items():
-        tgt = _nearest(dia)
-        if tgt is not None and abs(tgt - dia) <= 0.015:
+        try:
+            dia_f = float(dia)
+        except Exception:
+            continue
+        tgt = nearest(dia_f)
+        if tgt is not None and abs(tgt - dia_f) <= 0.015:
             counts[tgt] = max(0, counts[tgt] - int(qty))
 
     # subtract c'bore faces (don’t double count as drills)
@@ -1337,7 +1385,7 @@ def _adjust_drill_counts(
         if 0.05 <= f <= 3.0:
             face_ctr[round(f, 4)] += int(q)
     for face_d, face_q in face_ctr.items():
-        tgt = _nearest(face_d)
+        tgt = nearest(face_d)
         if tgt is not None and abs(tgt - face_d) <= 0.02:
             counts[tgt] = max(0, counts[tgt] - int(face_q))
 
@@ -1346,7 +1394,7 @@ def _adjust_drill_counts(
         if d >= 1.0:
             counts[d] = 0
 
-    return counts
+    return {d: q for d, q in counts.items() if q > 0}
 
 
 def _apply_ops_audit_counts(
@@ -4374,12 +4422,14 @@ def _compute_drilling_removal_section(
                 or {}
             )
 
-            def _seed_drill_bins_from_geo__local(g: dict) -> dict[float, int]:
+            def _seed_drill_bins_from_geo__local(
+                g: Mapping[str, Any] | None,
+            ) -> dict[float, int]:
                 out: dict[float, int] = {}
-                if not isinstance(g, dict):
+                if not isinstance(g, Mapping):
                     return out
 
-                # Prefer ready-made families
+                # 1) Families (already grouped)
                 for key in (
                     "hole_diam_families_geom_in",
                     "hole_diam_families_in",
@@ -4387,39 +4437,44 @@ def _compute_drilling_removal_section(
                     "hole_diam_families",
                 ):
                     fam = g.get(key)
-                    if isinstance(fam, dict) and fam:
+                    if isinstance(fam, Mapping) and fam:
                         for k, v in fam.items():
                             try:
                                 d = float(str(k).replace('"', "").strip())
                                 q = int(v or 0)
                                 if q > 0:
-                                    out[round(d, 4)] = out.get(round(d, 4), 0) + q
+                                    d = round(d, 3)
+                                    out[d] = out.get(d, 0) + q
                             except Exception:
                                 pass
                         if out:
                             return out
 
-                # Fall back to raw lists
-                holes_in = g.get("hole_diams_in") or g.get("hole_diams_geom_in")
-                holes_mm = g.get("hole_diams_mm") or g.get("hole_diams_geom_mm")
+                # 2) Lists (prefer precise), IN then MM
+                for key_in in ("hole_diams_in_precise", "hole_diams_in"):
+                    seq = g.get(key_in)
+                    if isinstance(seq, (list, tuple)) and seq:
+                        for x in seq:
+                            try:
+                                d = round(float(x), 3)
+                                out[d] = out.get(d, 0) + 1
+                            except Exception:
+                                pass
+                        if out:
+                            return out
 
-                def _acc(seq, mm=False):
-                    if not isinstance(seq, (list, tuple)):
-                        return
-                    for x in seq:
-                        try:
-                            d = float(x)
-                            if mm:
-                                d /= 25.4
-                            d = round(d, 3)
-                            out[d] = out.get(d, 0) + 1
-                        except Exception:
-                            pass
+                for key_mm in ("hole_diams_mm_precise", "hole_diams_mm"):
+                    seq = g.get(key_mm)
+                    if isinstance(seq, (list, tuple)) and seq:
+                        for x in seq:
+                            try:
+                                d = round(float(x) / 25.4, 3)
+                                out[d] = out.get(d, 0) + 1
+                            except Exception:
+                                pass
+                        if out:
+                            return out
 
-                if holes_in:
-                    _acc(holes_in, mm=False)
-                if not out and holes_mm:
-                    _acc(holes_mm, mm=True)
                 return out
 
             # 1) RAW bins (single source of truth)
@@ -4431,10 +4486,12 @@ def _compute_drilling_removal_section(
             )
 
             # 2) Collect pilots from chart text + ops rows
-            import re
             from collections import Counter
+            import re
 
-            def _collect_pilot_claims__local(g: dict) -> list[float]:
+            def _collect_pilot_claims__local(
+                g: Mapping[str, Any] | None, cleaned_chart: list[str]
+            ) -> list[float]:
                 claims: list[float] = []
                 TAP_PILOT = {
                     "#10-32": 0.1590,
@@ -4462,31 +4519,12 @@ def _compute_drilling_removal_section(
                             claims.extend([dia] * qty)
                     if "NPT" in U and "1/8" in U:
                         claims.extend([NPT_PILOT["1/8"]] * qty)
-                    m = re.search(r"(\d+\.\d+)\s*DRILL\s*THRU", desc, re.I)
+                    m = re.search(r"(\d*\.\d+)[^0-9]*DRILL\s*THRU", desc, re.I)
                     if m:
                         claims.extend([float(m.group(1))] * qty)
 
                 # chart lines
-                try:
-                    cl = (
-                        _collect_chart_lines_context(None, g, None, None)
-                        or _get_chart_lines_for_ops(
-                            breakdown, result, ctx=None, ctx_a=None, ctx_b=None
-                        )
-                        or []
-                    )
-                except Exception:
-                    cl = []
-                cleaned = []
-                for s in cl:
-                    try:
-                        c = _clean_mtext(str(s or ""))
-                        if c:
-                            cleaned.append(c)
-                    except Exception:
-                        pass
-
-                for s in cleaned:
+                for s in cleaned_chart:
                     u = s.upper()
                     mqty = re.match(r"\s*\((\d+)\)\s*(.*)$", u)
                     qty = int(mqty.group(1)) if mqty else 1
@@ -4497,11 +4535,11 @@ def _compute_drilling_removal_section(
                     if "N.P.T" in body or "NPT" in body:
                         if "1/8" in body:
                             claims.extend([NPT_PILOT["1/8"]] * qty)
-                    m2 = re.search(r"([0-9]+\.[0-9]+)\s*DRILL\s*THRU", body)
+                    m2 = re.search(r"(\d*\.\d+)[^0-9]*DRILL\s*THRU", body)
                     if m2:
                         claims.extend([float(m2.group(1))] * qty)
 
-                out = []
+                out: list[float] = []
                 for v in claims:
                     try:
                         f = float(v)
@@ -4511,7 +4549,26 @@ def _compute_drilling_removal_section(
                         pass
                 return out
 
-            _pilot_claims = _collect_pilot_claims__local(_geo_map)
+            _cleaned_chart: list[str] = []
+            try:
+                _chart = (
+                    _collect_chart_lines_context(None, _geo_map, None, None)
+                    or _get_chart_lines_for_ops(
+                        breakdown, result, ctx=None, ctx_a=None, ctx_b=None
+                    )
+                    or []
+                )
+            except Exception:
+                _chart = []
+            for s in _chart:
+                try:
+                    c = _clean_mtext(str(s or ""))
+                    if c:
+                        _cleaned_chart.append(c)
+                except Exception:
+                    pass
+
+            _pilot_claims = _collect_pilot_claims__local(_geo_map, _cleaned_chart)
             _push(lines, f"[DEBUG] pilot_claims={len(_pilot_claims)} example={_pilot_claims[:5]}")
 
             # 3) Pick up c’bore groups captured by the ops-card builder (if you stored them)
@@ -4547,8 +4604,12 @@ def _compute_drilling_removal_section(
 
                 # subtract pilots
                 for dia, qty in Counter(pilots or []).items():
-                    tgt = _nearest(dia)
-                    if tgt is not None and abs(tgt - dia) <= 0.015:
+                    try:
+                        dia_f = float(dia)
+                    except Exception:
+                        continue
+                    tgt = _nearest(dia_f)
+                    if tgt is not None and abs(tgt - dia_f) <= 0.015:
                         counts[tgt] = max(0, counts[tgt] - int(qty))
 
                 # subtract c’bore faces
@@ -4694,11 +4755,10 @@ def _compute_drilling_removal_section(
             for ln in drill_group_lines:
                 lines.append(ln)
 
+            _total_drills = sum(_drill_bins_adj.values())
             if isinstance(breakdown_mutable, (_MutableMappingABC, dict)):
                 try:
-                    extra_bucket_ops = typing.cast(
-                        MutableMapping[str, Any], breakdown_mutable
-                    ).setdefault("extra_bucket_ops", {})
+                    extra_bucket_ops = breakdown_mutable.setdefault("extra_bucket_ops", {})
                     extra_bucket_ops.setdefault("drill", []).append(
                         {"name": "Drill", "qty": int(_total_drills), "side": None}
                     )
@@ -12620,6 +12680,7 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
     except Exception as e:
         _push(lines, f"[DEBUG] material_removal_emit_skipped={e.__class__.__name__}: {e}")
     else:
+        extra_ops_lines_appended = 0
         try:
             if not ops_rows:
                 chart_lines_all = _collect_chart_lines_context(ctx, geo_map, ctx_a, ctx_b)
@@ -12775,8 +12836,22 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
                     counts_by_diam_obj = locals().get("_drill_bins_adj")
                 if not isinstance(counts_by_diam_obj, (_MappingABC, dict, Sequence)):
                     counts_by_diam_obj = None
-
-                drill_bins_adj_total = _sum_count_values(counts_by_diam_obj)
+                if counts_by_diam_raw_obj is None:
+                    candidate_raw = locals().get("_drill_bins_raw")
+                    if isinstance(candidate_raw, (_MappingABC, dict, Sequence)):
+                        counts_by_diam_raw_obj = candidate_raw
+                if counts_by_diam_obj is None:
+                    candidate_adj = locals().get("_drill_bins_adj")
+                    if isinstance(candidate_adj, (_MappingABC, dict, Sequence)):
+                        counts_by_diam_obj = candidate_adj
+                if counts_by_diam_raw_obj is None and isinstance(drilling_meta_snapshot, _MappingABC):
+                    candidate = drilling_meta_snapshot.get("counts_by_diam_raw")
+                    if isinstance(candidate, (_MappingABC, dict, Sequence)):
+                        counts_by_diam_raw_obj = candidate
+                if counts_by_diam_obj is None and isinstance(drilling_meta_snapshot, _MappingABC):
+                    candidate = drilling_meta_snapshot.get("counts_by_diam")
+                    if isinstance(candidate, (_MappingABC, dict, Sequence)):
+                        counts_by_diam_obj = candidate
                 _push(lines, f"[DEBUG] chart_lines_found={len(chart_lines_all)}")
                 _push(
                     lines,
@@ -12784,7 +12859,6 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
                     f"npt={ops_claims.get('npt', 0)} spot={ops_claims.get('spot', 0)} "
                     f"counterdrill={ops_claims.get('counterdrill', 0)} jig={ops_claims.get('jig', 0)}",
                 )
-                _push(lines, f"[DEBUG] DRILL bins adj={drill_bins_adj_total}")
 
                 # Seed minutes so Process table shows rows
                 try:
@@ -12832,7 +12906,7 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
                     f"[DEBUG] extra_ops_lines={len(appended_later_extra_ops_lines)}",
                 )
                 removal_summary_extra_lines.extend(appended_later_extra_ops_lines)
-                extra_ops_lines_appended = True
+                extra_ops_lines_appended = 1
 
             # Emit the cards (will no-op if no TAP/CBore/Spot rows)
             pre_ops_len = len(lines)
@@ -12878,7 +12952,7 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
                     for entry in appended_fallback_extra_ops_lines:
                         if not entry.startswith("[DEBUG]"):
                             removal_summary_extra_lines.append(entry)
-                    extra_ops_lines_appended = True
+                    extra_ops_lines_appended = 1
         except Exception as e:
             _push(
                 lines,

@@ -54,6 +54,8 @@ from cad_quoter.app.chart_lines import (  # noqa: E402  # pylint: disable=wrong-
         (["COUNTERDRILL"], 1),
         (["(5) COUNTER DRILL", "(2) center drill"], 5),
         (["(2) C’ DRILL"], 2),
+        (["(2) Counter-Drill"], 2),
+        (["DRILL THRU"], 0),
     ],
 )
 def test_count_counterdrill(lines: list[str], expected: int) -> None:
