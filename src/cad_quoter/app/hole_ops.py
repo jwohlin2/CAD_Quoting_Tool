@@ -389,6 +389,12 @@ def update_geo_ops_summary_from_hole_rows(
     ops_summary_map = geo.setdefault("ops_summary", {})
     ops_summary_map["rows"] = ops_rows
     ops_summary_map["source"] = chart_source or "chart_lines"
+    rows = ops_rows
+    try:
+        qty_sum = sum(int(r.get("qty") or 0) for r in rows)
+    except Exception:
+        qty_sum = 0
+    print(f"[EXTRACTOR] wrote ops rows: {len(rows)} (qty_sum={qty_sum})")
 
     totals_from_summary: dict[str, int] = {}
 
