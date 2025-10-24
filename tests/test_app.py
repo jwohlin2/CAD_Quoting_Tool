@@ -33,10 +33,12 @@ from appV5 import (  # noqa: E402  # pylint: disable=wrong-import-position
     _parse_hole_line,
     classify_concentric,
     hole_count_from_geometry,
+    hole_count_from_text_table,
     net_mass_kg,
     render_quote,
     summarize_hole_chart_lines,
     hole_rows_to_ops,
+    _normalize_text_table_lines,
 )
 
 try:  # noqa: E402  # pylint: disable=wrong-import-position
@@ -398,6 +400,26 @@ def test_build_ops_rows_from_lines_fallback_extracts_common_ops() -> None:
     }
 
     assert npt_row == {"hole": "", "ref": "", "qty": 1, "desc": "3/8 - NPT"}
+
+
+def test_hole_count_from_text_table_matches_normalized_rows() -> None:
+    lines = [
+        "metadata line",
+        "HOLE TABLE",
+        "HOLE | REF | QTY | DESCRIPTION",
+        "A | Ø0.250 | 4 | (4) 1/4-20 TAP THRU",
+        " | | | FROM BACK",
+        "B | 0.500 | 2 | (2) DRILL THRU",
+        "LIST OF COORDINATES",
+    ]
+
+    rows, expected_total, expected_families = _normalize_text_table_lines(lines)
+
+    count, families = hole_count_from_text_table(None, lines=lines)
+
+    assert expected_total == sum(row["qty"] for row in rows)
+    assert count == expected_total
+    assert families == expected_families
 
 
 @pytest.mark.parametrize(
