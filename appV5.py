@@ -815,6 +815,7 @@ from cad_quoter.app.hole_ops import (
     _SPOT_TOKENS,
     summarize_hole_chart_lines,
 )
+from cad_quoter.utils.number_parse import NUM_DEC_RE, NUM_FRAC_RE, _to_inch, first_inch_value
 from cad_quoter.app.container import (
     ServiceContainer,
     SupportsPricingEngine,
@@ -1424,24 +1425,19 @@ def _build_ops_cards_from_chart_lines(
             dia_val: float | None = None
             dia_match = _CB_DIA_RE.search(desc or "")
             if dia_match:
-                try:
-                    dia_val = float(dia_match.group(1))
-                except Exception:
-                    dia_val = None
+                raw = (dia_match.group("numA") or dia_match.group("numB") or "").strip()
+                dia_val = _to_inch(raw)
             if dia_val is None:
                 dm = RE_DIA.search(desc or "")
                 if dm:
-                    try:
-                        dia_val = float(dm.group(1))
-                    except Exception:
-                        dia_val = None
+                    dia_val = _to_inch(dm.group(1)) if dm.lastindex else None
+                    if dia_val is None:
+                        dia_val = first_inch_value(dm.group(0))
             dep_val: float | None = None
             dep_match = _X_DEPTH_RE.search(desc or "")
             if dep_match:
-                try:
-                    dep_val = float(dep_match.group(1))
-                except Exception:
-                    dep_val = None
+                depth_token = dep_match.group(1)
+                dep_val = _to_inch(depth_token)
             # must be a counterbore clause
             if RE_CBORE.search(desc or ""):
                 key = (dia_val, side_txt, dep_val)
@@ -3785,8 +3781,31 @@ def _depth_from_text(txt: str) -> float | None:
 
 
 def _cbore_dia_from_text(txt: str) -> float | None:
-    m = RE_DIA.search(txt or "")
-    return _float_or_none(m.group(1)) if m else None
+    text = txt or ""
+    m = _CB_DIA_RE.search(text)
+    if m:
+        raw = (m.group("numA") or m.group("numB") or "").strip()
+        val = _to_inch(raw)
+        if val is not None and val > 0:
+            return val
+    m = RE_DIA.search(text)
+    if m:
+        candidate = _to_inch(m.group(1)) if m.lastindex else None
+        if candidate is None:
+            candidate = first_inch_value(m.group(0))
+        if candidate is not None and candidate > 0:
+            return candidate
+    frac = NUM_FRAC_RE.search(text)
+    if frac:
+        val = _to_inch(f"{frac.group(1)}/{frac.group(2)}")
+        if val is not None and val > 0:
+            return val
+    dec = NUM_DEC_RE.search(text)
+    if dec:
+        val = _to_inch(dec.group(0))
+        if val is not None and val > 0:
+            return val
+    return None
 
 
 def _build_cbore_groups(rows: list[dict]) -> list[dict]:
