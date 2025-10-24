@@ -737,14 +737,16 @@ def _build_ops_cards_from_chart_lines(
     except Exception:
         printed_candidate = None
 
+    skip_cbore_card = False
     printed: MutableSet[str] | None = None
     if isinstance(printed_candidate, (_MutableSetABC, set)):
         printed = typing.cast(MutableSet[str], printed_candidate)
 
     if printed is not None:
         if "cbore" in printed:
-            return lines
-        printed.add("cbore")
+            skip_cbore_card = True
+        else:
+            printed.add("cbore")
 
     derived_candidate: Any = None
     try:
@@ -862,8 +864,9 @@ def _build_ops_cards_from_chart_lines(
 
     if isinstance(printed_flags, set):
         if "cbore" in printed_flags:
-            return lines
-        printed_flags.add("cbore")
+            skip_cbore_card = True
+        elif not skip_cbore_card:
+            printed_flags.add("cbore")
 
     bucket_view_obj: MutableMapping[str, Any] | Mapping[str, Any] | None = None
     if isinstance(target_breakdown, dict):
@@ -912,7 +915,7 @@ def _build_ops_cards_from_chart_lines(
 
     out_lines: list[str] = []
 
-    if cb_groups:
+    if cb_groups and not skip_cbore_card:
         front_cb = sum(
             int(qty)
             for (dia, side, _depth), qty in cb_groups.items()
@@ -1003,7 +1006,7 @@ def _build_ops_cards_from_chart_lines(
         except Exception:
             pass
 
-    if spot_qty > 0:
+    if spot_qty > 0 and not skip_cbore_card:
         per_spot = 0.05
         t_group = spot_qty * per_spot
         out_lines.extend(
@@ -1028,7 +1031,7 @@ def _build_ops_cards_from_chart_lines(
             {"name": "Spot drill", "qty": int(spot_qty), "side": "front"},
         )
 
-    if jig_qty > 0:
+    if jig_qty > 0 and not skip_cbore_card:
         per_jig = float(globals().get("JIG_GRIND_MIN_PER_FEATURE") or 0.75)
         t_group = jig_qty * per_jig
         out_lines.extend(
