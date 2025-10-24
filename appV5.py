@@ -4146,7 +4146,6 @@ def _compute_drilling_removal_section(
                     continue
         return total
 
-    drill_bins_raw_total = 0
     drill_bins_adj_total = 0
 
     pricing_buckets: MutableMapping[str, Any] | dict[str, Any] = {}
@@ -12832,17 +12831,9 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
                     except Exception:
                         pass
 
-                counts_by_diam_raw_obj = locals().get("counts_by_diam_raw")
                 counts_by_diam_obj = locals().get("counts_by_diam")
-                drilling_meta_snapshot = locals().get("drilling_meta_container")
-                if not isinstance(drilling_meta_snapshot, (_MappingABC, dict)):
-                    drilling_meta_snapshot = None
-                    if isinstance(breakdown_mutable, (_MappingABC, dict)):
-                        candidate_meta = breakdown_mutable.get("drilling_meta")
-                        if isinstance(candidate_meta, (_MappingABC, dict)):
-                            drilling_meta_snapshot = candidate_meta
-                if not isinstance(counts_by_diam_raw_obj, (_MappingABC, dict, Sequence)):
-                    counts_by_diam_raw_obj = None
+                if not isinstance(counts_by_diam_obj, (_MappingABC, dict, Sequence)):
+                    counts_by_diam_obj = locals().get("_drill_bins_adj")
                 if not isinstance(counts_by_diam_obj, (_MappingABC, dict, Sequence)):
                     counts_by_diam_obj = None
                 if counts_by_diam_raw_obj is None:
