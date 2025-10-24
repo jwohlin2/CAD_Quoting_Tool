@@ -1261,9 +1261,12 @@ def _build_ops_cards_from_chart_lines(
             fallback_rows = _build_ops_rows_from_lines_fallback(joined_chart)
         except Exception:
             fallback_rows = []
-        if fallback_rows:
+        if fallback_rows and isinstance(geo_map, (_MutableMappingABC, dict)):
             try:
-                update_geo_ops_summary_from_hole_rows(geo_map, fallback_rows)
+                update_geo_ops_summary_from_hole_rows(
+                    geo_map,
+                    hole_rows=fallback_rows,
+                )
             except Exception:
                 pass
             try:
