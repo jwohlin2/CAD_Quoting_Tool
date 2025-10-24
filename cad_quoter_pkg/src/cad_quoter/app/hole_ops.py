@@ -376,19 +376,21 @@ def update_geo_ops_summary_from_hole_rows(
         Iterable[Mapping[str, Any]] | None,
     ], int]
     | None = None,
-) -> list[dict[str, Any]]:
-    """Populate geo["ops_summary"] with rows derived from hole data."""
+) -> dict[str, Any]:
+    """Populate geo["ops_summary"] with rows and totals derived from hole data."""
 
     ops_rows = build_ops_summary_rows_from_hole_rows(hole_rows)
     if not ops_rows and chart_lines:
         ops_rows = _chart_build_ops_rows_from_lines_fallback(chart_lines)
 
     if not ops_rows:
-        return []
+        return {"rows": [], "totals": {}}
 
     ops_summary_map = geo.setdefault("ops_summary", {})
     ops_summary_map["rows"] = ops_rows
     ops_summary_map["source"] = chart_source or "chart_lines"
+
+    totals_from_summary: dict[str, int] = {}
 
     if apply_built_rows:
         try:
@@ -400,23 +402,38 @@ def update_geo_ops_summary_from_hole_rows(
         try:
             tap_qty = int(chart_summary.get("tap_qty") or 0)
             if tap_qty:
-                ops_summary_map["tap_total"] = tap_qty
+                totals_from_summary["tap_total"] = tap_qty
         except Exception:
             pass
         try:
             cbore_qty = int(chart_summary.get("cbore_qty") or 0)
             if cbore_qty:
-                ops_summary_map["cbore_total"] = cbore_qty
+                totals_from_summary["cbore_total"] = cbore_qty
         except Exception:
             pass
         try:
             csk_qty = int(chart_summary.get("csk_qty") or 0)
             if csk_qty:
-                ops_summary_map["csk_total"] = csk_qty
+                totals_from_summary["csk_total"] = csk_qty
         except Exception:
             pass
 
-    return ops_rows
+    if totals_from_summary:
+        existing_totals = ops_summary_map.get("totals")
+        if isinstance(existing_totals, Mapping):
+            totals_map = dict(existing_totals)
+            totals_map.update(totals_from_summary)
+        else:
+            totals_map = dict(totals_from_summary)
+        ops_summary_map["totals"] = totals_map
+        # Maintain legacy top-level keys for downstream compatibility.
+        for key, value in totals_from_summary.items():
+            ops_summary_map[key] = value
+
+    return {
+        "rows": ops_rows,
+        "totals": ops_summary_map.get("totals", {}),
+    }
 
 
 def _parse_hole_line(line: str, to_in: float, *, source: str | None = None) -> dict[str, Any] | None:
