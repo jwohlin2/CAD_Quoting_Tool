@@ -2631,6 +2631,79 @@ def _ops_counts_from_geo_and_locals(
     if isinstance(counterbore_from_groups, int) and counterbore_from_groups > 0:
         counts["counterbore"] = max(counts["counterbore"], counterbore_from_groups)
 
+    # 3b) Prefer explicit totals from geo.ops_summary.totals when present.
+    ops_totals_map: Mapping[str, Any] | None = None
+    for candidate in (geo_map, g):
+        if not isinstance(candidate, (_MappingABC, dict)):
+            continue
+        try:
+            summary = candidate.get("ops_summary")  # type: ignore[index]
+        except Exception:
+            summary = None
+        if not isinstance(summary, (_MappingABC, dict)):
+            continue
+        try:
+            totals_candidate = summary.get("totals")  # type: ignore[index]
+        except Exception:
+            totals_candidate = None
+        if isinstance(totals_candidate, (_MappingABC, dict)) and totals_candidate:
+            try:
+                ops_totals_map = dict(totals_candidate)
+            except Exception:
+                ops_totals_map = typing.cast(Mapping[str, Any], totals_candidate)
+            break
+
+    if ops_totals_map:
+
+        def _coerce_total(value: Any) -> int:
+            if value is None:
+                return 0
+            if isinstance(value, bool):
+                return int(value)
+            try:
+                if isinstance(value, (int, float)):
+                    numeric = float(value)
+                elif isinstance(value, str):
+                    text = value.strip()
+                    if not text:
+                        return 0
+                    if "/" in text and not any(ch.isalpha() for ch in text):
+                        numeric = float(Fraction(text))
+                    else:
+                        numeric = float(text)
+                else:
+                    numeric = float(value)
+            except Exception:
+                return 0
+            if not math.isfinite(numeric):
+                return 0
+            try:
+                return int(round(numeric))
+            except Exception:
+                return 0
+
+        def _sum_totals(substrs: tuple[str, ...]) -> int:
+            subtotal = 0
+            for key, raw in ops_totals_map.items():
+                key_lower = str(key).lower()
+                if not any(sub in key_lower for sub in substrs):
+                    continue
+                qty = max(0, _coerce_total(raw))
+                if qty > 0:
+                    subtotal += qty
+            return subtotal
+
+        counts["tap"] = max(counts["tap"], _sum_totals(("tap",)))
+        counts["counterbore"] = max(
+            counts["counterbore"], _sum_totals(("counterbore", "cbore"))
+        )
+        counts["counterdrill"] = max(
+            counts["counterdrill"], _sum_totals(("counterdrill",))
+        )
+        counts["jig-grind"] = max(counts["jig-grind"], _sum_totals(("jig",)))
+        # Do not attempt to infer drill totals from ops_totals; drill actions are
+        # derived from geometry/engine data elsewhere.
+
     # 4) (Optional) glean tiny hints from chart lines (just totals)
     for raw in chart_lines or []:
         s = str(raw or "").lower()
