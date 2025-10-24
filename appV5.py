@@ -12831,19 +12831,22 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
                     except Exception:
                         pass
 
-                counts_by_diam_obj = locals().get("counts_by_diam")
-                if not isinstance(counts_by_diam_obj, (_MappingABC, dict, Sequence)):
-                    counts_by_diam_obj = locals().get("_drill_bins_adj")
-                if not isinstance(counts_by_diam_obj, (_MappingABC, dict, Sequence)):
-                    counts_by_diam_obj = None
-                if counts_by_diam_raw_obj is None:
-                    candidate_raw = locals().get("_drill_bins_raw")
-                    if isinstance(candidate_raw, (_MappingABC, dict, Sequence)):
-                        counts_by_diam_raw_obj = candidate_raw
-                if counts_by_diam_obj is None:
-                    candidate_adj = locals().get("_drill_bins_adj")
-                    if isinstance(candidate_adj, (_MappingABC, dict, Sequence)):
-                        counts_by_diam_obj = candidate_adj
+                counts_by_diam_obj = None
+                try:
+                    candidate_counts = counts_by_diam  # type: ignore[name-defined]
+                except NameError:
+                    candidate_counts = None
+                derived_ops = ((breakdown or {}).get("derived_ops") or {})
+                src = derived_ops.get("drill_bins_adj") or {}
+                src_raw = derived_ops.get("drill_bins_raw") or {}
+                if isinstance(candidate_counts, (_MappingABC, dict, Sequence)):
+                    counts_by_diam_obj = candidate_counts
+                if counts_by_diam_obj is None and isinstance(src, (_MappingABC, dict, Sequence)):
+                    counts_by_diam_obj = src
+                if counts_by_diam_raw_obj is None and isinstance(
+                    src_raw, (_MappingABC, dict, Sequence)
+                ):
+                    counts_by_diam_raw_obj = src_raw
                 if counts_by_diam_raw_obj is None and isinstance(drilling_meta_snapshot, _MappingABC):
                     candidate = drilling_meta_snapshot.get("counts_by_diam_raw")
                     if isinstance(candidate, (_MappingABC, dict, Sequence)):
