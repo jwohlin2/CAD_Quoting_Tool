@@ -409,29 +409,30 @@ def render_drilling_section(
 
     per_hole_sum_min = 0.0
     drill_group_lines: list[str] = []
-    for d in sorted(counts_by_diam.keys()):
-        qty = int(counts_by_diam[d])
-        if qty <= 0:
-            continue
-        try:
-            depth = float(per_diam_depth.get(d, block_thickness))
-        except (TypeError, ValueError):
-            depth = 2.0
-        ld = (depth / d) if d > 0 else 0.0
-        sfm, ipr = ((39, 0.0020) if ld >= 3.0 else (80, 0.0060))
-        rpm = (sfm * 3.82) / max(d, 0.001)
-        ipm = rpm * ipr
-        _DRILL_TIME_CONTEXT["dia"] = float(d)
-        _DRILL_TIME_CONTEXT["ld"] = float(ld)
-        _DRILL_TIME_CONTEXT["sfm"] = float(sfm)
-        t_hole = _drill_time_model(depth, rpm, ipr)
-        group_minutes = qty * t_hole
-        per_hole_sum_min += group_minutes
-        drill_group_lines.append(
-            f'Dia {d:.3f}" × {qty}  | depth {depth:.3f}" | {sfm} sfm | '
-            f'{ipr:.4f} ipr | t/hole {t_hole:.2f} min | '
-            f'group {qty}×{t_hole:.2f} = {group_minutes:.2f} min'
-        )
+    if counts_override:
+        for d in sorted(counts_by_diam.keys()):
+            qty = int(counts_by_diam[d])
+            if qty <= 0:
+                continue
+            try:
+                depth = float(per_diam_depth.get(d, block_thickness))
+            except (TypeError, ValueError):
+                depth = 2.0
+            ld = (depth / d) if d > 0 else 0.0
+            sfm, ipr = ((39, 0.0020) if ld >= 3.0 else (80, 0.0060))
+            rpm = (sfm * 3.82) / max(d, 0.001)
+            ipm = rpm * ipr
+            _DRILL_TIME_CONTEXT["dia"] = float(d)
+            _DRILL_TIME_CONTEXT["ld"] = float(ld)
+            _DRILL_TIME_CONTEXT["sfm"] = float(sfm)
+            t_hole = _drill_time_model(depth, rpm, ipr)
+            group_minutes = qty * t_hole
+            per_hole_sum_min += group_minutes
+            drill_group_lines.append(
+                f'Dia {d:.3f}" × {qty}  | depth {depth:.3f}" | {sfm} sfm | '
+                f'{ipr:.4f} ipr | t/hole {t_hole:.2f} min | '
+                f'group {qty}×{t_hole:.2f} = {group_minutes:.2f} min'
+            )
 
     _DRILL_TIME_CONTEXT.clear()
 
