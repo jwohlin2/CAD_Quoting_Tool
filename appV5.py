@@ -1108,6 +1108,45 @@ def _ebo_append_unique(
 
 
 # --- compatibility shim: some callsites use _build_extra_ops_lines_list ---
+def _get_geo_map(*candidates: Mapping[str, Any] | None) -> Mapping[str, Any]:
+    """Return the first truthy geo map from the provided candidates."""
+
+    for cand in candidates:
+        if not isinstance(cand, (_MappingABC, dict)):
+            continue
+        try:
+            geo_obj = cand.get("geo")
+        except Exception:
+            geo_obj = None
+        if isinstance(geo_obj, (_MappingABC, dict)):
+            return typing.cast(Mapping[str, Any], geo_obj)
+    return {}
+
+
+def _ops_rows_from_geo(geo_map: Mapping[str, Any] | None) -> list[Mapping[str, Any]]:
+    """Extract ops_summary rows from the provided geo map."""
+
+    rows: list[Mapping[str, Any]] = []
+    if not isinstance(geo_map, (_MappingABC, dict)):
+        return rows
+
+    try:
+        rows_obj = (((geo_map or {}).get("ops_summary") or {}).get("rows") or [])
+    except Exception:
+        rows_obj = []
+
+    if isinstance(rows_obj, list):
+        for entry in rows_obj:
+            if isinstance(entry, _MappingABC):
+                rows.append(entry)
+    elif isinstance(rows_obj, _MappingABC):
+        for entry in rows_obj.values():  # type: ignore[assignment]
+            if isinstance(entry, _MappingABC):
+                rows.append(entry)
+
+    return rows
+
+
 def _build_extra_ops_lines_list(
     breakdown=None,
     result=None,
@@ -1183,7 +1222,14 @@ def _build_ops_cards_from_chart_lines(
     except Exception:
         pass
 
-    lines: list[str] = []
+    try:
+        geo_map = _get_geo_map(locals().get("result"), breakdown_mutable or breakdown)
+        pre_rows = _ops_rows_from_geo(geo_map)
+        lines: list[str] = [f"[DEBUG] ops_rows_pre={len(pre_rows)}"]
+    except Exception:
+        geo_map = {}
+        lines = ["[DEBUG] ops_rows_pre=?"]
+        pre_rows = []
 
     extra_bucket_ops: MutableMapping[str, Any] | None = None
     if isinstance(breakdown_mutable, dict):
@@ -1213,12 +1259,6 @@ def _build_ops_cards_from_chart_lines(
         except Exception:
             extra_bucket_ops = None
 
-    geo_map = (
-        ((result or {}).get("geo") if isinstance(result, _MappingABC) else None)
-        or ((breakdown or {}).get("geo") if isinstance(breakdown, _MappingABC) else None)
-        or {}
-    )
-
     try:
         chart_lines = _collect_chart_lines_context(ctx, geo_map, ctx_a, ctx_b) or []
     except Exception:
@@ -1233,7 +1273,7 @@ def _build_ops_cards_from_chart_lines(
             ctx_b=ctx_b,
         ) or []
 
-    ops_rows: list[Mapping[str, Any]] = []
+    ops_rows: list[Mapping[str, Any]] = list(pre_rows)
     try:
         rows_obj = (((geo_map or {}).get("ops_summary") or {}).get("rows") or [])
     except Exception:
