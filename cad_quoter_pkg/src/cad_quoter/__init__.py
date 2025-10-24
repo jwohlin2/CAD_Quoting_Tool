@@ -48,7 +48,7 @@ def _ensure_geometry_module() -> None:
         sys.modules["cad_quoter.geometry"] = stub
 
         try:
-            from cad_quoter.geometry_wrappers import (
+            from cad_quoter.utils.geo_fallbacks import (
                 collect_geo_features_from_df as _collect_geo_features_from_df,
                 map_geo_to_double_underscore as _map_geo_to_double_underscore,
                 update_variables_df_with_geo as _update_variables_df_with_geo,
@@ -75,7 +75,7 @@ if _geometry_stub is not None and not hasattr(
     _geometry_stub, "collect_geo_features_from_df"
 ):
     try:
-        from cad_quoter.geometry_wrappers import (
+        from cad_quoter.utils.geo_fallbacks import (
             collect_geo_features_from_df as _collect_geo_features_from_df,
             map_geo_to_double_underscore as _map_geo_to_double_underscore,
             update_variables_df_with_geo as _update_variables_df_with_geo,
