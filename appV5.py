@@ -4720,78 +4720,61 @@ def _compute_drilling_removal_section(
 
     # ---- END SAFE INITIALIZATION ----
 
-    def _seed_drill_bins_from_geo__local(
-        g: Mapping[str, Any] | None,
-    ) -> dict[float, int]:
-        out: dict[float, int] = {}
+    def _seed_drill_bins_from_geo__local(geo_map) -> dict[float, int]:
+        """Return {diam_in_rounded: count} from several possible GEO shapes."""
+        if not isinstance(geo_map, dict):
+            return {}
 
-        def _log_seed_result(source: str) -> dict[float, int]:
-            try:
-                total = int(sum(out.values()))
-            except Exception:
-                total = 0
-            try:
-                bins = len(out)
-            except Exception:
-                bins = 0
-            _log.info(
-                "[drill_seed] _seed_drill_bins_from_geo__local source=%s bins=%s total=%s",
-                source,
-                bins,
-                total,
+        diams_in: list[float] = []
+
+        # Common direct inch lists
+        for key in ("hole_diams_in", "hole_diams_in_precise", "hole_diams_inch"):
+            vals = geo_map.get(key)
+            if isinstance(vals, (list, tuple)):
+                for v in vals:
+                    try:
+                        diams_in.append(float(v))
+                    except Exception:
+                        pass
+
+        # mm sources → convert to inch
+        if not diams_in:
+            mm_list = (
+                geo_map.get("hole_diams_mm_precise")
+                or geo_map.get("hole_diams_mm")
+                or []
             )
-            return out
-
-        if not isinstance(g, Mapping):
-            return _log_seed_result("no-geo")
-
-        # 1) Families (already grouped)
-        for key in (
-            "hole_diam_families_geom_in",
-            "hole_diam_families_in",
-            "hole_diam_families_geom",
-            "hole_diam_families",
-        ):
-            fam = g.get(key)
-            if isinstance(fam, Mapping) and fam:
-                for k, v in fam.items():
+            if isinstance(mm_list, (list, tuple)):
+                for v in mm_list:
                     try:
-                        d = float(str(k).replace('"', "").strip())
-                        q = int(v or 0)
-                        if q > 0:
-                            d = round(d, 3)
-                            out[d] = out.get(d, 0) + q
+                        diams_in.append(float(v) / 25.4)
                     except Exception:
                         pass
-                if out:
-                    return _log_seed_result(f"family:{key}")
 
-        # 2) Lists (prefer precise), IN then MM
-        for key_in in ("hole_diams_in_precise", "hole_diams_in"):
-            seq = g.get(key_in)
-            if isinstance(seq, (list, tuple)) and seq:
-                for x in seq:
-                    try:
-                        d = round(float(x), 3)
-                        out[d] = out.get(d, 0) + 1
-                    except Exception:
-                        pass
-                if out:
-                    return _log_seed_result(key_in)
+        # hole_sets sometimes carry diameters per set
+        for hs in (geo_map.get("hole_sets") or []):
+            if isinstance(hs, dict):
+                d_in = None
+                try:
+                    if "diam_in" in hs:
+                        d_in = float(hs["diam_in"])
+                    elif "diam_mm" in hs:
+                        d_in = float(hs["diam_mm"]) / 25.4
+                except Exception:
+                    d_in = None
+                if d_in:
+                    diams_in.append(d_in)
 
-        for key_mm in ("hole_diams_mm_precise", "hole_diams_mm"):
-            seq = g.get(key_mm)
-            if isinstance(seq, (list, tuple)) and seq:
-                for x in seq:
-                    try:
-                        d = round(float(x) / 25.4, 3)
-                        out[d] = out.get(d, 0) + 1
-                    except Exception:
-                        pass
-                if out:
-                    return _log_seed_result(key_mm)
+        # Bin (rounded to thousandths to keep families stable)
+        bins: dict[float, int] = {}
+        for d in diams_in:
+            try:
+                k = round(float(d), 3)
+            except Exception:
+                continue
+            bins[k] = bins.get(k, 0) + 1
 
-        return _log_seed_result("empty")
+        return bins
 
     def _collect_pilot_claims__local(
         g: Mapping[str, Any] | None, cleaned_chart: list[str]
