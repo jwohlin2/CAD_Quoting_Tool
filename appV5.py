@@ -1193,6 +1193,30 @@ def _ebo_append_unique(
 
 
 # --- compatibility shim: some callsites use _build_extra_ops_lines_list ---
+
+
+def _normalize_geo_map(geo_obj: Mapping[str, Any] | None) -> Mapping[str, Any] | None:
+    """Normalize a geo map, merging legacy nested ``geo.geo`` payloads."""
+
+    if not isinstance(geo_obj, (_MappingABC, dict)):
+        return None
+
+    geo_map = dict(geo_obj) if not isinstance(geo_obj, dict) else dict(geo_obj)
+    try:
+        nested_geo = geo_map.get("geo")
+    except Exception:
+        nested_geo = None
+
+    if (
+        isinstance(nested_geo, (_MappingABC, dict))
+        and "ops_summary" not in geo_map
+    ):
+        for key, value in nested_geo.items():
+            geo_map.setdefault(key, value)
+
+    return geo_map
+
+
 def _get_geo_map(*candidates: Mapping[str, Any] | None) -> Mapping[str, Any]:
     """Return the first truthy geo map from the provided candidates."""
 
@@ -1203,8 +1227,9 @@ def _get_geo_map(*candidates: Mapping[str, Any] | None) -> Mapping[str, Any]:
             geo_obj = cand.get("geo")
         except Exception:
             geo_obj = None
-        if isinstance(geo_obj, (_MappingABC, dict)):
-            return typing.cast(Mapping[str, Any], geo_obj)
+        normalized = _normalize_geo_map(geo_obj)
+        if isinstance(normalized, (_MappingABC, dict)):
+            return typing.cast(Mapping[str, Any], normalized)
     return {}
 
 
@@ -4528,9 +4553,13 @@ def _render_time_per_hole(
 # ---------- HOLE TABLE: Table Row Reviewer ----------
 def _get_geo_map(result=None, breakdown=None):
     if isinstance(result, dict) and isinstance(result.get("geo"), dict):
-        return result["geo"]
+        geo = _normalize_geo_map(result["geo"])
+        if isinstance(geo, dict):
+            return geo
     if isinstance(breakdown, dict) and isinstance(breakdown.get("geo"), dict):
-        return breakdown["geo"]
+        geo = _normalize_geo_map(breakdown["geo"])
+        if isinstance(geo, dict):
+            return geo
     return {}
 
 
@@ -13891,7 +13920,9 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
     def _get_geo_map(*cands):
         for c in cands:
             if isinstance(c, dict) and isinstance(c.get("geo"), dict):
-                return c["geo"]
+                geo = _normalize_geo_map(c["geo"])
+                if isinstance(geo, dict):
+                    return geo
         return {}
 
     def _get_material_group(*cands):
