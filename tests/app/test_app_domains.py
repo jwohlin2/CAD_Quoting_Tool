@@ -921,9 +921,9 @@ def test_adjust_drill_counts_subtracts_row_pilots() -> None:
         cb_groups={},
     )
 
-    assert adjusted[round(0.1590, 4)] == 0
-    assert adjusted[round(0.5312, 4)] == 0
-    assert adjusted[round(0.3390, 4)] == 0
+    assert round(0.1590, 4) not in adjusted
+    assert round(0.5312, 4) not in adjusted
+    assert round(0.3390, 4) not in adjusted
 
 
 def test_adjust_drill_counts_sanitizes_inputs() -> None:
@@ -940,9 +940,9 @@ def test_adjust_drill_counts_sanitizes_inputs() -> None:
         },
     )
 
-    assert adjusted[round(0.25, 4)] == 0
+    assert round(0.25, 4) not in adjusted
     assert adjusted[round(0.5, 4)] == 3
-    assert adjusted[round(1.25, 4)] == 0
+    assert round(1.25, 4) not in adjusted
     for dia, qty in adjusted.items():
         assert qty <= counts_raw.get(dia, 0)
 
