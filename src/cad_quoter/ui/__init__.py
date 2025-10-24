@@ -5,10 +5,16 @@ from types import ModuleType
 
 __all__ = [
     "editor_controls",
+    "layout",
+    "llm_controls",
     "llm_panel",
+    "menus",
+    "output_pane",
     "planner_render",
+    "quote_editor",
     "services",
     "session_io",
+    "status",
     "suggestions",
     "tk_compat",
     "widgets",

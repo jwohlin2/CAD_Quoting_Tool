@@ -1,9 +1,7 @@
 from __future__ import annotations
 
 import argparse
-import os
 from collections.abc import Mapping
-from typing import Sequence
 
 from cad_quoter.geo_extractor import extract_geo_from_path
 
@@ -20,26 +18,14 @@ def _sum_qty(rows: list[Mapping[str, object]] | None) -> int:
     return total
 
 
-def main(argv: Sequence[str] | None = None) -> int:
+def main() -> None:
     parser = argparse.ArgumentParser(description="Dump GEO operations summary from a DXF/DWG file")
-    parser.add_argument("path", nargs="?", help="Path to the DXF or DWG file")
+    parser.add_argument("path", help="Path to the DXF or DWG file")
     parser.add_argument("--no-oda", dest="use_oda", action="store_false", help="Disable ODA fallback")
     parser.add_argument("--debug", action="store_true", help="Print the first 10 rows for inspection")
-    args = parser.parse_args(argv)
+    args = parser.parse_args()
 
-    path = (args.path or os.environ.get("GEO_DUMP_PATH") or "").strip()
-    if not path:
-        try:
-            path = input("Enter path to the DXF or DWG file: ").strip()
-        except EOFError:
-            path = ""
-
-    if not path:
-        parser.print_help()
-        print("\nProvide a DXF/DWG path as an argument, set GEO_DUMP_PATH, or answer the prompt.")
-        return 1
-
-    geo = extract_geo_from_path(path, use_oda=args.use_oda)
+    geo = extract_geo_from_path(args.path, use_oda=args.use_oda)
     ops_summary = geo.get("ops_summary") if isinstance(geo, Mapping) else {}
     if not isinstance(ops_summary, Mapping):
         ops_summary = {}
@@ -67,11 +53,10 @@ def main(argv: Sequence[str] | None = None) -> int:
             desc = row.get("desc") if isinstance(row, Mapping) else ""
             qty = row.get("qty") if isinstance(row, Mapping) else ""
             hole = row.get("hole") if isinstance(row, Mapping) else ""
-            side = row.get("side") if isinstance(row, Mapping) else ""
-            print(f"  [{idx:02d}] QTY={qty} REF={ref} SIDE={side} DESC={desc} HOLE={hole}")
-
-    return 0
+            print(
+                f"  [{idx:02d}] QTY={qty} REF={ref} SIDE={row.get('side') if isinstance(row, Mapping) else ''} DESC={desc} HOLE={hole}"
+            )
 
 
 if __name__ == "__main__":  # pragma: no cover - CLI entry point
-    raise SystemExit(main())
+    main()

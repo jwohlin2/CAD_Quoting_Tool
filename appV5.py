@@ -4200,10 +4200,12 @@ from cad_quoter.ui.tk_compat import (
     _ensure_tk,
 )
 
-from cad_quoter.ui.widgets import (
-    CreateToolTip,
-    ScrollableFrame,
-)
+from cad_quoter.ui.layout import MainNotebook
+from cad_quoter.ui.llm_controls import LLMControls
+from cad_quoter.ui.menus import MainMenu
+from cad_quoter.ui.output_pane import OutputPane
+from cad_quoter.ui.quote_editor import QuoteEditorView
+from cad_quoter.ui.status import StatusBar
 
 # UI service containers and configuration helpers
 from cad_quoter.ui.services import (
@@ -4211,7 +4213,6 @@ from cad_quoter.ui.services import (
     LLMServices,
     PricingRegistry,
     UIConfiguration,
-    infer_geo_override_defaults,
 )
 
 from cad_quoter.app.guardrails import build_guard_context, apply_drilling_floor_notes
@@ -4255,7 +4256,6 @@ from cad_quoter.utils.debug_tables import (
     append_removal_debug_if_enabled,
 )
 from cad_quoter.ui import llm_panel
-from cad_quoter.ui import session_io
 from cad_quoter.ui.editor_controls import coerce_checkbox_state, derive_editor_control_spec
 from cad_quoter.ui.planner_render import (
     PROGRAMMING_AMORTIZED_LABEL,
@@ -22936,7 +22936,6 @@ class App(tk.Tk):
         self.quote_state = QuoteState()
         self.llm_events: list[dict[str, Any]] = []
         self.llm_errors: list[dict[str, Any]] = []
-        self._llm_client_cache: LLMClientType | None = None
         self.settings_path = (
             getattr(self.configuration, "settings_path", None)
             or default_app_settings_json()
@@ -22945,34 +22944,6 @@ class App(tk.Tk):
         self.settings = self.llm_services.load_settings(self.settings_path)
         if not isinstance(self.settings, dict):
             self.settings = {}
-
-        saved_rate_mode = str(self.settings.get("rate_mode", "") or "").strip().lower()
-        if saved_rate_mode not in {"simple", "detailed"}:
-            saved_rate_mode = "detailed"
-        self.rate_mode = tk.StringVar(value=saved_rate_mode)
-        self.simple_labor_rate_var = tk.StringVar()
-        self.simple_machine_rate_var = tk.StringVar()
-        self._updating_simple_rates = False
-
-        if hasattr(self.rate_mode, "trace_add"):
-            self.rate_mode.trace_add("write", self._on_rate_mode_changed)
-        elif hasattr(self.rate_mode, "trace"):
-            self.rate_mode.trace("w", lambda *_: self._on_rate_mode_changed())
-
-        def _bind_simple(var: tk.StringVar, kind: str) -> None:
-            if hasattr(var, "trace_add"):
-                var.trace_add("write", lambda *_: self._on_simple_rate_changed(kind))
-            elif hasattr(var, "trace"):
-                var.trace("w", lambda *_: self._on_simple_rate_changed(kind))
-
-        _bind_simple(self.simple_labor_rate_var, "labor")
-        _bind_simple(self.simple_machine_rate_var, "machine")
-
-        thread_setting = str(self.settings.get("llm_thread_limit", "") or "").strip()
-        env_thread_setting = os.environ.get("QWEN_N_THREADS", "").strip()
-        initial_thread_setting = thread_setting or env_thread_setting
-        self.llm_thread_limit = tk.StringVar(value=initial_thread_setting)
-        self._llm_thread_limit_applied: int | None = None
 
         vendor_csv = str(self.settings.get("material_vendor_csv", "") or "")
         if vendor_csv:
@@ -22998,97 +22969,62 @@ class App(tk.Tk):
                             type(full_df),
                         )
 
-        # LLM defaults: ON + auto model discovery
-        default_model = (
-            self.configuration.default_llm_model_path
-            if getattr(self.configuration, "default_llm_model_path", None)
-            else self.llm_services.default_model_path()
+        self.llm_controls = LLMControls(
+            self,
+            llm_services=self.llm_services,
+            configuration=self.configuration,
+            settings=self.settings,
+            settings_path=self.settings_path,
+            debug_enabled=APP_ENV.llm_debug_enabled,
+            debug_dir=APP_ENV.llm_debug_dir,
+            on_event=self._llm_log_event,
+            on_error=self._llm_handle_error,
+            idle_callback=self.update_idletasks,
         )
+        self.llm_enabled = self.llm_controls.llm_enabled
+        self.apply_llm_adj = self.llm_controls.apply_llm_adj
+        self.llm_model_path = self.llm_controls.model_path
+        self.llm_thread_limit = self.llm_controls.thread_limit
+        self.llm_controls.sync_thread_limit(persist=False)
+
+        default_model = self.llm_model_path.get().strip()
         if default_model:
             os.environ["QWEN_GGUF_PATH"] = default_model
             self.params["LLMModelPath"] = default_model
 
-        self.llm_enabled = tk.BooleanVar(value=self.configuration.llm_enabled_default)
-        self.apply_llm_adj = tk.BooleanVar(value=self.configuration.apply_llm_adjustments_default)
-        self.llm_model_path = tk.StringVar(value=default_model)
+        self.menu_controller = MainMenu(self)
+        self.menu_controller.build()
 
-        if hasattr(self.llm_thread_limit, "trace_add"):
-            self.llm_thread_limit.trace_add("write", self._on_llm_thread_limit_changed)
-        elif hasattr(self.llm_thread_limit, "trace"):
-            self.llm_thread_limit.trace("w", lambda *_: self._on_llm_thread_limit_changed())
-        self._sync_llm_thread_limit(persist=False)
-
-        # Create a Menu Bar
-        menubar = tk.Menu(self)
-        self.config(menu=menubar)
-
-        file_menu = tk.Menu(menubar, tearoff=0)
-        menubar.add_cascade(label="File", menu=file_menu)
-
-        file_menu.add_command(label="Load Overrides...", command=self.load_overrides)
-        file_menu.add_command(label="Save Overrides...", command=self.save_overrides)
-        file_menu.add_separator()
-        file_menu.add_command(
-            label="Import Quote Session...",
-            command=lambda: session_io.import_quote_session(self),
-        )
-        file_menu.add_command(
-            label="Export Quote Session...",
-            command=lambda: session_io.export_quote_session(self),
-        )
-        file_menu.add_separator()
-        file_menu.add_command(label="Set Material Vendor CSV...", command=self.set_material_vendor_csv)
-        file_menu.add_command(label="Clear Material Vendor CSV", command=self.clear_material_vendor_csv)
-        file_menu.add_separator()
-        file_menu.add_command(label="Exit", command=self.quit)
-
-        help_menu = tk.Menu(menubar, tearoff=0)
-        menubar.add_cascade(label="Help", menu=help_menu)
-        help_menu.add_command(
-            label="Diagnostics",
-            command=lambda: messagebox.showinfo("Diagnostics", geometry.get_import_diagnostics_text())
-        )
-        # Tools menu with a debug trigger for Generate Quote in case button wiring misbehaves
-        tools_menu = tk.Menu(menubar, tearoff=0)
-        menubar.add_cascade(label="Tools", menu=tools_menu)
-        def _gen_quote_debug_menu() -> None:
-            append_debug_log("", "[UI] Tools > Generate Quote (debug)")
-            try:
-                self.status_var.set("Generating quote (via Tools menu)...")
-            except Exception:
-                pass
-            self.gen_quote()
-        tools_menu.add_command(label="Generate Quote (debug)", command=_gen_quote_debug_menu, accelerator="Ctrl+G")
-        try:
-            self.bind_all("<Control-g>", lambda *_: _gen_quote_debug_menu())
-        except Exception:
-            pass
-        # Simplified top toolbar
-        top = ttk.Frame(self); top.pack(fill="x", pady=(6,8))
+        top = ttk.Frame(self)
+        top.pack(fill="x", pady=(6, 8))
         ttk.Button(top, text="1. Load CAD & Vars", command=self.open_flow).pack(side="left", padx=5)
         ttk.Button(top, text="2. Generate Quote", command=self.gen_quote).pack(side="left", padx=5)
         ttk.Button(top, text="LLM Inspector", command=self.open_llm_inspector).pack(side="left", padx=5)
 
-        # Tabs
-        self.nb = ttk.Notebook(self); self.nb.pack(fill="both", expand=True)
-        self.tab_geo = ttk.Frame(self.nb); self.nb.add(self.tab_geo, text="GEO")
-        self.tab_editor = ttk.Frame(self.nb); self.nb.add(self.tab_editor, text="Quote Editor")
-        self.editor_scroll = ScrollableFrame(self.tab_editor)
-        self.editor_scroll.pack(fill="both", expand=True)
-        self.tab_out = ttk.Frame(self.nb); self.nb.add(self.tab_out, text="Output")
-        self.tab_llm = ttk.Frame(self)
+        self.main_notebook = MainNotebook(self)
+        self.nb = self.main_notebook.notebook
+        self.tab_geo = self.main_notebook.geo_tab
+        self.tab_editor = self.main_notebook.editor_tab
+        self.tab_out = self.main_notebook.output_tab
+        self.tab_llm = self.main_notebook.llm_tab
 
-        # Dictionaries to hold editor variables
-        self.quote_vars = {}
-        self.param_vars = {}
-        self.rate_vars = {}
-        self.editor_widgets_frame = None
-        self.editor_vars: dict[str, tk.Variable] = {}
-        self.editor_label_widgets: dict[str, ttk.Label] = {}
-        self.editor_label_base: dict[str, str] = {}
-        self.editor_value_sources: dict[str, str] = {}
-        self._editor_set_depth = 0
-        self._building_editor = False
+        self.editor_view = QuoteEditorView(
+            self,
+            self.tab_editor,
+            coerce_df_fn=coerce_or_make_vars_df,
+            material_price_updater=_update_material_price_field,
+            sugg_to_editor=SUGG_TO_EDITOR,
+            editor_to_sugg=EDITOR_TO_SUGG,
+            editor_from_ui=EDITOR_FROM_UI,
+        )
+
+        self.output_pane = OutputPane(self.tab_out)
+        self.output_nb = self.output_pane.notebook
+        self.output_tab_simplified = self.output_pane.get_tab("simplified")
+        self.output_tab_full = self.output_pane.get_tab("full")
+        self.output_text_widgets = self.output_pane.text_widgets
+        self.output_pane.select("simplified")
+
         self._reprice_in_progress = False
         self.auto_reprice_enabled = False
         self._quote_dirty = False
@@ -23097,54 +23033,51 @@ class App(tk.Tk):
         self.effective_setups: int = 1
         self.effective_fixture: str = "standard"
 
-        # Status Bar
-        self.status_var = tk.StringVar(value="Ready")
-        status_bar = ttk.Label(self, textvariable=self.status_var, relief=tk.SUNKEN, anchor="w", padding=5)
-        status_bar.pack(side="bottom", fill="x")
+        self.status_bar = StatusBar(self, initial="Ready")
+        self.status_var = self.status_bar.variable
+        self.llm_controls.register_status_setter(self.status_var.set)
 
         if self.config_errors:
             message = "Configuration errors detected:\n- " + "\n- ".join(self.config_errors)
             messagebox.showerror("Configuration", message)
             self.status_var.set("Configuration error: see dialog for details.")
 
-        # GEO (single pane; CAD open handled by top bar)
-        self.geo_txt = tk.Text(self.tab_geo, wrap="word"); self.geo_txt.pack(fill="both", expand=True)
+        self.geo_txt = tk.Text(self.tab_geo, wrap="word")
+        self.geo_txt.pack(fill="both", expand=True)
 
-        # LLM (hidden frame is still built to keep functionality without a visible tab)
         if hasattr(self, "_build_llm"):
             try:
                 self._build_llm(self.tab_llm)
             except Exception:
                 pass
 
-        # Output
-        self.output_nb = ttk.Notebook(self.tab_out)
-        self.output_nb.pack(fill="both", expand=True)
+    def _refresh_variables_cache(
+        self,
+        core_df: PandasDataFrame | None,
+        full_df: PandasDataFrame | None,
+    ) -> None:
+        """Store the most recent variable DataFrames and refresh the editor view."""
 
-        self.output_tab_simplified = ttk.Frame(self.output_nb)
-        self.output_nb.add(self.output_tab_simplified, text="Simplified")
-        self.output_tab_full = ttk.Frame(self.output_nb)
-        self.output_nb.add(self.output_tab_full, text="Full Detail")
-
-        self.output_text_widgets: dict[str, tk.Text] = {}
-
-        simplified_txt = tk.Text(self.output_tab_simplified, wrap="word")
-        simplified_txt.pack(fill="both", expand=True)
-        full_txt = tk.Text(self.output_tab_full, wrap="word")
-        full_txt.pack(fill="both", expand=True)
-
-        for name, widget in {"simplified": simplified_txt, "full": full_txt}.items():
+        def _coerce(df: PandasDataFrame | None) -> PandasDataFrame:
             try:
-                widget.tag_configure("rcol", tabs=("4.8i right",), tabstyle="tabular")
-            except tk.TclError:
-                widget.tag_configure("rcol", tabs=("4.8i right",))
-            self.output_text_widgets[name] = widget
+                return coerce_or_make_vars_df(df)
+            except Exception:
+                return coerce_or_make_vars_df(None)
 
-        self.output_nb.select(self.output_tab_simplified)
+        core_df_coerced = _coerce(core_df)
+        self.vars_df = core_df_coerced
 
-        self.LLM_SUGGEST = None
-        self._llm_load_attempted = False
-        self._llm_load_error: Exception | None = None
+        try:
+            self.vars_df_full = _coerce(full_df) if full_df is not None else core_df_coerced.copy()
+        except Exception:
+            self.vars_df_full = core_df_coerced.copy()
+
+        editor = getattr(self, "editor_view", None)
+        if editor is not None:
+            try:
+                editor.populate(core_df_coerced)
+            except Exception:
+                logger.exception("Failed to populate editor with refreshed variables", exc_info=True)
 
     def _reset_llm_logs(self) -> None:
         self.llm_events.clear()
@@ -23174,32 +23107,16 @@ class App(tk.Tk):
             pass
 
     def get_llm_client(self, model_path: str | None = None) -> LLMClientType | None:
-        path = (model_path or "").strip()
-        if not path and hasattr(self, "llm_model_path"):
-            path = (self.llm_model_path.get().strip() if self.llm_model_path.get() else "")
-        if not path:
-            path = os.environ.get("QWEN_GGUF_PATH", "")
-        path = path.strip()
-        if not path:
-            return None
-        self._sync_llm_thread_limit(persist=False)
-        cached = getattr(self, "_llm_client_cache", None)
-        if cached and cached.model_path == path:
-            return cached
-        if cached:
-            try:
-                cached.close()
-            except Exception:
-                pass
-        client = LLMClient(
-            path,
-            debug_enabled=APP_ENV.llm_debug_enabled,
-            debug_dir=APP_ENV.llm_debug_dir,
-            on_event=self._llm_log_event,
-            on_error=self._llm_handle_error,
-        )
-        self._llm_client_cache = client
-        return client
+        return self.llm_controls.get_client(model_path)
+
+    def _sync_llm_thread_limit(self, *, persist: bool) -> int | None:
+        return self.llm_controls.sync_thread_limit(persist=persist)
+
+    def _on_llm_thread_limit_changed(self, *_: object) -> None:
+        self.llm_controls.sync_thread_limit(persist=True)
+
+    def _ensure_llm_loaded(self):
+        return self.llm_controls.ensure_loaded()
 
     def _get_last_variables_path(self) -> str:
         if isinstance(self.settings, dict):
@@ -23213,901 +23130,51 @@ class App(tk.Tk):
         self.settings["last_variables_path"] = value
         self.llm_services.save_settings(self.settings_path, self.settings)
 
-    def _validate_thread_limit(self, proposed: str) -> bool:
-        text = str(proposed).strip()
-        return text.isdigit() or text == ""
-
-    def _current_llm_thread_limit(self) -> int | None:
-        try:
-            raw = self.llm_thread_limit.get()
-        except Exception:
-            return None
-        text = str(raw).strip()
-        if not text:
-            return None
-        try:
-            value = int(text, 10)
-        except Exception:
-            return None
-        if value <= 0:
-            return None
-        return value
-
-    def _invalidate_llm_client_cache(self) -> None:
-        cached = getattr(self, "_llm_client_cache", None)
-        if cached is not None:
-            try:
-                cached.close()
-            except Exception:
-                pass
-        self._llm_client_cache = None
-
-    def _sync_llm_thread_limit(self, *, persist: bool) -> int | None:
-        """Apply the current thread limit via ``LLMServices`` and manage cache state."""
-
-        limit = self._current_llm_thread_limit()
-        prior = getattr(self, "_llm_thread_limit_applied", None)
-
-        updated_settings = self.llm_services.apply_thread_limit_env(
-            limit,
-            settings=self.settings,
-            persist=persist,
-            settings_path=self.settings_path if persist else None,
-        )
-        if isinstance(updated_settings, dict):
-            self.settings = updated_settings
-
-        if limit != prior:
-            self._llm_thread_limit_applied = limit
-            self._invalidate_llm_client_cache()
-
-        return limit
-
-    def _on_llm_thread_limit_changed(self, *_: object) -> None:
-        self._sync_llm_thread_limit(persist=True)
-
-    def _variables_dialog_defaults(self) -> dict[str, Any]:
-        defaults: dict[str, Any] = {}
-        saved = self._get_last_variables_path()
-        if not saved:
-            return defaults
-        saved_path = Path(saved)
-        if saved_path.exists():
-            defaults["initialdir"] = str(saved_path.parent)
-            defaults["initialfile"] = saved_path.name
-            return defaults
-
-        if saved_path.name:
-            defaults["initialfile"] = saved_path.name
-        parent = saved_path.parent
-        try:
-            if parent and str(parent):
-                if parent.exists():
-                    defaults.setdefault("initialdir", str(parent))
-        except Exception:
-            pass
-        self._set_last_variables_path("")
-        return defaults
-
-    def _refresh_variables_cache(
-        self, core_df: PandasDataFrame, full_df: PandasDataFrame
-    ) -> None:
-        self.vars_df = core_df
-        self.vars_df_full = full_df
-
     def set_material_vendor_csv(self) -> None:
+        """Let the user pick a Material Vendor CSV and persist the choice."""
+
         path = filedialog.askopenfilename(
-            parent=self,
             title="Select Material Vendor CSV",
             filetypes=[("CSV files", "*.csv"), ("All files", "*.*")],
         )
         if not path:
             return
+
         if not isinstance(self.settings, dict):
             self.settings = {}
         self.settings["material_vendor_csv"] = path
         self.params["MaterialVendorCSVPath"] = path
-        self.llm_services.save_settings(self.settings_path, self.settings)
+
         try:
-            self.pricing.clear_cache()
+            self.llm_services.save_settings(self.settings_path, self.settings)
+        except Exception:
+            logger.exception("Failed to save material vendor CSV path", exc_info=True)
+
+        try:
+            self.status_var.set(f"Material vendor CSV set: {os.path.basename(path)}")
         except Exception:
             pass
-        self.status_var.set(f"Material vendor CSV set to {path}")
 
     def clear_material_vendor_csv(self) -> None:
-        if not isinstance(self.settings, dict):
-            self.settings = {}
-        self.settings["material_vendor_csv"] = ""
-        self.params["MaterialVendorCSVPath"] = ""
-        self.llm_services.save_settings(self.settings_path, self.settings)
-        try:
-            self.pricing.clear_cache()
-        except Exception:
-            pass
-        self.status_var.set("Material vendor CSV cleared.")
+        """Clear the persisted Material Vendor CSV path."""
 
-    def _ensure_llm_loaded(self):
-        """Load the optional vision LLM on-demand.
-
-        The original implementation performed this work during ``__init__`` of
-        the Tk application, which meant we blocked the UI event loop for
-        several seconds (or longer if large models needed to be paged in).
-        Loading lazily keeps the first paint of the window snappy while still
-        providing feedback the moment the user requests LLM features.
-        """
-
-        if self.LLM_SUGGEST is not None:
-            return self.LLM_SUGGEST
-        if self._llm_load_attempted and self._llm_load_error is not None:
-            return None
-
-        self._llm_load_attempted = True
-        start = time.perf_counter()
-
-        limit: int | None = None
-        try:
-            limit = self._sync_llm_thread_limit(persist=False)
-            status = "Loading Vision LLM (GPU)…"
-            if limit:
-                status = f"Loading Vision LLM (GPU, {limit} CPU threads)…"
-            self.status_var.set(status)
-            self.update_idletasks()
-        except Exception:
-            pass
-
-        try:
-            self.LLM_SUGGEST = self.llm_services.load_vision_model(
-                n_ctx=8192,
-                n_gpu_layers=20,
-                n_threads=limit,
-            )
-        except Exception as exc:
-            self._llm_load_error = exc
-            try:
-                limit = self._sync_llm_thread_limit(persist=False)
-                msg = f"Vision LLM GPU load failed ({exc}); retrying CPU mode…"
-                if limit:
-                    msg = f"{msg[:-1]} with {limit} CPU threads…)"
-                self.status_var.set(msg)
-                self.update_idletasks()
-            except Exception:
-                pass
-            try:
-                self.LLM_SUGGEST = self.llm_services.load_vision_model(
-                    n_ctx=4096,
-                    n_gpu_layers=0,
-                    n_threads=limit,
-                )
-            except Exception as exc2:
-                self._llm_load_error = exc2
-                try:
-                    self.status_var.set(f"Vision LLM unavailable: {exc2}")
-                except Exception:
-                    pass
-                return None
-        else:
-            self._llm_load_error = None
-
-        duration = time.perf_counter() - start
-        try:
-            self.status_var.set(f"Vision LLM ready in {duration:.1f}s")
-        except Exception:
-            pass
-        return self.LLM_SUGGEST
-
-    def _populate_editor_tab(self, df: PandasDataFrame) -> None:
-        df = coerce_or_make_vars_df(df)
-        if self.vars_df_full is None:
-            _, master_full = _load_master_variables()
-            if master_full is not None:
-                self.vars_df_full = master_full
-        """Rebuild the Quote Editor tab using the latest variables dataframe."""
-        def _ensure_row(
-            dataframe: PandasDataFrame, item: str, value: Any, dtype: str = "number"
-        ) -> PandasDataFrame:
-            mask = dataframe["Item"].astype(str).str.fullmatch(item, case=False)
-            if mask.any():
-                return dataframe
-            return geometry_upsert_var_row(dataframe, item, value, dtype=dtype)
-
-        df = _ensure_row(df, "Scrap Percent (%)", 15.0, dtype="number")
-        df = _ensure_row(df, "Plate Length (in)", 12.0, dtype="number")
-        df = _ensure_row(df, "Plate Width (in)", 14.0, dtype="number")
-        df = _ensure_row(df, "Thickness (in)", 2.0, dtype="number")
-        df = _ensure_row(df, "Hole Count (override)", 0, dtype="number")
-        df = _ensure_row(df, "Avg Hole Diameter (mm)", 0.0, dtype="number")
-        df = _ensure_row(df, "Material", "Aluminum MIC6", dtype="text")
-        self.vars_df = df
-        parent = self.editor_scroll.inner
-        for child in parent.winfo_children():
-            child.destroy()
-
-        self.quote_vars.clear()
-        self.param_vars.clear()
-        self.rate_vars.clear()
-        self.editor_vars.clear()
-        self.editor_label_widgets.clear()
-        self.editor_label_base.clear()
-        self.editor_value_sources.clear()
-
-        self._building_editor = True
-
-        self.editor_widgets_frame = parent
-        self.editor_widgets_frame.grid_columnconfigure(0, weight=1)
-
-        items_series = df["Item"].astype(str)
-        normalized_items = items_series.apply(normalize_item_text)
-        qty_mask = normalized_items.isin({"quantity", "qty", "lot size"})
-        if qty_mask.any():
-            qty_column = typing.cast(
-                PandasSeries,
-                df.loc[qty_mask, "Example Values / Options"],
-            )
-            qty_raw = qty_column.iloc[0]
-            try:
-                qty_value = float(str(qty_raw).strip())
-            except Exception:
-                qty_value = float(self.params.get("Quantity", 1) or 1)
-            if math.isnan(qty_value):
-                qty_value = float(self.params.get("Quantity", 1) or 1)
-            self.params["Quantity"] = max(1, int(round(qty_value)))
-
-        raw_skip_items = {
-            "Profit Margin %", "Profit Margin", "Margin %", "Margin",
-            "Expedite %", "Expedite",
-            "Insurance %", "Insurance",
-            "Vendor Markup %", "Vendor Markup",
-            "Min Lot Charge",
-            "Programmer $/hr",
-            "CAM Programmer $/hr",
-            "Milling $/hr",
-            "Inspection $/hr",
-            "Deburr $/hr",
-            "Packaging $/hr",
-            "Quantity", "Qty", "Lot Size",
-        }
-        skip_items = {normalize_item_text(item) for item in raw_skip_items}
-
-        material_lookup: Dict[str, float] = {}
-        for _, row_data in df.iterrows():
-            item_label = str(row_data.get("Item", ""))
-            raw_value = _coerce_float_or_none(row_data.get("Example Values / Options"))
-            if raw_value is None:
-                continue
-            per_g = _price_value_to_per_gram(raw_value, item_label)
-            if per_g is None:
-                continue
-            normalized_label = _normalize_lookup_key(item_label)
-            for canonical_key, keywords in MATERIAL_KEYWORDS.items():
-                if canonical_key == MATERIAL_OTHER_KEY:
-                    continue
-                if any((kw and kw in normalized_label) for kw in keywords):
-                    material_lookup[canonical_key] = per_g
-                    break
-
-        current_row = 0
-
-        quote_frame = ttk.Labelframe(self.editor_widgets_frame, text="Quote-Specific Variables", padding=(10, 5))
-        quote_frame.grid(row=current_row, column=0, sticky="ew", padx=10, pady=5)
-        current_row += 1
-
-        row_index = 0
-        material_choice_var: tk.StringVar | None = None
-        material_price_var: tk.StringVar | None = None
-        self.var_material: tk.StringVar | None = None
-
-        def update_material_price(*_):
-            _update_material_price_field(
-                material_choice_var,
-                material_price_var,
-                material_lookup,
-            )
-
-        # Prefer the headers from the original dataframe if available so that
-        # we can surface the richer context ("Why it Matters", formulas, etc.).
-        def _resolve_column(name: str) -> str:
-            import re
-
-            def _norm_col(s: str) -> str:
-                s = str(s).replace("\u00A0", " ")
-                s = re.sub(r"\s+", " ", s).strip().lower()
-                return re.sub(r"[^a-z0-9]", "", s)
-
-            target = _norm_col(name)
-            column_sources: list[PandasIndex] = []
-            if self.vars_df_full is not None:
-                column_sources.append(self.vars_df_full.columns)
-            column_sources.append(df.columns)
-            for columns in column_sources:
-                for col in columns:
-                    if _norm_col(col) == target:
-                        return col
-            return name
-
-        dtype_col_name = _resolve_column("Data Type / Input Method")
-        value_col_name = _resolve_column("Example Values / Options")
-
-        # Build a lookup so each row can pull the descriptive columns from the
-        # original spreadsheet while still operating on the sanitized df copy.
-        full_lookup: dict[str, PandasSeries] = {}
-        if self.vars_df_full is not None and "Item" in self.vars_df_full.columns:
-            full_items = self.vars_df_full["Item"].astype(str)
-            for idx, normalized in enumerate(full_items.apply(normalize_item)):
-                if normalized and normalized not in full_lookup:
-                    full_lookup[normalized] = self.vars_df_full.iloc[idx]
-
-        for _, row_data in df.iterrows():
-            item_name = str(row_data["Item"])
-            normalized_name = normalize_item(item_name)
-            if normalized_name in skip_items:
-                continue
-
-            full_row = full_lookup.get(normalized_name)
-
-            dtype_source = row_data.get(dtype_col_name, "")
-            if full_row is not None:
-                dtype_source = full_row.get(dtype_col_name, dtype_source)
-
-            initial_raw = row_data.get(value_col_name, "")
-            if full_row is not None:
-                initial_raw = full_row.get(value_col_name, initial_raw)
-            is_missing = False
-            if pd is not None:
-                try:
-                    is_missing = bool(pd.isna(initial_raw))
-                except Exception:
-                    is_missing = False
-            if is_missing:
-                initial_value = ""
-            else:
-                initial_value = "" if initial_raw is None else str(initial_raw)
-
-            control_spec = derive_editor_control_spec(dtype_source, initial_raw)
-            label_text = item_name
-            if full_row is not None and "Variable ID" in full_row:
-                var_id = str(full_row.get("Variable ID", "") or "").strip()
-                if var_id:
-                    label_text = f"{var_id} • {label_text}"
-            display_hint = control_spec.display_label.strip()
-            if display_hint and display_hint.lower() not in {"number", "text"}:
-                label_text = f"{label_text}\n[{display_hint}]"
-
-            row_container = ttk.Frame(quote_frame)
-            row_container.grid(row=row_index, column=0, columnspan=2, sticky="ew", padx=5, pady=4)
-            row_container.grid_columnconfigure(1, weight=1)
-
-            label_widget = ttk.Label(row_container, text=label_text, wraplength=400)
-
-            label_widget.grid(row=0, column=0, sticky="w", padx=(0, 6))
-
-            control_row = 0
-            info_indicator: ttk.Label | None = None
-            info_tooltip: CreateToolTip | None = None
-            info_text_parts: list[str] = []
-
-            control_container = ttk.Frame(row_container)
-            control_container.grid(row=control_row, column=1, sticky="ew", padx=5)
-            control_container.grid_columnconfigure(0, weight=1)
-            control_container.grid_columnconfigure(1, weight=1)
-            control_container.grid_columnconfigure(2, weight=0)
-
-            def _add_info_label(text: str) -> None:
-                nonlocal info_indicator, info_tooltip
-
-                text = text.strip()
-                if not text:
-                    return
-                info_text_parts.append(text)
-                combined_text = "\n\n".join(info_text_parts)
-
-                if info_indicator is None:
-                    info_indicator = ttk.Label(
-                        control_container,
-                        text="ⓘ",
-                        padding=(4, 0),
-                        cursor="question_arrow",  # show question cursor while keeping tooltip
-                        takefocus=0,
-                    )
-                    info_indicator.grid(row=control_row, column=2, sticky="nw", padx=(6, 0))
-                    info_tooltip = CreateToolTip(info_indicator, combined_text, wraplength=360)
-                elif info_tooltip is not None:
-                    info_tooltip.update_text(combined_text)
-
-            if normalized_name in {"material"}:
-                var = tk.StringVar(value=self.default_material_display)
-                if initial_value:
-                    var.set(initial_value)
-                normalized_initial = _normalize_lookup_key(var.get())
-                for canonical_key, keywords in MATERIAL_KEYWORDS.items():
-                    if canonical_key == MATERIAL_OTHER_KEY:
-                        continue
-                    if any(kw and kw in normalized_initial for kw in keywords):
-                        display = MATERIAL_DISPLAY_BY_KEY.get(canonical_key)
-                        if display:
-                            var.set(display)
-                        break
-                combo = ttk.Combobox(
-                    control_container,
-                    textvariable=var,
-                    values=MATERIAL_DROPDOWN_OPTIONS,
-                    width=32,
-                )
-                combo.grid(row=0, column=0, sticky="ew")
-                combo.bind("<<ComboboxSelected>>", update_material_price)
-                var.trace_add("write", update_material_price)
-                material_choice_var = var
-                self.var_material = var
-                self.quote_vars[item_name] = var
-                self._register_editor_field(item_name, var, label_widget)
-            elif re.search(
-                r"(Material\s*Price.*(per\s*gram|per\s*g|/g)|Unit\s*Price\s*/\s*g)",
-                item_name,
-                flags=re.IGNORECASE,
-            ):
-                var = tk.StringVar(value=initial_value)
-                ttk.Entry(control_container, textvariable=var, width=30).grid(row=0, column=0, sticky="w")
-                material_price_var = var
-                self.quote_vars[item_name] = var
-                self._register_editor_field(item_name, var, label_widget)
-            elif control_spec.control == "dropdown":
-                options = list(control_spec.options) or ([control_spec.entry_value] if control_spec.entry_value else [])
-                selected = control_spec.entry_value or (options[0] if options else "")
-                var = tk.StringVar(value=selected)
-                combo = ttk.Combobox(
-                    control_container,
-                    textvariable=var,
-                    values=options,
-                    width=28,
-                    state="readonly" if options else "normal",
-                )
-                combo.grid(row=0, column=0, sticky="ew")
-                self.quote_vars[item_name] = var
-                self._register_editor_field(item_name, var, label_widget)
-            elif control_spec.control == "checkbox":
-                initial_bool = control_spec.checkbox_state
-                bool_var = tk.BooleanVar(value=bool(initial_bool))
-                var = tk.StringVar(value="True" if initial_bool else "False")
-
-                def _sync_string_from_bool(*_args: Any) -> None:
-                    value = "True" if bool_var.get() else "False"
-                    if var.get() != value:
-                        var.set(value)
-
-                def _sync_bool_from_string(*_args: Any) -> None:
-                    current = var.get()
-                    parsed = coerce_checkbox_state(current, bool_var.get())
-                    if bool_var.get() != parsed:
-                        bool_var.set(parsed)
-
-                if hasattr(bool_var, "trace_add"):
-                    bool_var.trace_add("write", _sync_string_from_bool)
-                else:  # pragma: no cover - legacy Tk fallback
-                    bool_var.trace("w", lambda *_: _sync_string_from_bool())
-
-                if hasattr(var, "trace_add"):
-                    var.trace_add("write", _sync_bool_from_string)
-                else:  # pragma: no cover - legacy Tk fallback
-                    var.trace("w", lambda *_: _sync_bool_from_string())
-
-                ttk.Checkbutton(
-                    control_container,
-                    variable=bool_var,
-                    text=control_spec.checkbox_label or "Enabled",
-                ).grid(row=0, column=0, sticky="w")
-                self.quote_vars[item_name] = var
-                self._register_editor_field(item_name, var, label_widget)
-            else:
-                entry_value = control_spec.entry_value
-                if not entry_value and control_spec.control != "formula":
-                    entry_value = initial_value
-                var = tk.StringVar(value=entry_value)
-                ttk.Entry(control_container, textvariable=var, width=30).grid(row=0, column=0, sticky="w")
-                base_text = control_spec.base_text.strip() if isinstance(control_spec.base_text, str) else ""
-                if base_text:
-                    _add_info_label(f"Based on: {base_text}")
-                self.quote_vars[item_name] = var
-                self._register_editor_field(item_name, var, label_widget)
-
-            why_text = ""
-            if full_row is not None and "Why it Matters" in full_row:
-                why_text = str(full_row.get("Why it Matters", "") or "").strip()
-            elif "Why it Matters" in row_data:
-                why_text = str(row_data.get("Why it Matters", "") or "").strip()
-            if why_text:
-                _add_info_label(why_text)
-
-            swing_text = ""
-            if full_row is not None and "Typical Price Swing*" in full_row:
-                swing_text = str(full_row.get("Typical Price Swing*", "") or "").strip()
-            elif "Typical Price Swing*" in row_data:
-                swing_text = str(row_data.get("Typical Price Swing*", "") or "").strip()
-            if swing_text:
-                _add_info_label(f"Typical swing: {swing_text}")
-
-            row_index += 1
-
-        if material_choice_var is not None and material_price_var is not None:
-            existing = _coerce_float_or_none(material_price_var.get())
-            if existing is None or abs(existing) < 1e-9:
-                update_material_price()
-
-        def create_global_entries(
-            parent_frame: tk.Widget,
-            keys,
-            data_source,
-            var_dict,
-            columns: int = 2,
-        ) -> None:
-            for i, key in enumerate(keys):
-                row, col = divmod(i, columns)
-                label_widget = ttk.Label(parent_frame, text=key)
-                label_widget.grid(row=row, column=col * 2, sticky="e", padx=5, pady=2)
-                var = tk.StringVar(value=str(data_source.get(key, "")))
-                entry = ttk.Entry(parent_frame, textvariable=var, width=15)
-                if "Path" in key:
-                    entry.config(width=50)
-                entry.grid(row=row, column=col * 2 + 1, sticky="w", padx=5, pady=2)
-                var_dict[key] = var
-                self._register_editor_field(key, var, label_widget)
-
-        comm_frame = ttk.Labelframe(self.editor_widgets_frame, text="Global Overrides: Commercial & General", padding=(10, 5))
-        comm_frame.grid(row=current_row, column=0, sticky="ew", padx=10, pady=5)
-        current_row += 1
-        comm_keys = [
-            "MarginPct",
-            "ExpeditePct",
-            "VendorMarkupPct",
-            "InsurancePct",
-            "MinLotCharge",
-            "Quantity",
-        ]
-        create_global_entries(comm_frame, comm_keys, self.params, self.param_vars)
-
-        rates_frame = ttk.Labelframe(self.editor_widgets_frame, text="Global Overrides: Hourly Rates ($/hr)", padding=(10, 5))
-        rates_frame.grid(row=current_row, column=0, sticky="ew", padx=10, pady=5)
-        current_row += 1
-
-        mode_frame = ttk.Frame(rates_frame)
-        mode_frame.grid(row=0, column=0, sticky="w", pady=(0, 5))
-        ttk.Label(mode_frame, text="Mode:").grid(row=0, column=0, sticky="w", padx=(0, 8))
-        ttk.Radiobutton(mode_frame, text="Simple", value="simple", variable=self.rate_mode).grid(
-            row=0, column=1, sticky="w", padx=(0, 8)
-        )
-        ttk.Radiobutton(mode_frame, text="Detailed", value="detailed", variable=self.rate_mode).grid(
-            row=0, column=2, sticky="w"
-        )
-
-        rates_container = ttk.Frame(rates_frame)
-        rates_container.grid(row=1, column=0, sticky="ew")
-        rates_container.grid_columnconfigure(0, weight=1)
-
-        if self._simple_rate_mode_active():
-            self._build_simple_rate_entries(rates_container)
-        else:
-            create_global_entries(
-                rates_container,
-                sorted(self.rates.keys()),
-                self.rates,
-                self.rate_vars,
-                columns=3,
-            )
-
-        self._building_editor = False
-        try:
-            self._apply_geo_defaults(self.geo)
-        except Exception:
-            pass
-
-    def _simple_rate_mode_active(self) -> bool:
-        try:
-            mode = str(self.rate_mode.get() or "").strip().lower()
-        except Exception:
-            return False
-        return mode == "simple"
-
-    def _format_rate_value(self, value: Any) -> str:
-        if value in (None, ""):
-            return ""
-        try:
-            num = float(value)
-        except Exception:
-            return str(value)
-        text = f"{num:.3f}".rstrip("0").rstrip(".")
-        return text or "0"
-
-    def _build_simple_rate_entries(self, parent: tk.Widget) -> None:
-        known_keys = set(self.rates.keys()) | LABOR_RATE_KEYS | MACHINE_RATE_KEYS
-        for key in sorted(known_keys):
-            formatted = self._format_rate_value(self.rates.get(key, ""))
-            self.rate_vars[key] = tk.StringVar(value=formatted)
-
-        container = ttk.Frame(parent)
-        container.grid(row=0, column=0, sticky="w")
-
-        ttk.Label(container, text="Labor Rate").grid(row=0, column=0, sticky="e", padx=5, pady=2)
-        ttk.Entry(container, textvariable=self.simple_labor_rate_var, width=15).grid(
-            row=0, column=1, sticky="w", padx=5, pady=2
-        )
-        ttk.Label(container, text="Machine Rate").grid(row=1, column=0, sticky="e", padx=5, pady=2)
-        ttk.Entry(container, textvariable=self.simple_machine_rate_var, width=15).grid(
-            row=1, column=1, sticky="w", padx=5, pady=2
-        )
-
-        self._sync_simple_rate_fields()
-
-    def _sync_simple_rate_fields(self) -> None:
-        if not self._simple_rate_mode_active():
-            return
-
-        self._updating_simple_rates = True
-        try:
-            for key, var in self.rate_vars.items():
-                var.set(self._format_rate_value(self.rates.get(key, "")))
-
-            labor_value = next((self.rates.get(k) for k in LABOR_RATE_KEYS if k in self.rates), None)
-            machine_value = next((self.rates.get(k) for k in MACHINE_RATE_KEYS if k in self.rates), None)
-
-            self.simple_labor_rate_var.set(self._format_rate_value(labor_value))
-            self.simple_machine_rate_var.set(self._format_rate_value(machine_value))
-        finally:
-            self._updating_simple_rates = False
-
-    def _update_rate_group(self, keys: Iterable[str], value: float) -> bool:
-        changed = False
-        formatted = self._format_rate_value(value)
-        for key in keys:
-            previous = _coerce_float_or_none(self.rates.get(key))
-            if previous is None or abs(previous - value) > 1e-6:
-                changed = True
-            self.rates[key] = float(value)
-            var = self.rate_vars.get(key)
-            if var is None:
-                self.rate_vars[key] = tk.StringVar(value=formatted)
-            elif var.get() != formatted:
-                var.set(formatted)
-        return changed
-
-    def _apply_simple_rates(self, hint: str | None = None, *, trigger_reprice: bool = True) -> None:
-        if not self._simple_rate_mode_active() or self._updating_simple_rates:
-            return
-
-        labor_value = _coerce_float_or_none(self.simple_labor_rate_var.get())
-        machine_value = _coerce_float_or_none(self.simple_machine_rate_var.get())
-
-        changed = False
-        if labor_value is not None:
-            changed |= self._update_rate_group(LABOR_RATE_KEYS, float(labor_value))
-        if machine_value is not None:
-            changed |= self._update_rate_group(MACHINE_RATE_KEYS, float(machine_value))
-
-        if changed and trigger_reprice:
-            self.reprice(hint=hint or "Updated hourly rates.")
-
-    def _on_simple_rate_changed(self, kind: str) -> None:
-        hint = None
-        if kind == "labor":
-            hint = "Updated labor rates."
-        elif kind == "machine":
-            hint = "Updated machine rates."
-        self._apply_simple_rates(hint=hint)
-
-    def _on_rate_mode_changed(self, *_: Any) -> None:
-        if getattr(self, "_building_editor", False):
-            return
-
-        mode = str(self.rate_mode.get() or "").strip().lower()
         if isinstance(self.settings, dict):
-            self.settings["rate_mode"] = mode
-            self.llm_services.save_settings(self.settings_path, self.settings)
+            self.settings.pop("material_vendor_csv", None)
+            try:
+                self.llm_services.save_settings(self.settings_path, self.settings)
+            except Exception:
+                logger.exception("Failed to clear material vendor CSV path", exc_info=True)
+
+        self.params.pop("MaterialVendorCSVPath", None)
 
         try:
-            if self.vars_df is not None:
-                self._populate_editor_tab(typing.cast(PandasDataFrame, self.vars_df))
-            else:
-                self._populate_editor_tab(coerce_or_make_vars_df(None))
-        except Exception:
-            self._populate_editor_tab(coerce_or_make_vars_df(None))
-
-    def _register_editor_field(self, label: str, var: tk.Variable, label_widget: ttk.Label | None) -> None:
-        if not isinstance(label, str) or not isinstance(var, tk.Variable):
-            return
-        self.editor_vars[label] = var
-        if label_widget is not None:
-            self.editor_label_widgets[label] = label_widget
-            self.editor_label_base[label] = label
-        else:
-            self.editor_label_base.setdefault(label, label)
-        self.editor_value_sources.pop(label, None)
-        self._mark_label_source(label, None)
-        self._bind_editor_var(label, var)
-
-    def _bind_editor_var(self, label: str, var: tk.Variable) -> None:
-        def _on_write(*_):
-            if self._building_editor or self._editor_set_depth > 0:
-                return
-            self._update_editor_override_from_label(label, var.get())
-            self._mark_label_source(label, "User")
-            self.reprice(hint=f"Updated {label}.")
-
-        var.trace_add("write", _on_write)
-
-    def _mark_quote_dirty(self, hint: str | None = None) -> None:
-        self._quote_dirty = True
-        message = "Quote editor updated."
-        if isinstance(hint, str):
-            cleaned = hint.strip()
-            if cleaned:
-                message = cleaned.splitlines()[0]
-        try:
-            self.status_var.set(f"{message} Click Generate Quote to refresh totals.")
+            self.status_var.set("Material vendor CSV cleared")
         except Exception:
             pass
 
-    def _clear_quote_dirty(self) -> None:
-        self._quote_dirty = False
-
-    def _mark_label_source(self, label: str, src: str | None) -> None:
-        widget = self.editor_label_widgets.get(label)
-        base = self.editor_label_base.get(label, label)
-        if widget is not None:
-            if src == "LLM":
-                widget.configure(text=f"{base}  (LLM)", foreground="#1463FF")
-            elif src == "User":
-                widget.configure(text=f"{base}  (User)", foreground="#22863a")
-            else:
-                widget.configure(text=base, foreground="")
-        if src:
-            self.editor_value_sources[label] = src
-        else:
-            self.editor_value_sources.pop(label, None)
-
-    def _set_editor(self, label: str, value: Any, source_tag: str = "LLM") -> None:
-        if self.editor_value_sources.get(label) == "User":
-            return
-        var = self.editor_vars.get(label)
-        if var is None:
-            return
-        if isinstance(value, float):
-            txt = f"{value:.3f}"
-        else:
-            txt = str(value)
-        self._editor_set_depth += 1
-        try:
-            var.set(txt)
-        finally:
-            self._editor_set_depth -= 1
-        self._mark_label_source(label, source_tag)
-
-    def _fill_editor_if_blank(self, label: str, value: Any, source: str = "GEO") -> None:
-        if value is None:
-            return
-        if self.editor_value_sources.get(label) == "User":
-            return
-        var = self.editor_vars.get(label)
-        if var is None:
-            return
-        raw = var.get()
-        current = str(raw).strip() if raw is not None else ""
-        fill = False
-        if not current:
-            fill = True
-        else:
-            try:
-                fill = float(current) == 0.0
-            except Exception:
-                fill = False
-        if not fill:
-            return
-        if isinstance(value, (int, float)):
-            txt = f"{float(value):.3f}"
-        else:
-            txt = str(value)
-        self._editor_set_depth += 1
-        try:
-            var.set(txt)
-        finally:
-            self._editor_set_depth -= 1
-        self._mark_label_source(label, source)
-
-    def _apply_geo_defaults(self, geo_data: dict[str, Any] | None) -> None:
-        defaults = infer_geo_override_defaults(geo_data)
-        if not defaults:
-            return
-
-        for label, value in defaults.items():
-            if value is None:
-                continue
-            if isinstance(value, str):
-                var = self.editor_vars.get(label)
-                if var is None:
-                    continue
-                current = str(var.get() or "").strip()
-                if label == "Material":
-                    if current and current != self.default_material_display:
-                        continue
-                elif current:
-                    continue
-                self._set_editor(label, value, "GEO")
-                continue
-
-            self._fill_editor_if_blank(label, value, source="GEO")
-    def _update_editor_override_from_label(self, label: str, raw_value: str) -> None:
-        key = EDITOR_TO_SUGG.get(label)
-        if key is None:
-            return
-        converter = EDITOR_FROM_UI.get(label)
-        value: Any | None = None
-        if converter is not None:
-            try:
-                value = converter(raw_value)
-            except Exception:
-                value = None
-        path = key if isinstance(key, tuple) else (key,)
-        if value is None:
-            self._set_user_override_value(path, None)
-        else:
-            self._set_user_override_value(path, value)
-
-    def apply_llm_to_editor(self, sugg: dict, baseline_ctx: dict) -> None:
-        if not isinstance(sugg, dict) or not isinstance(baseline_ctx, dict):
-            return
-        for key, spec in SUGG_TO_EDITOR.items():
-            label, to_ui, _ = spec
-            if isinstance(key, tuple):
-                root, sub = key
-                val = ((sugg.get(root) or {}).get(sub))
-            else:
-                val = sugg.get(key)
-            if val is None:
-                continue
-            try:
-                ui_val = to_ui(val)
-            except Exception:
-                continue
-            self._set_editor(label, ui_val, "LLM")
-
-        mults = sugg.get("process_hour_multipliers") or {}
-        eff_hours: dict[str, float] = {}
-        base_hours = baseline_ctx.get("process_hours")
-        if isinstance(base_hours, dict):
-            for proc, hours in base_hours.items():
-                val = _coerce_float_or_none(hours)
-                if val is not None:
-                    eff_hours[str(proc)] = float(val)
-        bounds_src = None
-        if isinstance(self.quote_state.bounds, dict):
-            bounds_src = self.quote_state.bounds
-        elif isinstance(baseline_ctx.get("_bounds"), _MappingABC):
-            bounds_src = baseline_ctx.get("_bounds")
-        coerced_bounds = coerce_bounds(bounds_src if isinstance(bounds_src, _MappingABC) else None)
-        mult_min_bound = coerced_bounds["mult_min"]
-        mult_max_bound = coerced_bounds["mult_max"]
-        for proc, mult in mults.items():
-            if proc in eff_hours:
-                try:
-                    base_val = float(eff_hours[proc])
-                except Exception:
-                    continue
-                clamped_mult = clamp(mult, mult_min_bound, mult_max_bound, 1.0)
-                try:
-                    eff_hours[proc] = base_val * float(clamped_mult)
-                except Exception:
-                    eff_hours[proc] = base_val
-        for proc, (label, scale) in PROC_MULT_TARGETS.items():
-            if proc in eff_hours:
-                try:
-                    derived = eff_hours[proc] * float(scale)
-                except Exception:
-                    continue
-                self._set_editor(label, derived, "LLM")
-
-        self.effective_process_hours = eff_hours
-        self.effective_scrap = float(sugg.get("scrap_pct", baseline_ctx.get("scrap_pct", 0.0)) or 0.0)
-        self.effective_setups = int(sugg.get("setups", baseline_ctx.get("setups", 1)) or 1)
-        self.effective_fixture = str(sugg.get("fixture", baseline_ctx.get("fixture", "standard")) or "standard")
-
-        if not self._reprice_in_progress:
-            self.reprice(hint="LLM adjustments applied.")
+    def _validate_thread_limit(self, proposed: str) -> bool:
+        text = str(proposed).strip()
+        return text.isdigit() or text == ""
 
     def _set_user_override_value(self, path: Tuple[str, ...], value: Any):
         cur = self.quote_state.user_overrides
@@ -24238,7 +23305,7 @@ class App(tk.Tk):
                 self._log_geo(g2d)
 
                 vars_df_for_editor = typing.cast(PandasDataFrame, self.vars_df)
-                self._populate_editor_tab(vars_df_for_editor)
+                self.editor_view.populate(vars_df_for_editor)
                 self.nb.select(self.tab_editor)
                 self.status_var.set(f"{ext.upper()} variables loaded. Review the Quote Editor and generate the quote.")
                 return
@@ -24368,7 +23435,7 @@ class App(tk.Tk):
         vars_df_for_editor = self.vars_df
         if vars_df_for_editor is None:  # pragma: no cover - defensive type check
             raise RuntimeError("Variables dataframe was not initialized")
-        self._populate_editor_tab(typing.cast(PandasDataFrame, vars_df_for_editor))
+        self.editor_view.populate(typing.cast(PandasDataFrame, vars_df_for_editor))
         self.nb.select(self.tab_editor)
         self.status_var.set("Variables loaded. Review the Quote Editor and click Generate Quote.")
         return
@@ -24379,7 +23446,7 @@ class App(tk.Tk):
         return self.action_full_flow()
 
     def apply_overrides(self, notify: bool = False) -> None:
-        raw_param_values = {k: var.get() for k, var in self.param_vars.items()}
+        raw_param_values = {k: var.get() for k, var in self.editor_view.param_vars.items()}
 
         updates = {}
         for key, raw_value in raw_param_values.items():
@@ -24410,8 +23477,8 @@ class App(tk.Tk):
         self.params.update(updates)
 
         if quantity_val is not None:
-            if "Quantity" in self.param_vars:
-                self.param_vars["Quantity"].set(str(quantity_val))
+            if "Quantity" in self.editor_view.param_vars:
+                self.editor_view.param_vars["Quantity"].set(str(quantity_val))
 
         if self.vars_df is not None and raw_param_values:
             normalized_items = self.vars_df["Item"].astype(str).apply(normalize_item_text)
@@ -24437,11 +23504,11 @@ class App(tk.Tk):
                         self.vars_df.loc[mask, "Example Values / Options"] = value
                         break
 
-        if self._simple_rate_mode_active():
-            self._apply_simple_rates(trigger_reprice=False)
-            self._sync_simple_rate_fields()
+        if self.editor_view.simple_rate_mode_active():
+            self.editor_view.apply_simple_rates(trigger_reprice=False)
+            self.editor_view.sync_simple_rate_fields()
         else:
-            rate_raw_values = {k: var.get() for k, var in self.rate_vars.items()}
+            rate_raw_values = {k: var.get() for k, var in self.editor_view.rate_vars.items()}
             rate_updates = {}
             for key, raw_value in rate_raw_values.items():
                 try:
@@ -24451,9 +23518,9 @@ class App(tk.Tk):
                     rate_updates[key] = fallback if fallback is not None else 0.0
             self.rates.update(rate_updates)
             for key, value in rate_updates.items():
-                var = self.rate_vars.get(key)
+                var = self.editor_view.rate_vars.get(key)
                 if var is not None:
-                    var.set(self._format_rate_value(value))
+                    var.set(self.editor_view.format_rate_value(value))
 
         if notify:
             messagebox.showinfo("Overrides", "Overrides applied.")
@@ -24489,13 +23556,13 @@ class App(tk.Tk):
                     self.rates.update({k: float(v) for k, v in data["rates"].items()})
                 except Exception:
                     self.rates.update(data["rates"])
-            for k,v in self.param_vars.items():
+            for k, v in self.editor_view.param_vars.items():
                 v.set(str(self.params.get(k, "")))
-            if self._simple_rate_mode_active():
-                self._sync_simple_rate_fields()
+            if self.editor_view.simple_rate_mode_active():
+                self.editor_view.sync_simple_rate_fields()
             else:
-                for k,v in self.rate_vars.items():
-                    v.set(self._format_rate_value(self.rates.get(k, "")))
+                for k, v in self.editor_view.rate_vars.items():
+                    v.set(self.editor_view.format_rate_value(self.rates.get(k, "")))
             messagebox.showinfo("Overrides", "Overrides loaded.")
             self.status_var.set(f"Loaded overrides from {path}")
         except Exception:
@@ -24582,7 +23649,7 @@ class App(tk.Tk):
         widget.insert("end", d + "\n")
         widget.see("end")
         try:
-            self.output_nb.select(self.output_tab_simplified)
+            self.output_pane.select("simplified")
         except Exception:
             pass
 
@@ -24593,7 +23660,7 @@ class App(tk.Tk):
             self.gen_quote(reuse_suggestions=True)
             return
 
-        self._mark_quote_dirty(hint)
+        self.editor_view.mark_dirty(hint)
 
     def gen_quote(self, reuse_suggestions: bool = False) -> None:
         already_repricing = self._reprice_in_progress
@@ -24616,7 +23683,7 @@ class App(tk.Tk):
             if vars_df_local is None:
                 vars_df_local = coerce_or_make_vars_df(None)
                 self.vars_df = vars_df_local
-            for item_name, string_var in self.quote_vars.items():
+            for item_name, string_var in self.editor_view.quote_vars.items():
                 mask = vars_df_local["Item"] == item_name
                 if mask.any():
                     vars_df_local.loc[mask, "Example Values / Options"] = string_var.get()
@@ -24638,7 +23705,7 @@ class App(tk.Tk):
                 ui_vars.setdefault("Speeds/Feeds CSV", speeds_csv)
 
             # Use LLM only if already available; avoid blocking loads during quote gen
-            llm_suggest = self.LLM_SUGGEST
+            llm_suggest = self.llm_controls.vision_model
 
             try:
                 self._reset_llm_logs()
@@ -24718,7 +23785,7 @@ class App(tk.Tk):
             baseline_ctx = self.quote_state.baseline or {}
             suggestions_ctx = self.quote_state.suggestions or {}
             if baseline_ctx and suggestions_ctx:
-                self.apply_llm_to_editor(suggestions_ctx, baseline_ctx)
+                self.editor_view.apply_llm_to_editor(suggestions_ctx, baseline_ctx)
 
             model_path = self.llm_model_path.get().strip()
             llm_explanation = get_llm_quote_explanation(
@@ -24886,7 +23953,7 @@ class App(tk.Tk):
                     pass
 
             try:
-                self.output_nb.select(self.output_tab_simplified)
+                self.output_pane.select("simplified")
             except Exception:
                 pass
 
@@ -24902,7 +23969,7 @@ class App(tk.Tk):
             succeeded = True
         finally:
             if succeeded:
-                self._clear_quote_dirty()
+                self.editor_view.clear_dirty()
             if not already_repricing:
                 self._reprice_in_progress = False
 
