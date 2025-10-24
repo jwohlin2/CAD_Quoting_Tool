@@ -4,3 +4,6 @@ latest_quote_simplified.txt
 
 # IDE/editor configs
 .vscode/
+
+# Log files
+*.log
