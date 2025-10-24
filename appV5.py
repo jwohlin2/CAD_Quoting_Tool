@@ -17884,14 +17884,21 @@ def compute_quote_from_df(  # type: ignore[reportGeneralTypeIssues]
             )
             break
 
-    _ensure_drilling_override(
-        drill_hr,
-        planner_bucket_view=planner_bucket_view_candidate,
-        canonical_bucket_rollup=canonical_bucket_rollup_candidate,
-        process_meta=process_meta_map,
-        hour_summary_entries=hour_summary_for_override,
-        label_overrides=typing.cast(Mapping[str, str] | None, label_overrides_map),
-    )
+    override_intended = False
+    if drill_hr and drill_hr > 0.0:
+        override_intended = True
+    elif not (plan_drill_min and plan_drill_min > 0.0):
+        override_intended = True
+
+    if override_intended:
+        _ensure_drilling_override(
+            drill_hr,
+            planner_bucket_view=planner_bucket_view_candidate,
+            canonical_bucket_rollup=canonical_bucket_rollup_candidate,
+            process_meta=process_meta_map,
+            hour_summary_entries=hour_summary_for_override,
+            label_overrides=typing.cast(Mapping[str, str] | None, label_overrides_map),
+        )
 
     drilling_summary["total_minutes_billed"] = float(drill_min)
 
