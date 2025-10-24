@@ -62,3 +62,56 @@ def test_extract_geo_without_table(monkeypatch, tmp_path, dummy_doc):
     assert ops_summary.get("source") == "geom"
     assert ops_summary.get("rows") in (None, [])
     assert geo.get("hole_count") == 5
+
+
+def test_extract_geo_prefers_acad_when_better(monkeypatch, tmp_path, dummy_doc):
+    acad_rows = [{"qty": 10}, {"qty": 5}]
+    text_rows = [{"qty": 1}]
+
+    base_geo = {"ops_summary": {}, "hole_count_geom": 0}
+
+    monkeypatch.setattr(geo_extractor, "extract_geometry", lambda doc: dict(base_geo))
+    monkeypatch.setattr(geo_extractor, "read_acad_table", lambda doc: {"rows": acad_rows, "hole_count": 15})
+    monkeypatch.setattr(geo_extractor, "read_text_table", lambda doc: {"rows": text_rows})
+
+    def chooser(a, b):
+        return a if geo_extractor._score_table(a) >= geo_extractor._score_table(b) else b
+
+    monkeypatch.setattr(geo_extractor, "choose_better_table", chooser)
+
+    out_path = tmp_path / "acad_first.dxf"
+    out_path.write_text("DXF")
+
+    geo = geo_extractor.extract_geo_from_path(str(out_path), use_oda=False)
+
+    ops_summary = geo.get("ops_summary") or {}
+    assert ops_summary.get("source") == "acad_table"
+    assert len(ops_summary.get("rows") or []) == len(acad_rows)
+    assert geo.get("hole_count") == 15
+
+
+def test_extract_geo_keeps_better_existing_table(monkeypatch, tmp_path, dummy_doc):
+    existing_rows = [{"qty": 6}, {"qty": 6}, {"qty": 6}]
+    weaker_rows = [{"qty": 1}]
+
+    base_geo = {
+        "ops_summary": {"rows": list(existing_rows), "source": "initial_table"},
+        "provenance": {"holes": "HOLE TABLE"},
+        "hole_count": 18,
+    }
+
+    monkeypatch.setattr(geo_extractor, "extract_geometry", lambda doc: dict(base_geo))
+    monkeypatch.setattr(geo_extractor, "read_acad_table", lambda doc: {"rows": weaker_rows})
+    monkeypatch.setattr(geo_extractor, "read_text_table", lambda doc: {})
+
+    def chooser(a, b):
+        return a if geo_extractor._score_table(a) >= geo_extractor._score_table(b) else b
+
+    monkeypatch.setattr(geo_extractor, "choose_better_table", chooser)
+
+    geo = geo_extractor.extract_geo_from_path(str(tmp_path / "keep_existing.dxf"), use_oda=False)
+
+    ops_summary = geo.get("ops_summary") or {}
+    assert ops_summary.get("source") == "initial_table"
+    assert len(ops_summary.get("rows") or []) == len(existing_rows)
+    assert geo.get("hole_count") == 18
