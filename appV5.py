@@ -150,7 +150,7 @@ _MM_DIM_TOKEN = re.compile(
 )
 
 RE_COUNTERDRILL = re.compile(
-    r"\b(?:C[’']?\s*DRILL|COUNTER[-\s]*DRILL|CTR\s*DRILL)\b",
+    r"\b(?:C[’']\s*DRILL|COUNTER[\s-]*DRILL|CTR\s*DRILL)\b",
     re.IGNORECASE,
 )
 RE_JIG = re.compile(r"\bJIG\s*GRIND\b", re.IGNORECASE)
@@ -519,6 +519,123 @@ def _publish_extra_bucket_op(
             return
 
     entries.append(normalized)
+
+
+def _ensure_bucket_view_mapping(
+    owner: MutableMapping[str, Any] | Mapping[str, Any] | None,
+) -> MutableMapping[str, Any] | Mapping[str, Any] | None:
+    """Return a mutable bucket-view mapping for ``owner`` if possible."""
+
+    if isinstance(owner, dict):
+        try:
+            return owner.setdefault("bucket_view", {})
+        except Exception:
+            return owner.get("bucket_view")
+    if isinstance(owner, _MutableMappingABC):
+        try:
+            return typing.cast(MutableMapping[str, Any], owner.setdefault("bucket_view", {}))
+        except Exception:
+            try:
+                return owner.get("bucket_view")
+            except Exception:
+                return None
+    return None
+
+
+def _append_counterdrill_extra(
+    owner: MutableMapping[str, Any] | Mapping[str, Any] | None,
+    qty: int,
+    *,
+    rates: Mapping[str, Any] | None,
+    side: str | None = "front",
+) -> float:
+    """Append a counterdrill extra op entry and update bucket minutes."""
+
+    try:
+        qty_val = int(qty)
+    except Exception:
+        qty_val = 0
+    if qty_val <= 0:
+        return 0.0
+
+    _ebo_append_unique(
+        owner,
+        "counterdrill",
+        {"name": "Counterdrill", "qty": qty_val, "side": side},
+    )
+
+    minutes_per = float(
+        globals().get("COUNTERDRILL_MIN_PER_SIDE_MIN")
+        or COUNTERDRILL_MIN_PER_SIDE_MIN
+        or 0.12
+    )
+    total_minutes = float(qty_val) * minutes_per
+
+    bucket_view_obj = _ensure_bucket_view_mapping(owner)
+    if bucket_view_obj is not None:
+        machine_rate = (
+            _lookup_bucket_rate("counterdrill", rates)
+            or _lookup_bucket_rate("drilling", rates)
+            or _lookup_bucket_rate("machine", rates)
+            or 53.76
+        )
+        labor_rate = (
+            _lookup_bucket_rate("drilling_labor", rates)
+            or _lookup_bucket_rate("labor", rates)
+            or 25.46
+        )
+        _set_bucket_minutes_cost(
+            bucket_view_obj,
+            "counterdrill",
+            total_minutes,
+            machine_rate,
+            labor_rate,
+        )
+
+    return total_minutes
+
+
+def _append_jig_extra(
+    owner: MutableMapping[str, Any] | Mapping[str, Any] | None,
+    qty: int,
+    *,
+    rates: Mapping[str, Any] | None,
+) -> float:
+    """Append a jig-grind extra op entry and update bucket minutes."""
+
+    try:
+        qty_val = int(qty)
+    except Exception:
+        qty_val = 0
+    if qty_val <= 0:
+        return 0.0
+
+    _ebo_append_unique(
+        owner,
+        "jig-grind",
+        {"name": "Jig-grind", "qty": qty_val, "side": None},
+    )
+
+    minutes_per = float(globals().get("JIG_GRIND_MIN_PER_FEATURE") or 0.75)
+    total_minutes = float(qty_val) * minutes_per
+
+    bucket_view_obj = _ensure_bucket_view_mapping(owner)
+    if bucket_view_obj is not None:
+        machine_rate = (
+            _lookup_bucket_rate("grinding", rates)
+            or _lookup_bucket_rate("machine", rates)
+            or 53.76
+        )
+        labor_rate = _lookup_bucket_rate("labor", rates) or 25.46
+        _set_bucket_minutes_cost(
+            bucket_view_obj,
+            "grinding",
+            total_minutes,
+            machine_rate,
+            labor_rate,
+        )
+
+    return total_minutes
 
 from cad_quoter.app.chart_lines import (
     collect_chart_lines_context as _collect_chart_lines_context,
@@ -1928,6 +2045,17 @@ def _append_counterbore_spot_jig_cards(
         *,
         minutes: float | None = None,
     ) -> None:
+        if bucket == "jig-grind":
+            try:
+                qty_val = int(payload.get("qty") or 0)
+            except Exception:
+                qty_val = 0
+            _append_jig_extra(
+                breakdown_mutable,
+                qty_val,
+                rates=rates,
+            )
+            return
         if ebo_local is None:
             return
         _publish_extra_bucket_op(ebo_local, bucket, payload, minutes=minutes)
@@ -12962,33 +13090,17 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
                 )
             if ops_claims.get("counterdrill", 0) > 0:
                 counterdrill_qty_local = int(ops_claims.get("counterdrill", 0) or 0)
-                per_counterdrill = float(
-                    globals().get("COUNTERDRILL_MIN_PER_SIDE_MIN")
-                    or COUNTERDRILL_MIN_PER_SIDE_MIN
-                    or 0.12
-                )
-                _publish_extra_bucket_op(
-                    ebo,
-                    "counterdrill",
-                    {
-                        "name": "Counterdrill",
-                        "qty": counterdrill_qty_local,
-                        "side": "front",
-                    },
-                    minutes=float(counterdrill_qty_local) * per_counterdrill,
+                _append_counterdrill_extra(
+                    breakdown_mutable,
+                    counterdrill_qty_local,
+                    rates=rates,
                 )
             if ops_claims.get("jig", 0) > 0:
                 jig_qty = int(ops_claims.get("jig", 0) or 0)
-                per_jig = float(globals().get("JIG_GRIND_MIN_PER_FEATURE") or 0.75)
-                _publish_extra_bucket_op(
-                    ebo,
-                    "jig-grind",
-                    {
-                        "name": "Jig-grind",
-                        "qty": jig_qty,
-                        "side": None,
-                    },
-                    minutes=float(jig_qty) * per_jig,
+                _append_jig_extra(
+                    breakdown_mutable,
+                    jig_qty,
+                    rates=rates,
                 )
         except Exception:
             pass
@@ -13527,28 +13639,16 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
                                 minutes=float(spot_qty_local) * 0.05,
                             )
                         if counterdrill_qty > 0:
-                            per_counterdrill = float(
-                                globals().get("COUNTERDRILL_MIN_PER_SIDE_MIN")
-                                or COUNTERDRILL_MIN_PER_SIDE_MIN
-                                or 0.12
-                            )
-                            _publish_extra_bucket_op(
-                                ebo,
-                                "counterdrill",
-                                {
-                                    "name": "Counterdrill",
-                                    "qty": int(counterdrill_qty),
-                                    "side": "front",
-                                },
-                                minutes=float(counterdrill_qty) * per_counterdrill,
+                            _append_counterdrill_extra(
+                                breakdown_mutable,
+                                int(counterdrill_qty),
+                                rates=rates,
                             )
                         if jig_qty > 0:
-                            per_jig = float(globals().get("JIG_GRIND_MIN_PER_FEATURE") or 0.75)
-                            _publish_extra_bucket_op(
-                                ebo,
-                                "jig-grind",
-                                {"name": "Jig-grind", "qty": int(jig_qty), "side": None},
-                                minutes=float(jig_qty) * per_jig,
+                            _append_jig_extra(
+                                breakdown_mutable,
+                                int(jig_qty),
+                                rates=rates,
                             )
                     except Exception:
                         pass
@@ -13899,29 +13999,17 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
             )
         if (ops_claims.get("counterdrill") or 0) > 0:
             counterdrill_qty_local = int(ops_claims.get("counterdrill") or 0)
-            per_counterdrill = float(
-                globals().get("COUNTERDRILL_MIN_PER_SIDE_MIN")
-                or COUNTERDRILL_MIN_PER_SIDE_MIN
-                or 0.12
-            )
-            _publish_extra_bucket_op(
-                extra_bucket_ops,
-                "counterdrill",
-                {
-                    "name": "Counterdrill",
-                    "qty": counterdrill_qty_local,
-                    "side": "front",
-                },
-                minutes=float(counterdrill_qty_local) * per_counterdrill,
+            _append_counterdrill_extra(
+                breakdown_mutable,
+                counterdrill_qty_local,
+                rates=rates,
             )
         if (ops_claims.get("jig") or 0) > 0:
             jig_qty_local = int(ops_claims.get("jig") or 0)
-            per_jig = float(globals().get("JIG_GRIND_MIN_PER_FEATURE") or 0.75)
-            _publish_extra_bucket_op(
-                extra_bucket_ops,
-                "jig-grind",
-                {"name": "Jig-grind", "qty": jig_qty_local, "side": None},
-                minutes=float(jig_qty_local) * per_jig,
+            _append_jig_extra(
+                breakdown_mutable,
+                jig_qty_local,
+                rates=rates,
             )
     except Exception:
         pass
