@@ -85,6 +85,7 @@ from collections.abc import (
     Iterator,
     Mapping as _MappingABC,
     MutableMapping as _MutableMappingABC,
+    MutableSet as _MutableSetABC,
     Sequence,
 )
 from dataclasses import dataclass, field, replace
@@ -722,28 +723,54 @@ def _build_ops_cards_from_chart_lines(
         chart_claims.get("cb_groups") or {}
     )
 
+    printed_candidate: Any = None
     try:
         if isinstance(breakdown_mutable, dict):
-            derived = breakdown_mutable.setdefault("derived_ops", {})
+            printed_candidate = breakdown_mutable.setdefault(
+                "_ops_cards_printed", set()
+            )
         elif isinstance(breakdown_mutable, _MutableMappingABC):
-            derived = typing.cast(
+            printed_candidate = typing.cast(
+                MutableMapping[str, Any],
+                breakdown_mutable,
+            ).setdefault("_ops_cards_printed", set())
+    except Exception:
+        printed_candidate = None
+
+    printed: MutableSet[str] | None = None
+    if isinstance(printed_candidate, (_MutableSetABC, set)):
+        printed = typing.cast(MutableSet[str], printed_candidate)
+
+    if printed is not None:
+        if "cbore" in printed:
+            return lines
+        printed.add("cbore")
+
+    derived_candidate: Any = None
+    try:
+        if isinstance(breakdown_mutable, dict):
+            derived_candidate = breakdown_mutable.setdefault("derived_ops", {})
+        elif isinstance(breakdown_mutable, _MutableMappingABC):
+            derived_candidate = typing.cast(
                 MutableMapping[str, Any],
                 breakdown_mutable,
             ).setdefault("derived_ops", {})
-        else:
-            derived = None
-        if isinstance(derived, (_MutableMappingABC, dict)):
-            serial: dict[tuple[float | None, str, float | None], int] = {}
-            for (dia, side, depth), qty in cb_groups.items():
-                key = (
-                    float(dia) if dia is not None else None,
-                    str(side),
-                    float(depth) if depth is not None else None,
-                )
-                serial[key] = int(qty or 0)
-            derived["cb_groups"] = serial  # type: ignore[index]
     except Exception:
-        pass
+        derived_candidate = None
+
+    if isinstance(derived_candidate, (_MutableMappingABC, dict)):
+        serial: dict[tuple[float | None, str, float | None], int] = {}
+        for (dia, side, depth), qty in cb_groups.items():
+            key = (
+                float(dia) if dia is not None else None,
+                str(side),
+                float(depth) if depth is not None else None,
+            )
+            serial[key] = int(qty or 0)
+        try:
+            derived_candidate["cb_groups"] = serial  # type: ignore[index]
+        except Exception:
+            pass
     spot_qty = int(chart_claims.get("spot") or 0)
     jig_qty = int(chart_claims.get("jig") or 0)
 
