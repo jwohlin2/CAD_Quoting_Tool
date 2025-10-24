@@ -4172,18 +4172,29 @@ def _compute_drilling_removal_section(
 
     # ---- BEGIN SAFE INITIALIZATION ----
     geo_map_candidate: Mapping[str, Any] | MutableMapping[str, Any] | dict[str, Any] | None = None
+    result_geo_candidate: Mapping[str, Any] | MutableMapping[str, Any] | dict[str, Any] | Any | None = None
+    breakdown_geo_candidate: Mapping[str, Any] | MutableMapping[str, Any] | dict[str, Any] | Any | None = None
 
     if isinstance(result_context, (_MappingABC, dict)):
         try:
-            geo_map_candidate = result_context.get("geo")  # type: ignore[index]
+            result_geo_candidate = result_context.get("geo")  # type: ignore[index]
         except Exception:
-            geo_map_candidate = None
+            result_geo_candidate = None
 
-    if geo_map_candidate is None and isinstance(breakdown, (_MappingABC, dict)):
+    if isinstance(breakdown, (_MappingABC, dict)):
         try:
-            geo_map_candidate = breakdown.get("geo")  # type: ignore[index]
+            breakdown_geo_candidate = breakdown.get("geo")  # type: ignore[index]
         except Exception:
-            geo_map_candidate = None
+            breakdown_geo_candidate = None
+
+    if result_geo_candidate:
+        geo_map_candidate = result_geo_candidate
+    elif breakdown_geo_candidate:
+        geo_map_candidate = breakdown_geo_candidate
+    elif result_geo_candidate is not None:
+        geo_map_candidate = result_geo_candidate
+    else:
+        geo_map_candidate = breakdown_geo_candidate
 
     if isinstance(geo_map_candidate, (_MappingABC, dict)):
         geo_map = geo_map_candidate
