@@ -3,7 +3,8 @@ latest_quote_full.txt
 latest_quote_simplified.txt
 
 # IDE/editor configs
-.vscode/
+.vscode/*
+!.vscode/settings.json
 
 # Log files
 *.log

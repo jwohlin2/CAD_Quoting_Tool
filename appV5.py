@@ -47,13 +47,14 @@ if isinstance(_stdout, TextIOWrapper):
         pass
 
 _SCRIPT_DIR = Path(__file__).resolve().parent
-_PKG_SRC = _SCRIPT_DIR / "cad_quoter_pkg" / "src"
+_PKG_SRC = _SCRIPT_DIR / "src"
 if _PKG_SRC.is_dir():
     _pkg_src_str = str(_PKG_SRC)
     if _pkg_src_str not in sys.path:
         sys.path.insert(0, _pkg_src_str)
 
 from cad_quoter.app.quote_doc import (
+    build_material_detail_lines,
     build_quote_header_lines,
     _sanitize_render_text,
 )
@@ -90,6 +91,138 @@ from collections.abc import (
 )
 from dataclasses import dataclass, field, replace
 from fractions import Fraction
+
+_re = re
+
+# --- Ops aggregation from HOLE TABLE rows (minimal) ---
+_SIDE_BOTH = re.compile(r"\b(FRONT\s*&\s*BACK|BOTH\s+SIDES)\b", re.I)
+_SIDE_BACK = re.compile(r"\b(?:FROM\s+)?BACK\b", re.I)
+_SIDE_FRONT = re.compile(r"\b(?:FROM\s+)?FRONT\b", re.I)
+
+
+def _row_side(desc: str) -> str | None:
+    U = (desc or "").upper()
+    if _SIDE_BOTH.search(U):
+        return "BOTH"
+    if _SIDE_BACK.search(U):
+        return "BACK"
+    if _SIDE_FRONT.search(U):
+        return "FRONT"
+    return None
+
+
+def aggregate_ops_from_rows(rows: list[dict]) -> dict:
+    """Aggregate lightweight drilling/tapping counters from HOLE TABLE rows."""
+
+    totals: defaultdict[str, int] = defaultdict(int)
+    detail: list[dict[str, Any]] = []
+    for r in rows or []:
+        try:
+            qty = int(float(r.get("qty") or 0))
+        except Exception:
+            qty = 0
+        if qty <= 0:
+            continue
+        desc = str(r.get("desc", ""))
+        side = _row_side(desc)
+        U = desc.upper()
+
+        if "TAP" in U:
+            if side == "BACK":
+                totals["tap_back"] += qty
+            elif side == "BOTH":
+                totals["tap_front"] += qty
+                totals["tap_back"] += qty
+            else:
+                totals["tap_front"] += qty
+            totals["tap"] += qty
+            totals["drill"] += qty
+
+        if (
+            "CBORE" in U
+            or "C'BORE" in U
+            or "COUNTERBORE" in U
+            or "COUNTER BORE" in U
+        ):
+            if side == "BACK":
+                totals["counterbore_back"] += qty
+            elif side == "BOTH":
+                totals["counterbore_front"] += qty
+                totals["counterbore_back"] += qty
+            else:
+                totals["counterbore_front"] += qty
+            totals["counterbore"] += qty
+
+        if (
+            "C DRILL" in U
+            or "C’DRILL" in U
+            or "CENTER DRILL" in U
+            or "SPOT DRILL" in U
+            or "SPOT" in U
+        ):
+            if ("THRU" not in U) and ("TAP" not in U):
+                totals["spot"] += qty
+
+        if "JIG GRIND" in U:
+            totals["jig_grind"] += qty
+
+        detail.append(
+            {
+                "hole": r.get("hole") or r.get("id") or "",
+                "ref": r.get("ref", ""),
+                "qty": qty,
+                "desc": desc,
+            }
+        )
+
+    back_ops_total = int(totals.get("counterbore_back", 0) + totals.get("tap_back", 0))
+    return {
+        "totals": dict(totals),
+        "rows": detail,
+        "actions_total": int(sum(totals.values())),
+        "back_ops_total": back_ops_total,
+        "flip_required": bool(back_ops_total > 0),
+    }
+
+
+# --- Hole-table row promotion helpers ---------------------------------------
+def _rows_qty_sum(rows):
+    s = 0
+    for r in rows or []:
+        try:
+            s += int(float(r.get("qty") or 0))
+        except Exception:
+            pass
+    return s
+
+
+def _score_table_info(info):
+    if not isinstance(info, dict):
+        return (0, 0)
+    rows = info.get("rows") or []
+    return (_rows_qty_sum(rows), len(rows))
+
+
+def _better(a, b):
+    # prefer higher qty_sum; if tie, prefer more rows
+    (qa, ra), (qb, rb) = _score_table_info(a), _score_table_info(b)
+    return (qa, ra) >= (qb, rb)
+
+
+def _persist_rows_and_totals(geo, info):
+    if not isinstance(info, dict):
+        return
+    rows = info.get("rows") or []
+    if not rows:
+        return
+    # write where the app actually reads
+    geo.setdefault("ops_summary", {})["rows"] = rows
+    # compute totals (tap/cbore/back/front etc.) in extractor once
+    if "totals" not in geo["ops_summary"]:
+        try:
+            geo["ops_summary"]["totals"] = aggregate_ops_from_rows(rows)["totals"]
+        except Exception:
+            pass
 
 from cad_quoter.app._value_utils import (
     _format_value,
@@ -151,6 +284,22 @@ def _get_core_geo_map(geo_map: dict | None) -> dict:
     """Return the dict that actually holds the hole lists / feature counts."""
 
     g = geo_map or {}
+    if not isinstance(g, dict):
+        return {}
+
+    _family_keys = (
+        "hole_diam_families_geom_in",
+        "hole_diam_families_in",
+        "hole_diam_families_geom",
+        "hole_diam_families",
+    )
+
+    # If the outer map already provides drill families, prefer it so callers can
+    # still read the aggregated counts even when nested GEO metadata exists.
+    for key in _family_keys:
+        if key in g:
+            return g
+
     if isinstance(g.get("geo"), dict):
         g2 = g["geo"]
         for key in (
@@ -160,6 +309,7 @@ def _get_core_geo_map(geo_map: dict | None) -> dict:
             "hole_diams_mm_precise",
             "hole_sets",
             "feature_counts",
+            *_family_keys,
         ):
             if key in g2:
                 return g2
@@ -727,6 +877,7 @@ from cad_quoter.app.hole_ops import (
     _SPOT_TOKENS,
     summarize_hole_chart_lines,
 )
+from cad_quoter.utils.number_parse import NUM_DEC_RE, NUM_FRAC_RE, _to_inch, first_inch_value
 from cad_quoter.app.container import (
     ServiceContainer,
     SupportsPricingEngine,
@@ -1105,6 +1256,70 @@ def _ebo_append_unique(
 
 
 # --- compatibility shim: some callsites use _build_extra_ops_lines_list ---
+
+
+def _normalize_geo_map(geo_obj: Mapping[str, Any] | None) -> Mapping[str, Any] | None:
+    """Normalize a geo map, merging legacy nested ``geo.geo`` payloads."""
+
+    if not isinstance(geo_obj, (_MappingABC, dict)):
+        return None
+
+    geo_map = dict(geo_obj) if not isinstance(geo_obj, dict) else dict(geo_obj)
+    try:
+        nested_geo = geo_map.get("geo")
+    except Exception:
+        nested_geo = None
+
+    if (
+        isinstance(nested_geo, (_MappingABC, dict))
+        and "ops_summary" not in geo_map
+    ):
+        for key, value in nested_geo.items():
+            geo_map.setdefault(key, value)
+
+    return geo_map
+
+
+def _get_geo_map(*candidates: Mapping[str, Any] | None) -> Mapping[str, Any]:
+    """Return the first truthy geo map from the provided candidates."""
+
+    for cand in candidates:
+        if not isinstance(cand, (_MappingABC, dict)):
+            continue
+        try:
+            geo_obj = cand.get("geo")
+        except Exception:
+            geo_obj = None
+        normalized = _normalize_geo_map(geo_obj)
+        if isinstance(normalized, (_MappingABC, dict)):
+            return typing.cast(Mapping[str, Any], normalized)
+    return {}
+
+
+def _ops_rows_from_geo(geo_map: Mapping[str, Any] | None) -> list[Mapping[str, Any]]:
+    """Extract ops_summary rows from the provided geo map."""
+
+    rows: list[Mapping[str, Any]] = []
+    if not isinstance(geo_map, (_MappingABC, dict)):
+        return rows
+
+    try:
+        rows_obj = (((geo_map or {}).get("ops_summary") or {}).get("rows") or [])
+    except Exception:
+        rows_obj = []
+
+    if isinstance(rows_obj, list):
+        for entry in rows_obj:
+            if isinstance(entry, _MappingABC):
+                rows.append(entry)
+    elif isinstance(rows_obj, _MappingABC):
+        for entry in rows_obj.values():  # type: ignore[assignment]
+            if isinstance(entry, _MappingABC):
+                rows.append(entry)
+
+    return rows
+
+
 def _build_extra_ops_lines_list(
     breakdown=None,
     result=None,
@@ -1170,7 +1385,93 @@ def _build_ops_cards_from_chart_lines(
 ) -> list[str]:
     """Return extra MATERIAL REMOVAL cards for Counterbore / Spot / Jig."""
 
-    lines: list[str] = []
+    # guard: only build once per render pass
+    try:
+        root_state: MutableMapping[str, Any] | None = None
+        if breakdown_mutable is not None:
+            root_state = breakdown_mutable
+        elif breakdown is not None:
+            root_state = breakdown
+
+        if isinstance(root_state, dict):
+            if root_state.get("_ops_cards_once"):
+                return ["[DEBUG] extra_ops_appended=1 (skipped duplicate)"]
+            root_state["_ops_cards_once"] = True
+        elif isinstance(root_state, _MutableMappingABC):
+            root_state_mut = typing.cast(MutableMapping[str, Any], root_state)
+            if root_state_mut.get("_ops_cards_once"):
+                return ["[DEBUG] extra_ops_appended=1 (skipped duplicate)"]
+            root_state_mut["_ops_cards_once"] = True
+    except Exception:
+        pass
+
+    try:
+        print(
+            "[APP] geo keys at render:",
+            list((breakdown or {}).get("geo", {}).keys()),
+        )
+        geo_map = _get_geo_map(locals().get("result"), breakdown_mutable or breakdown)
+    except Exception:
+        geo_map = {}
+
+    pre_rows_obj: Any = []
+    if isinstance(geo_map, dict):
+        try:
+            pre_rows_obj = ((geo_map.get("ops_summary") or {}).get("rows") or [])
+        except Exception:
+            pre_rows_obj = []
+    rows: list[Any] = []
+    if isinstance(pre_rows_obj, list):
+        rows = pre_rows_obj
+    elif isinstance(pre_rows_obj, (_MappingABC, dict)):
+        try:
+            rows = [value for value in pre_rows_obj.values() if value is not None]
+        except Exception:
+            rows = []
+    print(f"[DEBUG] ops_rows_pre={len(rows)}")
+    lines: list[str] = [f"[DEBUG] ops_rows_pre={len(rows)}"]
+    if not rows:
+        built_rows = ensure_ops_rows_in_geo_from_chart(
+            geo=geo_map if isinstance(geo_map, dict) else None
+        )
+        chart_count = 0
+        try:
+            if isinstance(geo_map, dict):
+                chart_count = len(geo_map.get("chart_lines") or [])
+        except Exception:
+            chart_count = 0
+        print(
+            f"[DEBUG] chart_lines_found={chart_count} built_rows={built_rows}"
+        )
+        lines.append(
+            f"[DEBUG] chart_lines_found={chart_count} built_rows={built_rows}"
+        )
+        if not rows:
+            try:
+                refreshed_geo = _get_geo_map(
+                    locals().get("result"),
+                    breakdown_mutable or breakdown,
+                )
+            except Exception:
+                refreshed_geo = {}
+            if isinstance(refreshed_geo, dict):
+                try:
+                    post_rows = (
+                        (refreshed_geo.get("ops_summary") or {}).get("rows") or []
+                    )
+                except Exception:
+                    post_rows = []
+                if isinstance(post_rows, list):
+                    rows = post_rows
+                    geo_map = refreshed_geo
+                elif isinstance(post_rows, (_MappingABC, dict)):
+                    try:
+                        rows = [value for value in post_rows.values() if value is not None]
+                    except Exception:
+                        rows = []
+                    geo_map = refreshed_geo
+
+    rows = rows if isinstance(rows, list) else []
 
     extra_bucket_ops: MutableMapping[str, Any] | None = None
     if isinstance(breakdown_mutable, dict):
@@ -1200,12 +1501,6 @@ def _build_ops_cards_from_chart_lines(
         except Exception:
             extra_bucket_ops = None
 
-    geo_map = (
-        ((result or {}).get("geo") if isinstance(result, _MappingABC) else None)
-        or ((breakdown or {}).get("geo") if isinstance(breakdown, _MappingABC) else None)
-        or {}
-    )
-
     try:
         chart_lines = _collect_chart_lines_context(ctx, geo_map, ctx_a, ctx_b) or []
     except Exception:
@@ -1221,19 +1516,9 @@ def _build_ops_cards_from_chart_lines(
         ) or []
 
     ops_rows: list[Mapping[str, Any]] = []
-    try:
-        rows_obj = (((geo_map or {}).get("ops_summary") or {}).get("rows") or [])
-    except Exception:
-        rows_obj = []
-
-    if isinstance(rows_obj, list):
-        for entry in rows_obj:
-            if isinstance(entry, _MappingABC):
-                ops_rows.append(entry)
-    elif isinstance(rows_obj, _MappingABC):
-        for entry in rows_obj.values():  # type: ignore[assignment]
-            if isinstance(entry, _MappingABC):
-                ops_rows.append(entry)
+    for entry in rows:
+        if isinstance(entry, _MappingABC):
+            ops_rows.append(typing.cast(Mapping[str, Any], entry))
 
     cleaned_chart_lines: list[str] = []
     for raw in chart_lines or []:
@@ -1249,46 +1534,72 @@ def _build_ops_cards_from_chart_lines(
     if not joined_chart and not ops_rows:
         return lines
 
-    # If we don't have rows in geo, try to generate them from the chart lines once
-    try:
-        rows_obj = (((geo_map or {}).get("ops_summary") or {}).get("rows") or [])
-    except Exception:
-        rows_obj = []
-    have_ops_rows = isinstance(rows_obj, list) and len(rows_obj) > 0
-    if (not have_ops_rows) and joined_chart:
-        try:
-            # build normalized rows from lines, then persist to geo.ops_summary
-            fallback_rows = _build_ops_rows_from_lines_fallback(joined_chart)
-        except Exception:
-            fallback_rows = []
-        if fallback_rows and isinstance(geo_map, (_MutableMappingABC, dict)):
+    chart_claims: dict[str, Any] = {}
+    cb_groups: dict[tuple[float | None, str, float | None], int] = {}
+    # 3a) Try to build cbore groups from ops rows (best source: table rows)
+    if ops_rows:
+        for entry in ops_rows:
+            if not isinstance(entry, _MappingABC):
+                continue
             try:
-                update_geo_ops_summary_from_hole_rows(
-                    geo_map,
-                    hole_rows=fallback_rows,
+                qty = int(entry.get("qty") or 0)
+            except Exception:
+                qty = 0
+            if qty <= 0:
+                continue
+            desc = str(entry.get("desc") or "")
+            # side
+            side_txt = "FRONT"
+            side_match = RE_FRONT_BACK.search(desc or "")
+            if side_match:
+                side_txt = (
+                    "BACK"
+                    if "BACK" in side_match.group(0).upper()
+                    else "FRONT"
                 )
-            except Exception:
-                pass
-            try:
-                rows_obj = (((geo_map or {}).get("ops_summary") or {}).get("rows") or [])
-            except Exception:
-                rows_obj = []
-            if isinstance(rows_obj, list):
-                ops_rows = []
-                for entry in rows_obj:
-                    if isinstance(entry, _MappingABC):
-                        ops_rows.append(entry)
-            elif isinstance(rows_obj, _MappingABC):
-                ops_rows = []
-                for entry in rows_obj.values():  # type: ignore[assignment]
-                    if isinstance(entry, _MappingABC):
-                        ops_rows.append(entry)
-
-    chart_claims = _parse_ops_and_claims(joined_chart)
-
-    cb_groups: dict[tuple[float | None, str, float | None], int] = dict(
-        chart_claims.get("cb_groups") or {}
-    )
+            desc_text = desc or ""
+            # diameter & depth (prefer explicit CBORE tokens)
+            desc_text = desc or ""
+            dia_val: float | None = None
+            dia_match = _CB_DIA_RE.search(desc_text)
+            if dia_match:
+                raw = (dia_match.group("numA") or dia_match.group("numB") or "").strip()
+                dia_val = _to_inch(raw)
+            if dia_val is None:
+                dm = RE_DIA.search(desc_text)
+                if dm:
+                    token = dm.group(1) if dm.lastindex else dm.group(0)
+                    dia_val = _to_inch(token)
+                    if dia_val is None and token:
+                        fallback = NUM_FRAC_RE.search(token) or NUM_DEC_RE.search(token)
+                        dia_val = _to_inch(fallback.group(0)) if fallback else first_inch_value(token)
+            if dia_val is None:
+                fallback = NUM_FRAC_RE.search(desc_text) or NUM_DEC_RE.search(desc_text)
+                if fallback:
+                    dia_val = _to_inch(fallback.group(0))
+            dep_val: float | None = None
+            dep_match = _X_DEPTH_RE.search(desc_text)
+            if dep_match:
+                depth_token = dep_match.group(1)
+                dep_val = _to_inch(depth_token)
+            # must be a counterbore clause
+            if RE_CBORE.search(desc_text):
+                key = (dia_val, side_txt, dep_val)
+                cb_groups[key] = cb_groups.get(key, 0) + qty
+    # 3b) Parse chart claims (fallback source)
+    if not ops_rows:
+        try:
+            parsed_claims = _parse_ops_and_claims(joined_chart)
+        except Exception:
+            parsed_claims = {}
+        if isinstance(parsed_claims, dict):
+            chart_claims = parsed_claims
+        else:
+            chart_claims = {}
+    else:
+        chart_claims = {}
+    if (not ops_rows) and not cb_groups:
+        cb_groups = dict(chart_claims.get("cb_groups") or {})
 
     printed_candidate: Any = None
     try:
@@ -1348,9 +1659,6 @@ def _build_ops_cards_from_chart_lines(
             derived_candidate["cb_groups"] = serial  # type: ignore[index]
         except Exception:
             pass
-    spot_qty = int(chart_claims.get("spot") or 0)
-    jig_qty = int(chart_claims.get("jig") or 0)
-
     row_lines: list[str] = []
     for entry in ops_rows:
         desc = str(entry.get("desc") or entry.get("name") or "")
@@ -1363,16 +1671,31 @@ def _build_ops_cards_from_chart_lines(
         prefix = f"({qty_val}) " if qty_val > 0 else ""
         row_lines.append(prefix + desc)
 
-    if row_lines:
-        row_claims = _parse_ops_and_claims(row_lines)
-        if not cb_groups and row_claims.get("cb_groups"):
-            cb_groups = dict(row_claims["cb_groups"])
+    spot_qty = 0
+    jig_qty = 0
 
-        spot_qty = max(spot_qty, int(row_claims.get("spot") or 0))
-        jig_qty = max(jig_qty, int(row_claims.get("jig") or 0))
+    if row_lines:
+        try:
+            row_claims = _parse_ops_and_claims(row_lines)
+        except Exception:
+            row_claims = {}
+        if isinstance(row_claims, dict):
+            if not cb_groups and row_claims.get("cb_groups"):
+                try:
+                    cb_groups = dict(row_claims["cb_groups"])
+                except Exception:
+                    pass
+            try:
+                spot_qty = max(spot_qty, int(row_claims.get("spot") or 0))
+            except Exception:
+                pass
+            try:
+                jig_qty = max(jig_qty, int(row_claims.get("jig") or 0))
+            except Exception:
+                pass
 
     fallback_rows: list[dict[str, Any]] = []
-    if joined_chart:
+    if (not ops_rows) and joined_chart:
         try:
             fallback_rows = _build_ops_rows_from_lines_fallback(joined_chart)
         except Exception:
@@ -1397,6 +1720,15 @@ def _build_ops_cards_from_chart_lines(
         spot_from_rows, jig_from_rows = _count_spot_and_jig(fallback_rows)
         spot_qty = max(spot_qty, spot_from_rows)
         jig_qty = max(jig_qty, jig_from_rows)
+
+    try:
+        spot_qty = max(spot_qty, int(chart_claims.get("spot") or 0))
+    except Exception:
+        pass
+    try:
+        jig_qty = max(jig_qty, int(chart_claims.get("jig") or 0))
+    except Exception:
+        pass
 
     total_cb = int(sum(cb_groups.values()))
 
@@ -1694,17 +2026,9 @@ def _build_ops_cards_from_chart_lines(
         out_lines.append("")
 
         if front_cb > 0:
-            _ebo_append_unique(
-                mutation_owner,
-                "counterbore",
-                {"name": "Counterbore", "qty": int(front_cb), "side": "front"},
-            )
+            _ebo_append_unique("counterbore", "Counterbore", int(front_cb), "front")
         if back_cb > 0:
-            _ebo_append_unique(
-                mutation_owner,
-                "counterbore",
-                {"name": "Counterbore", "qty": int(back_cb), "side": "back"},
-            )
+            _ebo_append_unique("counterbore", "Counterbore", int(back_cb), "back")
 
         cb_mrate = (
             _lookup_bucket_rate("counterbore", rates)
@@ -1759,11 +2083,7 @@ def _build_ops_cards_from_chart_lines(
             _lookup_bucket_rate("machine", rates) or 53.76,
             _lookup_bucket_rate("labor", rates) or 25.46,
         )
-        _ebo_append_unique(
-            mutation_owner,
-            "spot",
-            {"name": "Spot drill", "qty": int(spot_qty), "side": "front"},
-        )
+        _ebo_append_unique("spot", "Spot drill", int(spot_qty), "front")
 
         _register_pending("spot")
 
@@ -1789,11 +2109,7 @@ def _build_ops_cards_from_chart_lines(
             or 53.76,
             _lookup_bucket_rate("labor", rates) or 25.46,
         )
-        _ebo_append_unique(
-            mutation_owner,
-            "jig-grind",
-            {"name": "Jig-grind", "qty": int(jig_qty), "side": None},
-        )
+        _ebo_append_unique("jig-grind", "Jig-grind", int(jig_qty))
 
         _register_pending("jig-grind")
 
@@ -1831,6 +2147,19 @@ def _build_ops_cards_from_chart_lines(
             pass
 
     lines.extend(out_lines)
+
+    try:
+        reviewer_lines = _render_table_row_reviewer(
+            result=locals().get("result"),
+            breakdown=breakdown_mutable or breakdown,
+            max_rows=10,
+        )
+    except Exception:
+        reviewer_lines = []
+
+    if reviewer_lines:
+        lines.extend(str(entry) for entry in reviewer_lines)
+
     return lines
 
 
@@ -2132,6 +2461,38 @@ def _ops_counts_from_geo_and_locals(
             cb_total = 0
         if cb_total > counts["counterbore"]:
             counts["counterbore"] = cb_total
+
+    # NEW: prefer explicit totals from geo.ops_summary.totals if available
+    try:
+        ops_totals = (
+            core_geo.get("ops_summary", {}).get("totals", {})
+            if isinstance(core_geo, (_MappingABC, dict))
+            else {}
+        )
+    except Exception:
+        ops_totals = {}
+    if isinstance(ops_totals, (_MappingABC, dict)) and ops_totals:
+
+        def _sum_keys(substrs: tuple[str, ...]) -> int:
+            s = 0
+            for k, v in ops_totals.items():
+                kl = str(k).lower()
+                if any(sub in kl for sub in substrs):
+                    try:
+                        s += int(round(float(v)))
+                    except Exception:
+                        continue
+            return s
+
+        counts["tap"] = max(counts["tap"], _sum_keys(("tap",)))
+        counts["counterbore"] = max(
+            counts["counterbore"], _sum_keys(("counterbore", "cbore"))
+        )
+        counts["counterdrill"] = max(
+            counts["counterdrill"], _sum_keys(("counterdrill",))
+        )
+        counts["jig-grind"] = max(counts["jig-grind"], _sum_keys(("jig",)))
+        # don't try to infer "drill" actions from ops_totals—geometry/engine handles drilling
 
     drill_candidates: list[int] = [counts["drill"]]
     tap_candidates: list[int] = [counts["tap"]]
@@ -2613,6 +2974,30 @@ def _ops_counts_from_geo_and_locals(
             key = _norm_op_key(str(k))
             if key in counts:
                 counts[key] += max(qty, 0)
+
+    # Prefer explicit totals when present
+    for candidate in (geo_map, g):
+        if not isinstance(candidate, (_MappingABC, dict)):
+            continue
+        try:
+            ops_summary = candidate.get("ops_summary")  # type: ignore[index]
+        except Exception:
+            ops_summary = None
+        if not isinstance(ops_summary, (_MappingABC, dict)):
+            continue
+        try:
+            totals_candidate = ops_summary.get("totals")  # type: ignore[index]
+        except Exception:
+            totals_candidate = None
+        if not isinstance(totals_candidate, (_MappingABC, dict)) or not totals_candidate:
+            continue
+        for key in ("tap", "counterbore"):
+            try:
+                qty_val = int(float(totals_candidate.get(key, 0)))
+            except Exception:
+                qty_val = 0
+            if key in counts:
+                counts[key] = max(counts[key], qty_val)
 
     # 2) If we have hole diameters but no drill count, use that as a floor.
     if counts["drill"] <= 0:
@@ -3506,8 +3891,26 @@ def _depth_from_text(txt: str) -> float | None:
 
 
 def _cbore_dia_from_text(txt: str) -> float | None:
-    m = RE_DIA.search(txt or "")
-    return _float_or_none(m.group(1)) if m else None
+    text = txt or ""
+    m = _CB_DIA_RE.search(text)
+    if m:
+        raw = (m.group("numA") or m.group("numB") or "").strip()
+        val = _to_inch(raw)
+        if val is not None and val > 0:
+            return val
+    m = RE_DIA.search(text)
+    if m:
+        candidate = _to_inch(m.group(1)) if m.lastindex else None
+        if candidate is None:
+            candidate = first_inch_value(m.group(0))
+        if candidate is not None and candidate > 0:
+            return candidate
+    fallback = NUM_FRAC_RE.search(text) or NUM_DEC_RE.search(text)
+    if fallback:
+        val = _to_inch(fallback.group(0))
+        if val is not None and val > 0:
+            return val
+    return None
 
 
 def _build_cbore_groups(rows: list[dict]) -> list[dict]:
@@ -3999,15 +4402,18 @@ from cad_quoter.app.effective import (
 from cad_quoter.ui import suggestions as ui_suggestions
 
 from cad_quoter.utils.scrap import (
-    HOLE_SCRAP_CAP,
-    SCRAP_DEFAULT_GUESS,
-    _holes_scrap_fraction,
     normalize_scrap_pct,
+    resolve_material_scrap_state,
 )
-from cad_quoter.utils.render_utils.tables import ascii_table, draw_kv_table
+from cad_quoter.utils.render_utils.tables import (
+    ascii_table,
+    draw_kv_table,
+    render_process_sections,
+)
 from cad_quoter.app.planner_helpers import _process_plan_job
 from cad_quoter.app.env_flags import FORCE_PLANNER
 from cad_quoter.app.planner_adapter import resolve_planner, resolve_pricing_source_value
+from cad_quoter.app.planner_support import apply_planner_result
 
 from cad_quoter.resources.loading import load_json, load_text
 
@@ -4241,6 +4647,186 @@ def _render_time_per_hole(
             f"[removal] drill_total_minutes={extra_map['drill_total_minutes']}"
         )
     return subtotal_minutes, seen_deep, seen_std, drill_groups
+
+
+# ---------- HOLE TABLE: Table Row Reviewer ----------
+def _get_geo_map(result=None, breakdown=None):
+    # prefer top-level geo
+    if isinstance(result, dict) and isinstance(result.get("geo"), dict):
+        g = result["geo"]
+        return {**(g.get("geo") or {}), **g} if isinstance(g.get("geo"), dict) else g
+    if isinstance(breakdown, dict) and isinstance(breakdown.get("geo"), dict):
+        g = breakdown["geo"]
+        return {**(g.get("geo") or {}), **g} if isinstance(g.get("geo"), dict) else g
+    return {}
+
+
+def _ops_rows_from_geo(geo_map):
+    try:
+        ops = (geo_map or {}).get("ops_summary") or {}
+        if not isinstance(ops, (_MappingABC, dict)):
+            return []
+        for key in ("rows", "rows_detail", "rows_raw"):
+            rows = ops.get(key)
+            if isinstance(rows, list) and rows:
+                return rows
+        return []
+    except Exception:
+        return []
+
+
+def _sum_qty(rows):
+    s = 0
+    for r in rows or []:
+        try:
+            s += int(float(r.get("qty") or 0))
+        except Exception:
+            pass
+    return s
+
+
+def _row_side_from_desc(desc: str) -> str:
+    U = (desc or "").upper()
+    if "FRONT & BACK" in U or "BOTH SIDES" in U:
+        return "FRONT+BACK"
+    if "FROM BACK" in U:
+        return "BACK"
+    if "FROM FRONT" in U:
+        return "FRONT"
+    return "-"
+
+
+def _render_table_row_reviewer(*, result=None, breakdown=None, max_rows=10) -> list[str]:
+    def _coerce_str(value: Any) -> str:
+        if value is None:
+            return ""
+        if isinstance(value, str):
+            return value.strip()
+        return str(value).strip()
+
+    def _format_ref(row: Mapping[str, Any]) -> str:
+        candidates: list[Any] = []
+        for key in ("ref", "ref_in", "diameter_in", "dia", "dia_in"):
+            if key in row:
+                candidates.append(row.get(key))
+        for value in candidates:
+            if value is None:
+                continue
+            try:
+                num = float(value)
+            except Exception:
+                text = _coerce_str(value)
+                if text:
+                    return text
+                continue
+            if math.isfinite(num):
+                return f"{num:.4f}\""
+        return "-"
+
+    geo = _get_geo_map(result, breakdown)
+    rows = _ops_rows_from_geo(geo)
+    lines = ["TABLE ROW REVIEW – HOLE TABLE (ops rows)", "=" * 66]
+    if rows:
+        lines.append(f"rows ............... {len(rows)}")
+        lines.append(f"qty sum (QTY col) .. {_sum_qty(rows)}")
+        lines += ["", "First rows", "-" * 66]
+        for i, raw_row in enumerate(rows[:max_rows]):
+            row = raw_row if isinstance(raw_row, Mapping) else {}
+            hole = _coerce_str(row.get("hole") or row.get("id") or "") or "-"
+            try:
+                qty = int(float(row.get("qty") or 0))
+            except Exception:
+                qty = row.get("qty")
+            desc = _coerce_str(
+                row.get("desc")
+                or row.get("description")
+                or row.get("text")
+                or ""
+            )
+            if desc:
+                desc = re.sub(r"\s+", " ", desc)
+            side = _row_side_from_desc(desc)
+            ref = _format_ref(row)
+            lines.append(
+                f"[{i:02}] {hole} | QTY={qty} | REF={ref} | SIDE={side} | {desc}"
+            )
+        if len(rows) > max_rows:
+            lines.append("...")
+        lines.append("")
+    else:
+        lines.append("rows ............... 0 (no geo.ops_summary.rows)")
+        ops = (geo or {}).get("ops_summary")
+        if isinstance(ops, dict):
+            lines.append("ops_summary keys ... " + ", ".join(sorted(ops.keys())))
+        else:
+            lines.append("ops_summary ........ (missing)")
+        prov = (geo.get("provenance", {}) or {}).get("holes") if isinstance(geo, dict) else None
+        if prov:
+            lines.append(f"provenance.holes .... {prov}")
+        ch = geo.get("chart_lines") if isinstance(geo, dict) else None
+        if isinstance(ch, list):
+            lines.append(f"chart_lines ......... {len(ch)}")
+    return lines
+
+
+def _build_ops_rows_from_chart_lines(chart_lines: list[str]) -> list[dict]:
+    if not chart_lines:
+        return []
+    lines = [(" ".join((s or "").split())).strip() for s in chart_lines if (s or "").strip()]
+    # merge continuations: a new row starts when a line begins with "(n)"
+    rows_txt, cur = [], ""
+    for ln in lines:
+        if _re.match(r"^\(\s*\d+\s*\)", ln):
+            if cur:
+                rows_txt.append(cur.strip())
+            cur = ln
+        else:
+            cur = f"{cur} {ln}".strip()
+    if cur:
+        rows_txt.append(cur.strip())
+
+    rows: list[dict] = []
+    for t in rows_txt:
+        mqty = _re.match(r"^\(\s*(\d+)\s*\)\s*(.+)$", t)
+        if not mqty:
+            continue
+        qty = int(mqty.group(1))
+        desc = mqty.group(2).strip()
+        # REF diameter if present (Ø, decimal, or fraction)
+        mref = _re.search(r"[Ø⌀\u00D8]?\s*((?:\d+/\d+)|(?:\d+(?:\.\d+)?))", desc)
+        ref = None
+        if mref:
+            s = mref.group(1)
+            if "/" in s:
+                num, den = s.split("/")
+                try:
+                    ref = f'{float(int(num))/float(int(den)):.4f}"'
+                except Exception:
+                    ref = None
+            else:
+                try:
+                    ref = f'{float(s):.4f}"'
+                except Exception:
+                    ref = None
+        rows.append({"hole": "", "ref": ref or "", "qty": qty, "desc": desc})
+    return rows
+
+
+def ensure_ops_rows_in_geo_from_chart(*, geo: dict | None) -> int:
+    """If geo.ops_summary.rows is missing/empty but chart_lines exist, build and persist them."""
+
+    if not isinstance(geo, dict):
+        return 0
+    curr = ((geo.get("ops_summary") or {}).get("rows") or [])
+    if isinstance(curr, list) and curr:
+        return len(curr)  # already have rows
+    chart = geo.get("chart_lines") if isinstance(geo.get("chart_lines"), list) else []
+    built = _build_ops_rows_from_chart_lines(chart)
+    if built:
+        geo.setdefault("ops_summary", {})["rows"] = built
+        # no totals here (extractor should do it), but at least the app can render groups now
+        return len(built)
+    return 0
 
 
 _thread_tpi = re.compile(r"#?\s*\d{1,2}\s*-\s*(\d+)", re.I)
@@ -7641,7 +8227,12 @@ from cad_quoter.pricing.materials import (
     plan_stock_blank as plan_stock_blank,
 )
 from cad_quoter.config import _ensure_two_bucket_rates
-from cad_quoter.rates import LABOR_RATE_KEYS, MACHINE_RATE_KEYS, two_bucket_to_flat
+from cad_quoter.rates import (
+    LABOR_RATE_KEYS,
+    MACHINE_RATE_KEYS,
+    prepare_render_rates,
+    two_bucket_to_flat,
+)
 from cad_quoter.vendors.mcmaster_stock import lookup_sku_and_price_for_mm
 
 SCRAP_RECOVERY_DEFAULT = _materials.SCRAP_RECOVERY_DEFAULT
@@ -8295,149 +8886,26 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
             return 0.0
 
     separate_labor_cfg = bool(getattr(cfg, "separate_machine_labor", False)) if cfg else False
-    default_flat_rates: Mapping[str, Any] = RATES_DEFAULT if isinstance(RATES_DEFAULT, Mapping) else {}
+    default_flat_rates: Mapping[str, Any] = (
+        RATES_DEFAULT if isinstance(RATES_DEFAULT, Mapping) else {}
+    )
 
-    def _default_rate(*keys: str) -> float:
-        for key in keys:
-            if not key:
-                continue
-            try:
-                value = default_flat_rates.get(key)
-            except Exception:
-                value = None
-            numeric = _coerce_rate_value(value)
-            if numeric > 0.0:
-                return numeric
-        return 0.0
-
-    default_machine_rate_value = _default_rate("MachineRate", "MillingRate", "CNC_Mill")
-    default_labor_rate_value = _default_rate("LaborRate", "Machinist", "DefaultLaborRate")
-    default_programmer_rate_value = _default_rate("ProgrammingRate", "Programmer")
-    default_inspector_rate_value = _default_rate("InspectionRate", "Inspector")
+    prepared_flat_rates = prepare_render_rates(
+        rates,
+        cfg=cfg,
+        default_two_bucket=RATES_TWO_BUCKET_DEFAULT,
+        default_flat=default_flat_rates,
+    )
+    for key, value in prepared_flat_rates.items():
+        rates[key] = value
 
     cfg_labor_rate_value = 0.0
     if separate_labor_cfg:
         cfg_labor_rate_value = _coerce_rate_value(getattr(cfg, "labor_rate_per_hr", 0.0))
         if cfg_labor_rate_value <= 0.0:
-            cfg_labor_rate_value = default_labor_rate_value or 45.0
+            cfg_labor_rate_value = _coerce_rate_value(prepared_flat_rates.get("LaborRate"))
 
-    if "ShopRate" not in rates:
-        fallback_shop = _coerce_rate_value(rates.get("MillingRate"))
-        rates.setdefault("ShopRate", fallback_shop)
-    shop_rate_val = _coerce_rate_value(rates.get("ShopRate"))
-
-    if "EngineerRate" not in rates:
-        engineer_fallback = _coerce_rate_value(rates.get("MillingRate"))
-        if engineer_fallback <= 0 and shop_rate_val > 0:
-            engineer_fallback = shop_rate_val
-        rates.setdefault("EngineerRate", engineer_fallback)
-    engineer_rate_val = _coerce_rate_value(rates.get("EngineerRate"))
-
-    labor_rate_value = _coerce_rate_value(rates.get("LaborRate"))
-    if labor_rate_value <= 0:
-        labor_rate_value = _coerce_rate_value(rates.get("ShopLaborRate"))
-    if labor_rate_value <= 0:
-        labor_rate_value = default_labor_rate_value or 45.0
-    if separate_labor_cfg and cfg_labor_rate_value > 0.0:
-        labor_rate_value = cfg_labor_rate_value
-    rates["LaborRate"] = labor_rate_value
-
-    machine_rate_value = _coerce_rate_value(rates.get("MachineRate"))
-    if machine_rate_value <= 0:
-        machine_rate_value = _coerce_rate_value(rates.get("ShopMachineRate"))
-    if machine_rate_value <= 0:
-        machine_rate_value = default_machine_rate_value or labor_rate_value
-    rates["MachineRate"] = machine_rate_value
-
-    cfg_programmer_rate: float | None = None
-    if cfg and getattr(cfg, "separate_machine_labor", False):
-        cfg_programmer_rate = _coerce_rate_value(getattr(cfg, "labor_rate_per_hr", None))
-        if cfg_programmer_rate <= 0:
-            cfg_programmer_rate = default_programmer_rate_value or default_labor_rate_value or 45.0
-
-    if cfg_programmer_rate is not None and cfg_programmer_rate > 0:
-        programmer_rate_value = float(cfg_programmer_rate)
-        programming_rate_value = float(cfg_programmer_rate)
-    else:
-        if "ProgrammerRate" not in rates:
-            programmer_fallback = (
-                engineer_rate_val if engineer_rate_val > 0 else _coerce_rate_value(rates.get("MillingRate"))
-            )
-            if programmer_fallback <= 0 and shop_rate_val > 0:
-                programmer_fallback = shop_rate_val
-            if programmer_fallback <= 0:
-                programmer_fallback = _coerce_rate_value(rates.get("LaborRate"))
-            if programmer_fallback <= 0:
-                programmer_fallback = default_programmer_rate_value or default_labor_rate_value
-            if programmer_fallback > 0 and default_programmer_rate_value > 0:
-                programmer_fallback = max(programmer_fallback, default_programmer_rate_value)
-            rates.setdefault("ProgrammerRate", programmer_fallback)
-
-        programmer_rate_value = _coerce_rate_value(rates.get("ProgrammerRate"))
-        if programmer_rate_value <= 0:
-            programmer_rate_value = (
-                engineer_rate_val
-                if engineer_rate_val > 0
-                else _coerce_rate_value(rates.get("MillingRate"))
-            )
-        if programmer_rate_value <= 0 and shop_rate_val > 0:
-            programmer_rate_value = shop_rate_val
-        if programmer_rate_value <= 0:
-            programmer_rate_value = labor_rate_value
-        if programmer_rate_value <= 0:
-            programmer_rate_value = default_programmer_rate_value or default_labor_rate_value
-        if programmer_rate_value > 0 and default_programmer_rate_value > 0:
-            programmer_rate_value = max(programmer_rate_value, default_programmer_rate_value)
-
-        programming_rate_value = _coerce_rate_value(rates.get("ProgrammingRate"))
-        if programming_rate_value <= 0:
-            programming_rate_value = programmer_rate_value
-        if programming_rate_value <= 0:
-            programming_rate_value = labor_rate_value
-        if programming_rate_value <= 0:
-            programming_rate_value = default_programmer_rate_value or programmer_rate_value
-        if programming_rate_value > 0 and default_programmer_rate_value > 0:
-            programming_rate_value = max(programming_rate_value, default_programmer_rate_value)
-
-    rates["ProgrammerRate"] = programmer_rate_value
-    rates["ProgrammingRate"] = programming_rate_value
-
-    inspector_rate_value = _coerce_rate_value(rates.get("InspectorRate"))
-    if inspector_rate_value <= 0:
-        inspector_rate_value = labor_rate_value
-    if inspector_rate_value <= 0:
-        inspector_rate_value = default_inspector_rate_value or default_labor_rate_value
-    if inspector_rate_value > 0 and default_inspector_rate_value > 0:
-        inspector_rate_value = max(inspector_rate_value, default_inspector_rate_value)
-    rates["InspectorRate"] = inspector_rate_value
-
-    inspection_rate_value = _coerce_rate_value(rates.get("InspectionRate"))
-    if inspection_rate_value <= 0:
-        inspection_rate_value = inspector_rate_value
-    if inspection_rate_value <= 0:
-        inspection_rate_value = labor_rate_value
-    if inspection_rate_value <= 0:
-        inspection_rate_value = default_inspector_rate_value or default_labor_rate_value
-    if inspection_rate_value > 0 and default_inspector_rate_value > 0:
-        inspection_rate_value = max(inspection_rate_value, default_inspector_rate_value)
-    rates["InspectionRate"] = inspection_rate_value
-
-    if default_labor_rate_value > 0:
-        rates.setdefault("LaborRate", default_labor_rate_value)
-    else:
-        rates.setdefault("LaborRate", 45.0)
-    if default_machine_rate_value > 0:
-        rates.setdefault("MachineRate", default_machine_rate_value)
-    else:
-        rates.setdefault("MachineRate", labor_rate_value or 45.0)
-    rates.setdefault("ProgrammingRate", rates.get("ProgrammerRate", rates["LaborRate"]))
-    rates.setdefault("InspectionRate", rates.get("InspectorRate", rates["LaborRate"]))
-
-    fallback_two_bucket_rates = _normalized_two_bucket_rates(rates)
-    fallback_flat_rates = two_bucket_to_flat(fallback_two_bucket_rates)
-    for key, fallback_value in fallback_flat_rates.items():
-        if _coerce_rate_value(rates.get(key)) <= 0.0:
-            rates[key] = float(fallback_value)
+    fallback_two_bucket_rates = _normalized_two_bucket_rates(prepared_flat_rates)
     params       = breakdown.get("params", {}) or {}
     nre_cost_details = breakdown.get("nre_cost_details", {}) or {}
     labor_cost_details_input_raw = breakdown.get("labor_cost_details", {}) or {}
@@ -8777,33 +9245,6 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
         pad = max(2, total - len(left) - len(right))
         return f"{left}{' ' * pad}{right}"
 
-    def _scrap_source_hint(material_info: Mapping[str, Any] | None) -> str | None:
-        if not isinstance(material_info, _MappingABC):
-            return None
-
-        scrap_from_holes_raw = material_info.get("scrap_pct_from_holes")
-        scrap_from_holes_val = _coerce_float_or_none(scrap_from_holes_raw)
-        scrap_from_holes = False
-        if scrap_from_holes_val is not None and scrap_from_holes_val > 1e-6:
-            scrap_from_holes = True
-        elif isinstance(scrap_from_holes_raw, bool):
-            scrap_from_holes = scrap_from_holes_raw
-        if scrap_from_holes:
-            return "holes"
-
-        label_raw = material_info.get("scrap_source_label")
-        if label_raw in (None, ""):
-            return None
-
-        label_text = str(label_raw).strip()
-        if not label_text:
-            return None
-
-        label_text = label_text.replace("+", " + ")
-        label_text = label_text.replace("_", " ")
-        label_text = " ".join(label_text.split())
-        return label_text or None
-
     def _is_truthy_flag(value) -> bool:
         """Return True only for explicit truthy values.
 
@@ -9025,432 +9466,6 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
         if _is_total_label(label):
             _maybe_insert_total_separator(len(right))
         append_line(_render_kv_line(label, right, indent))
-
-    def _render_process_and_hours_from_buckets(
-        lines: list[str], bucket_view_obj: Mapping[str, Any] | None
-    ) -> tuple[float, float, list[tuple[str, float, float, float, float]]]:
-        try:
-            buckets_candidate = (
-                bucket_view_obj.get("buckets") if bucket_view_obj else None
-            )
-        except Exception:
-            buckets_candidate = None
-        if isinstance(buckets_candidate, dict):
-            buckets = buckets_candidate
-        elif isinstance(buckets_candidate, _MappingABC):
-            try:
-                buckets = dict(buckets_candidate)
-            except Exception:
-                buckets = {}
-        else:
-            buckets = {}
-
-        order = [
-            "programming",
-            "programming_amortized",
-            "milling",
-            "turning",
-            "drilling",
-            "tapping",
-            "counterbore",
-            "countersink",
-            "spot_drill",
-            "grinding",
-            "jig_grind",
-            "finishing_deburr",
-            "saw_waterjet",
-            "wire_edm",
-            "sinker_edm",
-            "assembly",
-            "inspection",
-        ]
-
-        canonical_entries: dict[str, dict[str, float]] = {}
-        if isinstance(buckets, _MappingABC):
-            for raw_key, raw_entry in buckets.items():
-                if not isinstance(raw_entry, _MappingABC):
-                    continue
-                key_str = str(raw_key)
-                canon_key = (
-                    _canonical_bucket_key(key_str)
-                    or _normalize_bucket_key(key_str)
-                    or key_str
-                )
-                minutes_val = max(0.0, _as_float(raw_entry.get("minutes"), 0.0))
-                machine_val = max(0.0, _as_float(raw_entry.get("machine$"), 0.0))
-                labor_val = max(0.0, _as_float(raw_entry.get("labor$"), 0.0))
-                total_val = max(0.0, _as_float(raw_entry.get("total$"), 0.0))
-                if total_val <= 0.0:
-                    total_val = round(machine_val + labor_val, 2)
-                canonical_entries[canon_key] = {
-                    "minutes": minutes_val,
-                    "machine$": machine_val,
-                    "labor$": labor_val,
-                    "total$": total_val,
-                }
-
-        milling_entry = canonical_entries.get("milling")
-        if milling_entry:
-            milling_meta = _lookup_process_meta(process_meta, "milling") or {}
-
-            def _maybe_float(value: Any) -> float | None:
-                try:
-                    number = float(value)
-                except Exception:
-                    return None
-                if not math.isfinite(number):
-                    return None
-                return number
-
-            milling_minutes = _safe_float(milling_entry.get("minutes"), default=0.0)
-            meta_minutes = _safe_float(milling_meta.get("minutes"), default=0.0)
-            meta_hours = _safe_float(milling_meta.get("hr"), default=0.0)
-            if meta_minutes > 0.0:
-                milling_minutes = meta_minutes
-            elif meta_hours > 0.0:
-                milling_minutes = meta_hours * 60.0
-
-            if milling_minutes > 0.0:
-                milling_hours = milling_minutes / 60.0
-
-                def _rate_from_candidates(
-                    mapping: Mapping[str, Any] | None,
-                    keys: Sequence[str],
-                    default: float,
-                ) -> float:
-                    if not isinstance(mapping, _MappingABC):
-                        mapping = {}
-                    for key in keys:
-                        if not key:
-                            continue
-                        try:
-                            raw = mapping.get(key)  # type: ignore[index]
-                        except Exception:
-                            raw = None
-                        rate_val = _maybe_float(raw)
-                        if rate_val is not None and rate_val > 0.0:
-                            return rate_val
-                    return default
-
-                machine_rate = _rate_from_candidates(
-                    rates,
-                    (
-                        "machine_per_hour",
-                        "machine_rate",
-                        "milling_rate",
-                        "MachineRate",
-                        "MillingRate",
-                        "ShopMachineRate",
-                        "ShopRate",
-                    ),
-                    90.0,
-                )
-                labor_rate = _rate_from_candidates(
-                    rates,
-                    (
-                        "labor_per_hour",
-                        "labor_rate",
-                        "milling_labor_rate",
-                        "LaborRate",
-                        "ShopLaborRate",
-                    ),
-                    45.0,
-                )
-
-                if cfg is not None:
-                    cfg_machine = _maybe_float(getattr(cfg, "machine_rate_per_hr", None))
-                    if cfg_machine is not None and cfg_machine > 0.0:
-                        machine_rate = cfg_machine
-                    cfg_labor = _maybe_float(getattr(cfg, "labor_rate_per_hr", None))
-                    if cfg_labor is not None and cfg_labor > 0.0:
-                        labor_rate = cfg_labor
-
-                config_sources: list[Mapping[str, Any]] = []
-
-                def _add_config_source(candidate: Any) -> None:
-                    if isinstance(candidate, dict):
-                        config_sources.append(candidate)
-                    elif isinstance(candidate, _MappingABC):
-                        config_sources.append(dict(candidate))
-
-                for container in (breakdown, result):
-                    if not isinstance(container, _MappingABC):
-                        continue
-                    _add_config_source(container.get("config"))
-                    _add_config_source(container.get("params"))
-
-                if isinstance(result, _MappingABC):
-                    quote_state_payload = result.get("quote_state")
-                    if isinstance(quote_state_payload, _MappingABC):
-                        _add_config_source(quote_state_payload.get("config"))
-                        _add_config_source(quote_state_payload.get("params"))
-
-                attended_frac: float | None = None
-                if cfg is not None:
-                    cfg_frac = _maybe_float(getattr(cfg, "milling_attended_fraction", None))
-                    if cfg_frac is not None:
-                        attended_frac = cfg_frac
-
-                for source in config_sources:
-                    try:
-                        candidate = source.get("milling_attended_fraction")
-                    except Exception:
-                        candidate = None
-                    frac_val = _maybe_float(candidate)
-                    if frac_val is not None:
-                        attended_frac = frac_val
-                        break
-
-                if attended_frac is None:
-                    attended_frac = 1.0
-                attended_frac = max(0.0, min(attended_frac, 1.0))
-                milling_labor_hours = milling_hours * attended_frac
-
-                machine_cost = milling_hours * machine_rate
-                labor_cost = milling_labor_hours * labor_rate
-                total_cost = machine_cost + labor_cost
-
-                milling_entry["minutes"] = round(milling_minutes, 2)
-                milling_entry["machine$"] = round(machine_cost, 2)
-                milling_entry["labor$"] = round(labor_cost, 2)
-                milling_entry["total$"] = round(total_cost, 2)
-                canonical_entries["milling"] = milling_entry
-
-                if isinstance(buckets, dict):
-                    milling_bucket = buckets.get("milling")
-                    if isinstance(milling_bucket, dict):
-                        milling_bucket.update(
-                            {
-                                "minutes": milling_entry["minutes"],
-                                "machine$": milling_entry["machine$"],
-                                "labor$": milling_entry["labor$"],
-                                "total$": milling_entry["total$"],
-                            }
-                        )
-
-                aggregated_metrics_container = locals().get("aggregated_bucket_minutes")
-                if isinstance(aggregated_metrics_container, dict):
-                    milling_metrics = aggregated_metrics_container.get("milling")
-                    if isinstance(milling_metrics, dict):
-                        milling_metrics.update(
-                            {
-                                "minutes": milling_entry["minutes"],
-                                "machine$": milling_entry["machine$"],
-                                "labor$": milling_entry["labor$"],
-                            }
-                        )
-
-                print(
-                    f"[CHECK/milling] min={milling_minutes:.2f} hr={milling_hours:.2f} "
-                    f"mach_rate={machine_rate:.2f}/hr labor_rate={labor_rate:.2f}/hr "
-                    f"machine$={milling_entry['machine$']:.2f} "
-                    f"labor$={milling_entry['labor$']:.2f} total$={milling_entry['total$']:.2f}"
-                )
-
-        def _append_process_row(
-            rows: list[tuple[str, float, float, float, float]],
-            label: str,
-            minutes_val: float,
-            machine_val: float,
-            labor_val: float,
-            total_val: float,
-        ) -> None:
-            minutes_clean = max(0.0, _as_float(minutes_val, 0.0))
-            machine_clean = max(0.0, _as_float(machine_val, 0.0))
-            labor_clean = max(0.0, _as_float(labor_val, 0.0))
-            total_clean = max(0.0, _as_float(total_val, 0.0))
-            if total_clean <= 0.0:
-                total_clean = round(machine_clean + labor_clean, 2)
-            if (
-                total_clean <= 0.0
-                and machine_clean <= 0.0
-                and labor_clean <= 0.0
-                and minutes_clean <= 0.0
-            ):
-                return
-            rows.append(
-                (
-                    str(label),
-                    minutes_clean,
-                    machine_clean,
-                    labor_clean,
-                    total_clean,
-                )
-            )
-
-        def _label_for_bucket(canon_key: str) -> str:
-            display_label = _display_bucket_label(canon_key, label_overrides)
-            if display_label:
-                return display_label
-            return canon_key or ""
-
-        lines.append("Process & Labor Costs")
-        lines.append("-" * 74)
-        rows: list[tuple[str, float, float, float, float]] = []
-
-        programming_entry: dict[str, float] | None = None
-        programming_entry_label = PROGRAMMING_PER_PART_LABEL
-        for candidate in ("programming_amortized", "programming"):
-            entry = canonical_entries.pop(candidate, None)
-            if entry is not None:
-                programming_entry = entry
-                if candidate == "programming_amortized":
-                    programming_entry_label = PROGRAMMING_AMORTIZED_LABEL
-                else:
-                    programming_entry_label = PROGRAMMING_PER_PART_LABEL
-                break
-
-        prog_minutes = 0.0
-        prog_total = 0.0
-        if programming_entry is not None:
-            prog_minutes = programming_entry.get("minutes", 0.0)
-            prog_total = programming_entry.get("total$", 0.0)
-            if prog_total <= 0.0:
-                prog_total = programming_entry.get("labor$", 0.0)
-        if prog_total <= 0.0:
-            try:
-                prog_total = max(
-                    0.0,
-                    _as_float(labor_cost_totals.get(PROGRAMMING_PER_PART_LABEL), 0.0),
-                )
-            except Exception:
-                prog_total = 0.0
-        if prog_minutes <= 0.0:
-            try:
-                prog_minutes = max(0.0, _as_float(programming_minutes, 0.0))
-            except NameError:
-                prog_minutes = 0.0
-        if prog_total > 0.0 or prog_minutes > 0.0:
-            _append_process_row(
-                rows,
-                programming_entry_label,
-                prog_minutes,
-                0.0,
-                prog_total,
-                prog_total,
-            )
-
-        def _consume_entry(canon_key: str) -> None:
-            entry = canonical_entries.pop(canon_key, None)
-            if not entry:
-                return
-            minutes_val = entry.get("minutes", 0.0)
-            machine_val = entry.get("machine$", 0.0)
-            labor_val = entry.get("labor$", 0.0)
-            total_val = entry.get("total$", 0.0)
-            _append_process_row(
-                rows,
-                _label_for_bucket(canon_key),
-                minutes_val,
-                machine_val,
-                labor_val,
-                total_val,
-            )
-
-        for bucket_key in order:
-            _consume_entry(bucket_key)
-
-        if canonical_entries:
-            for canon_key, entry in sorted(
-                canonical_entries.items(),
-                key=lambda item: _label_for_bucket(item[0]).lower(),
-            ):
-                minutes_val = entry.get("minutes", 0.0)
-                machine_val = entry.get("machine$", 0.0)
-                labor_val = entry.get("labor$", 0.0)
-                total_val = entry.get("total$", 0.0)
-                _append_process_row(
-                    rows,
-                    _label_for_bucket(canon_key),
-                    minutes_val,
-                    machine_val,
-                    labor_val,
-                    total_val,
-                )
-
-        row_canon_keys = {
-            _canonical_bucket_key(row_label) or _normalize_bucket_key(row_label)
-            for row_label, *_ in rows
-        }
-        if "tapping" not in row_canon_keys:
-            tapping_bucket: Mapping[str, Any] | None = None
-            for candidate_key in ("tapping", "Tapping"):
-                entry = buckets.get(candidate_key)
-                if isinstance(entry, _MappingABC):
-                    tapping_bucket = entry
-                    break
-            if tapping_bucket is None:
-                tapping_bucket = {}
-            tapping_minutes = _as_float(tapping_bucket.get("minutes", 0.0), 0.0)
-            tapping_machine = _as_float(tapping_bucket.get("machine$", 0.0), 0.0)
-            tapping_labor = _as_float(tapping_bucket.get("labor$", 0.0), 0.0)
-            tapping_total = _as_float(tapping_bucket.get("total$", 0.0), 0.0)
-            if (
-                tapping_minutes > 0.0
-                or tapping_machine > 0.0
-                or tapping_labor > 0.0
-                or tapping_total > 0.0
-            ):
-                _append_process_row(
-                    rows,
-                    _label_for_bucket("tapping"),
-                    tapping_minutes,
-                    tapping_machine,
-                    tapping_labor,
-                    tapping_total,
-                )
-
-        total_cost = sum(row[4] for row in rows)
-        total_minutes = sum(row[1] for row in rows)
-
-        if rows:
-            headers = ("Process", "Minutes", "Machine $", "Labor $", "Total $")
-            display_rows: list[tuple[str, str, str, str, str]] = []
-            for name, minutes_val, machine_val, labor_val, total_val in rows:
-                display_rows.append(
-                    (
-                        str(name),
-                        f"{minutes_val:,.2f}",
-                        _m(machine_val),
-                        _m(labor_val),
-                        _m(total_val),
-                    )
-                )
-
-            total_row = ("Total", "", "", "", _m(total_cost))
-            width_candidates = display_rows + [total_row]
-            col_widths = [len(header) for header in headers]
-            for row_values in width_candidates:
-                for idx, value in enumerate(row_values):
-                    col_widths[idx] = max(col_widths[idx], len(value))
-
-            def _format_row(values: Sequence[str]) -> str:
-                pieces: list[str] = []
-                for idx, value in enumerate(values):
-                    align = "L" if idx == 0 else "R"
-                    width = col_widths[idx]
-                    if align == "L":
-                        pieces.append(value.ljust(width))
-                    else:
-                        pieces.append(value.rjust(width))
-                return "  " + "  ".join(pieces)
-
-            header_line = _format_row(headers)
-            separator_line = "  " + "  ".join("-" * width for width in col_widths)
-            lines.append(header_line)
-            lines.append(separator_line)
-            for row in display_rows:
-                lines.append(_format_row(row))
-            lines.append(separator_line)
-            lines.append(_format_row(total_row))
-            for display_label, *_ in rows:
-                add_process_notes(display_label)
-            lines.append("")
-            return total_cost, total_minutes, rows
-
-        lines.append("  (no bucket data)")
-        lines.append("")
-        return 0.0, 0.0, []
 
     def _is_extra_segment(segment: str) -> bool:
         try:
@@ -10644,263 +10659,33 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
                         breakdown["material"] = {"total_material_cost": float(total_material_cost)}
                 except Exception:
                     pass
-            net_mass_val = _coerce_float_or_none(net_mass_g)
-            effective_mass_source = material.get("effective_mass_g")
-            effective_mass_val = _coerce_float_or_none(effective_mass_source)
-            prefer_pct_for_scrap = effective_mass_val is not None
-            if effective_mass_val is None:
-                effective_mass_val = _coerce_float_or_none(mass_g)
-            removal_mass_val = None
-            for removal_key in ("material_removed_mass_g", "material_removed_mass_g_est"):
-                removal_mass_val = _coerce_float_or_none(material.get(removal_key))
-                if removal_mass_val:
-                    break
-            scrap_fraction_val = normalize_scrap_pct(scrap)
-            if scrap_fraction_val <= 0:
-                scrap_fraction_val = None
-            base_mass_for_scrap = None
-            if net_mass_val and net_mass_val > 0:
-                base_mass_for_scrap = float(net_mass_val)
-            elif effective_mass_val and effective_mass_val > 0:
-                base_mass_for_scrap = float(effective_mass_val)
-            scrap_adjusted_mass_val: float | None = None
-            if base_mass_for_scrap:
-                if removal_mass_val and removal_mass_val > 0:
-                    scrap_adjusted_mass_val = max(0.0, base_mass_for_scrap - float(removal_mass_val))
-                elif scrap_fraction_val is not None:
-                    scrap_adjusted_mass_val = max(0.0, base_mass_for_scrap * (1.0 - scrap_fraction_val))
-                elif (
-                    effective_mass_val is not None
-                    and net_mass_val is not None
-                ):
-                    diff_mass = abs(float(effective_mass_val) - float(net_mass_val))
-                    base_candidate = max(float(effective_mass_val), float(net_mass_val))
-                    scrap_adjusted_mass_val = max(0.0, base_candidate - diff_mass)
-            starting_mass_val = _coerce_float_or_none(material.get("mass_g"))
-            if starting_mass_val is None:
-                starting_mass_val = _coerce_float_or_none(
-                    material.get("effective_mass_g")
-                )
-            if starting_mass_val is None:
-                starting_mass_val = effective_mass_val
-            if (
-                net_mass_val is None
-                and removal_mass_val is not None
-                and removal_mass_val >= 0
-            ):
-                base_for_net = starting_mass_val
-                if base_for_net is None:
-                    base_for_net = effective_mass_val
-                if base_for_net is not None:
-                    net_mass_val = max(0.0, float(base_for_net) - float(removal_mass_val))
-            if net_mass_val is None:
-                net_mass_val = effective_mass_val
-            show_mass_line = (
-                (net_mass_val and net_mass_val > 0)
-                or (effective_mass_val and effective_mass_val > 0)
-                or show_zeros
+            scrap_context = {
+                "scrap_pct": scrap,
+                "scrap_credit_entered": scrap_credit_entered,
+                "scrap_credit": scrap_credit,
+                "scrap_credit_unit_price_usd_per_lb": material.get(
+                    "scrap_credit_unit_price_usd_per_lb"
+                ),
+                "price_source": price_source,
+                "price_asof": price_asof,
+                "supplier_min_charge": minchg,
+            }
+            material_updates, helper_detail_lines = build_material_detail_lines(
+                material,
+                scrap_context=scrap_context,
+                currency=currency,
+                show_zeros=show_zeros,
+                show_material_shipping=show_material_shipping,
+                shipping_total=shipping_total,
+                shipping_source=shipping_source,
             )
-            if show_mass_line:
-                net_display = _format_weight_lb_decimal(net_mass_val)
-                mass_desc: list[str] = [f"{net_display} net"]
-                scrap_desc_mass = scrap_adjusted_mass_val
-                if scrap_desc_mass is None:
-                    scrap_desc_mass = effective_mass_val
-                if (
-                    scrap_desc_mass is not None
-                    and (
-                        not net_mass_val
-                        or abs(float(scrap_desc_mass) - float(net_mass_val)) > 0.05
-                    )
-                ):
-                    mass_desc.append(
-                        f"scrap-adjusted {_format_weight_lb_decimal(scrap_desc_mass)}"
-                    )
-                elif effective_mass_val and not net_mass_val:
-                    mass_desc.append(
-                        f"scrap-adjusted {_format_weight_lb_decimal(effective_mass_val)}"
-                    )
-
-            scrap_mass_val = _compute_scrap_mass_g(
-                removal_mass_g_est=material.get("material_removed_mass_g_est"),
-                scrap_pct_raw=scrap,
-                effective_mass_g=effective_mass_val,
-                net_mass_g=net_mass_val,
-                prefer_pct=prefer_pct_for_scrap,
-            )
-
-            if scrap_mass_val is not None:
-                scrap_credit_mass_lb = float(scrap_mass_val) / 1000.0 * LB_PER_KG
-                material_detail_for_breakdown["scrap_credit_mass_lb"] = (
-                    scrap_credit_mass_lb
-                )
-            else:
-                scrap_credit_mass_lb = None
-                material_detail_for_breakdown.pop("scrap_credit_mass_lb", None)
-
-            weight_lines: list[str] = []
-            if (starting_mass_val and starting_mass_val > 0) or show_zeros:
-                weight_lines.append(
-                    f"  Starting Weight: {_format_weight_lb_oz(starting_mass_val)}"
-                )
-            if (net_mass_val and net_mass_val > 0) or show_zeros:
-                weight_lines.append(
-                    f"  Net Weight: {_format_weight_lb_oz(net_mass_val)}"
-                )
-            if scrap_mass_val is not None:
-                if scrap_mass_val > 0 or show_zeros:
-                    weight_lines.append(
-                        f"  Scrap Weight: {_format_weight_lb_oz(scrap_mass_val)}"
-                    )
-            elif show_zeros:
-                weight_lines.append("  Scrap Weight: 0 oz")
-            computed_scrap_fraction: float | None = None
-            if (
-                starting_mass_val is not None
-                and starting_mass_val > 0
-                and scrap_mass_val is not None
-            ):
-                try:
-                    start_mass = float(starting_mass_val)
-                    scrap_mass = max(0.0, float(scrap_mass_val))
-                except Exception:
-                    start_mass = 0.0
-                    scrap_mass = 0.0
-                if start_mass > 0:
-                    computed_scrap_fraction = scrap_mass / start_mass
-
-            if scrap is not None or computed_scrap_fraction is not None:
-                scrap_hint_text = _scrap_source_hint(material)
-                if computed_scrap_fraction is not None:
-                    scrap_line = (
-                        f"  Scrap Percentage: {_pct(computed_scrap_fraction)} (computed)"
-                    )
-                    if scrap_hint_text and scrap_fraction_val is None:
-                        scrap_line += f" ({scrap_hint_text})"
-                    weight_lines.append(scrap_line)
-                elif scrap is not None:
-                    scrap_line = f"  Scrap Percentage: {_pct(scrap)}"
-                    if scrap_hint_text:
-                        scrap_line += f" ({scrap_hint_text})"
-                    weight_lines.append(scrap_line)
-
-                if scrap_fraction_val is not None:
-                    geometry_line = (
-                        f"  Scrap % (geometry hint): {_pct(scrap_fraction_val)}"
-                    )
-                    if scrap_hint_text:
-                        geometry_line += f" ({scrap_hint_text})"
-                    weight_lines.append(geometry_line)
-            # Historically the renderer would emit an extra weight-only line here when
-            # ``scrap_adjusted_mass`` was available.  The value was the computed "with
-            # scrap" mass, but because it lacked a label it rendered as a stray line like
-            # ``9 lb 6.4 oz`` in the middle of the material section.  That formatting is
-            # confusing and does not provide any additional context to the reader, so we
-            # intentionally skip adding that line.  The net, starting, and scrap weights
-            # already convey the information a customer needs.
-
-            detail_lines.extend(weight_lines)
-            scrap_credit_lines: list[str] = []
-            if scrap_credit_entered and scrap_credit:
-                credit_display = _m(scrap_credit)
-                if credit_display.startswith(currency):
-                    credit_display = f"-{credit_display}"
-                else:
-                    credit_display = f"-{fmt_money(scrap_credit, currency)}"
-                scrap_credit_lines.append(f"  Scrap Credit: {credit_display}")
-                scrap_credit_unit_price_lb = _coerce_float_or_none(
-                    material.get("scrap_credit_unit_price_usd_per_lb")
-                )
-                if (
-                    scrap_credit_mass_lb is not None
-                    and scrap_credit_unit_price_lb is not None
-                ):
-                    scrap_credit_lines.append(
-                        "    based on "
-                        f"{_format_weight_lb_oz(scrap_mass_val)} × {fmt_money(scrap_credit_unit_price_lb, currency)} / lb"
-                    )
-            if scrap_credit_lines:
-                detail_lines.extend(scrap_credit_lines)
-
-            shipping_tax_lines: list[str] = []
-            base_cost_before_scrap = _coerce_float_or_none(
-                material.get("material_cost_before_credit")
-            )
-            if base_cost_before_scrap is None:
-                net_mass_for_base = _coerce_float_or_none(net_mass_val)
-                if net_mass_for_base is None:
-                    net_mass_for_base = _coerce_float_or_none(
-                        material.get("net_mass_g")
-                    )
-                if net_mass_for_base is not None and net_mass_for_base > 0:
-                    per_lb_value = _coerce_float_or_none(
-                        material.get("unit_price_usd_per_lb")
-                    )
-                    if per_lb_value is None:
-                        per_g_value = _coerce_float_or_none(
-                            material.get("unit_price_per_g")
-                        )
-                        if per_g_value is not None:
-                            per_lb_value = per_g_value * (1000.0 / LB_PER_KG)
-                    if per_lb_value is not None:
-                        base_cost_before_scrap = (
-                            float(net_mass_for_base) / 1000.0 * LB_PER_KG
-                        ) * float(per_lb_value)
-
-            if base_cost_before_scrap is not None or show_zeros:
-                base_val = float(base_cost_before_scrap or 0.0)
-                if show_material_shipping and (shipping_total > 0 or show_zeros):
-                    if shipping_source:
-                        shipping_display = shipping_total
+            if isinstance(material_detail_for_breakdown, _MutableMappingABC):
+                for key, value in material_updates.items():
+                    if value is None:
+                        material_detail_for_breakdown.pop(key, None)
                     else:
-                        shipping_display = base_val * 0.15
-                    shipping_tax_lines.append(f"  Shipping: {_m(shipping_display)}")
-                tax_cost = base_val * 0.065
-                if tax_cost > 0 or show_zeros:
-                    shipping_tax_lines.append(f"  Material Tax: {_m(tax_cost)}")
-
-            if shipping_tax_lines:
-                detail_lines.extend(shipping_tax_lines)
-
-            if upg or unit_price_kg or unit_price_lb or show_zeros:
-                grams_per_lb = 1000.0 / LB_PER_KG
-                per_lb_value = _coerce_float_or_none(unit_price_lb)
-                if per_lb_value is None:
-                    per_kg_value = _coerce_float_or_none(unit_price_kg)
-                    if per_kg_value is not None:
-                        per_lb_value = per_kg_value / LB_PER_KG
-                if per_lb_value is None:
-                    per_g_value = _coerce_float_or_none(upg)
-                    if per_g_value is not None:
-                        per_lb_value = per_g_value * grams_per_lb
-                if per_lb_value is None and show_zeros:
-                    per_lb_value = 0.0
-
-                if per_lb_value is not None:
-                    display_line = f"{_m(per_lb_value)} / lb"
-                    extras: list[str] = []
-                    if price_asof:
-                        extras.append(f"as of {price_asof}")
-                    extra = f" ({', '.join(extras)})" if extras else ""
-                    price_lines = [f"  Material Price: {display_line}{extra}"]
-                else:
-                    price_lines = []
-            else:
-                price_lines = []
-            if price_source:
-                price_lines.append(f"  Source: {price_source}")
-            if minchg or show_zeros:
-                price_lines.append(f"  Supplier Min Charge: {_m(minchg or 0)}")
-            if price_lines:
-                last_line = detail_lines[-1] if detail_lines else ""
-                if (
-                    detail_lines
-                    and last_line != ""
-                    and not last_line.lstrip().startswith("Scrap Credit:")
-                    and not last_line.lstrip().startswith("based on ")
-                ):
-                    detail_lines.append("")
-                detail_lines.extend(price_lines)
+                        material_detail_for_breakdown[key] = value
+            detail_lines.extend(helper_detail_lines)
             def _coerce_dims(candidate: Any) -> tuple[float, float, float] | None:
                 if isinstance(candidate, (list, tuple)) and len(candidate) >= 3:
                     try:
@@ -11770,53 +11555,69 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
     if not isinstance(extra_ops_lines, list):
         extra_ops_lines = list(extra_ops_lines or [])
 
+    flags: MutableSet[str] | None = None
+    try:
+        flags_candidate = breakdown_mutable.setdefault("_ops_cards_printed", set())
+        if isinstance(flags_candidate, MutableSet):
+            flags = flags_candidate
+    except Exception:
+        flags = None
+
+    pending_aliases: set[str] = set()
+    pending_owner: MutableMapping[str, Any] | None = None
+    if isinstance(breakdown_mutable, (_MutableMappingABC, dict)):
+        pending_owner = typing.cast(MutableMapping[str, Any], breakdown_mutable)
+        try:
+            pending_candidate = pending_owner.get("_ops_cards_printed_pending")
+        except Exception:
+            pending_candidate = None
+        if isinstance(pending_candidate, (_MutableSetABC, set)):
+            pending_aliases = set(pending_candidate)
+        elif pending_candidate is not None:
+            try:
+                pending_aliases = set(typing.cast(Iterable[str], pending_candidate))
+            except Exception:
+                pending_aliases = set()
+
+    def _clear_pending_ops_flags() -> None:
+        nonlocal pending_aliases, pending_owner
+        if pending_owner is None:
+            return
+        try:
+            pending_candidate_local = pending_owner.get("_ops_cards_printed_pending")
+        except Exception:
+            pending_candidate_local = None
+        if isinstance(pending_candidate_local, (_MutableSetABC, set)):
+            try:
+                pending_candidate_local.clear()
+            except Exception:
+                pass
+        try:
+            pending_owner["_ops_cards_printed_pending"] = set()  # type: ignore[index]
+        except Exception:
+            pass
+        pending_aliases.clear()
+
+    def _mark_pending_ops_flags_as_printed() -> None:
+        aliases_to_mark: Iterable[str]
+        if pending_aliases:
+            aliases_to_mark = tuple(pending_aliases)
+        else:
+            aliases_to_mark = ("counterbore", "cbore")
+        if flags is not None:
+            for alias in aliases_to_mark:
+                try:
+                    flags.add(alias)
+                except Exception:
+                    pass
+        _clear_pending_ops_flags()
+
     if extra_ops_lines:
         already_counterbore = any(
             isinstance(entry, str)
             and entry.strip().upper().startswith("MATERIAL REMOVAL – COUNTERBORE")
             for entry in lines
         )
-        flags: MutableSet[str] | None = None
-        try:
-            flags_candidate = breakdown_mutable.setdefault("_ops_cards_printed", set())
-            if isinstance(flags_candidate, MutableSet):
-                flags = flags_candidate
-        except Exception:
-            flags = None
-
-        pending_aliases: set[str] = set()
-        pending_owner: MutableMapping[str, Any] | None = None
-        if isinstance(breakdown_mutable, (_MutableMappingABC, dict)):
-            pending_owner = typing.cast(MutableMapping[str, Any], breakdown_mutable)
-            try:
-                pending_candidate = pending_owner.get("_ops_cards_printed_pending")
-            except Exception:
-                pending_candidate = None
-            if isinstance(pending_candidate, (_MutableSetABC, set)):
-                pending_aliases = set(pending_candidate)
-            elif pending_candidate is not None:
-                try:
-                    pending_aliases = set(typing.cast(Iterable[str], pending_candidate))
-                except Exception:
-                    pending_aliases = set()
-
-        def _clear_pending_ops_flags() -> None:
-            if pending_owner is None:
-                return
-            try:
-                pending_candidate_local = pending_owner.get("_ops_cards_printed_pending")
-            except Exception:
-                pending_candidate_local = None
-            if isinstance(pending_candidate_local, (_MutableSetABC, set)):
-                try:
-                    pending_candidate_local.clear()
-                except Exception:
-                    pass
-            try:
-                pending_owner["_ops_cards_printed_pending"] = set()  # type: ignore[index]
-            except Exception:
-                pass
-
         should_append_extra_ops = not already_counterbore and (
             flags is None
             or all(alias not in flags for alias in ("counterbore", "cbore"))
@@ -11831,20 +11632,7 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
             if appended_extra_ops_lines:
                 extra_ops_lines_appended = 1
                 extra_ops_lines_cache = list(appended_extra_ops_lines)
-                if flags is not None:
-                    aliases_to_mark: Iterable[str]
-                    if pending_aliases:
-                        aliases_to_mark = tuple(pending_aliases)
-                    else:
-                        aliases_to_mark = ("counterbore", "cbore")
-                    for alias in aliases_to_mark:
-                        try:
-                            flags.add(alias)
-                        except Exception:
-                            pass
-                _clear_pending_ops_flags()
-            else:
-                _clear_pending_ops_flags()
+                _mark_pending_ops_flags_as_printed()
         else:
             _clear_pending_ops_flags()
     if not appended_extra_ops_lines:
@@ -13009,10 +12797,47 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
             if lookup_key:
                 bucket_entries_for_totals_map[str(lookup_key)] = entry
 
-    process_rows_total, process_rows_minutes, process_rows_rendered = _render_process_and_hours_from_buckets(
-        lines,
+    process_config_sources: list[Mapping[str, Any]] = []
+
+    def _collect_config_sources(container: Mapping[str, Any] | None) -> None:
+        if not isinstance(container, _MappingABC):
+            return
+        for key in ("config", "params"):
+            try:
+                candidate = container.get(key)
+            except Exception:
+                candidate = None
+            if isinstance(candidate, dict):
+                process_config_sources.append(candidate)
+            elif isinstance(candidate, _MappingABC):
+                process_config_sources.append(dict(candidate))
+
+    _collect_config_sources(breakdown if isinstance(breakdown, _MappingABC) else None)
+    _collect_config_sources(result if isinstance(result, _MappingABC) else None)
+    if isinstance(result, _MappingABC):
+        quote_state_payload = result.get("quote_state")
+        if isinstance(quote_state_payload, _MappingABC):
+            _collect_config_sources(quote_state_payload)
+
+    process_section_lines, process_rows_total, process_rows_minutes, process_rows_rendered = render_process_sections(
         bucket_view_for_render,
+        process_meta=process_meta if isinstance(process_meta, _MappingABC) else None,
+        rates=rates if isinstance(rates, _MappingABC) else None,
+        cfg=cfg,
+        label_overrides=label_overrides,
+        format_money=_m,
+        add_process_notes=lambda label: add_process_notes(label),
+        config_sources=process_config_sources,
+        labor_cost_totals=labor_cost_totals,
+        programming_minutes=locals().get("programming_minutes"),
+        page_width=page_width,
+        canonical_bucket_key=_canonical_bucket_key,
+        normalize_bucket_key=_normalize_bucket_key,
+        display_bucket_label=_display_bucket_label,
+        programming_per_part_label=PROGRAMMING_PER_PART_LABEL,
+        programming_amortized_label=PROGRAMMING_AMORTIZED_LABEL,
     )
+    lines.extend(process_section_lines)
     proc_total_rendered = process_rows_total
     hrs_total_rendered = process_rows_minutes / 60.0 if process_rows_minutes > 0 else 0.0
     proc_machine = sum(row[2] for row in process_rows_rendered)
@@ -14239,7 +14064,9 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
     def _get_geo_map(*cands):
         for c in cands:
             if isinstance(c, dict) and isinstance(c.get("geo"), dict):
-                return c["geo"]
+                geo = _normalize_geo_map(c["geo"])
+                if isinstance(geo, dict):
+                    return geo
         return {}
 
     def _get_material_group(*cands):
@@ -14551,6 +14378,7 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
                     extra_ops_lines_appended = 1
                     extra_ops_lines_cache = list(appended_later_extra_ops_lines)
             if appended_later_extra_ops_lines:
+                _mark_pending_ops_flags_as_printed()
                 _push(
                     lines,
                     f"[DEBUG] extra_ops_lines={len(appended_later_extra_ops_lines)}",
@@ -14598,6 +14426,7 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
                     include_in_removal_cards=False,
                 )
                 if appended_fallback_extra_ops_lines:
+                    _mark_pending_ops_flags_as_printed()
                     for entry in appended_fallback_extra_ops_lines:
                         if not entry.startswith("[DEBUG]"):
                             removal_summary_extra_lines.append(entry)
@@ -17133,118 +16962,17 @@ def compute_quote_from_df(  # type: ignore[reportGeneralTypeIssues]
     material_text = material_display
 
     scrap_value = value_map.get("Scrap Percent (%)")
-    normalized_scrap = normalize_scrap_pct(scrap_value)
-    scrap_frac: float | None = normalized_scrap if normalized_scrap > 0 else None
-    scrap_source = "ui" if scrap_frac is not None else "default_guess"
-    scrap_source_label = scrap_source
-    hole_reason_applied = False
-    if scrap_frac is None:
-        stock_plan = geo_payload.get("stock_plan_guess") if isinstance(geo_payload, dict) else None
-        if isinstance(stock_plan, _MappingABC):
-            net = _coerce_float_or_none(stock_plan.get("net_volume_in3"))
-            stock = _coerce_float_or_none(stock_plan.get("stock_volume_in3"))
-            if net and stock and net > 0 and stock >= net:
-                scrap_frac = max(0.0, min(0.25, (stock - net) / net))
-                scrap_source = "stock_plan_guess"
-                scrap_source_label = scrap_source
-        if scrap_frac is None:
-            scrap_frac = SCRAP_DEFAULT_GUESS
-            scrap_source = "default_guess"
-            scrap_source_label = scrap_source
-
-    assert scrap_frac is not None
-    scrap_frac = float(scrap_frac)
-
-    hole_scrap_frac_est = _holes_scrap_fraction(geo_payload, cap=HOLE_SCRAP_CAP)
-    if hole_scrap_frac_est > 0:
-        hole_scrap_frac_clamped = max(0.0, min(HOLE_SCRAP_CAP, float(hole_scrap_frac_est)))
-        ui_scrap_frac = normalize_scrap_pct(scrap_value)
-        scrap_candidate = max(ui_scrap_frac, hole_scrap_frac_clamped)
-        if scrap_candidate > scrap_frac + 1e-9:
-            scrap_frac = scrap_candidate
-            scrap_source_label = f"{scrap_source}+holes"
-            hole_reason_applied = True
-
-    density_g_cc = _coerce_float_or_none(value_map.get("Material Density"))
-    if (density_g_cc in (None, 0.0)) and material_text:
-        density_hint = _density_for_material(material_text)
-        if density_hint:
-            density_g_cc = density_hint
-
-    net_volume_cm3 = _coerce_float_or_none(value_map.get("Net Volume (cm^3)"))
-    if net_volume_cm3 is None:
-        length_in = _coerce_float_or_none(value_map.get("Plate Length (in)"))
-        width_in = _coerce_float_or_none(value_map.get("Plate Width (in)"))
-        thickness_in_val = _coerce_float_or_none(value_map.get("Thickness (in)"))
-
-        if isinstance(geo_payload, _MappingABC):
-            if length_in is None:
-                length_in = _coerce_float_or_none(
-                    geo_payload.get("plate_len_in")
-                    or geo_payload.get("plate_length_in")
-                )
-            if width_in is None:
-                width_in = _coerce_float_or_none(
-                    geo_payload.get("plate_wid_in")
-                    or geo_payload.get("plate_width_in")
-                )
-
-            if length_in is None:
-                length_mm = _coerce_positive_float(
-                    geo_payload.get("plate_len_mm")
-                    or geo_payload.get("plate_length_mm")
-                )
-                if length_mm:
-                    length_in = float(length_mm) / 25.4
-            if width_in is None:
-                width_mm = _coerce_positive_float(
-                    geo_payload.get("plate_wid_mm")
-                    or geo_payload.get("plate_width_mm")
-                )
-                if width_mm:
-                    width_in = float(width_mm) / 25.4
-
-            if thickness_in_val is None:
-                thickness_in_val = _coerce_float_or_none(geo_payload.get("thickness_in"))
-                if thickness_in_val is None:
-                    thickness_mm_geo = _coerce_positive_float(geo_payload.get("thickness_mm"))
-                    if thickness_mm_geo:
-                        thickness_in_val = float(thickness_mm_geo) / 25.4
-
-            if length_in is None or width_in is None:
-                derived_ctx = geo_payload.get("derived")
-                if isinstance(derived_ctx, _MappingABC):
-                    bbox_mm = derived_ctx.get("bbox_mm")
-                    if (
-                        isinstance(bbox_mm, (list, tuple))
-                        and len(bbox_mm) == 2
-                    ):
-                        bbox_L_mm = _coerce_positive_float(bbox_mm[0])
-                        bbox_W_mm = _coerce_positive_float(bbox_mm[1])
-                        if length_in is None and bbox_L_mm:
-                            length_in = float(bbox_L_mm) / 25.4
-                        if width_in is None and bbox_W_mm:
-                            width_in = float(bbox_W_mm) / 25.4
-
-        if length_in and width_in and thickness_in_val:
-            volume_in3 = float(length_in) * float(width_in) * float(thickness_in_val)
-            net_volume_cm3 = volume_in3 * 16.387064
-
-    removal_mass_g = _holes_removed_mass_g(geo_payload)
-    if net_volume_cm3 and density_g_cc and removal_mass_g:
-        net_mass_g = float(net_volume_cm3) * float(density_g_cc)
-        base_for_removal = float(scrap_frac or 0.0) if scrap_source != "default_guess" else 0.0
-        removal_result = compute_mass_and_scrap_after_removal(
-            net_mass_g,
-            base_for_removal,
-            removal_mass_g,
-        )
-        scrap_frac = removal_result[1]
-        scrap_source = "geometry"
-        if hole_reason_applied:
-            scrap_source_label = f"{scrap_source_label}+geometry"
-        else:
-            scrap_source_label = scrap_source
+    scrap_state = resolve_material_scrap_state(
+        value_map=value_map if isinstance(value_map, _MappingABC) else None,
+        geo_payload=geo_payload if isinstance(geo_payload, _MappingABC) else None,
+        material_text=material_text,
+        scrap_value=scrap_value,
+        material_group_display=material_group_display,
+        density_lookup=_density_for_material,
+    )
+    scrap_frac = scrap_state.scrap_fraction
+    scrap_source = scrap_state.scrap_source
+    scrap_source_label = scrap_state.scrap_source_label
 
     fai_value = value_map.get("FAIR Required")
     fai_required = coerce_bool(coerce_checkbox_state(fai_value), default=False)
@@ -17474,112 +17202,31 @@ def compute_quote_from_df(  # type: ignore[reportGeneralTypeIssues]
     material_entry["material_cost_before_credit"] = float(base_material_cost)
     mat_block["material_cost_before_credit"] = float(base_material_cost)
 
-    scrap_mass_lb_val = _coerce_float_or_none(
-        mat_block.get("scrap_weight_lb") or mat_block.get("scrap_lb")
+    scrap_state.finalize_credit(
+        material_block=mat_block,
+        overrides=overrides if isinstance(overrides, _MappingABC) else None,
+        geo_context=geo_context if isinstance(geo_context, dict) else None,
+        material_display=material_display,
+        material_group_display=material_group_display,
+        wieland_lookup=_wieland_scrap_usd_per_lb,
+        default_recovery_fraction=_materials.SCRAP_RECOVERY_DEFAULT,
+        default_scrap_price_usd_per_lb=_materials.SCRAP_PRICE_FALLBACK_USD_PER_LB,
     )
-    scrap_mass_lb = (
-        float(scrap_mass_lb_val)
-        if scrap_mass_lb_val is not None and scrap_mass_lb_val > 0
-        else None
-    )
+
+    credit_info = scrap_state.scrap_credit
+    scrap_mass_lb = credit_info.mass_lb
     if scrap_mass_lb is not None:
         mat_block["scrap_credit_mass_lb"] = float(scrap_mass_lb)
         material_entry["scrap_credit_mass_lb"] = float(scrap_mass_lb)
 
-    credit_override_amount: float | None = None
-    unit_price_override: float | None = None
-    recovery_override: float | None = None
-    if isinstance(overrides, _MappingABC):
-        for key in (
-            "Material Scrap / Remnant Value",
-            "material_scrap_credit",
-            "material_scrap_credit_usd",
-            "scrap_credit_usd",
-        ):
-            override_val = overrides.get(key)
-            if override_val in (None, ""):
-                continue
-            coerced_override = _coerce_float_or_none(override_val)
-            if coerced_override is not None:
-                credit_override_amount = abs(float(coerced_override))
-                break
+    scrap_credit_amount = credit_info.amount_usd
+    scrap_price_used = credit_info.unit_price_usd_per_lb
+    scrap_recovery_used = credit_info.recovery_fraction
+    scrap_credit_source = credit_info.source
+    wieland_scrap_price = credit_info.wieland_price_usd_per_lb
 
-        for key in (
-            "scrap_credit_unit_price_usd_per_lb",
-            "scrap_price_usd_per_lb",
-            "scrap_usd_per_lb",
-            "Scrap Price ($/lb)",
-            "Scrap Credit ($/lb)",
-            "Scrap Unit Price ($/lb)",
-        ):
-            price_val = overrides.get(key)
-            if price_val in (None, ""):
-                continue
-            coerced_price = _coerce_float_or_none(price_val)
-            if coerced_price is not None and coerced_price >= 0:
-                unit_price_override = float(coerced_price)
-                break
-
-        for key in (
-            "scrap_recovery_pct",
-            "Scrap Recovery (%)",
-            "scrap_recovery_fraction",
-        ):
-            recovery_val = overrides.get(key)
-            if recovery_val in (None, ""):
-                continue
-            coerced_recovery = _coerce_float_or_none(recovery_val)
-            if coerced_recovery is None:
-                continue
-            recovery_fraction = float(coerced_recovery)
-            if recovery_fraction > 1.0 + 1e-6:
-                recovery_fraction = recovery_fraction / 100.0
-            recovery_override = max(0.0, min(1.0, recovery_fraction))
-            break
-
-    scrap_credit_amount: float | None = None
-    scrap_price_used: float | None = None
-    scrap_recovery_used: float | None = None
-    scrap_credit_source: str | None = None
-    wieland_scrap_price: float | None = None
-
-    if credit_override_amount is not None:
-        scrap_credit_amount = max(0.0, float(credit_override_amount))
-        scrap_credit_source = "override_amount"
-    elif scrap_mass_lb is not None:
-        recovery = (
-            recovery_override
-            if recovery_override is not None
-            else _materials.SCRAP_RECOVERY_DEFAULT
-        )
-        scrap_recovery_used = recovery
-        if unit_price_override is not None:
-            scrap_price_used = max(0.0, float(unit_price_override))
-            scrap_credit_source = "override_unit_price"
-            mat_block["scrap_price_usd_per_lb"] = float(scrap_price_used)
-        else:
-            family_hint = None
-            if isinstance(geo_context, dict):
-                family_hint = (
-                    geo_context.get("material_family")
-                    or geo_context.get("material_group")
-                )
-            family_hint = family_hint or material_group_display or material_display
-            if family_hint is not None and not isinstance(family_hint, str):
-                family_hint = str(family_hint)
-            if isinstance(family_hint, str):
-                family_hint = family_hint.strip() or None
-            price_candidate = _wieland_scrap_usd_per_lb(family_hint)
-            if price_candidate is not None:
-                wieland_scrap_price = float(price_candidate)
-                scrap_price_used = float(price_candidate)
-                scrap_credit_source = "wieland"
-                mat_block["scrap_price_usd_per_lb"] = float(scrap_price_used)
-            else:
-                scrap_price_used = _materials.SCRAP_PRICE_FALLBACK_USD_PER_LB
-                scrap_credit_source = "default"
-                mat_block["scrap_price_usd_per_lb"] = float(scrap_price_used)
-        scrap_credit_amount = float(scrap_mass_lb) * float(scrap_price_used or 0.0) * float(scrap_recovery_used or 0.0)
+    if scrap_price_used is not None:
+        mat_block["scrap_price_usd_per_lb"] = float(scrap_price_used)
 
     if wieland_scrap_price is not None:
         mat_block["scrap_price_usd_per_lb"] = float(wieland_scrap_price)
@@ -17703,8 +17350,6 @@ def compute_quote_from_df(  # type: ignore[reportGeneralTypeIssues]
     amortized_programming = 0.0
     amortized_fixture = 0.0
     planner_exception: Exception | None = None
-    recognized_line_items = 0
-    use_planner = False
     fallback_reason = ""
     if family:
         if callable(_process_plan_job):
@@ -17727,230 +17372,6 @@ def compute_quote_from_df(  # type: ignore[reportGeneralTypeIssues]
             pricing = {}
 
         planner_result.update(pricing if isinstance(pricing, dict) else {})
-        recognized_line_items = _recognized_line_items_from_planner(planner_result)
-        if (
-            "recognized_line_items" not in planner_result
-            and recognized_line_items > 0
-        ):
-            planner_result["recognized_line_items"] = recognized_line_items
-
-        if planner_result:
-            breakdown["process_plan_pricing"] = planner_result
-            baseline["process_plan_pricing"] = planner_result
-            process_plan_summary["pricing"] = planner_result
-            if isinstance(breakdown, _MutableMappingABC):
-                breakdown["pricing_source"] = "Planner"
-
-        if planner_exception is None and recognized_line_items > 0:
-            use_planner = True
-        else:
-            fallback_reason = (
-                "Planner pricing failed; using legacy fallback"
-                if planner_exception is not None
-                else "Planner recognized no operations; using legacy fallback"
-            )
-
-    if use_planner:
-        totals = (
-            planner_result.get("totals", {})
-            if isinstance(planner_result.get("totals"), _MappingABC)
-            else {}
-        )
-        machine_cost = float(_coerce_float_or_none(totals.get("machine_cost")) or 0.0)
-        labor_cost_total = float(_coerce_float_or_none(totals.get("labor_cost")) or 0.0)
-        total_minutes = float(_coerce_float_or_none(totals.get("minutes")) or 0.0)
-
-        line_items = planner_result.get("line_items")
-        if isinstance(line_items, Sequence):
-            for item in line_items:
-                if not isinstance(item, _MappingABC):
-                    continue
-                raw_label = item.get("op") or item.get("name") or ""
-                canonical_label, is_amortized = _canonical_amortized_label(raw_label)
-                normalized_label = str(canonical_label or raw_label or "").strip().lower()
-                if not is_amortized:
-                    if any(
-                        token in normalized_label
-                        for token in ("per part", "per pc", "per piece")
-                    ):
-                        is_amortized = True
-                if not is_amortized:
-                    continue
-                if not normalized_label:
-                    continue
-                labor_amount = _coerce_float_or_none(item.get("labor_cost"))
-                if labor_amount is None:
-                    continue
-                labor_value = float(labor_amount)
-                if "program" in normalized_label:
-                    amortized_programming += labor_value
-                elif "fixture" in normalized_label:
-                    amortized_fixture += labor_value
-
-        planner_machine_cost_total = machine_cost
-        planner_labor_cost_total = labor_cost_total - amortized_programming - amortized_fixture
-        if planner_labor_cost_total < 0:
-            planner_labor_cost_total = 0.0
-
-        planner_direct_cost_total = planner_machine_cost_total + planner_labor_cost_total
-        if planner_direct_cost_total <= 0.0:
-            zero_cost_message = "Planner produced zero machine/labor cost; using legacy fallback"
-            quote_log = breakdown.setdefault("quote_log", [])
-            if isinstance(quote_log, list):
-                quote_log.append(zero_cost_message)
-            else:
-                breakdown["quote_log"] = [zero_cost_message]
-            fallback_reason = zero_cost_message
-            use_planner = False
-        else:
-            process_costs.clear()
-            process_costs.update(
-                {
-                    "Machine": round(planner_machine_cost_total, 2),
-                    "Labor": round(planner_labor_cost_total, 2),
-                }
-            )
-            planner_totals_map = (
-                planner_result.get("totals", {})
-                if isinstance(planner_result.get("totals"), _MappingABC)
-                else {}
-            )
-            minutes_by_bucket = (
-                planner_totals_map.get("minutes_by_bucket", {})
-                if isinstance(planner_totals_map, _MappingABC)
-                else {}
-            )
-            cost_by_bucket = (
-                planner_totals_map.get("cost_by_bucket", {})
-                if isinstance(planner_totals_map, _MappingABC)
-                else {}
-            )
-            if minutes_by_bucket:
-                hour_summary = {}
-                for key, value in minutes_by_bucket.items():
-                    try:
-                        minutes_val = float(value or 0.0)
-                    except Exception:
-                        minutes_val = 0.0
-                    hour_summary[str(key)] = round(minutes_val / 60.0, 2)
-                process_plan_summary["hour_summary"] = hour_summary
-            if cost_by_bucket:
-                bucket_costs: list[PlannerBucketCost] = []
-                planner_cost_map: dict[str, float] = {}
-                for key, value in cost_by_bucket.items():
-                    try:
-                        numeric_cost = round(float(value or 0.0), 2)
-                    except Exception:
-                        numeric_cost = 0.0
-                    name = str(key)
-                    bucket_costs.append({"name": name, "cost": numeric_cost})
-                    planner_cost_map[name] = numeric_cost
-                process_plan_summary["process_costs"] = bucket_costs
-                process_plan_summary["process_costs_map"] = planner_cost_map
-            process_plan_summary["computed_total_labor_cost"] = float(
-                planner_totals_map.get("labor_cost", 0.0) or 0.0
-            )
-            process_plan_summary["display_labor_for_ladder"] = process_plan_summary[
-                "computed_total_labor_cost"
-            ]
-            process_plan_summary["computed_total_machine_cost"] = float(
-                planner_totals_map.get("machine_cost", 0.0) or 0.0
-            )
-            process_plan_summary["planner_labor_cost_total"] = planner_labor_cost_total
-            process_plan_summary["planner_machine_cost_total"] = planner_machine_cost_total
-            process_plan_summary["pricing_source"] = "Planner"
-            planner_subtotal = (
-                process_plan_summary["display_labor_for_ladder"]
-                + process_plan_summary["computed_total_machine_cost"]
-            )
-            planner_subtotal_rounded = round(planner_subtotal, 2)
-            process_plan_summary["computed_subtotal"] = planner_subtotal_rounded
-            combined_labor_total = (
-                planner_machine_cost_total
-                + planner_labor_cost_total
-                + amortized_programming
-                + amortized_fixture
-            )
-            totals_block.update(
-                {
-                    "machine_cost": planner_machine_cost_total,
-                    "labor_cost": combined_labor_total,
-                    "minutes": total_minutes,
-                    "subtotal": planner_subtotal_rounded,
-                }
-            )
-            breakdown["labor_cost_rendered"] = combined_labor_total
-            breakdown["process_plan_pricing"] = planner_result
-            breakdown["pricing_source"] = "Planner"
-            breakdown["process_minutes"] = total_minutes
-            baseline["pricing_source"] = "Planner"
-            baseline["process_plan_pricing"] = planner_result
-            process_plan_summary["used_planner"] = True
-            planner_used = True
-
-            hr_total = total_minutes / 60.0 if total_minutes else 0.0
-            process_meta["planner_total"] = {
-                "minutes": total_minutes,
-                "hr": hr_total,
-                "cost": machine_cost + labor_cost_total,
-                "machine_cost": machine_cost,
-                "labor_cost": labor_cost_total,
-                "labor_cost_excl_amortized": planner_labor_cost_total,
-                "amortized_programming": amortized_programming,
-                "amortized_fixture": amortized_fixture,
-                "line_items": list(planner_result.get("line_items", []) or []),
-            }
-            process_meta["planner_machine"] = {
-                "minutes": total_minutes,
-                "hr": hr_total,
-                "cost": machine_cost,
-            }
-            process_meta["planner_labor"] = {
-                "minutes": total_minutes,
-                "hr": hr_total,
-                "cost": labor_cost_total,
-                "cost_excl_amortized": planner_labor_cost_total,
-                "amortized_programming": amortized_programming,
-                "amortized_fixture": amortized_fixture,
-            }
-
-            machine_rendered = float(_coerce_float_or_none(process_costs.get("Machine")) or 0.0)
-            if (
-                planner_machine_cost_total > 0.0
-                and machine_rendered > 0.0
-                and abs(planner_machine_cost_total - machine_rendered) > _PLANNER_BUCKET_ABS_EPSILON
-            ):
-                breakdown["red_flags"].append("Planner totals drifted (machine cost)")
-            labor_rendered = float(_coerce_float_or_none(process_costs.get("Labor")) or 0.0)
-            if (
-                planner_labor_cost_total > 0.0
-                and labor_rendered > 0.0
-                and abs(planner_labor_cost_total - labor_rendered) > _PLANNER_BUCKET_ABS_EPSILON
-            ):
-                breakdown["red_flags"].append("Planner totals drifted (labor cost)")
-
-    if not use_planner:
-        breakdown.setdefault("process_minutes", 0.0)
-        breakdown["pricing_source"] = "legacy"
-        baseline.setdefault("pricing_source", "legacy")
-        if fallback_reason:
-            breakdown["red_flags"].append(fallback_reason)
-        breakdown.setdefault("pricing_source", "legacy")
-        baseline.setdefault("pricing_source", "legacy")
-
-    if process_plan_summary:
-        if isinstance(breakdown, dict):
-            existing_summary = breakdown.get("process_plan")
-            if isinstance(existing_summary, dict):
-                existing_summary.update(process_plan_summary)
-            else:
-                breakdown["process_plan"] = dict(process_plan_summary)
-
-    using_planner = str(breakdown.get("pricing_source", "")).strip().lower() == "planner"
-
-    if os.environ.get("ASSERT_PLANNER"):
-        assert str(breakdown.get("pricing_source", "")).strip().lower() == "planner", "Planner not engaged"
-
     merged_two_bucket_rates: dict[str, dict[str, float]] = {"labor": {}, "machine": {}}
     for candidate in (RATES_TWO_BUCKET_DEFAULT, default_rates, rates):
         if not isinstance(candidate, _MappingABC):
@@ -17986,60 +17407,56 @@ def compute_quote_from_df(  # type: ignore[reportGeneralTypeIssues]
         if qty_for_bucketize <= 0:
             qty_for_bucketize = 1
 
-    try:
-        bucketized_raw = bucketize(
-            planner_result if isinstance(planner_result, dict) else {},
-            merged_two_bucket_rates,
-            bucketize_nre,
-            qty=qty_for_bucketize,
-            geom=geom_for_bucketize,
-        )
-    except Exception:
-        bucketized_raw = {}
+    planner_apply_result = apply_planner_result(
+        planner_result,
+        breakdown=breakdown,
+        baseline=baseline,
+        process_plan_summary=process_plan_summary,
+        process_costs=process_costs,
+        process_meta=process_meta,
+        totals_block=totals_block,
+        bucketize_rates=merged_two_bucket_rates,
+        bucketize_nre=bucketize_nre,
+        geom_for_bucketize=geom_for_bucketize,
+        qty_for_bucketize=qty_for_bucketize,
+        planner_exception=planner_exception,
+        fallback_reason=fallback_reason,
+        planner_bucket_abs_epsilon=_PLANNER_BUCKET_ABS_EPSILON,
+    )
 
-    if not isinstance(bucketized_raw, _MappingABC):
-        bucketized_raw = {}
+    use_planner = planner_apply_result.use_planner
+    planner_used = planner_apply_result.planner_used
+    fallback_reason = planner_apply_result.fallback_reason
+    planner_machine_cost_total = planner_apply_result.planner_machine_cost_total
+    planner_labor_cost_total = planner_apply_result.planner_labor_cost_total
+    amortized_programming = planner_apply_result.amortized_programming
+    amortized_fixture = planner_apply_result.amortized_fixture
+    bucket_view_prepared: dict[str, Any] = planner_apply_result.bucket_view_prepared
+    aggregated_bucket_minutes: dict[str, dict[str, float]] = (
+        planner_apply_result.aggregated_bucket_minutes
+    )
 
-    bucket_view_prepared: dict[str, Any] = _prepare_bucket_view(bucketized_raw)
+    if not use_planner:
+        breakdown.setdefault("process_minutes", 0.0)
+        breakdown["pricing_source"] = "legacy"
+        baseline.setdefault("pricing_source", "legacy")
+        if fallback_reason:
+            breakdown["red_flags"].append(fallback_reason)
+        breakdown.setdefault("pricing_source", "legacy")
+        baseline.setdefault("pricing_source", "legacy")
 
-    aggregated_bucket_minutes: dict[str, dict[str, float]] = {}
-    line_items: Sequence[Mapping[str, Any]] | None = None
-    if isinstance(planner_result, _MappingABC):
-        raw_items = planner_result.get("line_items")
-        if isinstance(raw_items, Sequence):
-            # A shallow copy is sufficient for iteration and avoids surprising
-            # behaviour if the planner mutates the list during aggregation.
-            line_items = list(raw_items)
+    if process_plan_summary:
+        if isinstance(breakdown, dict):
+            existing_summary = breakdown.get("process_plan")
+            if isinstance(existing_summary, dict):
+                existing_summary.update(process_plan_summary)
+            else:
+                breakdown["process_plan"] = dict(process_plan_summary)
 
-    if line_items:
-        for entry in line_items:
-            if not isinstance(entry, _MappingABC):
-                continue
-            bucket_key = _planner_bucket_key_for_name(entry.get("op"))
-            if not bucket_key:
-                continue
-            canon_key = _canonical_bucket_key(bucket_key) or bucket_key
-            if not canon_key or canon_key in _FINAL_BUCKET_HIDE_KEYS:
-                continue
-            minutes_val = float(_safe_float(entry.get("minutes")))
-            machine_val = float(_bucket_cost(entry, "machine_cost", "machine$"))
-            labor_val = float(_bucket_cost(entry, "labor_cost", "labor$"))
-            if canon_key == "milling" and labor_val > 0.0:
-                machine_val += labor_val
-                labor_val = 0.0
-            if (
-                minutes_val <= 0.0
-                and machine_val <= 0.0
-                and labor_val <= 0.0
-            ):
-                continue
-            metrics = aggregated_bucket_minutes.setdefault(
-                canon_key,
-                {"minutes": 0.0, "machine$": 0.0, "labor$": 0.0},
-            )
-            metrics["minutes"] += minutes_val
-            metrics["machine$"] += machine_val
-            metrics["labor$"] += labor_val
+    using_planner = str(breakdown.get("pricing_source", "")).strip().lower() == "planner"
+
+    if os.environ.get("ASSERT_PLANNER"):
+        assert str(breakdown.get("pricing_source", "")).strip().lower() == "planner", "Planner not engaged"
 
     hole_diams: list[float] = []
     if isinstance(geo_payload, _MappingABC):
@@ -20601,6 +20018,56 @@ def _looks_like_hole_header(s: str) -> bool:
     )
 
 
+_RE_TEXT_ROW_START = re.compile(r"^\(\s*(\d+)\s*\)")
+
+
+def _merge_wrapped_text_rows(
+    rows: Sequence[Mapping[str, str]] | None,
+) -> list[dict[str, str]]:
+    """Merge wrapped HOLE TABLE rows captured from text entities.
+
+    A row is considered to start when the first non-empty field begins with
+    ``(n)``. Subsequent rows without that marker are appended to the most recent
+    starter, preserving column assignments (hole/ref/qty/desc) while collapsing
+    whitespace. ``qty`` is backfilled from the ``(n)`` token when missing.
+    """
+
+    merged: list[dict[str, str]] = []
+    if not rows:
+        return merged
+
+    for raw in rows:
+        base = {key: " ".join(str(raw.get(key, "")).split()) for key in ("hole", "ref", "qty", "desc")}
+        lead = next((base[key] for key in ("hole", "ref", "qty", "desc") if base[key]), "")
+        starts_new = bool(_RE_TEXT_ROW_START.match(lead))
+        if starts_new or not merged:
+            if not base.get("qty"):
+                m_hint = _RE_TEXT_ROW_START.match(lead)
+                if m_hint:
+                    base["qty"] = m_hint.group(1)
+            merged.append(base)
+            continue
+        prev = merged[-1]
+        for key, value in base.items():
+            if not value:
+                continue
+            if prev.get(key):
+                prev[key] = f"{prev[key]} {value}".strip()
+            else:
+                prev[key] = value
+
+    for row in merged:
+        if row.get("qty"):
+            continue
+        for key in ("hole", "ref", "desc"):
+            m_qty = _RE_TEXT_ROW_START.match(row.get(key, ""))
+            if m_qty:
+                row["qty"] = m_qty.group(1)
+                break
+
+    return merged
+
+
 def extract_hole_table_from_text(doc, y_tol: float = 0.04, min_rows: int = 5):
     """
     Returns dict like:
@@ -20685,6 +20152,8 @@ def extract_hole_table_from_text(doc, y_tol: float = 0.04, min_rows: int = 5):
         if _looks_like_hole_header(joined):
             break
         rows.append({"hole": hole, "ref": ref, "qty": qtys, "desc": desc})
+
+    rows = _merge_wrapped_text_rows(rows)
 
     if len(rows) < min_rows:
         return {}
@@ -20951,10 +20420,13 @@ def hole_count_from_acad_table(doc) -> dict[str, Any]:
             if re.search(r"\b(FRONT\s*&\s*BACK|BOTH\s+SIDES)\b", upper_text):
                 double_sided = True
 
+            ref_value = ref_txt.strip()
+            if d is not None:
+                ref_value = f"{d:.4f}\""
             rows_norm.append(
                 {
                     "hole": hole_id.strip(),
-                    "ref": ref_txt.strip(),
+                    "ref": ref_value,
                     "qty": qty,
                     "desc": desc.strip(),
                     "diameter_in": d,
@@ -22226,18 +21698,90 @@ def extract_2d_features_from_dxf_or_dwg(path: str | Path) -> dict[str, Any]:
     if doc is None:
         raise RuntimeError("Failed to load DXF/DWG document")
 
-    table_info = hole_count_from_acad_table(doc) or {}
-    if not table_info.get("hole_count"):
-        table_info = extract_hole_table_from_text(doc) or {}
+    geo = _build_geo_from_ezdxf_doc(doc)
+
+    acad_info = hole_count_from_acad_table(doc) or {}
+    text_info = {}
+    if not (acad_info.get("rows") or []):
+        text_info = extract_hole_table_from_text(doc) or {}
+
+    best_table_info = acad_info if _better(acad_info, text_info) else text_info
+    _persist_rows_and_totals(geo, best_table_info)
+    table_info = best_table_info or {}
 
     sp = doc.modelspace()
     units = detect_units_scale(doc)
     to_in = float(units.get("to_in", 1.0) or 1.0)
     u2mm = to_in * 25.4
 
-    geo = _build_geo_from_ezdxf_doc(doc)
-    if table_info.get("ops_summary"):
-        geo["ops_summary"] = table_info["ops_summary"]
+    table_ops_summary = table_info.get("ops_summary") if table_info else None
+
+    rows_for_ops = (table_info or {}).get("rows") or []
+    if rows_for_ops:
+        agg_from_rows = aggregate_ops_from_rows(rows_for_ops)
+        agg_totals = (
+            agg_from_rows.get("totals")
+            if isinstance(agg_from_rows, Mapping)
+            else None
+        )
+
+        def _ensure_ops_summary(G):
+            if not isinstance(G, dict):
+                return
+
+            existing_summary = G.get("ops_summary")
+            if isinstance(existing_summary, Mapping):
+                ops_summary_map: dict[str, Any] = dict(existing_summary)
+            else:
+                ops_summary_map = {}
+
+            if isinstance(table_ops_summary, Mapping):
+                for key, value in table_ops_summary.items():
+                    if key in {"rows", "totals"}:
+                        continue
+                    ops_summary_map.setdefault(key, value)
+
+            ops_summary_map["rows"] = rows_for_ops
+
+            totals_map: dict[str, Any] = {}
+            if isinstance(existing_summary, Mapping):
+                existing_totals = existing_summary.get("totals")
+                if isinstance(existing_totals, Mapping):
+                    totals_map.update(existing_totals)
+            if isinstance(table_ops_summary, Mapping):
+                table_totals = table_ops_summary.get("totals")
+                if isinstance(table_totals, Mapping):
+                    totals_map.update(table_totals)
+            if isinstance(ops_summary_map.get("totals"), Mapping):
+                totals_map.update(dict(ops_summary_map["totals"]))
+            if isinstance(agg_totals, Mapping):
+                totals_map.update(agg_totals)
+            ops_summary_map["totals"] = totals_map
+
+            if isinstance(agg_from_rows, Mapping):
+                for key in ("actions_total", "back_ops_total", "flip_required"):
+                    if key in agg_from_rows and key not in ops_summary_map:
+                        ops_summary_map[key] = agg_from_rows[key]
+
+            G["ops_summary"] = ops_summary_map
+
+        _ensure_ops_summary(geo)
+        nested_geo = geo.get("geo") if isinstance(geo, dict) else None
+        if isinstance(nested_geo, dict):
+            _ensure_ops_summary(nested_geo)
+
+        try:
+            geo["hole_count"] = int(
+                table_info.get("hole_count")
+                or (geo.get("hole_count") if isinstance(geo, dict) else 0)
+                or 0
+            )
+        except Exception:
+            pass
+    elif isinstance(table_ops_summary, Mapping):
+        geo["ops_summary"] = dict(table_ops_summary)
+    elif table_ops_summary:
+        geo["ops_summary"] = table_ops_summary
 
     hole_source: str | None = None
     provenance_entry = geo.get("provenance")
@@ -22592,15 +22136,31 @@ def extract_2d_features_from_dxf_or_dwg(path: str | Path) -> dict[str, Any]:
         _chart_all_lines.append(normalized)
 
     if extractor and dxf_text_path:
+        extractor_name = getattr(extractor, "__name__", None) or str(extractor)
+        print(
+            f"[EXTRACTOR] invoking {extractor_name} for {dxf_text_path} "
+            "(include_tables=True)"
+        )
         try:
             raw_lines = extractor(dxf_text_path, include_tables=True)
         except TypeError:
+            print(
+                f"[EXTRACTOR] retrying {extractor_name} for {dxf_text_path} without include_tables"
+            )
             try:
                 raw_lines = extractor(dxf_text_path)
-            except Exception:
+            except Exception as exc:
+                print(
+                    f"[EXTRACTOR] failed invoking {extractor_name} without include_tables: {exc}"
+                )
                 raw_lines = []
-        except Exception:
+        except Exception as exc:
+            print(f"[EXTRACTOR] failed invoking {extractor_name}: {exc}")
             raw_lines = []
+        else:
+            print(
+                f"[EXTRACTOR] extractor returned {len(raw_lines) if raw_lines else 0} lines"
+            )
         if raw_lines:
             for ln in raw_lines:
                 _append_chart_line(ln)
@@ -22619,25 +22179,41 @@ def extract_2d_features_from_dxf_or_dwg(path: str | Path) -> dict[str, Any]:
         "chart_lines": len(chart_lines),
     }
 
-    table_info = hole_count_from_acad_table(doc)
     table_counts_trusted = True
     if hole_source and "GEOM" in str(hole_source).upper():
         table_counts_trusted = False
+
+    acad2 = hole_count_from_acad_table(doc) or {}
+    text2 = {}
+    if not (acad2.get("rows") or []):
+        try:
+            text2 = extract_hole_table_from_text(doc) or {}
+        except Exception:
+            text2 = {}
+    if text2 and text2.get("hole_count"):
+        text2 = dict(text2)
+        text2.setdefault("provenance", "HOLE TABLE (TEXT)")
+
+    candidate = acad2 if _better(acad2, text2) else text2
+    if _better(candidate, best_table_info):
+        best_table_info = candidate
+        _persist_rows_and_totals(geo, best_table_info)
+
+    try:
+        if "hole_count" in (best_table_info or {}):
+            geo["hole_count"] = int(
+                best_table_info.get("hole_count")
+                or geo.get("hole_count")
+                or 0
+            )
+    except Exception:
+        pass
+
+    table_info = best_table_info or {}
+    if not table_counts_trusted:
         table_info = {}
-    if (not table_info or not table_info.get("hole_count")) and doc is not None:
-        try:
-            text_table = extract_hole_table_from_text(doc)
-        except Exception:
-            text_table = {}
-        if text_table and text_table.get("hole_count"):
-            text_table = dict(text_table)
-            text_table.setdefault("provenance", "HOLE TABLE (TEXT)")
-            table_info = text_table
+
     if table_info and table_info.get("hole_count") and table_counts_trusted:
-        try:
-            geo["hole_count"] = int(table_info.get("hole_count") or 0)
-        except Exception:
-            pass
         fam = table_info.get("hole_diam_families_in")
         if isinstance(fam, dict) and fam:
             geo["hole_diam_families_in"] = fam
@@ -22655,6 +22231,11 @@ def extract_2d_features_from_dxf_or_dwg(path: str | Path) -> dict[str, Any]:
             geo["provenance"] = provenance_entry
         else:
             geo["provenance"] = {"holes": prov}
+
+    rows = ((geo.get("ops_summary") or {}).get("rows") or [])
+    print(
+        f"[EXTRACTOR] wrote ops rows: {len(rows)} (qty_sum={_rows_qty_sum(rows)})"
+    )
 
     if chart_lines:
         chart_summary = summarize_hole_chart_lines(chart_lines)
@@ -22691,6 +22272,34 @@ def extract_2d_features_from_dxf_or_dwg(path: str | Path) -> dict[str, Any]:
                 chart_summary=chart_summary,
                 apply_built_rows=_apply_built_rows,
             )
+            rows_for_totals: list[dict[str, Any]] = []
+            if isinstance(ops_rows, (_MappingABC, dict)):
+                candidate_rows = ops_rows.get("rows") if isinstance(ops_rows, dict) else None
+                if isinstance(candidate_rows, list):
+                    rows_for_totals = [
+                        dict(row)
+                        for row in candidate_rows
+                        if isinstance(row, (_MappingABC, dict))
+                    ]
+            elif isinstance(ops_rows, list):
+                rows_for_totals = [
+                    dict(row)
+                    for row in ops_rows
+                    if isinstance(row, (_MappingABC, dict))
+                ]
+            if rows_for_totals:
+                ops_summary_map = geo.setdefault("ops_summary", {})
+                ops_summary_map["rows"] = rows_for_totals
+                try:
+                    totals_map = aggregate_ops(
+                        rows_for_totals,
+                        ops_entries=chart_ops,
+                    ).get("totals", {})
+                except Exception:
+                    totals_map = {}
+                ops_summary_map["totals"] = dict(totals_map) if isinstance(
+                    totals_map, (_MappingABC, dict)
+                ) else {}
         except Exception:
             ops_rows = []
         # --- end publish rows ---

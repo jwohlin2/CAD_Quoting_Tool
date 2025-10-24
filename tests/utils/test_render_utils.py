@@ -21,6 +21,7 @@ from cad_quoter.utils.rendering import (
     render_quote_doc,
     render_quote_doc_to_path,
 )
+from cad_quoter.utils.render_utils.tables import render_process_sections
 
 
 @pytest.mark.parametrize(
@@ -261,3 +262,78 @@ def test_render_quote_doc_to_path_preserves_utf8(tmp_path) -> None:
     data = output_path.read_bytes()
     assert data == expected.encode("utf-8")
     assert "\r" not in output_path.read_text(encoding="utf-8")
+
+
+def test_render_process_sections_formats_ascii_table() -> None:
+    bucket_view = {
+        "buckets": {
+            "milling": {"minutes": 30, "machine$": 45, "labor$": 15},
+            "drilling": {"minutes": 12.5, "machine$": 10, "labor$": 5},
+        }
+    }
+    noted: list[str] = []
+    lines, total, minutes, rows = render_process_sections(
+        bucket_view,
+        process_meta=None,
+        rates=None,
+        cfg=None,
+        label_overrides=None,
+        format_money=lambda value: f"${float(value):.2f}",
+        add_process_notes=lambda label: noted.append(label),
+        page_width=20,
+        canonical_bucket_key=lambda key: str(key or "").lower(),
+        normalize_bucket_key=lambda key: str(key or "").lower(),
+        display_bucket_label=lambda key, overrides: key or "",
+    )
+
+    assert lines == [
+        "Process & Labor Costs",
+        "--------------------",
+        "  Process   Minutes  Machine $  Labor $  Total $",
+        "  --------  -------  ---------  -------  -------",
+        "  milling     30.00     $45.00   $22.50   $67.50",
+        "  drilling    12.50     $10.00    $5.00   $15.00",
+        "  --------  -------  ---------  -------  -------",
+        "  Total                                   $82.50",
+        "",
+    ]
+    assert total == pytest.approx(82.5)
+    assert minutes == pytest.approx(42.5)
+    assert rows == [
+        ("milling", pytest.approx(30.0), pytest.approx(45.0), pytest.approx(22.5), pytest.approx(67.5)),
+        ("drilling", pytest.approx(12.5), pytest.approx(10.0), pytest.approx(5.0), pytest.approx(15.0)),
+    ]
+    assert noted == ["milling", "drilling"]
+
+
+def test_render_process_sections_uses_programming_fallback() -> None:
+    lines, total, minutes, rows = render_process_sections(
+        {"buckets": {}},
+        process_meta=None,
+        rates=None,
+        cfg=None,
+        label_overrides=None,
+        format_money=lambda value: f"${float(value):.2f}",
+        add_process_notes=lambda label: None,
+        page_width=24,
+        labor_cost_totals={"Programming (per part)": 12},
+        programming_minutes=3,
+        canonical_bucket_key=lambda key: str(key or "").lower(),
+        normalize_bucket_key=lambda key: str(key or "").lower(),
+        display_bucket_label=lambda key, overrides: key or "",
+        programming_per_part_label="Programming (per part)",
+        programming_amortized_label="Programming (amortized)",
+    )
+
+    assert "Programming (per part)" in " ".join(lines)
+    assert total == pytest.approx(12.0)
+    assert minutes == pytest.approx(3.0)
+    assert rows == [
+        (
+            "Programming (per part)",
+            pytest.approx(3.0),
+            pytest.approx(0.0),
+            pytest.approx(12.0),
+            pytest.approx(12.0),
+        )
+    ]
