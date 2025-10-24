@@ -1659,17 +1659,9 @@ def _build_ops_cards_from_chart_lines(
         out_lines.append("")
 
         if front_cb > 0:
-            _ebo_append_unique(
-                mutation_owner,
-                "counterbore",
-                {"name": "Counterbore", "qty": int(front_cb), "side": "front"},
-            )
+            _ebo_append_unique("counterbore", "Counterbore", int(front_cb), "front")
         if back_cb > 0:
-            _ebo_append_unique(
-                mutation_owner,
-                "counterbore",
-                {"name": "Counterbore", "qty": int(back_cb), "side": "back"},
-            )
+            _ebo_append_unique("counterbore", "Counterbore", int(back_cb), "back")
 
         cb_mrate = (
             _lookup_bucket_rate("counterbore", rates)
@@ -1724,11 +1716,7 @@ def _build_ops_cards_from_chart_lines(
             _lookup_bucket_rate("machine", rates) or 53.76,
             _lookup_bucket_rate("labor", rates) or 25.46,
         )
-        _ebo_append_unique(
-            mutation_owner,
-            "spot",
-            {"name": "Spot drill", "qty": int(spot_qty), "side": "front"},
-        )
+        _ebo_append_unique("spot", "Spot drill", int(spot_qty), "front")
 
         _register_pending("spot")
 
@@ -1754,11 +1742,7 @@ def _build_ops_cards_from_chart_lines(
             or 53.76,
             _lookup_bucket_rate("labor", rates) or 25.46,
         )
-        _ebo_append_unique(
-            mutation_owner,
-            "jig-grind",
-            {"name": "Jig-grind", "qty": int(jig_qty), "side": None},
-        )
+        _ebo_append_unique("jig-grind", "Jig-grind", int(jig_qty))
 
         _register_pending("jig-grind")
 
