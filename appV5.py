@@ -1114,6 +1114,64 @@ def _build_ops_cards_from_chart_lines(
         chart_claims.get("cb_groups") or {}
     )
 
+    printed_candidate: Any = None
+    try:
+        if isinstance(breakdown_mutable, dict):
+            printed_candidate = breakdown_mutable.setdefault(
+                "_ops_cards_printed", set()
+            )
+        elif isinstance(breakdown_mutable, _MutableMappingABC):
+            printed_candidate = typing.cast(
+                MutableMapping[str, Any],
+                breakdown_mutable,
+            ).setdefault("_ops_cards_printed", set())
+    except Exception:
+        printed_candidate = None
+
+    skip_cbore_card = False
+    cbore_flag_preexisting = False
+    try:
+        if printed_candidate is not None and "cbore" in typing.cast(Iterable[str], printed_candidate):
+            cbore_flag_preexisting = True
+    except Exception:
+        cbore_flag_preexisting = False
+    printed: MutableSet[str] | None = None
+    if isinstance(printed_candidate, (_MutableSetABC, set)):
+        printed = typing.cast(MutableSet[str], printed_candidate)
+
+    if printed is not None:
+        if "cbore" in printed:
+            cbore_flag_preexisting = True
+        else:
+            printed.add("cbore")
+    if cbore_flag_preexisting:
+        skip_cbore_card = True
+
+    derived_candidate: Any = None
+    try:
+        if isinstance(breakdown_mutable, dict):
+            derived_candidate = breakdown_mutable.setdefault("derived_ops", {})
+        elif isinstance(breakdown_mutable, _MutableMappingABC):
+            derived_candidate = typing.cast(
+                MutableMapping[str, Any],
+                breakdown_mutable,
+            ).setdefault("derived_ops", {})
+    except Exception:
+        derived_candidate = None
+
+    if isinstance(derived_candidate, (_MutableMappingABC, dict)):
+        serial: dict[tuple[float | None, str, float | None], int] = {}
+        for (dia, side, depth), qty in cb_groups.items():
+            key = (
+                float(dia) if dia is not None else None,
+                str(side),
+                float(depth) if depth is not None else None,
+            )
+            serial[key] = int(qty or 0)
+        try:
+            derived_candidate["cb_groups"] = serial  # type: ignore[index]
+        except Exception:
+            pass
     spot_qty = int(chart_claims.get("spot") or 0)
     jig_qty = int(chart_claims.get("jig") or 0)
 
@@ -1175,6 +1233,41 @@ def _build_ops_cards_from_chart_lines(
         elif isinstance(breakdown, _MutableMappingABC):
             target_breakdown = typing.cast(MutableMapping[str, Any], breakdown)
 
+    printed_flags: set[str] | None = None
+    try:
+        if isinstance(breakdown_mutable, dict):
+            printed_flags = breakdown_mutable.setdefault("_ops_cards_printed", set())
+        elif isinstance(breakdown_mutable, _MutableMappingABC):
+            printed_flags = typing.cast(
+                MutableMapping[str, Any],
+                breakdown_mutable,
+            ).setdefault("_ops_cards_printed", set())
+    except Exception:
+        printed_flags = None
+
+    if printed_flags is not None and not isinstance(printed_flags, set):
+        try:
+            printed_flags = set(printed_flags)  # type: ignore[arg-type]
+        except Exception:
+            printed_flags = set()
+        try:
+            if isinstance(breakdown_mutable, dict):
+                breakdown_mutable["_ops_cards_printed"] = printed_flags
+            elif isinstance(breakdown_mutable, _MutableMappingABC):
+                typing.cast(
+                    MutableMapping[str, Any],
+                    breakdown_mutable,
+                )["_ops_cards_printed"] = printed_flags
+        except Exception:
+            pass
+
+    if isinstance(printed_flags, set):
+        if "cbore" in printed_flags:
+            if cbore_flag_preexisting:
+                skip_cbore_card = True
+        else:
+            printed_flags.add("cbore")
+
     bucket_view_obj: MutableMapping[str, Any] | Mapping[str, Any] | None = None
     if isinstance(target_breakdown, dict):
         bucket_view_obj = target_breakdown.setdefault("bucket_view", {})
@@ -1229,28 +1322,7 @@ def _build_ops_cards_from_chart_lines(
 
     out_lines: list[str] = []
 
-    if cb_groups and _print_once("counterbore"):
-        if isinstance(mutation_owner, (_MutableMappingABC, dict)):
-            derived_owner: MutableMapping[str, Any] | None = None
-            try:
-                derived_owner = mutation_owner.setdefault("derived_ops", {})
-            except Exception:
-                derived_owner = None
-            if isinstance(derived_owner, (_MutableMappingABC, dict)):
-                serial_cb: dict[tuple[float | None, str, float | None], int] = {}
-                for (dia, side, depth), qty in cb_groups.items():
-                    serial_cb[
-                        (
-                            float(dia) if dia is not None else None,
-                            str(side or ""),
-                            float(depth) if depth is not None else None,
-                        )
-                    ] = int(qty or 0)
-                try:
-                    derived_owner["cb_groups"] = serial_cb  # type: ignore[index]
-                except Exception:
-                    pass
-
+    if cb_groups and not skip_cbore_card:
         front_cb = sum(
             int(qty)
             for (dia, side, _depth), qty in cb_groups.items()
@@ -1304,14 +1376,12 @@ def _build_ops_cards_from_chart_lines(
                 mutation_owner,
                 "counterbore",
                 {"name": "Counterbore", "qty": int(front_cb), "side": "front"},
-                minutes=float(front_cb) * per,
             )
         if back_cb > 0:
             _ebo_append_unique(
                 mutation_owner,
                 "counterbore",
                 {"name": "Counterbore", "qty": int(back_cb), "side": "back"},
-                minutes=float(back_cb) * per,
             )
 
         cb_mrate = (
@@ -1345,7 +1415,7 @@ def _build_ops_cards_from_chart_lines(
         except Exception:
             pass
 
-    if spot_qty > 0 and _print_once("spot"):
+    if spot_qty > 0 and not skip_cbore_card:
         per_spot = 0.05
         t_group = spot_qty * per_spot
         out_lines.extend(
@@ -1369,10 +1439,9 @@ def _build_ops_cards_from_chart_lines(
             mutation_owner,
             "spot",
             {"name": "Spot drill", "qty": int(spot_qty), "side": "front"},
-            minutes=t_group,
         )
 
-    if jig_qty > 0 and _print_once("jig-grind"):
+    if jig_qty > 0 and not skip_cbore_card:
         per_jig = float(globals().get("JIG_GRIND_MIN_PER_FEATURE") or 0.75)
         t_group = jig_qty * per_jig
         out_lines.extend(
@@ -1385,10 +1454,19 @@ def _build_ops_cards_from_chart_lines(
                 "",
             ]
         )
-        _append_jig_extra(
-            breakdown_mutable,
-            int(jig_qty),
-            rates=rates,
+        _set_bucket_minutes_cost(
+            bucket_view_obj,
+            "grinding",
+            t_group,
+            _lookup_bucket_rate("grinding", rates)
+            or _lookup_bucket_rate("machine", rates)
+            or 53.76,
+            _lookup_bucket_rate("labor", rates) or 25.46,
+        )
+        _ebo_append_unique(
+            mutation_owner,
+            "jig-grind",
+            {"name": "Jig-grind", "qty": int(jig_qty), "side": None},
         )
 
     if out_lines:
@@ -4617,9 +4695,6 @@ def _compute_drilling_removal_section(
         if isinstance(derived_ops_owner, (_MutableMappingABC, dict)):
             derived_ops_owner["derived_ops"] = derived_ops
 
-    counts_by_diam_raw_obj: dict[float, int] = dict(derived_ops.get("drill_bins_raw") or {})
-    counts_by_diam_adj_obj: dict[float, int] = dict(derived_ops.get("drill_bins_adj") or {})
-    drill_total_adj: int = int(derived_ops.get("drill_total") or 0)
     # ---- END SAFE INITIALIZATION ----
 
     def _seed_drill_bins_from_geo__local(
@@ -5261,22 +5336,64 @@ def _compute_drilling_removal_section(
                 f"[DEBUG] DRILL printed_sum={printed_sum} audit_drill={drill_actions_from_groups}",
             )
 
-        if not counts_by_diam_raw_obj:
-            counts_by_diam_raw_obj = _seed_drill_bins_from_geo__local(geo_map) or {}
-            derived_ops["drill_bins_raw"] = dict(counts_by_diam_raw_obj)
+        geo_map = (
+            ((result or {}).get("geo") if isinstance(result, dict) else None)
+            or ((breakdown or {}).get("geo") if isinstance(breakdown, dict) else None)
+            or {}
+        )
 
-        if not counts_by_diam_adj_obj:
-            pilot_claims = derived_ops.get("pilot_claims") or {}
-            cb_groups = derived_ops.get("cb_groups") or {}
-            counts_by_diam_adj_obj = (
-                _adjust_drill_counts__local(counts_by_diam_raw_obj, pilot_claims, cb_groups)
-                or {}
-            )
-            derived_ops["drill_bins_adj"] = dict(counts_by_diam_adj_obj)
+        owner_candidate: MutableMapping[str, Any] | dict[str, Any] | Mapping[str, Any] | None
+        if isinstance(breakdown_mutable, (_MutableMappingABC, dict)):
+            owner_candidate = typing.cast(MutableMapping[str, Any], breakdown_mutable)
+        elif isinstance(breakdown, (_MutableMappingABC, dict)):
+            owner_candidate = typing.cast(MutableMapping[str, Any], breakdown)
+        else:
+            owner_candidate = None
 
-        if not drill_total_adj:
-            drill_total_adj = int(sum(counts_by_diam_adj_obj.values()))
-            derived_ops["drill_total"] = drill_total_adj
+        if isinstance(owner_candidate, dict):
+            derived_obj = owner_candidate.setdefault("derived_ops", derived_ops)
+        elif isinstance(owner_candidate, _MutableMappingABC):
+            derived_obj = owner_candidate.setdefault("derived_ops", derived_ops)
+        else:
+            derived_obj = derived_ops
+
+        if isinstance(derived_obj, Mapping) and not isinstance(derived_obj, dict):
+            try:
+                derived_obj = dict(derived_obj)
+            except Exception:
+                derived_obj = {}
+
+        if not isinstance(derived_obj, dict):
+            derived_obj = {}
+
+        if isinstance(owner_candidate, (_MutableMappingABC, dict)):
+            owner_candidate["derived_ops"] = derived_obj  # type: ignore[index]
+
+        derived_ops = typing.cast(MutableMapping[str, Any] | dict[str, Any], derived_obj)
+
+        if "drill_bins_raw" not in derived_ops:
+            seed = _seed_drill_bins_from_geo__local(geo_map) or {}
+            derived_ops["drill_bins_raw"] = dict(seed)
+
+        cb_groups = derived_ops.get("cb_groups") or {}
+
+        if "drill_bins_adj" not in derived_ops:
+            adj = _adjust_drill_counts__local(
+                derived_ops.get("drill_bins_raw") or {},
+                derived_ops.get("pilot_claims") or {},
+                cb_groups,
+            ) or {}
+            derived_ops["drill_bins_adj"] = dict(adj)
+            derived_ops["drill_total"] = int(sum(adj.values()))
+
+        counts_by_diam_raw_obj = dict(derived_ops.get("drill_bins_raw") or {})
+        counts_by_diam_adj_obj = dict(derived_ops.get("drill_bins_adj") or {})
+        drill_total_adj = int(derived_ops.get("drill_total") or 0)
+
+        _push(
+            lines,
+            f"[DEBUG] DRILL publish raw={sum(counts_by_diam_raw_obj.values())} adj={drill_total_adj}",
+        )
 
         drill_bins_adj_total = int(sum(counts_by_diam_adj_obj.values()))
 
@@ -13319,6 +13436,26 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
     geo_map = _get_geo_map(ctx, locals().get("geo"), ctx_a, ctx_b)
     material_group = _get_material_group(ctx, ctx_a, ctx_b)
 
+    drilling_meta_snapshot: Any = {}
+    try:
+        if isinstance(ctx_b, (_MappingABC, dict)):
+            drilling_meta_snapshot = (
+                ctx_b.get("drilling_meta")
+                or ctx_b.get("speeds_feeds_table")
+                or {}
+            )
+    except Exception:
+        drilling_meta_snapshot = {}
+    if not drilling_meta_snapshot and isinstance(breakdown, (_MappingABC, dict)):
+        try:
+            drilling_meta_snapshot = (
+                breakdown.get("drilling_meta")
+                or breakdown.get("speeds_feeds_table")
+                or {}
+            )
+        except Exception:
+            drilling_meta_snapshot = {}
+
     ops_summary_map = None
     ops_rows: list[Any] = []
 
@@ -13980,7 +14117,7 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
     counts_by_diam_final = locals().get("counts_by_diam")
     if not isinstance(counts_by_diam_final, (_MappingABC, dict)):
         counts_by_diam_final = {}
-    def _audit_tallies(breakdown_or_mut: _MappingABC[str, Any] | None) -> dict[str, int]:
+    def _audit_tallies(state: _MappingABC[str, Any] | None) -> dict[str, int]:
         tallies: dict[str, int] = {
             "drill": 0,
             "tap": 0,
@@ -13989,21 +14126,17 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
             "jig-grind": 0,
             "spot": 0,
         }
-        if isinstance(breakdown_or_mut, (_MappingABC, dict)):
-            source = breakdown_or_mut
-        else:
-            source = {}
 
-        if isinstance(source, (_MappingABC, dict)):
-            xbo = source.get("extra_bucket_ops")
+        if isinstance(state, (_MappingABC, dict)):
+            source: Mapping[str, Any] | None = typing.cast(Mapping[str, Any], state)
         else:
-            xbo = None
-        if isinstance(xbo, (_MappingABC, dict)):
-            iterator = xbo.items()
-        else:
-            iterator = []
-        for bucket, entries in iterator:
-            if bucket in tallies:
+            source = None
+
+        xbo_candidate = source.get("extra_bucket_ops") if isinstance(source, (_MappingABC, dict)) else None
+        if isinstance(xbo_candidate, (_MappingABC, dict)):
+            for bucket, entries in xbo_candidate.items():
+                if bucket not in tallies:
+                    continue
                 for entry in entries or []:
                     try:
                         if isinstance(entry, _MappingABC):
@@ -14014,23 +14147,20 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
                     except Exception:
                         pass
 
-        if isinstance(source, (_MappingABC, dict)):
-            dop = source.get("derived_ops")
-        else:
-            dop = None
-        if isinstance(dop, (_MappingABC, dict)):
+        dop_candidate = source.get("derived_ops") if isinstance(source, (_MappingABC, dict)) else None
+        if isinstance(dop_candidate, (_MappingABC, dict)):
             try:
-                tallies["drill"] = int(dop.get("drill_total") or tallies["drill"])
+                tallies["drill"] = int(dop_candidate.get("drill_total") or tallies["drill"])
             except Exception:
                 pass
 
         return tallies
 
-    breakdown_for_audit: Any
-    if isinstance(breakdown_mutable, (_MappingABC, dict)) and breakdown_mutable:
-        breakdown_for_audit = breakdown_mutable
+    breakdown_for_audit: Mapping[str, Any] | None
+    if isinstance(breakdown_mutable, (_MappingABC, dict)):
+        breakdown_for_audit = typing.cast(Mapping[str, Any], breakdown_mutable)
     elif isinstance(breakdown, (_MappingABC, dict)):
-        breakdown_for_audit = breakdown
+        breakdown_for_audit = typing.cast(Mapping[str, Any], breakdown)
     else:
         breakdown_for_audit = None
 
@@ -15831,6 +15961,115 @@ def _load_speeds_feeds_table_from_path(path: str | None) -> tuple[PandasDataFram
     return table, False
 
 
+def _ensure_drilling_override(
+    drill_hours: Any,
+    *,
+    planner_bucket_view: Mapping[str, Any] | None,
+    canonical_bucket_rollup: _MutableMappingABC[str, Any] | None,
+    process_meta: _MutableMappingABC[str, Any] | None,
+    hour_summary_entries: _MutableMappingABC[str, tuple[float, bool]] | None,
+    label_overrides: Mapping[str, str] | None = None,
+) -> None:
+    """Propagate estimator drilling hours into planner-derived structures."""
+
+    try:
+        hours = float(drill_hours or 0.0)
+    except Exception:
+        hours = 0.0
+    if not math.isfinite(hours):
+        hours = 0.0
+    hours = max(0.0, hours)
+
+    minutes_value = round(hours * 60.0, 2)
+    minutes_for_meta = round(hours * 60.0, 1)
+    hr_for_meta = round(hours, 2)
+    hr_precise = round(hours, 3)
+
+    if isinstance(canonical_bucket_rollup, _MutableMappingABC):
+        existing_rollup = canonical_bucket_rollup.get("drilling")
+        if isinstance(existing_rollup, _MutableMappingABC):
+            try:
+                existing_rollup["minutes"] = minutes_value
+            except Exception:
+                pass
+            try:
+                existing_rollup["hours"] = hr_precise
+            except Exception:
+                pass
+        canonical_bucket_rollup["drilling"] = hours
+
+    if isinstance(process_meta, _MutableMappingABC):
+        drilling_meta = process_meta.get("drilling")
+        if isinstance(drilling_meta, _MutableMappingABC):
+            drilling_meta["hr"] = hr_for_meta
+            drilling_meta["minutes"] = minutes_for_meta
+        elif isinstance(drilling_meta, _MappingABC):
+            new_meta = dict(drilling_meta)
+            new_meta["hr"] = hr_for_meta
+            new_meta["minutes"] = minutes_for_meta
+            process_meta["drilling"] = new_meta
+        else:
+            process_meta["drilling"] = {
+                "hr": hr_for_meta,
+                "minutes": minutes_for_meta,
+            }
+
+    if isinstance(hour_summary_entries, _MutableMappingABC):
+        label = _display_bucket_label("drilling", label_overrides) or "Drilling"
+        include_flag = True
+        existing = hour_summary_entries.get(label)
+        if isinstance(existing, (list, tuple)) and existing:
+            try:
+                include_flag = bool(existing[1])
+            except Exception:
+                include_flag = True
+        hour_summary_entries[label] = (hr_for_meta, include_flag)
+
+    def _update_bucket_map(bucket_map: Mapping[str, Any] | None) -> None:
+        if not isinstance(bucket_map, _MutableMappingABC):
+            return
+        target_key: str | None = None
+        for key in list(bucket_map.keys()):
+            if _canonical_bucket_key(key) == "drilling":
+                target_key = key
+                break
+        if target_key is None:
+            target_key = "Drilling"
+        entry_raw = bucket_map.get(target_key)
+        if isinstance(entry_raw, _MutableMappingABC):
+            entry = entry_raw
+        elif isinstance(entry_raw, _MappingABC):
+            entry = dict(entry_raw)
+        else:
+            entry = {}
+        entry["minutes"] = minutes_value
+        entry["hr"] = hr_precise
+        bucket_map[target_key] = entry
+
+    if isinstance(planner_bucket_view, _MutableMappingABC):
+        buckets_map = planner_bucket_view.get("buckets")
+        if isinstance(buckets_map, _MutableMappingABC):
+            _update_bucket_map(buckets_map)
+        else:
+            _update_bucket_map(planner_bucket_view)
+
+        order = planner_bucket_view.get("order")
+        if isinstance(order, list):
+            canonical_order = {
+                _canonical_bucket_key(item)
+                for item in order
+                if isinstance(item, str)
+            }
+            if "drilling" not in canonical_order:
+                candidate_key: str | None = None
+                if isinstance(buckets_map, _MutableMappingABC):
+                    for key in buckets_map.keys():
+                        if _canonical_bucket_key(key) == "drilling":
+                            candidate_key = key
+                            break
+                order.append(candidate_key or "Drilling")
+
+
 def _ensure_quote_state(state: QuoteState | None) -> QuoteState:
     return state if isinstance(state, QuoteState) else QuoteState()
 
@@ -17207,6 +17446,74 @@ def compute_quote_from_df(  # type: ignore[reportGeneralTypeIssues]
     pm["hr"] = drill_hr
     pm["rate"] = float(rates.get("DrillingRate") or rates.get("MachineRate") or 0.0)
     pm["basis"] = ["minutes_engine"]
+
+    process_meta_map: _MutableMappingABC[str, Any] | None
+    if isinstance(process_meta, _MutableMappingABC):
+        process_meta_map = process_meta
+    elif isinstance(process_meta, dict):
+        process_meta_map = typing.cast(_MutableMappingABC[str, Any], process_meta)
+    else:
+        process_meta_map = None
+
+    hour_summary_for_override = locals().get("hour_summary_entries")
+    if isinstance(hour_summary_for_override, dict):
+        hour_summary_for_override = typing.cast(
+            _MutableMappingABC[str, tuple[float, bool]],
+            hour_summary_for_override,
+        )
+    elif not isinstance(hour_summary_for_override, _MutableMappingABC):
+        hour_summary_for_override = None
+
+    label_overrides_map = locals().get("label_overrides")
+    if not isinstance(label_overrides_map, _MappingABC):
+        label_overrides_map = None
+
+    planner_bucket_view_candidate: Mapping[str, Any] | None = None
+    for candidate_name in (
+        "planner_bucket_view",
+        "bucket_view_obj",
+        "bucket_view_struct",
+        "bucket_state",
+    ):
+        candidate_view = locals().get(candidate_name)
+        if isinstance(candidate_view, _MutableMappingABC):
+            planner_bucket_view_candidate = typing.cast(
+                Mapping[str, Any],
+                candidate_view,
+            )
+            break
+        if isinstance(candidate_view, dict):
+            planner_bucket_view_candidate = typing.cast(Mapping[str, Any], candidate_view)
+            break
+        if isinstance(candidate_view, _MappingABC):
+            planner_bucket_view_candidate = typing.cast(Mapping[str, Any], candidate_view)
+            break
+
+    canonical_bucket_rollup_candidate: _MutableMappingABC[str, Any] | None = None
+    for candidate_name in (
+        "canonical_bucket_rollup",
+        "canonical_bucket_summary",
+        "bucket_rollup_map",
+    ):
+        candidate_rollup = locals().get(candidate_name)
+        if isinstance(candidate_rollup, _MutableMappingABC):
+            canonical_bucket_rollup_candidate = candidate_rollup
+            break
+        if isinstance(candidate_rollup, dict):
+            canonical_bucket_rollup_candidate = typing.cast(
+                _MutableMappingABC[str, Any],
+                candidate_rollup,
+            )
+            break
+
+    _ensure_drilling_override(
+        drill_hr,
+        planner_bucket_view=planner_bucket_view_candidate,
+        canonical_bucket_rollup=canonical_bucket_rollup_candidate,
+        process_meta=process_meta_map,
+        hour_summary_entries=hour_summary_for_override,
+        label_overrides=typing.cast(Mapping[str, str] | None, label_overrides_map),
+    )
 
     drilling_summary["total_minutes_billed"] = float(drill_min)
 
