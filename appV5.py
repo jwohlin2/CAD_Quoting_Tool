@@ -4537,8 +4537,13 @@ def _get_geo_map(result=None, breakdown=None):
 def _ops_rows_from_geo(geo_map):
     try:
         ops = (geo_map or {}).get("ops_summary") or {}
-        rows = ops.get("rows")
-        return rows if isinstance(rows, list) else []
+        if not isinstance(ops, (_MappingABC, dict)):
+            return []
+        for key in ("rows", "rows_detail", "rows_raw"):
+            rows = ops.get(key)
+            if isinstance(rows, list) and rows:
+                return rows
+        return []
     except Exception:
         return []
 
@@ -4565,6 +4570,32 @@ def _row_side_from_desc(desc: str) -> str:
 
 
 def _render_table_row_reviewer(*, result=None, breakdown=None, max_rows=10) -> list[str]:
+    def _coerce_str(value: Any) -> str:
+        if value is None:
+            return ""
+        if isinstance(value, str):
+            return value.strip()
+        return str(value).strip()
+
+    def _format_ref(row: Mapping[str, Any]) -> str:
+        candidates: list[Any] = []
+        for key in ("ref", "ref_in", "diameter_in", "dia", "dia_in"):
+            if key in row:
+                candidates.append(row.get(key))
+        for value in candidates:
+            if value is None:
+                continue
+            try:
+                num = float(value)
+            except Exception:
+                text = _coerce_str(value)
+                if text:
+                    return text
+                continue
+            if math.isfinite(num):
+                return f"{num:.4f}\""
+        return "-"
+
     geo = _get_geo_map(result, breakdown)
     rows = _ops_rows_from_geo(geo)
     lines = ["TABLE ROW REVIEW – HOLE TABLE (ops rows)", "=" * 66]
@@ -4572,16 +4603,28 @@ def _render_table_row_reviewer(*, result=None, breakdown=None, max_rows=10) -> l
         lines.append(f"rows ............... {len(rows)}")
         lines.append(f"qty sum (QTY col) .. {_sum_qty(rows)}")
         lines += ["", "First rows", "-" * 66]
-        for i, r in enumerate(rows[:max_rows]):
-            hole = (r.get("hole") or r.get("id") or "").strip()
-            ref = (r.get("ref") or "").strip()
+        for i, raw_row in enumerate(rows[:max_rows]):
+            row = raw_row if isinstance(raw_row, Mapping) else {}
+            hole = _coerce_str(row.get("hole") or row.get("id") or "") or "-"
             try:
-                qty = int(float(r.get("qty") or 0))
+                qty = int(float(row.get("qty") or 0))
             except Exception:
-                qty = r.get("qty")
-            desc = (r.get("desc") or "").strip()
+                qty = row.get("qty")
+            desc = _coerce_str(
+                row.get("desc")
+                or row.get("description")
+                or row.get("text")
+                or ""
+            )
+            if desc:
+                desc = re.sub(r"\s+", " ", desc)
             side = _row_side_from_desc(desc)
-            lines.append(f"[{i:02}] {hole:>2} | QTY={qty} | REF={ref} | SIDE={side} | {desc}")
+            ref = _format_ref(row)
+            lines.append(
+                f"[{i:02}] {hole} | QTY={qty} | REF={ref} | SIDE={side} | {desc}"
+            )
+        if len(rows) > max_rows:
+            lines.append("...")
         lines.append("")
     else:
         lines.append("rows ............... 0 (no geo.ops_summary.rows)")
