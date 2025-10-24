@@ -5363,49 +5363,51 @@ def _compute_drilling_removal_section(
         else:
             root_state = {}
 
-        derived_seed: dict[str, Any]
+        derived_obj: Any = {}
+        if isinstance(root_state, MutableMapping):
+            derived_obj = root_state.setdefault("derived_ops", {})
+            if isinstance(derived_obj, Mapping) and not isinstance(derived_obj, dict):
+                derived_obj = dict(derived_obj)
+                root_state["derived_ops"] = derived_obj  # type: ignore[index]
+            elif not isinstance(derived_obj, dict):
+                derived_obj = {}
+                root_state["derived_ops"] = derived_obj  # type: ignore[index]
+
+        derived_ops = typing.cast(dict[str, Any], derived_obj if isinstance(derived_obj, dict) else {})
+
         if isinstance(derived_ops, dict):
-            derived_seed = derived_ops
-        elif isinstance(derived_ops, MutableMapping):
-            derived_seed = dict(derived_ops)
-        else:
-            derived_seed = {}
-
-        derived_obj = root_state.setdefault("derived_ops", derived_seed)
-        if isinstance(derived_obj, Mapping) and not isinstance(derived_obj, dict):
-            derived_obj = dict(derived_obj)
-            root_state["derived_ops"] = derived_obj  # type: ignore[index]
-        if not isinstance(derived_obj, dict):
-            derived_obj = {}
-            root_state["derived_ops"] = derived_obj  # type: ignore[index]
-
-        derived_ops = typing.cast(dict[str, Any], derived_obj)
-
-        if "drill_bins_raw" not in derived_ops:
-            seed_raw = _seed_drill_bins_from_geo__local(geo_map) or {}
-            derived_ops["drill_bins_raw"] = dict(seed_raw)
-
-        cb_groups = derived_ops.get("cb_groups") or {}
-
-        if "drill_bins_adj" not in derived_ops:
-            adj = _adjust_drill_counts__local(
-                derived_ops.get("drill_bins_raw") or {},
-                derived_ops.get("pilot_claims") or {},
-                cb_groups,
-            ) or {}
-            derived_ops["drill_bins_adj"] = dict(adj)
+            if "drill_bins_raw" not in derived_ops:
+                derived_ops["drill_bins_raw"] = _seed_drill_bins_from_geo__local(geo_map)
+            if "drill_bins_adj" not in derived_ops:
+                derived_ops["drill_bins_adj"] = _adjust_drill_counts__local(
+                    derived_ops.get("drill_bins_raw") or {},
+                    derived_ops.get("pilot_claims") or {},
+                    derived_ops.get("cb_groups") or {},
+                )
             derived_ops["drill_total"] = int(
-                sum(int(v or 0) for v in adj.values())
+                sum(
+                    int(v or 0)
+                    for v in (derived_ops.get("drill_bins_adj") or {}).values()
+                )
             )
+            _push(
+                lines,
+                "[DEBUG] DRILL publish raw="
+                + str(
+                    sum(
+                        int(v or 0)
+                        for v in (derived_ops.get("drill_bins_raw") or {}).values()
+                    )
+                )
+                + " adj="
+                + str(derived_ops.get("drill_total") or 0),
+            )
+        else:
+            derived_ops = {}
 
         counts_by_diam_raw_obj = dict(derived_ops.get("drill_bins_raw") or {})
         counts_by_diam_adj_obj = dict(derived_ops.get("drill_bins_adj") or {})
         drill_total_adj = int(derived_ops.get("drill_total") or 0)
-
-        _push(
-            lines,
-            f"[DEBUG] DRILL publish raw={sum(int(v or 0) for v in counts_by_diam_raw_obj.values())} adj={drill_total_adj}",
-        )
 
         drill_bins_adj_total = int(sum(counts_by_diam_adj_obj.values()))
 
