@@ -4725,20 +4725,73 @@ def _compute_drilling_removal_section(
         if not isinstance(geo_map, dict):
             return {}
 
-        diams_in: list[float] = []
+        bins: dict[float, int] = {}
+
+        def _parse_diam(raw: Any) -> float | None:
+            text = str(raw).replace('"', "").strip()
+            try:
+                return float(text)
+            except Exception:
+                match = re.search(r"[-+]?\d*\.\d+|[-+]?\d+", text)
+                if not match:
+                    return None
+                try:
+                    return float(match.group(0))
+                except Exception:
+                    return None
+
+        have_inch_source = False
+
+        # hole diameter families carry explicit counts; prefer the first populated map
+        families_used = False
+        for key, is_mm in (
+            ("hole_diam_families_geom_in", False),
+            ("hole_diam_families_in", False),
+            ("hole_diam_families_geom", True),
+            ("hole_diam_families", True),
+        ):
+            fam_map = geo_map.get(key)
+            if not isinstance(fam_map, Mapping) or not fam_map:
+                continue
+            for raw_diam, raw_qty in fam_map.items():
+                try:
+                    qty = int(raw_qty or 0)
+                except Exception:
+                    continue
+                if qty <= 0:
+                    continue
+                diam_val = _parse_diam(raw_diam)
+                if diam_val is None:
+                    continue
+                if is_mm:
+                    diam_val /= 25.4
+                try:
+                    rounded = round(diam_val, 3)
+                except Exception:
+                    continue
+                bins[rounded] = bins.get(rounded, 0) + qty
+                families_used = True
+            if families_used:
+                have_inch_source = True
+                break
 
         # Common direct inch lists
         for key in ("hole_diams_in", "hole_diams_in_precise", "hole_diams_inch"):
             vals = geo_map.get(key)
             if isinstance(vals, (list, tuple)):
                 for v in vals:
+                    diam_val = _parse_diam(v)
+                    if diam_val is None:
+                        continue
                     try:
-                        diams_in.append(float(v))
+                        rounded = round(diam_val, 3)
                     except Exception:
-                        pass
+                        continue
+                    bins[rounded] = bins.get(rounded, 0) + 1
+                    have_inch_source = True
 
         # mm sources → convert to inch
-        if not diams_in:
+        if not have_inch_source:
             mm_list = (
                 geo_map.get("hole_diams_mm_precise")
                 or geo_map.get("hole_diams_mm")
@@ -4746,10 +4799,15 @@ def _compute_drilling_removal_section(
             )
             if isinstance(mm_list, (list, tuple)):
                 for v in mm_list:
+                    diam_val = _parse_diam(v)
+                    if diam_val is None:
+                        continue
                     try:
-                        diams_in.append(float(v) / 25.4)
+                        rounded = round(diam_val / 25.4, 3)
                     except Exception:
-                        pass
+                        continue
+                    bins[rounded] = bins.get(rounded, 0) + 1
+                    have_inch_source = True
 
         # hole_sets sometimes carry diameters per set
         for hs in (geo_map.get("hole_sets") or []):
@@ -4757,22 +4815,19 @@ def _compute_drilling_removal_section(
                 d_in = None
                 try:
                     if "diam_in" in hs:
-                        d_in = float(hs["diam_in"])
+                        d_in = _parse_diam(hs["diam_in"])
                     elif "diam_mm" in hs:
-                        d_in = float(hs["diam_mm"]) / 25.4
+                        diam_mm = _parse_diam(hs["diam_mm"])
+                        d_in = (diam_mm / 25.4) if diam_mm is not None else None
                 except Exception:
                     d_in = None
                 if d_in:
-                    diams_in.append(d_in)
-
-        # Bin (rounded to thousandths to keep families stable)
-        bins: dict[float, int] = {}
-        for d in diams_in:
-            try:
-                k = round(float(d), 3)
-            except Exception:
-                continue
-            bins[k] = bins.get(k, 0) + 1
+                    try:
+                        rounded = round(float(d_in), 3)
+                    except Exception:
+                        continue
+                    bins[rounded] = bins.get(rounded, 0) + 1
+                    have_inch_source = True
 
         return bins
 
