@@ -1187,14 +1187,12 @@ def _build_ops_cards_from_chart_lines(
                 mutation_owner,
                 "counterbore",
                 {"name": "Counterbore", "qty": int(front_cb), "side": "front"},
-                minutes=float(front_cb) * per,
             )
         if back_cb > 0:
             _ebo_append_unique(
                 mutation_owner,
                 "counterbore",
                 {"name": "Counterbore", "qty": int(back_cb), "side": "back"},
-                minutes=float(back_cb) * per,
             )
 
         cb_mrate = (
@@ -1252,7 +1250,6 @@ def _build_ops_cards_from_chart_lines(
             mutation_owner,
             "spot",
             {"name": "Spot drill", "qty": int(spot_qty), "side": "front"},
-            minutes=t_group,
         )
 
     if jig_qty > 0 and _print_once("jig-grind"):
@@ -1281,7 +1278,6 @@ def _build_ops_cards_from_chart_lines(
             mutation_owner,
             "jig-grind",
             {"name": "Jig-grind", "qty": int(jig_qty), "side": None},
-            minutes=t_group,
         )
 
     if out_lines:
