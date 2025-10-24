@@ -1417,31 +1417,32 @@ def _build_ops_cards_from_chart_lines(
     except Exception:
         pass
 
-    try:
-        print(
-            "[APP] geo keys at render:",
-            list((breakdown or {}).get("geo", {}).keys()),
-        )
-        geo_map = _get_geo_map(locals().get("result"), breakdown_mutable or breakdown)
-    except Exception:
-        geo_map = {}
+    geo_map = _get_geo_map(locals().get("result"), breakdown_mutable or breakdown)
 
-    pre_rows_obj: Any = []
-    if isinstance(geo_map, dict):
+    ops_summary_obj: Any = {}
+    if isinstance(geo_map, (_MappingABC, dict)):
         try:
-            pre_rows_obj = ((geo_map.get("ops_summary") or {}).get("rows") or [])
+            ops_summary_obj = geo_map.get("ops_summary")  # type: ignore[attr-defined]
         except Exception:
-            pre_rows_obj = []
+            ops_summary_obj = {}
+    rows_obj: Any = []
+    ops_source: Any = None
+    if isinstance(ops_summary_obj, (_MappingABC, dict)):
+        ops_source = ops_summary_obj.get("source")
+        rows_obj = ops_summary_obj.get("rows") or []
+
     rows: list[Any] = []
-    if isinstance(pre_rows_obj, list):
-        rows = pre_rows_obj
-    elif isinstance(pre_rows_obj, (_MappingABC, dict)):
+    if isinstance(rows_obj, list):
+        rows = rows_obj
+    elif isinstance(rows_obj, (_MappingABC, dict)):
         try:
-            rows = [value for value in pre_rows_obj.values() if value is not None]
+            rows = [value for value in rows_obj.values() if value is not None]
         except Exception:
             rows = []
-    print(f"[DEBUG] ops_rows_pre={len(rows)}")
-    lines: list[str] = [f"[DEBUG] ops_rows_pre={len(rows)}"]
+
+    debug_row_msg = f"[DEBUG] ops_rows_pre={len(rows)}  source={ops_source}"
+    print(debug_row_msg)
+    lines: list[str] = [debug_row_msg]
     if not rows:
         built_rows = ensure_ops_rows_in_geo_from_chart(
             geo=geo_map if isinstance(geo_map, dict) else None
@@ -3259,41 +3260,8 @@ def _append_counterbore_spot_jig_cards(
         except Exception:
             return None
 
-    # ---------- PASS A: parse CHART LINES (what you already have: 10) ----------
-    if isinstance(chart_lines, list):
-        # helpful debug
-        for i, ln in enumerate(chart_lines[:6]):
-            lines_out.append(f"[DEBUG] chart[{i}]: {ln}")
-        for raw in chart_lines:
-            s = str(raw or "")
-            if not s.strip(): continue
-            U = s.upper()
-            qty = _parse_qty(s)
-            side = _side(U)
-            dia = _extract_counterbore_dia(s)
-            if dia is not None:
-                mdepth = _X_DEPTH_RE.search(s)
-                depth = float(mdepth.group(1)) if mdepth else None
-                if side == "BOTH":
-                    for sd in ("FRONT","BACK"):
-                        cb_groups[(dia, sd, depth)] = cb_groups.get((dia, sd, depth), 0) + qty
-                else:
-                    cb_groups[(dia, side, depth)] = cb_groups.get((dia, side, depth), 0) + qty
-                continue
-            if (
-                _SPOT_RE_TXT.search(s)
-                and not _COUNTERDRILL_RE.search(s)
-                and not _DRILL_THRU.search(s)
-                and not ("TAP" in U or _TAP_RE.search(s))
-            ):
-                spot_qty += qty
-                continue
-            if _JIG_RE_TXT.search(s):
-                jig_qty += qty
-                continue
-
-    # ---------- PASS B: fallback to ROWS (your built_rows=3) ----------
-    if not cb_groups and isinstance(rows, list):
+    # ---------- PASS A: parse ROWS when available ----------
+    if isinstance(rows, list) and rows:
         for r in rows:
             qty = int((r or {}).get("qty") or 0)
             if qty <= 0: continue
@@ -3320,6 +3288,41 @@ def _append_counterbore_spot_jig_cards(
                     spot_qty += qty
                 if _JIG_RE_TXT.search(s):
                     jig_qty += qty
+
+    # ---------- PASS B: fallback to CHART LINES when rows missing ----------
+    if (not isinstance(rows, list)) or (not rows):
+        if isinstance(chart_lines, list):
+            # helpful debug
+            for i, ln in enumerate(chart_lines[:6]):
+                lines_out.append(f"[DEBUG] chart[{i}]: {ln}")
+            for raw in chart_lines:
+                s = str(raw or "")
+                if not s.strip():
+                    continue
+                U = s.upper()
+                qty = _parse_qty(s)
+                side = _side(U)
+                dia = _extract_counterbore_dia(s)
+                if dia is not None:
+                    mdepth = _X_DEPTH_RE.search(s)
+                    depth = float(mdepth.group(1)) if mdepth else None
+                    if side == "BOTH":
+                        for sd in ("FRONT", "BACK"):
+                            cb_groups[(dia, sd, depth)] = cb_groups.get((dia, sd, depth), 0) + qty
+                    else:
+                        cb_groups[(dia, side, depth)] = cb_groups.get((dia, side, depth), 0) + qty
+                    continue
+                if (
+                    _SPOT_RE_TXT.search(s)
+                    and not _COUNTERDRILL_RE.search(s)
+                    and not _DRILL_THRU.search(s)
+                    and not ("TAP" in U or _TAP_RE.search(s))
+                ):
+                    spot_qty += qty
+                    continue
+                if _JIG_RE_TXT.search(s):
+                    jig_qty += qty
+                    continue
 
     appended = 0
 
@@ -4736,13 +4739,36 @@ def _render_time_per_hole(
 
 # ---------- HOLE TABLE: Table Row Reviewer ----------
 def _get_geo_map(result=None, breakdown=None):
-    # prefer top-level geo
-    if isinstance(result, dict) and isinstance(result.get("geo"), dict):
-        g = result["geo"]
-        return {**(g.get("geo") or {}), **g} if isinstance(g.get("geo"), dict) else g
-    if isinstance(breakdown, dict) and isinstance(breakdown.get("geo"), dict):
-        g = breakdown["geo"]
-        return {**(g.get("geo") or {}), **g} if isinstance(g.get("geo"), dict) else g
+    g: Any = {}
+
+    if isinstance(result, (_MappingABC, dict)):
+        try:
+            candidate = result.get("geo")  # type: ignore[attr-defined]
+        except Exception:
+            candidate = None
+        if isinstance(candidate, (_MappingABC, dict)):
+            g = candidate
+    if not isinstance(g, (_MappingABC, dict)) and isinstance(
+        breakdown, (_MappingABC, dict)
+    ):
+        try:
+            candidate = breakdown.get("geo")  # type: ignore[attr-defined]
+        except Exception:
+            candidate = None
+        if isinstance(candidate, (_MappingABC, dict)):
+            g = candidate
+
+    if isinstance(g, (_MappingABC, dict)):
+        try:
+            nested = g.get("geo")  # type: ignore[attr-defined]
+        except Exception:
+            nested = None
+        merged: dict[str, Any] = {}
+        if isinstance(nested, (_MappingABC, dict)):
+            merged.update(typing.cast(Mapping[str, Any], nested))
+        merged.update(typing.cast(Mapping[str, Any], g))
+        return merged
+
     return {}
 
 
