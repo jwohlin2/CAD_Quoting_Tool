@@ -179,6 +179,46 @@ def aggregate_ops_from_rows(rows: list[dict]) -> dict:
         "flip_required": bool(back_ops_total > 0),
     }
 
+
+# --- Hole-table row promotion helpers ---------------------------------------
+def _rows_qty_sum(rows):
+    s = 0
+    for r in rows or []:
+        try:
+            s += int(float(r.get("qty") or 0))
+        except Exception:
+            pass
+    return s
+
+
+def _score_table_info(info):
+    if not isinstance(info, dict):
+        return (0, 0)
+    rows = info.get("rows") or []
+    return (_rows_qty_sum(rows), len(rows))
+
+
+def _better(a, b):
+    # prefer higher qty_sum; if tie, prefer more rows
+    (qa, ra), (qb, rb) = _score_table_info(a), _score_table_info(b)
+    return (qa, ra) >= (qb, rb)
+
+
+def _persist_rows_and_totals(geo, info):
+    if not isinstance(info, dict):
+        return
+    rows = info.get("rows") or []
+    if not rows:
+        return
+    # write where the app actually reads
+    geo.setdefault("ops_summary", {})["rows"] = rows
+    # compute totals (tap/cbore/back/front etc.) in extractor once
+    if "totals" not in geo["ops_summary"]:
+        try:
+            geo["ops_summary"]["totals"] = aggregate_ops_from_rows(rows)["totals"]
+        except Exception:
+            pass
+
 from cad_quoter.app._value_utils import (
     _format_value,
 )
@@ -1487,27 +1527,24 @@ def _build_ops_cards_from_chart_lines(
                 )
             desc_text = desc or ""
             # diameter & depth (prefer explicit CBORE tokens)
+            desc_text = desc or ""
             dia_val: float | None = None
             dia_match = _CB_DIA_RE.search(desc_text)
             if dia_match:
                 raw = (dia_match.group("numA") or dia_match.group("numB") or "").strip()
                 dia_val = _to_inch(raw)
             if dia_val is None:
-                frac_match = NUM_FRAC_RE.search(desc_text)
-                if frac_match:
-                    dia_val = _to_inch(f"{frac_match.group(1)}/{frac_match.group(2)}")
-            if dia_val is None:
-                dec_match = NUM_DEC_RE.search(desc_text)
-                if dec_match:
-                    dia_val = _to_inch(dec_match.group(0))
-            if dia_val is None:
                 dm = RE_DIA.search(desc_text)
                 if dm:
-                    dia_val = _to_inch(dm.group(1)) if dm.lastindex else None
-                    if dia_val is None:
-                        dia_val = first_inch_value(dm.group(0))
+                    token = dm.group(1) if dm.lastindex else dm.group(0)
+                    dia_val = _to_inch(token)
+                    if dia_val is None and token:
+                        fallback = NUM_FRAC_RE.search(token) or NUM_DEC_RE.search(token)
+                        dia_val = _to_inch(fallback.group(0)) if fallback else first_inch_value(token)
             if dia_val is None:
-                dia_val = first_inch_value(desc_text)
+                fallback = NUM_FRAC_RE.search(desc_text) or NUM_DEC_RE.search(desc_text)
+                if fallback:
+                    dia_val = _to_inch(fallback.group(0))
             dep_val: float | None = None
             dep_match = _X_DEPTH_RE.search(desc_text)
             if dep_match:
@@ -3852,14 +3889,9 @@ def _cbore_dia_from_text(txt: str) -> float | None:
             candidate = first_inch_value(m.group(0))
         if candidate is not None and candidate > 0:
             return candidate
-    frac = NUM_FRAC_RE.search(text)
-    if frac:
-        val = _to_inch(f"{frac.group(1)}/{frac.group(2)}")
-        if val is not None and val > 0:
-            return val
-    dec = NUM_DEC_RE.search(text)
-    if dec:
-        val = _to_inch(dec.group(0))
+    fallback = NUM_FRAC_RE.search(text) or NUM_DEC_RE.search(text)
+    if fallback:
+        val = _to_inch(fallback.group(0))
         if val is not None and val > 0:
             return val
     return None
@@ -21593,16 +21625,21 @@ def extract_2d_features_from_dxf_or_dwg(path: str | Path) -> dict[str, Any]:
     if doc is None:
         raise RuntimeError("Failed to load DXF/DWG document")
 
-    table_info = hole_count_from_acad_table(doc) or {}
-    if not table_info.get("hole_count"):
-        table_info = extract_hole_table_from_text(doc) or {}
+    geo = _build_geo_from_ezdxf_doc(doc)
+
+    acad_info = hole_count_from_acad_table(doc) or {}
+    text_info = {}
+    if not (acad_info.get("rows") or []):
+        text_info = extract_hole_table_from_text(doc) or {}
+
+    best_table_info = acad_info if _better(acad_info, text_info) else text_info
+    _persist_rows_and_totals(geo, best_table_info)
+    table_info = best_table_info or {}
 
     sp = doc.modelspace()
     units = detect_units_scale(doc)
     to_in = float(units.get("to_in", 1.0) or 1.0)
     u2mm = to_in * 25.4
-
-    geo = _build_geo_from_ezdxf_doc(doc)
 
     table_ops_summary = table_info.get("ops_summary") if table_info else None
 
@@ -21668,14 +21705,6 @@ def extract_2d_features_from_dxf_or_dwg(path: str | Path) -> dict[str, Any]:
             )
         except Exception:
             pass
-
-        try:
-            qty_sum = sum(int(r.get("qty") or 0) for r in rows_for_ops)
-        except Exception:
-            qty_sum = 0
-        print(
-            f"[EXTRACTOR] wrote ops rows: {len(rows_for_ops)} (qty_sum={qty_sum})"
-        )
     elif isinstance(table_ops_summary, Mapping):
         geo["ops_summary"] = dict(table_ops_summary)
     elif table_ops_summary:
@@ -22077,25 +22106,41 @@ def extract_2d_features_from_dxf_or_dwg(path: str | Path) -> dict[str, Any]:
         "chart_lines": len(chart_lines),
     }
 
-    table_info = hole_count_from_acad_table(doc)
     table_counts_trusted = True
     if hole_source and "GEOM" in str(hole_source).upper():
         table_counts_trusted = False
+
+    acad2 = hole_count_from_acad_table(doc) or {}
+    text2 = {}
+    if not (acad2.get("rows") or []):
+        try:
+            text2 = extract_hole_table_from_text(doc) or {}
+        except Exception:
+            text2 = {}
+    if text2 and text2.get("hole_count"):
+        text2 = dict(text2)
+        text2.setdefault("provenance", "HOLE TABLE (TEXT)")
+
+    candidate = acad2 if _better(acad2, text2) else text2
+    if _better(candidate, best_table_info):
+        best_table_info = candidate
+        _persist_rows_and_totals(geo, best_table_info)
+
+    try:
+        if "hole_count" in (best_table_info or {}):
+            geo["hole_count"] = int(
+                best_table_info.get("hole_count")
+                or geo.get("hole_count")
+                or 0
+            )
+    except Exception:
+        pass
+
+    table_info = best_table_info or {}
+    if not table_counts_trusted:
         table_info = {}
-    if (not table_info or not table_info.get("hole_count")) and doc is not None:
-        try:
-            text_table = extract_hole_table_from_text(doc)
-        except Exception:
-            text_table = {}
-        if text_table and text_table.get("hole_count"):
-            text_table = dict(text_table)
-            text_table.setdefault("provenance", "HOLE TABLE (TEXT)")
-            table_info = text_table
+
     if table_info and table_info.get("hole_count") and table_counts_trusted:
-        try:
-            geo["hole_count"] = int(table_info.get("hole_count") or 0)
-        except Exception:
-            pass
         fam = table_info.get("hole_diam_families_in")
         if isinstance(fam, dict) and fam:
             geo["hole_diam_families_in"] = fam
@@ -22113,6 +22158,11 @@ def extract_2d_features_from_dxf_or_dwg(path: str | Path) -> dict[str, Any]:
             geo["provenance"] = provenance_entry
         else:
             geo["provenance"] = {"holes": prov}
+
+    rows = ((geo.get("ops_summary") or {}).get("rows") or [])
+    print(
+        f"[EXTRACTOR] wrote ops rows: {len(rows)} (qty_sum={_rows_qty_sum(rows)})"
+    )
 
     if chart_lines:
         chart_summary = summarize_hole_chart_lines(chart_lines)
