@@ -4507,8 +4507,26 @@ def _compute_drilling_removal_section(
         g: Mapping[str, Any] | None,
     ) -> dict[float, int]:
         out: dict[float, int] = {}
-        if not isinstance(g, Mapping):
+
+        def _log_seed_result(source: str) -> dict[float, int]:
+            try:
+                total = int(sum(out.values()))
+            except Exception:
+                total = 0
+            try:
+                bins = len(out)
+            except Exception:
+                bins = 0
+            _log.info(
+                "[drill_seed] _seed_drill_bins_from_geo__local source=%s bins=%s total=%s",
+                source,
+                bins,
+                total,
+            )
             return out
+
+        if not isinstance(g, Mapping):
+            return _log_seed_result("no-geo")
 
         # 1) Families (already grouped)
         for key in (
@@ -4529,7 +4547,7 @@ def _compute_drilling_removal_section(
                     except Exception:
                         pass
                 if out:
-                    return out
+                    return _log_seed_result(f"family:{key}")
 
         # 2) Lists (prefer precise), IN then MM
         for key_in in ("hole_diams_in_precise", "hole_diams_in"):
@@ -4542,7 +4560,7 @@ def _compute_drilling_removal_section(
                     except Exception:
                         pass
                 if out:
-                    return out
+                    return _log_seed_result(key_in)
 
         for key_mm in ("hole_diams_mm_precise", "hole_diams_mm"):
             seq = g.get(key_mm)
@@ -4554,9 +4572,9 @@ def _compute_drilling_removal_section(
                     except Exception:
                         pass
                 if out:
-                    return out
+                    return _log_seed_result(key_mm)
 
-        return out
+        return _log_seed_result("empty")
 
     def _collect_pilot_claims__local(
         g: Mapping[str, Any] | None, cleaned_chart: list[str]
@@ -5058,6 +5076,12 @@ def _compute_drilling_removal_section(
                     derived_ops["drill_bins_raw"] = dict(counts_by_diam_raw_obj)
                     derived_ops["drill_bins_adj"] = dict(counts_by_diam_adj_obj)
                     derived_ops["drill_total"] = drill_actions_from_groups
+
+                    _log.info(
+                        "[drill_seed] wrote derived_ops drill_bins_raw bins=%s total=%s",
+                        len(counts_by_diam_raw_obj),
+                        _sum_count_values(counts_by_diam_raw_obj),
+                    )
 
                     counts_by_diam_raw_obj = dict(derived_ops["drill_bins_raw"])
                     counts_by_diam_adj_obj = dict(derived_ops["drill_bins_adj"])
