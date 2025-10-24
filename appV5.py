@@ -738,15 +738,23 @@ def _build_ops_cards_from_chart_lines(
         printed_candidate = None
 
     skip_cbore_card = False
+    cbore_flag_preexisting = False
+    try:
+        if printed_candidate is not None and "cbore" in typing.cast(Iterable[str], printed_candidate):
+            cbore_flag_preexisting = True
+    except Exception:
+        cbore_flag_preexisting = False
     printed: MutableSet[str] | None = None
     if isinstance(printed_candidate, (_MutableSetABC, set)):
         printed = typing.cast(MutableSet[str], printed_candidate)
 
     if printed is not None:
         if "cbore" in printed:
-            skip_cbore_card = True
+            cbore_flag_preexisting = True
         else:
             printed.add("cbore")
+    if cbore_flag_preexisting:
+        skip_cbore_card = True
 
     derived_candidate: Any = None
     try:
@@ -864,8 +872,9 @@ def _build_ops_cards_from_chart_lines(
 
     if isinstance(printed_flags, set):
         if "cbore" in printed_flags:
-            skip_cbore_card = True
-        elif not skip_cbore_card:
+            if cbore_flag_preexisting:
+                skip_cbore_card = True
+        else:
             printed_flags.add("cbore")
 
     bucket_view_obj: MutableMapping[str, Any] | Mapping[str, Any] | None = None
