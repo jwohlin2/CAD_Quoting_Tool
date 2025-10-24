@@ -78,13 +78,13 @@ def _resolve_planner_usage(
     if planner_mode == "planner":
         used_planner = base_signal or has_totals
     elif planner_mode == "legacy":
-        used_planner = False
+        used_planner = base_signal or has_recognized
     elif planner_mode == "estimator":
         used_planner = False
     else:  # auto / fallback
         used_planner = base_signal or has_recognized
 
-    if has_line_items and planner_mode not in {"legacy", "estimator"}:
+    if has_line_items and planner_mode != "estimator":
         used_planner = True
 
     return used_planner
