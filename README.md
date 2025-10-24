@@ -25,12 +25,13 @@ before export.
    python -m venv .venv
    source .venv/bin/activate  # Windows: .venv\Scripts\activate
    ```
-2. Install the repository in editable mode so the in-tree `src/cad_quoter`
-   package is importable during development. Then install the runtime
-   dependencies (make sure your private index hosting `cad-quoter` is available
-   via `PIP_EXTRA_INDEX_URL` or `--extra-index-url`):
+2. Install the repository in editable mode (including the "dev" extras) so the
+   in-tree `src/cad_quoter` package is importable during development and the
+   packaging toolchain is available. Then install the runtime dependencies
+   (make sure your private index hosting `cad-quoter` is available via
+   `PIP_EXTRA_INDEX_URL` or `--extra-index-url`):
    ```bash
-   pip install -e .
+   pip install -e .[dev]
    pip install -r requirements.txt
    ```
 3. (Optional) Place Qwen GGUF weights in one of the recognised locations:
@@ -68,6 +69,28 @@ Automated checks live under `tests/`.  Run the suite with:
 ```bash
 pytest
 ```
+
+## Building and publishing the reusable package
+
+The quoting helpers under `src/cad_quoter/` are published as the private
+`cad-quoter` distribution. Editable installs (`pip install -e .[dev]`) pull in
+the build dependencies so you can cut a release directly from this repository.
+
+1. Remove any previous build artefacts:
+   ```bash
+   rm -rf build dist src/cad_quoter.egg-info
+   ```
+2. Create a fresh source distribution and wheel:
+   ```bash
+   python -m build
+   ```
+3. Upload the artefacts to your internal package index:
+   ```bash
+   python -m twine upload --repository cad-internal dist/*
+   ```
+
+See `docs/cad-quoter-package.md` for more background on the packaged quoting
+helpers and how downstream applications consume them.
 
 ### Documentation
 

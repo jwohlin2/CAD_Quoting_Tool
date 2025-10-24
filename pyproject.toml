@@ -25,6 +25,12 @@ dependencies = [
     "types-pythonocc-core==7.7.0.1",
 ]
 
+[project.optional-dependencies]
+dev = [
+    "build>=1.2.1",
+    "twine>=4.0.2",
+]
+
 [tool.ruff]
 line-length = 100
 fix = true
