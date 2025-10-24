@@ -723,54 +723,6 @@ def _build_ops_cards_from_chart_lines(
         chart_claims.get("cb_groups") or {}
     )
 
-    printed_candidate: Any = None
-    try:
-        if isinstance(breakdown_mutable, dict):
-            printed_candidate = breakdown_mutable.setdefault(
-                "_ops_cards_printed", set()
-            )
-        elif isinstance(breakdown_mutable, _MutableMappingABC):
-            printed_candidate = typing.cast(
-                MutableMapping[str, Any],
-                breakdown_mutable,
-            ).setdefault("_ops_cards_printed", set())
-    except Exception:
-        printed_candidate = None
-
-    printed: MutableSet[str] | None = None
-    if isinstance(printed_candidate, (_MutableSetABC, set)):
-        printed = typing.cast(MutableSet[str], printed_candidate)
-
-    if printed is not None:
-        if "cbore" in printed:
-            return lines
-        printed.add("cbore")
-
-    derived_candidate: Any = None
-    try:
-        if isinstance(breakdown_mutable, dict):
-            derived_candidate = breakdown_mutable.setdefault("derived_ops", {})
-        elif isinstance(breakdown_mutable, _MutableMappingABC):
-            derived_candidate = typing.cast(
-                MutableMapping[str, Any],
-                breakdown_mutable,
-            ).setdefault("derived_ops", {})
-    except Exception:
-        derived_candidate = None
-
-    if isinstance(derived_candidate, (_MutableMappingABC, dict)):
-        serial: dict[tuple[float | None, str, float | None], int] = {}
-        for (dia, side, depth), qty in cb_groups.items():
-            key = (
-                float(dia) if dia is not None else None,
-                str(side),
-                float(depth) if depth is not None else None,
-            )
-            serial[key] = int(qty or 0)
-        try:
-            derived_candidate["cb_groups"] = serial  # type: ignore[index]
-        except Exception:
-            pass
     spot_qty = int(chart_claims.get("spot") or 0)
     jig_qty = int(chart_claims.get("jig") or 0)
 
@@ -832,39 +784,6 @@ def _build_ops_cards_from_chart_lines(
         elif isinstance(breakdown, _MutableMappingABC):
             target_breakdown = typing.cast(MutableMapping[str, Any], breakdown)
 
-    printed_flags: set[str] | None = None
-    try:
-        if isinstance(breakdown_mutable, dict):
-            printed_flags = breakdown_mutable.setdefault("_ops_cards_printed", set())
-        elif isinstance(breakdown_mutable, _MutableMappingABC):
-            printed_flags = typing.cast(
-                MutableMapping[str, Any],
-                breakdown_mutable,
-            ).setdefault("_ops_cards_printed", set())
-    except Exception:
-        printed_flags = None
-
-    if printed_flags is not None and not isinstance(printed_flags, set):
-        try:
-            printed_flags = set(printed_flags)  # type: ignore[arg-type]
-        except Exception:
-            printed_flags = set()
-        try:
-            if isinstance(breakdown_mutable, dict):
-                breakdown_mutable["_ops_cards_printed"] = printed_flags
-            elif isinstance(breakdown_mutable, _MutableMappingABC):
-                typing.cast(
-                    MutableMapping[str, Any],
-                    breakdown_mutable,
-                )["_ops_cards_printed"] = printed_flags
-        except Exception:
-            pass
-
-    if isinstance(printed_flags, set):
-        if "cbore" in printed_flags:
-            return lines
-        printed_flags.add("cbore")
-
     bucket_view_obj: MutableMapping[str, Any] | Mapping[str, Any] | None = None
     if isinstance(target_breakdown, dict):
         bucket_view_obj = target_breakdown.setdefault("bucket_view", {})
@@ -913,6 +832,62 @@ def _build_ops_cards_from_chart_lines(
     out_lines: list[str] = []
 
     if cb_groups:
+        printed_owner: MutableMapping[str, Any] | None = None
+        if isinstance(breakdown_mutable, dict):
+            printed_owner = breakdown_mutable
+        elif isinstance(breakdown_mutable, _MutableMappingABC):
+            printed_owner = typing.cast(MutableMapping[str, Any], breakdown_mutable)
+
+        printed: MutableSet[str] | None = None
+        if printed_owner is not None:
+            try:
+                printed_candidate = printed_owner.setdefault("_ops_cards_printed", set())
+            except Exception:
+                printed_candidate = None
+            if isinstance(printed_candidate, (_MutableSetABC, set)):
+                printed = typing.cast(MutableSet[str], printed_candidate)
+            elif printed_candidate is not None:
+                try:
+                    printed = set(printed_candidate)  # type: ignore[arg-type]
+                except Exception:
+                    printed = set()
+                try:
+                    printed_owner["_ops_cards_printed"] = printed  # type: ignore[index]
+                except Exception:
+                    pass
+
+        if printed is not None:
+            if "cbore" in printed:
+                return lines
+            printed.add("cbore")
+
+        derived_owner: MutableMapping[str, Any] | None = None
+        if isinstance(breakdown_mutable, dict):
+            derived_owner = breakdown_mutable.setdefault("derived_ops", {})
+        elif isinstance(breakdown_mutable, _MutableMappingABC):
+            try:
+                derived_owner = typing.cast(
+                    MutableMapping[str, Any],
+                    breakdown_mutable,
+                ).setdefault("derived_ops", {})
+            except Exception:
+                derived_owner = None
+
+        if isinstance(derived_owner, (_MutableMappingABC, dict)):
+            serial_cb: dict[tuple[float | None, str, float | None], int] = {}
+            for (dia, side, depth), qty in cb_groups.items():
+                serial_cb[
+                    (
+                        float(dia) if dia is not None else None,
+                        str(side or ""),
+                        float(depth) if depth is not None else None,
+                    )
+                ] = int(qty or 0)
+            try:
+                derived_owner["cb_groups"] = serial_cb  # type: ignore[index]
+            except Exception:
+                pass
+
         front_cb = sum(
             int(qty)
             for (dia, side, _depth), qty in cb_groups.items()
