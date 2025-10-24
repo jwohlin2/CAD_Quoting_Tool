@@ -115,6 +115,7 @@ def aggregate_ops_from_rows(rows: list[dict]) -> dict:
     """Aggregate lightweight drilling/tapping counters from HOLE TABLE rows."""
 
     totals: defaultdict[str, int] = defaultdict(int)
+    actions: defaultdict[str, int] = defaultdict(int)
     detail: list[dict[str, Any]] = []
     for r in rows or []:
         try:
@@ -130,22 +131,31 @@ def aggregate_ops_from_rows(rows: list[dict]) -> dict:
         if "TAP" in U:
             if side == "BACK":
                 totals["tap_back"] += qty
+                actions["tap_back"] += qty
             elif side == "BOTH":
                 totals["tap_front"] += qty
                 totals["tap_back"] += qty
+                actions["tap_front"] += qty
+                actions["tap_back"] += qty
             else:
                 totals["tap_front"] += qty
+                actions["tap_front"] += qty
             totals["tap"] += qty
             totals["drill"] += qty
+            actions["drill"] += qty
 
         if "CBORE" in U or "C'BORE" in U or "COUNTER BORE" in U:
             if side == "BACK":
                 totals["counterbore_back"] += qty
+                actions["counterbore_back"] += qty
             elif side == "BOTH":
                 totals["counterbore_front"] += qty
                 totals["counterbore_back"] += qty
+                actions["counterbore_front"] += qty
+                actions["counterbore_back"] += qty
             else:
                 totals["counterbore_front"] += qty
+                actions["counterbore_front"] += qty
             totals["counterbore"] += qty
 
         if (
@@ -157,9 +167,11 @@ def aggregate_ops_from_rows(rows: list[dict]) -> dict:
         ):
             if ("THRU" not in U) and ("TAP" not in U):
                 totals["spot"] += qty
+                actions["spot"] += qty
 
         if "JIG GRIND" in U:
             totals["jig_grind"] += qty
+            actions["jig_grind"] += qty
 
         detail.append(
             {
@@ -174,7 +186,7 @@ def aggregate_ops_from_rows(rows: list[dict]) -> dict:
     return {
         "totals": dict(totals),
         "rows": detail,
-        "actions_total": int(sum(totals.values())),
+        "actions_total": int(sum(actions.values())),
         "back_ops_total": back_ops_total,
         "flip_required": bool(back_ops_total > 0),
     }
