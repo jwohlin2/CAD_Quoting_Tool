@@ -21795,15 +21795,31 @@ def extract_2d_features_from_dxf_or_dwg(path: str | Path) -> dict[str, Any]:
         _chart_all_lines.append(normalized)
 
     if extractor and dxf_text_path:
+        extractor_name = getattr(extractor, "__name__", None) or str(extractor)
+        print(
+            f"[EXTRACTOR] invoking {extractor_name} for {dxf_text_path} "
+            "(include_tables=True)"
+        )
         try:
             raw_lines = extractor(dxf_text_path, include_tables=True)
         except TypeError:
+            print(
+                f"[EXTRACTOR] retrying {extractor_name} for {dxf_text_path} without include_tables"
+            )
             try:
                 raw_lines = extractor(dxf_text_path)
-            except Exception:
+            except Exception as exc:
+                print(
+                    f"[EXTRACTOR] failed invoking {extractor_name} without include_tables: {exc}"
+                )
                 raw_lines = []
-        except Exception:
+        except Exception as exc:
+            print(f"[EXTRACTOR] failed invoking {extractor_name}: {exc}")
             raw_lines = []
+        else:
+            print(
+                f"[EXTRACTOR] extractor returned {len(raw_lines) if raw_lines else 0} lines"
+            )
         if raw_lines:
             for ln in raw_lines:
                 _append_chart_line(ln)
