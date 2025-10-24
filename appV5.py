@@ -20261,6 +20261,113 @@ def _merge_wrapped_text_rows(
     return merged
 
 
+def _normalize_text_table_rows(
+    rows: Sequence[Mapping[str, str]] | None,
+) -> tuple[list[dict[str, Any]], int, dict[str, int]]:
+    """Normalise HOLE TABLE rows harvested from text entities."""
+
+    merged_rows = _merge_wrapped_text_rows(rows)
+
+    def parse_qty(s: str) -> int:
+        try:
+            return int(float((s or "").strip()))
+        except Exception:
+            m = re.search(r"\d+", s or "")
+            return int(m.group()) if m else 0
+
+    def parse_dia_inch(s: str) -> float | None:
+        s = (s or "").strip().lstrip("Ø⌀\u00D8 ").strip()
+        if re.fullmatch(r"\d+/\d+", s):
+            try:
+                return float(Fraction(s))
+            except Exception:
+                return None
+        if re.fullmatch(r"(?:\d+)?\.\d+|\d+(?:\.\d+)?", s):
+            try:
+                return float(s)
+            except Exception:
+                return None
+        return None
+
+    total = 0
+    families: dict[str, int] = {}
+    clean_rows: list[dict[str, Any]] = []
+    for row in merged_rows:
+        q = parse_qty(row.get("qty", ""))
+        if q <= 0:
+            continue
+        d = parse_dia_inch(row.get("ref", ""))
+        if d is None:
+            desc_val = row.get("desc", "")
+            mm = re.search(
+                r"[Ø⌀\u00D8]?\s*((?:\d+)?\.\d+|\d+/\d+|\d+(?:\.\d+)?)",
+                desc_val,
+            )
+            d = parse_dia_inch(mm.group(1)) if mm else None
+        if d is None:
+            continue
+        key = f'{d:.4f}"'
+        families[key] = families.get(key, 0) + q
+        total += q
+        clean_rows.append(
+            {
+                **row,
+                "qty": q,
+                "ref": key,
+                "diameter_in": d,
+            }
+        )
+
+    return clean_rows, total, families
+
+
+def _normalize_text_table_lines(
+    lines: Sequence[str] | None,
+) -> tuple[list[dict[str, Any]], int, dict[str, int]]:
+    """Parse and normalise raw HOLE TABLE text lines."""
+
+    if not lines:
+        return [], 0, {}
+
+    cleaned = [str(raw).strip() for raw in lines if raw]
+    if not cleaned:
+        return [], 0, {}
+
+    header_idx = None
+    for i, text in enumerate(cleaned):
+        if "HOLE TABLE" in text.upper():
+            header_idx = i
+            break
+    if header_idx is None:
+        return [], 0, {}
+
+    rows: list[dict[str, str]] = []
+    for raw in cleaned[header_idx + 1 :]:
+        upper = raw.upper()
+        if not upper:
+            continue
+        if "DESCRIPTION" in upper:
+            continue
+        if "LIST OF COORDINATES" in upper or "SEE SHEET" in upper:
+            break
+        if set(raw.strip()) <= {"-", " "}:
+            continue
+        if "|" in raw:
+            parts = [part.strip() for part in raw.split("|")]
+            while len(parts) < 4:
+                parts.append("")
+            hole, ref, qty = parts[:3]
+            desc = " ".join(part for part in parts[3:] if part).strip()
+        else:
+            hole = ""
+            ref = ""
+            qty = ""
+            desc = raw.strip()
+        rows.append({"hole": hole, "ref": ref, "qty": qty, "desc": desc})
+
+    return _normalize_text_table_rows(rows)
+
+
 def extract_hole_table_from_text(doc, y_tol: float = 0.04, min_rows: int = 5):
     """
     Returns dict like:
@@ -20351,45 +20458,7 @@ def extract_hole_table_from_text(doc, y_tol: float = 0.04, min_rows: int = 5):
     if len(rows) < min_rows:
         return {}
 
-    total = 0
-    families: dict[str, int] = {}
-
-    def parse_qty(s: str) -> int:
-        try:
-            return int(float((s or "").strip()))
-        except Exception:
-            m = re.search(r"\d+", s or "")
-            return int(m.group()) if m else 0
-
-    def parse_dia_inch(s: str) -> float | None:
-        s = (s or "").strip().lstrip("Ø⌀\u00D8 ").strip()
-        if re.fullmatch(r"\d+/\d+", s):
-            try:
-                return float(Fraction(s))
-            except Exception:
-                return None
-        if re.fullmatch(r"(?:\d+)?\.\d+|\d+(?:\.\d+)?", s):
-            try:
-                return float(s)
-            except Exception:
-                return None
-        return None
-
-    clean_rows: list[dict[str, Any]] = []
-    for r in rows:
-        q = parse_qty(r["qty"])
-        if q <= 0:
-            continue
-        d = parse_dia_inch(r["ref"])
-        if d is None:
-            mm = re.search(r"[Ø⌀\u00D8]?\s*((?:\d+)?\.\d+|\d+/\d+|\d+(?:\.\d+)?)", r["desc"])
-            d = parse_dia_inch(mm.group(1)) if mm else None
-        if d is None:
-            continue
-        key = f'{d:.4f}"'
-        families[key] = families.get(key, 0) + q
-        total += q
-        clean_rows.append({**r, "qty": q, "ref": key, "diameter_in": d})
+    clean_rows, total, families = _normalize_text_table_rows(rows)
 
     if total <= 0:
         return {}
@@ -20679,54 +20748,22 @@ def hole_count_from_acad_table(doc) -> dict[str, Any]:
 
     return result
 
-def hole_count_from_text_table(doc, lines: Sequence[str] | None = None) -> tuple[int, dict] | tuple[None, None]:
+def hole_count_from_text_table(
+    doc,
+    lines: Sequence[str] | None = None,
+) -> tuple[int, dict] | tuple[None, None]:
+    source_lines: Sequence[str] | None
     if lines is None:
         source_lines = _iter_table_text(doc) or []
     else:
         source_lines = lines
-    cleaned = [str(raw).strip() for raw in source_lines if raw]
-    if not cleaned:
+
+    _, total, families = _normalize_text_table_lines(source_lines)
+
+    if total <= 0:
         return None, None
 
-    idx = None
-    for i, s in enumerate(cleaned):
-        if "HOLE TABLE" in s.upper():
-            idx = i
-            break
-    if idx is None:
-        return None, None
-
-    total = 0
-    fam: dict[float, int] = {}
-    for s in cleaned[idx + 1 :]:
-        u = s.upper()
-        if not u or "DESCRIPTION" in u:
-            continue
-        if "LIST OF COORDINATES" in u or "SEE SHEET" in u:
-            break
-
-        mqty = re.search(r"\bQTY\b[:\s]*([0-9]+)", u)
-        if not mqty:
-            cols = [c.strip() for c in u.split("|")]
-            for c in cols:
-                if c.isdigit():
-                    mqty = re.match(r"(\d+)$", c)
-                    if mqty:
-                        break
-        if mqty:
-            q = int(mqty.group(1))
-            total += q
-        else:
-            q = None
-
-        mref = re.search(r"\bREF\s*[Ø⌀]?\s*(\d+(?:\.\d+)?)", u)
-        if not mref:
-            mref = re.search(r"[Ø⌀]\s*(\d+(?:\.\d+)?)", u)
-        if mref and mqty:
-            d = round(float(mref.group(1)), 4)
-            fam[d] = fam.get(d, 0) + int(mqty.group(1))
-
-    return (total, fam) if total else (None, None)
+    return total, families
 
 
 def hole_count_from_geometry(doc, to_in, plate_bbox=None) -> tuple[int, dict]:
