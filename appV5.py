@@ -94,6 +94,91 @@ from fractions import Fraction
 
 _re = re
 
+# --- Ops aggregation from HOLE TABLE rows (minimal) ---
+_SIDE_BOTH = re.compile(r"\b(FRONT\s*&\s*BACK|BOTH\s+SIDES)\b", re.I)
+_SIDE_BACK = re.compile(r"\b(?:FROM\s+)?BACK\b", re.I)
+_SIDE_FRONT = re.compile(r"\b(?:FROM\s+)?FRONT\b", re.I)
+
+
+def _row_side(desc: str) -> str | None:
+    U = (desc or "").upper()
+    if _SIDE_BOTH.search(U):
+        return "BOTH"
+    if _SIDE_BACK.search(U):
+        return "BACK"
+    if _SIDE_FRONT.search(U):
+        return "FRONT"
+    return None
+
+
+def aggregate_ops_from_rows(rows: list[dict]) -> dict:
+    """Aggregate lightweight drilling/tapping counters from HOLE TABLE rows."""
+
+    totals: defaultdict[str, int] = defaultdict(int)
+    detail: list[dict[str, Any]] = []
+    for r in rows or []:
+        try:
+            qty = int(float(r.get("qty") or 0))
+        except Exception:
+            qty = 0
+        if qty <= 0:
+            continue
+        desc = str(r.get("desc", ""))
+        side = _row_side(desc)
+        U = desc.upper()
+
+        if "TAP" in U:
+            if side == "BACK":
+                totals["tap_back"] += qty
+            elif side == "BOTH":
+                totals["tap_front"] += qty
+                totals["tap_back"] += qty
+            else:
+                totals["tap_front"] += qty
+            totals["tap"] += qty
+            totals["drill"] += qty
+
+        if "CBORE" in U or "C'BORE" in U or "COUNTER BORE" in U:
+            if side == "BACK":
+                totals["counterbore_back"] += qty
+            elif side == "BOTH":
+                totals["counterbore_front"] += qty
+                totals["counterbore_back"] += qty
+            else:
+                totals["counterbore_front"] += qty
+            totals["counterbore"] += qty
+
+        if (
+            "C DRILL" in U
+            or "C’DRILL" in U
+            or "CENTER DRILL" in U
+            or "SPOT DRILL" in U
+            or "SPOT" in U
+        ):
+            if ("THRU" not in U) and ("TAP" not in U):
+                totals["spot"] += qty
+
+        if "JIG GRIND" in U:
+            totals["jig_grind"] += qty
+
+        detail.append(
+            {
+                "hole": r.get("hole") or r.get("id") or "",
+                "ref": r.get("ref", ""),
+                "qty": qty,
+                "desc": desc,
+            }
+        )
+
+    back_ops_total = int(totals.get("counterbore_back", 0) + totals.get("tap_back", 0))
+    return {
+        "totals": dict(totals),
+        "rows": detail,
+        "actions_total": int(sum(totals.values())),
+        "back_ops_total": back_ops_total,
+        "flip_required": bool(back_ops_total > 0),
+    }
+
 from cad_quoter.app._value_utils import (
     _format_value,
 )
@@ -20050,10 +20135,13 @@ def hole_count_from_acad_table(doc) -> dict[str, Any]:
             if re.search(r"\b(FRONT\s*&\s*BACK|BOTH\s+SIDES)\b", upper_text):
                 double_sided = True
 
+            ref_value = ref_txt.strip()
+            if d is not None:
+                ref_value = f"{d:.4f}\""
             rows_norm.append(
                 {
                     "hole": hole_id.strip(),
-                    "ref": ref_txt.strip(),
+                    "ref": ref_value,
                     "qty": qty,
                     "desc": desc.strip(),
                     "diameter_in": d,
@@ -21335,8 +21423,23 @@ def extract_2d_features_from_dxf_or_dwg(path: str | Path) -> dict[str, Any]:
     u2mm = to_in * 25.4
 
     geo = _build_geo_from_ezdxf_doc(doc)
-    if table_info.get("ops_summary"):
+
+    if isinstance(table_info.get("ops_summary"), dict):
+        geo["ops_summary"] = dict(table_info["ops_summary"])
+    elif table_info.get("ops_summary"):
         geo["ops_summary"] = table_info["ops_summary"]
+
+    if table_info:
+        rows_for_ops = table_info.get("rows") or []
+        if rows_for_ops:
+            ops_summary_map = geo.setdefault("ops_summary", {})
+            ops_summary_map["rows"] = rows_for_ops
+            agg = aggregate_ops_from_rows(rows_for_ops)
+            ops_summary_map["totals"] = agg.get("totals", {})
+            ops_summary_map["actions_total"] = agg.get("actions_total", 0)
+            ops_summary_map["back_ops_total"] = agg.get("back_ops_total", 0)
+            ops_summary_map["flip_required"] = agg.get("flip_required", False)
+            geo["hole_count"] = int(table_info.get("hole_count") or 0)
 
     hole_source: str | None = None
     provenance_entry = geo.get("provenance")
