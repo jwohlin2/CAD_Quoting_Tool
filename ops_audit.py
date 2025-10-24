@@ -6,7 +6,7 @@ from collections import defaultdict
 from pathlib import Path
 from typing import Any, Iterable, Mapping, Sequence
 
-_PKG_SRC = Path(__file__).resolve().parent / "cad_quoter_pkg" / "src"
+_PKG_SRC = Path(__file__).resolve().parent / "src"
 if _PKG_SRC.is_dir():
     _pkg_src_str = str(_PKG_SRC)
     if _pkg_src_str not in sys.path:

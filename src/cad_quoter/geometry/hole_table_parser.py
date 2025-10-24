@@ -8,6 +8,14 @@ from dataclasses import dataclass
 from fractions import Fraction
 from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence
 
+from cad_quoter.utils.number_parse import (
+    NUM_DEC_RE,
+    NUM_FRAC_RE,
+    VALUE_PATTERN,
+    _to_inch,
+    first_inch_value,
+)
+
 logger = logging.getLogger(__name__)
 
 LETTER_DRILLS_INCH = {
@@ -51,8 +59,7 @@ NUMBER_DRILLS_INCH = {
 
 INCH_TO_MM = 25.4
 
-NUM_PATTERN = r"(?:\d*\.\d+|\d+)"
-VALUE_PATTERN = rf"(?:\d+\s*/\s*\d+|{NUM_PATTERN})"
+NUM_PATTERN = NUM_DEC_RE.pattern
 
 
 def _frac_to_mm(n: int, d: int) -> float:
@@ -274,20 +281,33 @@ def _parse_description(desc: str) -> List[Dict[str, Any]]:
                 }
             )
 
-    cbore_depth = re.search(rf"C['’]?BORE\s+X\s+({NUM_PATTERN})\s*DEEP", text)
+    cbore_depth = re.search(rf"C['’]?BORE\s+X\s+({VALUE_PATTERN})\s*DEEP", text)
     if cbore_depth:
-        depth_val = float(cbore_depth.group(1)) * INCH_TO_MM
-        dia_match = re.search(rf"({NUM_PATTERN})\s*[Ø⌀\u00D8]?\s*C['’]?BORE", text)
-        dia_val = float(dia_match.group(1)) * INCH_TO_MM if dia_match else None
+        depth_in = _to_inch(cbore_depth.group(1))
+        dia_match = re.search(rf"({VALUE_PATTERN})\s*[Ø⌀\u00D8]?\s*C['’]?BORE", text)
+        dia_in = _to_inch(dia_match.group(1)) if dia_match else None
+        if dia_in is None:
+            fallback = NUM_FRAC_RE.search(text) or NUM_DEC_RE.search(text)
+            dia_in = _to_inch(fallback.group(0)) if fallback else first_inch_value(text)
+        depth_val = depth_in * INCH_TO_MM if depth_in is not None else None
+        dia_val = dia_in * INCH_TO_MM if dia_in is not None else None
         tokens.append({"type": "cbore", "dia_mm": dia_val, "depth_mm": depth_val, "source": "desc"})
 
-    csk_match = re.search(rf"({NUM_PATTERN})\s*[Ø⌀\u00D8]?\s*CSK", text)
+    csk_match = re.search(rf"({VALUE_PATTERN})\s*[Ø⌀\u00D8]?\s*CSK", text)
     if csk_match:
-        tokens.append({"type": "csk", "dia_mm": float(csk_match.group(1)) * INCH_TO_MM, "source": "desc"})
+        dia_in = _to_inch(csk_match.group(1))
+        if dia_in is None:
+            dia_in = first_inch_value(csk_match.group(0))
+        dia_mm = dia_in * INCH_TO_MM if dia_in is not None else None
+        tokens.append({"type": "csk", "dia_mm": dia_mm, "source": "desc"})
 
-    spot_match = re.search(rf"({NUM_PATTERN})\s*SPOT\s*(?:DRILL|FACE)", text)
+    spot_match = re.search(rf"({VALUE_PATTERN})\s*SPOT\s*(?:DRILL|FACE)", text)
     if spot_match:
-        tokens.append({"type": "spot", "dia_mm": float(spot_match.group(1)) * INCH_TO_MM, "source": "desc"})
+        dia_in = _to_inch(spot_match.group(1))
+        if dia_in is None:
+            dia_in = first_inch_value(spot_match.group(0))
+        dia_mm = dia_in * INCH_TO_MM if dia_in is not None else None
+        tokens.append({"type": "spot", "dia_mm": dia_mm, "source": "desc"})
 
     return tokens
 
