@@ -23051,6 +23051,34 @@ class App(tk.Tk):
             except Exception:
                 pass
 
+    def _refresh_variables_cache(
+        self,
+        core_df: PandasDataFrame | None,
+        full_df: PandasDataFrame | None,
+    ) -> None:
+        """Store the most recent variable DataFrames and refresh the editor view."""
+
+        def _coerce(df: PandasDataFrame | None) -> PandasDataFrame:
+            try:
+                return coerce_or_make_vars_df(df)
+            except Exception:
+                return coerce_or_make_vars_df(None)
+
+        core_df_coerced = _coerce(core_df)
+        self.vars_df = core_df_coerced
+
+        try:
+            self.vars_df_full = _coerce(full_df) if full_df is not None else core_df_coerced.copy()
+        except Exception:
+            self.vars_df_full = core_df_coerced.copy()
+
+        editor = getattr(self, "editor_view", None)
+        if editor is not None:
+            try:
+                editor.populate(core_df_coerced)
+            except Exception:
+                logger.exception("Failed to populate editor with refreshed variables", exc_info=True)
+
     def _reset_llm_logs(self) -> None:
         self.llm_events.clear()
         self.llm_errors.clear()
@@ -23101,6 +23129,48 @@ class App(tk.Tk):
         value = str(path) if path else ""
         self.settings["last_variables_path"] = value
         self.llm_services.save_settings(self.settings_path, self.settings)
+
+    def set_material_vendor_csv(self) -> None:
+        """Let the user pick a Material Vendor CSV and persist the choice."""
+
+        path = filedialog.askopenfilename(
+            title="Select Material Vendor CSV",
+            filetypes=[("CSV files", "*.csv"), ("All files", "*.*")],
+        )
+        if not path:
+            return
+
+        if not isinstance(self.settings, dict):
+            self.settings = {}
+        self.settings["material_vendor_csv"] = path
+        self.params["MaterialVendorCSVPath"] = path
+
+        try:
+            self.llm_services.save_settings(self.settings_path, self.settings)
+        except Exception:
+            logger.exception("Failed to save material vendor CSV path", exc_info=True)
+
+        try:
+            self.status_var.set(f"Material vendor CSV set: {os.path.basename(path)}")
+        except Exception:
+            pass
+
+    def clear_material_vendor_csv(self) -> None:
+        """Clear the persisted Material Vendor CSV path."""
+
+        if isinstance(self.settings, dict):
+            self.settings.pop("material_vendor_csv", None)
+            try:
+                self.llm_services.save_settings(self.settings_path, self.settings)
+            except Exception:
+                logger.exception("Failed to clear material vendor CSV path", exc_info=True)
+
+        self.params.pop("MaterialVendorCSVPath", None)
+
+        try:
+            self.status_var.set("Material vendor CSV cleared")
+        except Exception:
+            pass
 
     def _validate_thread_limit(self, proposed: str) -> bool:
         text = str(proposed).strip()
