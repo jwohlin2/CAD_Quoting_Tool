@@ -1872,6 +1872,161 @@ def _adjust_drill_counts(
     return {d: q for d, q in counts.items() if q > 0}
 
 
+def _get_core_geo_map(
+    geo_map: Mapping[str, Any] | dict[str, Any] | None,
+) -> dict[str, Any]:
+    """Return a mutable geo dict, merging top-level helpers when present."""
+
+    base: dict[str, Any]
+    if isinstance(geo_map, dict):
+        base = geo_map
+    elif isinstance(geo_map, _MappingABC):
+        try:
+            base = dict(geo_map)
+        except Exception:
+            base = {}
+    else:
+        base = {}
+
+    nested: Any = None
+    try:
+        nested = base.get("geo")
+    except Exception:
+        nested = None
+
+    if isinstance(nested, dict):
+        core = nested
+    elif isinstance(nested, _MappingABC):
+        try:
+            core = dict(nested)
+        except Exception:
+            core = {}
+    else:
+        core = base
+
+    if core is not base and isinstance(base, dict):
+        for helper_key in ("feature_counts", "chart_lines", "chart_summary", "chart_source"):
+            if helper_key not in core and helper_key in base:
+                core[helper_key] = base[helper_key]
+
+    return core if isinstance(core, dict) else {}
+
+
+def _norm_op_key(name: str) -> str:
+    n = (name or "").strip().lower()
+    n = n.replace("’", "'").replace(" ", "").replace("_", "").replace("-", "")
+    if n.endswith("qty"):
+        n = n[:-3]
+    if n.endswith("count"):
+        n = n[:-5]
+    # synonyms → canonical
+    if n in {"drill", "drilling", "deepdrill", "deepdrilling", "stdandrill", "standarddrill"}:
+        return "drill"
+    if n in {"tap", "taps", "tapping"}:
+        return "tap"
+    if n in {"counterbore", "cbore", "c'bore", "c’bore"}:
+        return "counterbore"
+    if n in {
+        "counterdrill",
+        "cdrill",
+        "c'drill",
+        "c’drill",
+        "centerdrill",
+        "centredrill",
+        "centerdrilling",
+        "centredrilling",
+        "centre",
+        "spot",
+        "spotdrill",
+        "spotdrilling",
+    }:
+        # Treat ALL “spot/center drill” as Counterdrill per the requirement.
+        return "counterdrill"
+    if n in {"jig", "jiggrind", "jiggrinding", "grind", "grinding"}:
+        return "jig-grind"
+    return n
+
+
+def _ops_counts_from_geo_and_locals(
+    geo_map: Mapping[str, Any] | dict[str, Any] | None,
+    *,
+    counterbore_from_groups: int | None = None,
+    chart_lines: Sequence[str] | None = None,
+) -> dict[str, int]:
+    """Robust counts from GEO.feature_counts + fallbacks."""
+
+    counts = {"drill": 0, "tap": 0, "counterbore": 0, "counterdrill": 0, "jig-grind": 0}
+
+    g = _get_core_geo_map(geo_map)
+
+    def _iter_feature_count_maps() -> Iterator[Mapping[str, Any]]:
+        for candidate in (geo_map, g):
+            if not isinstance(candidate, (_MappingABC, dict)):
+                continue
+            try:
+                fc = candidate.get("feature_counts")  # type: ignore[index]
+            except Exception:
+                fc = None
+            if isinstance(fc, (_MappingABC, dict)):
+                yield typing.cast(Mapping[str, Any], fc)
+
+    # 1) feature_counts (preferred, if present)
+    for fc_map in _iter_feature_count_maps():
+        for k, v in fc_map.items():
+            try:
+                if isinstance(v, (int, float)):
+                    qty = int(v)
+                else:
+                    qty = int(float(v))
+            except Exception:
+                continue
+            key = _norm_op_key(str(k))
+            if key in counts:
+                counts[key] += max(qty, 0)
+
+    # 2) If we have hole diameters but no drill count, use that as a floor.
+    if counts["drill"] <= 0:
+        seed_fn = globals().get("_seed_drill_bins_from_geo__local")
+        raw_bins: Mapping[float, Any]
+        if callable(seed_fn):
+            try:
+                raw_bins = typing.cast(Mapping[float, Any], seed_fn(g))
+            except Exception:
+                raw_bins = {}
+        else:
+            raw_bins = _seed_drill_bins_from_geo(g)
+        try:
+            counts["drill"] = max(int(sum(int(v) for v in raw_bins.values())), 0)
+        except Exception:
+            counts["drill"] = 0
+
+    # 3) Merge in our already-parsed counterbores (from cb_groups).
+    if isinstance(counterbore_from_groups, int) and counterbore_from_groups > 0:
+        counts["counterbore"] = max(counts["counterbore"], counterbore_from_groups)
+
+    # 4) (Optional) glean tiny hints from chart lines (just totals)
+    for raw in chart_lines or []:
+        s = str(raw or "").lower()
+        if not s:
+            continue
+        # crude bumpers if feature_counts missing
+        if "tap" in s:
+            counts["tap"] = max(counts["tap"], 1)
+        if "c'bore" in s or "counterbore" in s:
+            counts["counterbore"] = max(counts["counterbore"], 1)
+        if (
+            "c'drill" in s
+            or "counterdrill" in s
+            or "center drill" in s
+            or "centre drill" in s
+        ):
+            counts["counterdrill"] = max(counts["counterdrill"], 1)
+        if "jig" in s:
+            counts["jig-grind"] = max(counts["jig-grind"], 1)
+
+    return counts
+
+
 def _apply_ops_audit_counts(
     ops_counts: MutableMapping[str, int],
     *,
@@ -14158,10 +14313,29 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
         else:
             source = None
 
-        dop = (source or {}).get("derived_ops") if isinstance(source, (_MappingABC, dict)) else None
-        if isinstance(dop, (_MappingABC, dict)):
+        derived_ops_map: Mapping[str, Any] | None = None
+        derived_ops_mut: MutableMapping[str, Any] | None = None
+        if isinstance(source, (_MappingABC, dict)):
             try:
-                tallies["drill"] = int(dop.get("drill_total") or 0)
+                derived_candidate = source.get("derived_ops")  # type: ignore[index]
+            except Exception:
+                derived_candidate = None
+            if isinstance(derived_candidate, MutableMapping):
+                derived_ops_mut = typing.cast(MutableMapping[str, Any], derived_candidate)
+                derived_ops_map = derived_ops_mut
+            elif isinstance(derived_candidate, dict):
+                derived_ops_map = derived_candidate
+                if isinstance(source, (_MutableMappingABC, dict)):
+                    derived_ops_mut = typing.cast(MutableMapping[str, Any], derived_candidate)
+            elif isinstance(derived_candidate, _MappingABC):
+                derived_ops_map = dict(derived_candidate)
+                if isinstance(source, (_MutableMappingABC, dict)):
+                    source["derived_ops"] = derived_ops_map  # type: ignore[index]
+                    derived_ops_mut = typing.cast(MutableMapping[str, Any], derived_ops_map)
+
+        if isinstance(derived_ops_map, (_MappingABC, dict)):
+            try:
+                tallies["drill"] = int(derived_ops_map.get("drill_total") or 0)
             except Exception:
                 pass
 
@@ -14180,6 +14354,73 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
                         tallies[bucket] += int(qty_value or 0)
                     except Exception:
                         pass
+
+        chart_line_candidates: list[str] = []
+
+        def _extend_chart_lines(candidate: Any) -> None:
+            if not isinstance(candidate, (_MappingABC, dict)):
+                return
+            try:
+                raw_lines = candidate.get("chart_lines")  # type: ignore[index]
+            except Exception:
+                raw_lines = None
+            if isinstance(raw_lines, (list, tuple)):
+                for entry in raw_lines:
+                    text = str(entry or "").strip()
+                    if text:
+                        chart_line_candidates.append(text)
+
+        geo_for_counts: dict[str, Any] = {}
+        if isinstance(source, (_MappingABC, dict)):
+            geo_for_counts = _get_core_geo_map(source)
+
+        _extend_chart_lines(source)
+        _extend_chart_lines(geo_for_counts)
+
+        counterbore_from_groups = None
+        if isinstance(derived_ops_map, (_MappingABC, dict)):
+            try:
+                cb_groups_obj = derived_ops_map.get("cb_groups")  # type: ignore[index]
+            except Exception:
+                cb_groups_obj = None
+            if isinstance(cb_groups_obj, (_MappingABC, dict)):
+                total_cb = 0
+                for qty in cb_groups_obj.values():
+                    try:
+                        total_cb += max(0, int(round(float(qty))))
+                    except Exception:
+                        continue
+                if total_cb > 0:
+                    counterbore_from_groups = total_cb
+
+        aggregated_counts = _ops_counts_from_geo_and_locals(
+            geo_for_counts,
+            counterbore_from_groups=counterbore_from_groups,
+            chart_lines=chart_line_candidates,
+        )
+
+        aggregated_copy: dict[str, int] = {}
+        for key, qty in aggregated_counts.items():
+            try:
+                qty_int = int(qty)
+            except Exception:
+                continue
+            aggregated_copy[key] = qty_int
+            if key in tallies and qty_int > tallies[key]:
+                tallies[key] = qty_int
+
+        if aggregated_copy:
+            if derived_ops_mut is not None:
+                derived_ops_mut["ops_counts"] = dict(aggregated_copy)
+            elif isinstance(source, (_MutableMappingABC, dict)):
+                try:
+                    existing_counts = source.get("ops_counts")  # type: ignore[index]
+                except Exception:
+                    existing_counts = None
+                if isinstance(existing_counts, (_MutableMappingABC, dict)):
+                    typing.cast(MutableMapping[str, Any], existing_counts).update(aggregated_copy)
+                else:
+                    source["ops_counts"] = dict(aggregated_copy)  # type: ignore[index]
 
         return tallies
 
