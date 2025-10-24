@@ -1323,19 +1323,38 @@ def _normalize_geo_map(geo_obj: Mapping[str, Any] | None) -> Mapping[str, Any] |
     return geo_map
 
 
-def _get_geo_map(*candidates: Mapping[str, Any] | None) -> Mapping[str, Any]:
-    """Return the first truthy geo map from the provided candidates."""
+def _get_geo_map(
+    result: Mapping[str, Any] | None = None,
+    breakdown: Mapping[str, Any] | None = None,
+) -> Mapping[str, Any]:
+    """Return a merged geo map, flattening legacy ``geo.geo`` payloads."""
 
-    for cand in candidates:
-        if not isinstance(cand, (_MappingABC, dict)):
+    g: Mapping[str, Any] | dict[str, Any] = {}
+
+    for candidate in (result, breakdown):
+        if not isinstance(candidate, (_MappingABC, dict)):
             continue
         try:
-            geo_obj = cand.get("geo")
+            geo_candidate = candidate.get("geo")  # type: ignore[attr-defined]
         except Exception:
-            geo_obj = None
-        normalized = _normalize_geo_map(geo_obj)
-        if isinstance(normalized, (_MappingABC, dict)):
-            return typing.cast(Mapping[str, Any], normalized)
+            geo_candidate = None
+        if isinstance(geo_candidate, (_MappingABC, dict)):
+            g = geo_candidate if isinstance(geo_candidate, dict) else dict(geo_candidate)
+            break
+
+    if isinstance(g, (_MappingABC, dict)):
+        try:
+            nested_geo = g.get("geo")  # type: ignore[attr-defined]
+        except Exception:
+            nested_geo = None
+        merged: dict[str, Any] = {}
+        if isinstance(nested_geo, (_MappingABC, dict)):
+            merged.update(
+                nested_geo if isinstance(nested_geo, dict) else dict(nested_geo)
+            )
+        merged.update(g if isinstance(g, dict) else dict(g))
+        return merged
+
     return {}
 
 
@@ -1456,11 +1475,15 @@ def _build_ops_cards_from_chart_lines(
             ops_summary_obj = geo_map.get("ops_summary")  # type: ignore[attr-defined]
         except Exception:
             ops_summary_obj = {}
+
     rows_obj: Any = []
-    ops_source: Any = None
+    ops_source: Any = "?"
     if isinstance(ops_summary_obj, (_MappingABC, dict)):
-        ops_source = ops_summary_obj.get("source")
         rows_obj = ops_summary_obj.get("rows") or []
+        try:
+            ops_source = ops_summary_obj.get("source") or "?"
+        except Exception:
+            ops_source = "?"
 
     rows: list[Any] = []
     if isinstance(rows_obj, list):
@@ -4769,38 +4792,6 @@ def _render_time_per_hole(
 
 
 # ---------- HOLE TABLE: Table Row Reviewer ----------
-def _get_geo_map(result=None, breakdown=None):
-    g: Any = {}
-
-    if isinstance(result, (_MappingABC, dict)):
-        try:
-            candidate = result.get("geo")  # type: ignore[attr-defined]
-        except Exception:
-            candidate = None
-        if isinstance(candidate, (_MappingABC, dict)):
-            g = candidate
-    if not isinstance(g, (_MappingABC, dict)) and isinstance(
-        breakdown, (_MappingABC, dict)
-    ):
-        try:
-            candidate = breakdown.get("geo")  # type: ignore[attr-defined]
-        except Exception:
-            candidate = None
-        if isinstance(candidate, (_MappingABC, dict)):
-            g = candidate
-
-    if isinstance(g, (_MappingABC, dict)):
-        try:
-            nested = g.get("geo")  # type: ignore[attr-defined]
-        except Exception:
-            nested = None
-        merged: dict[str, Any] = {}
-        if isinstance(nested, (_MappingABC, dict)):
-            merged.update(typing.cast(Mapping[str, Any], nested))
-        merged.update(typing.cast(Mapping[str, Any], g))
-        return merged
-
-    return {}
 
 
 def _ops_rows_from_geo(geo_map):
