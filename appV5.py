@@ -10278,6 +10278,7 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
     extra_ops_lines: Sequence[Any] | None = []
     appended_extra_ops_lines: list[str] = []
     attempted_append = False
+    extra_ops_lines_appended = 0
     try:
         extra_ops_lines = _build_ops_cards_from_chart_lines(
             breakdown=breakdown,
