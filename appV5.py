@@ -209,6 +209,39 @@ def _seed_drill_bins_from_geo(geo: dict) -> dict[float, int]:
     return out
 
 
+def _log_geo_seed_debug(lines: list[str], geo: Mapping[str, Any] | dict[str, Any]) -> None:
+    """Emit debugging context for GEO maps used to seed drill bins."""
+
+    try:
+        geo_obj = geo if isinstance(geo, _MappingABC) else {}
+    except Exception:
+        geo_obj = {}
+
+    def _seq_len(value: Any) -> int:
+        if isinstance(value, (list, tuple, set)):
+            return len(value)
+        if isinstance(value, Sequence) and not isinstance(value, (str, bytes, bytearray)):
+            try:
+                return len(list(value))
+            except Exception:
+                return 0
+        return 0
+
+    try:
+        try:
+            geo_keys = sorted(geo_obj.keys())[:12]
+        except Exception:
+            geo_keys = sorted((str(key) for key in geo_obj.keys()))[:12]
+        _push(lines, f"[DEBUG] geo keys={geo_keys}")
+        _push(
+            lines,
+            f"[DEBUG] hole lists: in={_seq_len(geo_obj.get('hole_diams_in'))} "
+            f"mm={_seq_len(geo_obj.get('hole_diams_mm'))}",
+        )
+    except Exception:
+        pass
+
+
 def _parse_dim_to_mm(value: Any) -> float | None:
     """Parse a dimension string containing millimeter units to a float value."""
 
@@ -4125,6 +4158,7 @@ def _compute_drilling_removal_section(
             continue
 
     if not counts_by_diam_raw or sum(int(v) for v in counts_by_diam_raw.values()) == 0:
+        _log_geo_seed_debug(lines, geo_map)
         counts_by_diam_raw = _seed_drill_bins_from_geo(geo_map)
 
     _push(lines, f"[DEBUG] drill_families_from_geo={sum(counts_by_diam_raw.values())}")
@@ -4313,6 +4347,7 @@ def _compute_drilling_removal_section(
 
             # If counts_by_diam_raw is empty/undefined, seed from GEO now
             if not counts_by_diam_raw or sum(int(v) for v in (counts_by_diam_raw or {}).values()) == 0:
+                _log_geo_seed_debug(lines, geo_map)
                 counts_by_diam_raw = _seed_drill_bins_from_geo(geo_map)
 
             raw_total = sum(int(v) for v in (counts_by_diam_raw or {}).values())
