@@ -4430,6 +4430,7 @@ def _compute_drilling_removal_section(
     *,
     breakdown: Mapping[str, Any] | MutableMapping[str, Any],
     rates: Mapping[str, Any] | MutableMapping[str, Any],
+    result: Mapping[str, Any] | None = None,
     drilling_meta_source: Mapping[str, Any] | None,
     drilling_card_detail: Mapping[str, Any] | None,
     drill_machine_minutes_estimate: float,
@@ -10502,6 +10503,7 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
     ) = _compute_drilling_removal_section(
         breakdown=breakdown,
         rates=rates,
+        result=typing.cast(Mapping[str, Any], result) if isinstance(result, _MappingABC) else (result if isinstance(result, Mapping) else None),
         drilling_meta_source=drilling_meta_map,
         drilling_card_detail=drilling_card_detail,
         drill_machine_minutes_estimate=drill_machine_minutes_estimate,
