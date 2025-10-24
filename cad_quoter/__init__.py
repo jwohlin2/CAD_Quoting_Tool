@@ -6,19 +6,47 @@ from pathlib import Path
 from types import ModuleType
 import sys
 
-_TARGET = "cad_quoter_pkg.src.cad_quoter"
+_TARGET = "cad_quoter"
+
+
+def _ensure_src_on_path() -> Path | None:
+    try:
+        repo_root = Path(__file__).resolve().parent.parent
+    except Exception:  # pragma: no cover - defensive bootstrap
+        return None
+
+    src_root = repo_root / "src"
+    if not src_root.is_dir():
+        return None
+
+    src_text = str(src_root)
+    if src_text not in sys.path:
+        sys.path.insert(0, src_text)
+    return src_root
 
 
 def _import_target() -> ModuleType:
     """Load the real :mod:`cad_quoter` package from the vendored source tree."""
 
+    previous = sys.modules.pop(__name__, None)
     try:
         module = import_module(_TARGET)
     except Exception as exc:  # pragma: no cover - defensive bootstrap
+        src_root = _ensure_src_on_path()
+        if src_root is not None:
+            try:
+                module = import_module(_TARGET)
+            except Exception:
+                pass
+            else:
+                return module
         raise ModuleNotFoundError(
-            "The cad_quoter package is not available. Install cad-quoter or keep "
-            "cad_quoter_pkg/src on the import path."
+            "The cad_quoter package is not available. Install cad-quoter or keep src "
+            "on the import path."
         ) from exc
+    finally:
+        if __name__ not in sys.modules and previous is not None:
+            sys.modules[__name__] = previous
     return module
 
 
@@ -56,7 +84,7 @@ try:
 except Exception:  # pragma: no cover - defensive guard for exotic environments
     _EXTRA_PATHS: tuple[Path, ...] = ()
 else:
-    candidate = _repo_root / "cad_quoter_pkg" / "src"
+    candidate = _repo_root / "src"
     _EXTRA_PATHS = (candidate,) if candidate.is_dir() else ()
 
 try:

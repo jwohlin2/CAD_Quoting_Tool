@@ -11,9 +11,7 @@ if str(PROJECT_ROOT) not in sys.path:
 try:  # pragma: no cover - test bootstrap helper
     import cad_quoter.geometry.dxf_enrich  # type: ignore[import-not-found]
 except ModuleNotFoundError:  # pragma: no cover - load shim for tests
-    geometry_dir = (
-        PROJECT_ROOT / "cad_quoter_pkg" / "src" / "cad_quoter" / "geometry"
-    )
+    geometry_dir = PROJECT_ROOT / "src" / "cad_quoter" / "geometry"
 
     for _module_name in ("dxf_text", "dxf_enrich"):
         spec = importlib.util.spec_from_file_location(

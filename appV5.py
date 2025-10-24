@@ -47,7 +47,7 @@ if isinstance(_stdout, TextIOWrapper):
         pass
 
 _SCRIPT_DIR = Path(__file__).resolve().parent
-_PKG_SRC = _SCRIPT_DIR / "cad_quoter_pkg" / "src"
+_PKG_SRC = _SCRIPT_DIR / "src"
 if _PKG_SRC.is_dir():
     _pkg_src_str = str(_PKG_SRC)
     if _pkg_src_str not in sys.path:
