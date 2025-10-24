@@ -6,9 +6,14 @@ report shared by the quoting UI.
 """
 from __future__ import annotations
 
-from collections.abc import Iterable, Mapping, Sequence
+from collections.abc import Iterable, Mapping, MutableMapping, Sequence
 import math
 from typing import Any
+
+from cad_quoter.pricing.feed_math import approach_allowance_for_drill
+
+
+_DRILL_TIME_CONTEXT: dict[str, float] = {}
 
 Number = float | int
 
@@ -49,6 +54,47 @@ def _calc_ipm(rpm: float | None, ipr: Number | None) -> float | None:
     if rpm is None or ipr is None:
         return None
     return rpm * float(ipr)
+
+
+def _drill_time_model(depth_in: float, rpm: float, ipr: float) -> float:
+    """Approximate the per-hole drilling time in minutes.
+
+    The quoting engine exposes the adjusted drilling bins without detailed
+    timing metrics for each diameter.  This helper mirrors the estimator's
+    lightweight model so the rendered report reflects the same assumptions.
+    """
+
+    depth = max(float(depth_in), 0.0)
+    feed = max(float(ipr), 0.0)
+    spindle = max(float(rpm), 0.0)
+    ipm = max(spindle * feed, 1e-6)
+
+    # Approximate the axial distance travelled by the drill. Include a
+    # simplified allowance for the drill point as well as a minor breakthrough
+    # factor so thin parts still accrue reasonable time.
+    dia_equiv = float(_DRILL_TIME_CONTEXT.get("dia", 0.0))
+    if dia_equiv <= 0.0:
+        ld_hint = _DRILL_TIME_CONTEXT.get("ld", 0.0)
+        if ld_hint > 0.0:
+            dia_equiv = depth / ld_hint
+        if dia_equiv <= 0.0:
+            dia_equiv = max(depth / 3.0, 1e-3)
+    point_allowance = approach_allowance_for_drill(dia_equiv, 118.0)
+    axial_depth = depth + point_allowance + 0.1 * dia_equiv
+
+    cut_min = axial_depth / ipm
+
+    # Light peck penalty keeps deep holes from looking artificially fast.
+    ld_ratio = depth / dia_equiv if dia_equiv > 0 else 0.0
+    peck_penalty = 0.07 if ld_ratio >= 3.0 else 0.02
+    peck_min = peck_penalty * depth
+
+    # A simple approach / retract time assuming a mid-range VMC rapid rate.
+    rapid_ipm = 200.0
+    approach = 0.25
+    rapid_min = (2.0 * approach) / rapid_ipm
+
+    return cut_min + peck_min + rapid_min
 
 
 def _aggregate_counts_by_diameter(
@@ -287,6 +333,7 @@ def render_drilling_section(
     block_thickness: Number,
     drill_groups: Sequence[Mapping[str, Any]],
     overheads: Mapping[str, Number],
+    breakdown_mutable: MutableMapping[str, Any] | None = None,
 ) -> str:
     counts_override = _extract_counts_override(drill_groups)
     counts_by_diam = counts_override or _aggregate_counts_by_diameter(drill_groups)
@@ -361,66 +408,63 @@ def render_drilling_section(
     lines.append("------------------------------------------------------------------")
 
     per_hole_sum_min = 0.0
-    rendered_from_counts = False
+    drill_group_lines: list[str] = []
+    total_drill_qty = 0
+    for d in sorted(counts_by_diam.keys()):
+        q = int(counts_by_diam[d])
+        if q <= 0:
+            continue
+        total_drill_qty += q
+        try:
+            depth = float(per_diam_depth.get(d, block_thickness))
+        except (TypeError, ValueError):
+            depth = 2.0
+        ld = (depth / d) if d > 0 else 0.0
+        sfm, ipr = ((39, 0.0020) if ld >= 3.0 else (80, 0.0060))
+        rpm = (sfm * 3.82) / max(d, 0.001)
+        ipm = rpm * ipr
+        _DRILL_TIME_CONTEXT["dia"] = float(d)
+        _DRILL_TIME_CONTEXT["ld"] = float(ld)
+        _DRILL_TIME_CONTEXT["sfm"] = float(sfm)
+        t_hole = _drill_time_model(depth, rpm, ipr)
+        group_minutes = q * t_hole
+        per_hole_sum_min += group_minutes
+        drill_group_lines.append(
+            f'Dia {d:.3f}" × {q}  | depth {depth:.3f}" | {sfm} sfm | '
+            f'{ipr:.4f} ipr | t/hole {t_hole:.2f} min | '
+            f'group {q}×{t_hole:.2f} = {group_minutes:.2f} min'
+        )
 
-    if counts_override:
-        metrics_by_dia = _per_diameter_metrics(drill_groups)
-        for dia in sorted(counts_by_diam.keys()):
-            qty = int(counts_by_diam[dia])
-            if qty <= 0:
-                continue
-            depth = per_diam_depth.get(dia)
-            if depth is None:
-                try:
-                    depth = float(block_thickness)
-                except (TypeError, ValueError):
-                    depth = 0.0
-            depth = float(depth or 0.0)
-            metrics = metrics_by_dia.get(dia, {})
-            sfm_val = metrics.get("sfm")
-            ipr_val = metrics.get("ipr")
-            tph_val = metrics.get("t_per")
-            rpm = _calc_rpm(sfm_val, dia)
-            _ = _calc_ipm(rpm, ipr_val)
-            sfm_str = f"{int(round(sfm_val))}" if sfm_val else "-"
-            ipr_str = f"{float(ipr_val):.4f}" if ipr_val else "-"
-            if tph_val:
-                tph_str = f"{float(tph_val):.2f} min"
-                group_minutes = float(tph_val) * qty
-                group_str = f"{qty}×{float(tph_val):.2f} = {group_minutes:.2f} min"
-                per_hole_sum_min += group_minutes
-            else:
-                tph_str = "—"
-                group_str = f"{qty}×— = —"
-            lines.append(
-                f"Dia {_fmt3(dia)}\" × {qty}  | depth {_fmt3(depth)}\" | "
-                f"{sfm_str} sfm | {ipr_str} ipr | t/hole {tph_str} | group {group_str}"
-            )
-        rendered_from_counts = True
-    else:
+    _DRILL_TIME_CONTEXT.clear()
+
+    if not drill_group_lines:
         for group in drill_groups:
             rpm = _calc_rpm(group.get("sfm"), group.get("dia"))
             ipm = _calc_ipm(rpm, group.get("ipr"))
-            _ = ipm  # maintained for parity with the reference implementation
+            _ = ipm
+            qty_val = int(group.get("qty", 0))
+            total_drill_qty += qty_val
             tph = group.get("t_per_hole_min")
-            group_minutes = (float(tph) * int(group.get("qty", 0))) if tph else None
-            dia_str = _fmt3(group["dia"])
-            depth_str = _fmt3(group.get("depth_in", 0.0))
-            sfm_str = f"{int(group['sfm'])}" if group.get("sfm") else "-"
+            if tph:
+                per_hole_sum_min += float(tph) * qty_val
+            dia = float(group.get("dia") or 0.0)
+            depth = float(group.get("depth_in") or 0.0)
+            sfm_val = group.get("sfm")
             ipr_val = group.get("ipr")
-            ipr_str = f"{float(ipr_val):.4f}" if ipr_val is not None else "-"
             tph_str = f"{float(tph):.2f} min" if tph else "—"
-            if tph and group_minutes is not None:
-                group_str = (
-                    f"{group['qty']}×{float(tph):.2f} = {group_minutes:.2f} min"
-                )
-                per_hole_sum_min += group_minutes
-            else:
-                group_str = f"{group['qty']}×— = —"
-            lines.append(
-                f"Dia {dia_str}\" × {group['qty']}  | depth {depth_str}\" | "
-                f"{sfm_str} sfm | {ipr_str} ipr | t/hole {tph_str} | group {group_str}"
+            group_minutes = (
+                f"{group['qty']}×{float(tph):.2f} = {float(tph) * int(group.get('qty', 0)):.2f} min"
+                if tph
+                else f"{group['qty']}×— = —"
             )
+            drill_group_lines.append(
+                f"Dia {_fmt3(dia)}\" × {group['qty']}  | depth {_fmt3(depth)}\" | "
+                f"{int(float(sfm_val)) if sfm_val else '-'} sfm | "
+                f"{f'{float(ipr_val):.4f}' if ipr_val is not None else '-'} ipr | "
+                f"t/hole {tph_str} | group {group_minutes}"
+            )
+
+    lines.extend(drill_group_lines)
 
     deep_tc = float(overheads["toolchange_deep_min"]) if deep_ct else 0.0
     std_tc = float(overheads["toolchange_std_min"]) if std_ct else 0.0
@@ -431,8 +475,6 @@ def render_drilling_section(
     )
     lines.append("------------------------------------------------------------------")
 
-    if not rendered_from_counts:
-        per_hole_sum_min = _sum_minutes(drill_groups)
     total_with_tc = per_hole_sum_min + deep_tc + std_tc
     lines.append(
         f"Subtotal (per-hole × qty) . {_fmt(per_hole_sum_min, 2)} min  "
@@ -443,6 +485,20 @@ def render_drilling_section(
         f"{_fmt(total_with_tc, 2)} min  ({_fmt(total_with_tc / 60, 2)} hr)"
     )
     lines.append("")
+
+    if isinstance(breakdown_mutable, MutableMapping):
+        try:
+            extra_bucket_ops = breakdown_mutable.setdefault("extra_bucket_ops", {})
+            if isinstance(extra_bucket_ops, MutableMapping):
+                total_qty = total_drill_qty
+                if total_qty <= 0:
+                    total_qty = int(sum(int(v) for v in counts_by_diam.values()))
+                extra_bucket_ops.setdefault("drill", []).append(
+                    {"name": "Drill", "qty": int(total_qty), "side": None}
+                )
+        except Exception:  # pragma: no cover - defensive
+            pass
+
     return "\n".join(lines)
 
 
