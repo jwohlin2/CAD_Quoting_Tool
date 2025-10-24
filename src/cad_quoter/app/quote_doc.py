@@ -17,6 +17,7 @@ from cad_quoter.utils.rendering import (
     format_weight_lb_decimal,
     format_weight_lb_oz,
 )
+from cad_quoter.utils.render_utils import QuoteDoc
 from cad_quoter.utils.scrap import normalize_scrap_pct
 
 from cad_quoter.ui.services import QuoteConfiguration
@@ -647,6 +648,31 @@ def build_material_detail_lines(
     return updates, detail_lines
 
 
+def build_quote_doc_from_result(
+    result: dict,
+    *,
+    currency: str = "$",
+    show_zeros: bool = False,
+    llm_explanation: str = "",
+    page_width: int = 74,
+    cfg: QuoteConfiguration | None = None,
+    geometry: Mapping[str, Any] | None = None,
+) -> QuoteDoc:
+    """Return a :class:`QuoteDoc` using the legacy rendering pipeline."""
+
+    from appV5 import _build_quote_doc_from_result as _legacy_build_quote_doc
+
+    return _legacy_build_quote_doc(
+        result=result,
+        currency=currency,
+        show_zeros=show_zeros,
+        llm_explanation=llm_explanation,
+        page_width=page_width,
+        cfg=cfg,
+        geometry=geometry,
+    )
+
+
 __all__ = [
     "_sanitize_render_text",
     "_wrap_header_text",
@@ -655,5 +681,6 @@ __all__ = [
     "_build_quote_header_lines",
     "build_quote_header_lines",
     "build_material_detail_lines",
+    "build_quote_doc_from_result",
 ]
 
