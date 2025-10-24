@@ -1259,6 +1259,38 @@ def _build_ops_cards_from_chart_lines(
     if not joined_chart and not ops_rows:
         return lines
 
+    # If we don't have rows in geo, try to generate them from the chart lines once
+    try:
+        rows_obj = (((geo_map or {}).get("ops_summary") or {}).get("rows") or [])
+    except Exception:
+        rows_obj = []
+    have_ops_rows = isinstance(rows_obj, list) and len(rows_obj) > 0
+    if (not have_ops_rows) and joined_chart:
+        try:
+            # build normalized rows from lines, then persist to geo.ops_summary
+            fallback_rows = _build_ops_rows_from_lines_fallback(joined_chart)
+        except Exception:
+            fallback_rows = []
+        if fallback_rows:
+            try:
+                update_geo_ops_summary_from_hole_rows(geo_map, fallback_rows)
+            except Exception:
+                pass
+            try:
+                rows_obj = (((geo_map or {}).get("ops_summary") or {}).get("rows") or [])
+            except Exception:
+                rows_obj = []
+            if isinstance(rows_obj, list):
+                ops_rows = []
+                for entry in rows_obj:
+                    if isinstance(entry, _MappingABC):
+                        ops_rows.append(entry)
+            elif isinstance(rows_obj, _MappingABC):
+                ops_rows = []
+                for entry in rows_obj.values():  # type: ignore[assignment]
+                    if isinstance(entry, _MappingABC):
+                        ops_rows.append(entry)
+
     chart_claims = _parse_ops_and_claims(joined_chart)
 
     cb_groups: dict[tuple[float | None, str, float | None], int] = dict(
