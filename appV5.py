@@ -92,6 +92,8 @@ from collections.abc import (
 from dataclasses import dataclass, field, replace
 from fractions import Fraction
 
+_re = re
+
 from cad_quoter.app._value_utils import (
     _format_value,
 )
@@ -4332,6 +4334,107 @@ def _render_time_per_hole(
             f"[removal] drill_total_minutes={extra_map['drill_total_minutes']}"
         )
     return subtotal_minutes, seen_deep, seen_std, drill_groups
+
+
+# ---------- HOLE TABLE: Table Row Reviewer (debug/visibility) ----------
+def _get_geo_map(result: dict | None = None, breakdown: dict | None = None) -> dict:
+    """Best-effort: fetch the nested geo map from result or breakdown."""
+
+    if isinstance(result, dict):
+        g = result.get("geo")
+        if isinstance(g, dict):
+            return g
+    if isinstance(breakdown, dict):
+        g = breakdown.get("geo")
+        if isinstance(g, dict):
+            return g
+    return {}
+
+
+def _ops_rows_from_geo(geo_map: dict | None) -> list[dict]:
+    try:
+        if not isinstance(geo_map, (_MappingABC, dict)):
+            return []
+        ops = geo_map.get("ops_summary") or {}
+        rows = ops.get("rows")
+        return rows if isinstance(rows, list) else []
+    except Exception:
+        return []
+
+
+def _row_side_from_desc(desc: str) -> str:
+    U = (desc or "").upper()
+    if _re.search(r"\bFROM\s+BACK\b", U):
+        return "BACK"
+    if _re.search(r"FRONT\s*&\s*BACK", U) or _re.search(r"BOTH\s+SIDES", U):
+        return "FRONT+BACK"
+    if _re.search(r"\bFROM\s+FRONT\b", U):
+        return "FRONT"
+    return "-"  # unknown/not specified
+
+
+def _sum_qty(rows: list[dict]) -> int:
+    s = 0
+    for r in rows:
+        try:
+            s += int(float(r.get("qty") or 0))
+        except Exception:
+            pass
+    return s
+
+
+def _render_table_row_reviewer(
+    *, result: dict | None, breakdown: dict | None, max_rows: int = 10
+) -> list[str]:
+    """Emit a debug card showing what's inside geo.ops_summary.rows (or why it's empty)."""
+
+    geo = _get_geo_map(result, breakdown)
+    lines: list[str] = []
+    rows = _ops_rows_from_geo(geo)
+    lines.append("TABLE ROW REVIEW – HOLE TABLE (ops rows)")
+    lines.append("=" * 66)
+    if rows:
+        qty_sum = _sum_qty(rows)
+        lines.append(f"rows ............... {len(rows)}")
+        lines.append(f"qty sum (QTY col) .. {qty_sum}")
+        lines.append("")
+        lines.append("First rows")
+        lines.append("-" * 66)
+        for i, r in enumerate(rows[:max_rows]):
+            hole = (r.get("hole") or r.get("id") or "").strip()
+            ref = (r.get("ref") or "").strip()
+            try:
+                qty = int(float(r.get("qty") or 0))
+            except Exception:
+                qty = r.get("qty")
+            desc = (r.get("desc") or "").strip()
+            side = _row_side_from_desc(desc)
+            lines.append(
+                f"[{i:02}] {hole:>2} | QTY={qty} | REF={ref} | SIDE={side} | {desc}"
+            )
+        lines.append("")
+    else:
+        # No rows: show why (keys present, any families, provenance)
+        ops = geo.get("ops_summary") if isinstance(geo, dict) else None
+        prov = (geo.get("provenance", {}) or {}).get("holes") if isinstance(geo, dict) else None
+        lines.append("rows ............... 0  (no ops_summary.rows found)")
+        if isinstance(ops, dict):
+            lines.append("ops_summary keys ... " + ", ".join(sorted(ops.keys())))
+        else:
+            lines.append("ops_summary ........ (missing)")
+        fam = geo.get("hole_diam_families_in") if isinstance(geo, dict) else None
+        if isinstance(fam, dict) and fam:
+            lines.append(
+                "families (table/geom) count ...... "
+                f"{len(fam)} (sum={_sum_qty([{'qty': v} for v in fam.values()])})"
+            )
+        if prov:
+            lines.append(f"provenance.holes .... {prov}")
+        # If you stash chart lines in geo, show how many
+        ch = geo.get("chart_lines") if isinstance(geo, dict) else None
+        if isinstance(ch, list):
+            lines.append(f"chart_lines ......... {len(ch)}")
+    return lines
 
 
 _thread_tpi = re.compile(r"#?\s*\d{1,2}\s*-\s*(\d+)", re.I)
