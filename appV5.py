@@ -13341,9 +13341,7 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
     counts_by_diam_final = locals().get("counts_by_diam")
     if not isinstance(counts_by_diam_final, (_MappingABC, dict)):
         counts_by_diam_final = {}
-    def _audit_tallies(
-        extra_ops: _MappingABC[str, Any] | None, derived: _MappingABC[str, Any] | None
-    ) -> dict[str, int]:
+    def _audit_tallies(breakdown_or_mut: _MappingABC[str, Any] | None) -> dict[str, int]:
         tallies: dict[str, int] = {
             "drill": 0,
             "tap": 0,
@@ -13352,36 +13350,52 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
             "jig-grind": 0,
             "spot": 0,
         }
-        for bucket, entries in (extra_ops or {}).items():
+        if isinstance(breakdown_or_mut, (_MappingABC, dict)):
+            source = breakdown_or_mut
+        else:
+            source = {}
+
+        if isinstance(source, (_MappingABC, dict)):
+            xbo = source.get("extra_bucket_ops")
+        else:
+            xbo = None
+        if isinstance(xbo, (_MappingABC, dict)):
+            iterator = xbo.items()
+        else:
+            iterator = []
+        for bucket, entries in iterator:
             if bucket in tallies:
                 for entry in entries or []:
-                    if isinstance(entry, _MappingABC):
-                        try:
-                            tallies[bucket] += int(entry.get("qty") or 0)
-                        except Exception:
-                            continue
-        try:
-            if derived and "drill_total" in derived:
-                tallies["drill"] = int(derived["drill_total"])
-        except Exception:
-            pass
+                    try:
+                        if isinstance(entry, _MappingABC):
+                            qty_value = entry.get("qty")
+                        else:
+                            qty_value = getattr(entry, "qty", None)
+                        tallies[bucket] += int(qty_value or 0)
+                    except Exception:
+                        pass
+
+        if isinstance(source, (_MappingABC, dict)):
+            dop = source.get("derived_ops")
+        else:
+            dop = None
+        if isinstance(dop, (_MappingABC, dict)):
+            try:
+                tallies["drill"] = int(dop.get("drill_total") or tallies["drill"])
+            except Exception:
+                pass
+
         return tallies
 
-    derived_ops_candidate = (
-        breakdown.get("derived_ops") if isinstance(breakdown, _MappingABC) else None
-    )
-    derived_ops = (
-        derived_ops_candidate if isinstance(derived_ops_candidate, _MappingABC) else None
-    )
-    extra_ops_candidate = (
-        breakdown_mutable.get("extra_bucket_ops")
-        if isinstance(breakdown_mutable, _MappingABC)
-        else None
-    )
-    extra_ops = (
-        extra_ops_candidate if isinstance(extra_ops_candidate, _MappingABC) else None
-    )
-    _tallies = _audit_tallies(extra_ops, derived_ops)
+    breakdown_for_audit: Any
+    if isinstance(breakdown_mutable, (_MappingABC, dict)) and breakdown_mutable:
+        breakdown_for_audit = breakdown_mutable
+    elif isinstance(breakdown, (_MappingABC, dict)):
+        breakdown_for_audit = breakdown
+    else:
+        breakdown_for_audit = None
+
+    _tallies = _audit_tallies(breakdown_for_audit)
     _push(
         lines,
         f"[DEBUG] OPS TALLY (final) {', '.join(f'{k}={v}' for k, v in _tallies.items())}",
