@@ -43,7 +43,7 @@ _TAP_RE = re.compile(
     r"\b(?:#?\d+[- ]\d+|[1-9]/\d+-\d+|M\d+(?:[.\s×xX]\d+)?|[\d/]+-NPT|N\.?P\.?T\.?)\s*TAP\b",
     re.I,
 )
-_DRILL_THRU = re.compile(r"\bDRILL\s+THRU\b", re.I)
+_DRILL_THRU = re.compile(r"\bDRILL(?:[-\s]+)THRU\b", re.I)
 _SIZE_INCH_RE = re.compile(r"\((\d+(?:\.\d+)?|\.\d+)\)")
 _LETTER_RE = re.compile(r"\b([A-Z])\b")
 
