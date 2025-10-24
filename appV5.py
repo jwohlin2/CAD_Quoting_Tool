@@ -138,7 +138,12 @@ def aggregate_ops_from_rows(rows: list[dict]) -> dict:
             totals["tap"] += qty
             totals["drill"] += qty
 
-        if "CBORE" in U or "C'BORE" in U or "COUNTER BORE" in U:
+        if (
+            "CBORE" in U
+            or "C'BORE" in U
+            or "COUNTERBORE" in U
+            or "COUNTER BORE" in U
+        ):
             if side == "BACK":
                 totals["counterbore_back"] += qty
             elif side == "BOTH":
