@@ -56,6 +56,7 @@ if _PKG_SRC.is_dir():
 from cad_quoter.app.quote_doc import (
     build_material_detail_lines,
     build_quote_header_lines,
+    build_quote_doc_from_result,
     _sanitize_render_text,
 )
 from cad_quoter.pricing.machining_report import _drill_time_model
@@ -1012,6 +1013,7 @@ from cad_quoter.utils.scrap import (
 )
 if TYPE_CHECKING:
     from cad_quoter.utils.render_utils import (
+        QuoteDoc,
         QuoteDocRecorder as _QuoteDocRecorder,
         fmt_hours as _fmt_hours,
         fmt_money as _fmt_money,
@@ -8699,7 +8701,7 @@ class PlannerBucketCost(TypedDict):
 
 # ---------- Bucket & Operation Roles ----------
 @no_type_check
-def render_quote(  # type: ignore[reportGeneralTypeIssues]
+def _build_quote_doc_from_result(  # type: ignore[reportGeneralTypeIssues]
     result: dict,
     currency: str = "$",
     show_zeros: bool = False,
@@ -8707,8 +8709,8 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
     page_width: int = 74,
     cfg: QuoteConfiguration | None = None,
     geometry: Mapping[str, Any] | None = None,
-) -> str:
-    """Pretty printer for a full quote with auto-included non-zero lines."""
+) -> QuoteDoc:
+    """Build a :class:`QuoteDoc` for a full quote with auto-included non-zero lines."""
 
     overrides = (
         ("prefer_removal_drilling_hours", True),
@@ -16252,12 +16254,39 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
         breakdown.setdefault("render_payload", render_payload)
 
     doc = doc_builder.build_doc()
+
+    return doc
+
+
+def render_quote(  # type: ignore[reportGeneralTypeIssues]
+    result: dict,
+    currency: str = "$",
+    show_zeros: bool = False,
+    llm_explanation: str = "",
+    page_width: int = 74,
+    cfg: QuoteConfiguration | None = None,
+    geometry: Mapping[str, Any] | None = None,
+) -> str:
+    """Render the quote text using :func:`build_quote_doc_from_result`."""
+
+    doc = build_quote_doc_from_result(
+        result=result,
+        currency=currency,
+        show_zeros=show_zeros,
+        llm_explanation=llm_explanation,
+        page_width=page_width,
+        cfg=cfg,
+        geometry=geometry,
+    )
+    divider = "-" * int(page_width)
     text = render_quote_doc(doc, divider=divider)
 
     # ASCII-sanitize output to avoid mojibake like '×' on some Windows setups
     text = _sanitize_render_text(text)
 
     return text
+
+
 # ===== QUOTE CONFIG (edit-friendly) ==========================================
 CONFIG_INIT_ERRORS: list[str] = []
 
