@@ -4261,8 +4261,13 @@ def _compute_drilling_removal_section(
                 counts_source = counts_by_diam_raw
 
             # --- DRILL BIN SEEDING (place before adjust) ---
+            try:
+                result_map = result if isinstance(result, dict) else None  # type: ignore[name-defined]
+            except NameError:
+                result_map = None
+
             geo_map = (
-                ((result or {}).get("geo") if isinstance(result, dict) else None)
+                ((result_map or {}).get("geo") if isinstance(result_map, dict) else None)
                 or ((breakdown or {}).get("geo") if isinstance(breakdown, dict) else None)
                 or {}
             )
