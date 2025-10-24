@@ -7,3 +7,14 @@ latest_quote_simplified.txt
 
 # Log files
 *.log
+
+# Python caches and bytecode
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# Generated debug artifacts
+_dump.py
+GEO.txt
+latest_quote_error.txt
