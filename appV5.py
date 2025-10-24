@@ -54,6 +54,7 @@ if _PKG_SRC.is_dir():
         sys.path.insert(0, _pkg_src_str)
 
 from cad_quoter.app.quote_doc import (
+    build_material_detail_lines,
     build_quote_header_lines,
     _sanitize_render_text,
 )
@@ -8864,33 +8865,6 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
         pad = max(2, total - len(left) - len(right))
         return f"{left}{' ' * pad}{right}"
 
-    def _scrap_source_hint(material_info: Mapping[str, Any] | None) -> str | None:
-        if not isinstance(material_info, _MappingABC):
-            return None
-
-        scrap_from_holes_raw = material_info.get("scrap_pct_from_holes")
-        scrap_from_holes_val = _coerce_float_or_none(scrap_from_holes_raw)
-        scrap_from_holes = False
-        if scrap_from_holes_val is not None and scrap_from_holes_val > 1e-6:
-            scrap_from_holes = True
-        elif isinstance(scrap_from_holes_raw, bool):
-            scrap_from_holes = scrap_from_holes_raw
-        if scrap_from_holes:
-            return "holes"
-
-        label_raw = material_info.get("scrap_source_label")
-        if label_raw in (None, ""):
-            return None
-
-        label_text = str(label_raw).strip()
-        if not label_text:
-            return None
-
-        label_text = label_text.replace("+", " + ")
-        label_text = label_text.replace("_", " ")
-        label_text = " ".join(label_text.split())
-        return label_text or None
-
     def _is_truthy_flag(value) -> bool:
         """Return True only for explicit truthy values.
 
@@ -10731,263 +10705,33 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
                         breakdown["material"] = {"total_material_cost": float(total_material_cost)}
                 except Exception:
                     pass
-            net_mass_val = _coerce_float_or_none(net_mass_g)
-            effective_mass_source = material.get("effective_mass_g")
-            effective_mass_val = _coerce_float_or_none(effective_mass_source)
-            prefer_pct_for_scrap = effective_mass_val is not None
-            if effective_mass_val is None:
-                effective_mass_val = _coerce_float_or_none(mass_g)
-            removal_mass_val = None
-            for removal_key in ("material_removed_mass_g", "material_removed_mass_g_est"):
-                removal_mass_val = _coerce_float_or_none(material.get(removal_key))
-                if removal_mass_val:
-                    break
-            scrap_fraction_val = normalize_scrap_pct(scrap)
-            if scrap_fraction_val <= 0:
-                scrap_fraction_val = None
-            base_mass_for_scrap = None
-            if net_mass_val and net_mass_val > 0:
-                base_mass_for_scrap = float(net_mass_val)
-            elif effective_mass_val and effective_mass_val > 0:
-                base_mass_for_scrap = float(effective_mass_val)
-            scrap_adjusted_mass_val: float | None = None
-            if base_mass_for_scrap:
-                if removal_mass_val and removal_mass_val > 0:
-                    scrap_adjusted_mass_val = max(0.0, base_mass_for_scrap - float(removal_mass_val))
-                elif scrap_fraction_val is not None:
-                    scrap_adjusted_mass_val = max(0.0, base_mass_for_scrap * (1.0 - scrap_fraction_val))
-                elif (
-                    effective_mass_val is not None
-                    and net_mass_val is not None
-                ):
-                    diff_mass = abs(float(effective_mass_val) - float(net_mass_val))
-                    base_candidate = max(float(effective_mass_val), float(net_mass_val))
-                    scrap_adjusted_mass_val = max(0.0, base_candidate - diff_mass)
-            starting_mass_val = _coerce_float_or_none(material.get("mass_g"))
-            if starting_mass_val is None:
-                starting_mass_val = _coerce_float_or_none(
-                    material.get("effective_mass_g")
-                )
-            if starting_mass_val is None:
-                starting_mass_val = effective_mass_val
-            if (
-                net_mass_val is None
-                and removal_mass_val is not None
-                and removal_mass_val >= 0
-            ):
-                base_for_net = starting_mass_val
-                if base_for_net is None:
-                    base_for_net = effective_mass_val
-                if base_for_net is not None:
-                    net_mass_val = max(0.0, float(base_for_net) - float(removal_mass_val))
-            if net_mass_val is None:
-                net_mass_val = effective_mass_val
-            show_mass_line = (
-                (net_mass_val and net_mass_val > 0)
-                or (effective_mass_val and effective_mass_val > 0)
-                or show_zeros
+            scrap_context = {
+                "scrap_pct": scrap,
+                "scrap_credit_entered": scrap_credit_entered,
+                "scrap_credit": scrap_credit,
+                "scrap_credit_unit_price_usd_per_lb": material.get(
+                    "scrap_credit_unit_price_usd_per_lb"
+                ),
+                "price_source": price_source,
+                "price_asof": price_asof,
+                "supplier_min_charge": minchg,
+            }
+            material_updates, helper_detail_lines = build_material_detail_lines(
+                material,
+                scrap_context=scrap_context,
+                currency=currency,
+                show_zeros=show_zeros,
+                show_material_shipping=show_material_shipping,
+                shipping_total=shipping_total,
+                shipping_source=shipping_source,
             )
-            if show_mass_line:
-                net_display = _format_weight_lb_decimal(net_mass_val)
-                mass_desc: list[str] = [f"{net_display} net"]
-                scrap_desc_mass = scrap_adjusted_mass_val
-                if scrap_desc_mass is None:
-                    scrap_desc_mass = effective_mass_val
-                if (
-                    scrap_desc_mass is not None
-                    and (
-                        not net_mass_val
-                        or abs(float(scrap_desc_mass) - float(net_mass_val)) > 0.05
-                    )
-                ):
-                    mass_desc.append(
-                        f"scrap-adjusted {_format_weight_lb_decimal(scrap_desc_mass)}"
-                    )
-                elif effective_mass_val and not net_mass_val:
-                    mass_desc.append(
-                        f"scrap-adjusted {_format_weight_lb_decimal(effective_mass_val)}"
-                    )
-
-            scrap_mass_val = _compute_scrap_mass_g(
-                removal_mass_g_est=material.get("material_removed_mass_g_est"),
-                scrap_pct_raw=scrap,
-                effective_mass_g=effective_mass_val,
-                net_mass_g=net_mass_val,
-                prefer_pct=prefer_pct_for_scrap,
-            )
-
-            if scrap_mass_val is not None:
-                scrap_credit_mass_lb = float(scrap_mass_val) / 1000.0 * LB_PER_KG
-                material_detail_for_breakdown["scrap_credit_mass_lb"] = (
-                    scrap_credit_mass_lb
-                )
-            else:
-                scrap_credit_mass_lb = None
-                material_detail_for_breakdown.pop("scrap_credit_mass_lb", None)
-
-            weight_lines: list[str] = []
-            if (starting_mass_val and starting_mass_val > 0) or show_zeros:
-                weight_lines.append(
-                    f"  Starting Weight: {_format_weight_lb_oz(starting_mass_val)}"
-                )
-            if (net_mass_val and net_mass_val > 0) or show_zeros:
-                weight_lines.append(
-                    f"  Net Weight: {_format_weight_lb_oz(net_mass_val)}"
-                )
-            if scrap_mass_val is not None:
-                if scrap_mass_val > 0 or show_zeros:
-                    weight_lines.append(
-                        f"  Scrap Weight: {_format_weight_lb_oz(scrap_mass_val)}"
-                    )
-            elif show_zeros:
-                weight_lines.append("  Scrap Weight: 0 oz")
-            computed_scrap_fraction: float | None = None
-            if (
-                starting_mass_val is not None
-                and starting_mass_val > 0
-                and scrap_mass_val is not None
-            ):
-                try:
-                    start_mass = float(starting_mass_val)
-                    scrap_mass = max(0.0, float(scrap_mass_val))
-                except Exception:
-                    start_mass = 0.0
-                    scrap_mass = 0.0
-                if start_mass > 0:
-                    computed_scrap_fraction = scrap_mass / start_mass
-
-            if scrap is not None or computed_scrap_fraction is not None:
-                scrap_hint_text = _scrap_source_hint(material)
-                if computed_scrap_fraction is not None:
-                    scrap_line = (
-                        f"  Scrap Percentage: {_pct(computed_scrap_fraction)} (computed)"
-                    )
-                    if scrap_hint_text and scrap_fraction_val is None:
-                        scrap_line += f" ({scrap_hint_text})"
-                    weight_lines.append(scrap_line)
-                elif scrap is not None:
-                    scrap_line = f"  Scrap Percentage: {_pct(scrap)}"
-                    if scrap_hint_text:
-                        scrap_line += f" ({scrap_hint_text})"
-                    weight_lines.append(scrap_line)
-
-                if scrap_fraction_val is not None:
-                    geometry_line = (
-                        f"  Scrap % (geometry hint): {_pct(scrap_fraction_val)}"
-                    )
-                    if scrap_hint_text:
-                        geometry_line += f" ({scrap_hint_text})"
-                    weight_lines.append(geometry_line)
-            # Historically the renderer would emit an extra weight-only line here when
-            # ``scrap_adjusted_mass`` was available.  The value was the computed "with
-            # scrap" mass, but because it lacked a label it rendered as a stray line like
-            # ``9 lb 6.4 oz`` in the middle of the material section.  That formatting is
-            # confusing and does not provide any additional context to the reader, so we
-            # intentionally skip adding that line.  The net, starting, and scrap weights
-            # already convey the information a customer needs.
-
-            detail_lines.extend(weight_lines)
-            scrap_credit_lines: list[str] = []
-            if scrap_credit_entered and scrap_credit:
-                credit_display = _m(scrap_credit)
-                if credit_display.startswith(currency):
-                    credit_display = f"-{credit_display}"
-                else:
-                    credit_display = f"-{fmt_money(scrap_credit, currency)}"
-                scrap_credit_lines.append(f"  Scrap Credit: {credit_display}")
-                scrap_credit_unit_price_lb = _coerce_float_or_none(
-                    material.get("scrap_credit_unit_price_usd_per_lb")
-                )
-                if (
-                    scrap_credit_mass_lb is not None
-                    and scrap_credit_unit_price_lb is not None
-                ):
-                    scrap_credit_lines.append(
-                        "    based on "
-                        f"{_format_weight_lb_oz(scrap_mass_val)} × {fmt_money(scrap_credit_unit_price_lb, currency)} / lb"
-                    )
-            if scrap_credit_lines:
-                detail_lines.extend(scrap_credit_lines)
-
-            shipping_tax_lines: list[str] = []
-            base_cost_before_scrap = _coerce_float_or_none(
-                material.get("material_cost_before_credit")
-            )
-            if base_cost_before_scrap is None:
-                net_mass_for_base = _coerce_float_or_none(net_mass_val)
-                if net_mass_for_base is None:
-                    net_mass_for_base = _coerce_float_or_none(
-                        material.get("net_mass_g")
-                    )
-                if net_mass_for_base is not None and net_mass_for_base > 0:
-                    per_lb_value = _coerce_float_or_none(
-                        material.get("unit_price_usd_per_lb")
-                    )
-                    if per_lb_value is None:
-                        per_g_value = _coerce_float_or_none(
-                            material.get("unit_price_per_g")
-                        )
-                        if per_g_value is not None:
-                            per_lb_value = per_g_value * (1000.0 / LB_PER_KG)
-                    if per_lb_value is not None:
-                        base_cost_before_scrap = (
-                            float(net_mass_for_base) / 1000.0 * LB_PER_KG
-                        ) * float(per_lb_value)
-
-            if base_cost_before_scrap is not None or show_zeros:
-                base_val = float(base_cost_before_scrap or 0.0)
-                if show_material_shipping and (shipping_total > 0 or show_zeros):
-                    if shipping_source:
-                        shipping_display = shipping_total
+            if isinstance(material_detail_for_breakdown, _MutableMappingABC):
+                for key, value in material_updates.items():
+                    if value is None:
+                        material_detail_for_breakdown.pop(key, None)
                     else:
-                        shipping_display = base_val * 0.15
-                    shipping_tax_lines.append(f"  Shipping: {_m(shipping_display)}")
-                tax_cost = base_val * 0.065
-                if tax_cost > 0 or show_zeros:
-                    shipping_tax_lines.append(f"  Material Tax: {_m(tax_cost)}")
-
-            if shipping_tax_lines:
-                detail_lines.extend(shipping_tax_lines)
-
-            if upg or unit_price_kg or unit_price_lb or show_zeros:
-                grams_per_lb = 1000.0 / LB_PER_KG
-                per_lb_value = _coerce_float_or_none(unit_price_lb)
-                if per_lb_value is None:
-                    per_kg_value = _coerce_float_or_none(unit_price_kg)
-                    if per_kg_value is not None:
-                        per_lb_value = per_kg_value / LB_PER_KG
-                if per_lb_value is None:
-                    per_g_value = _coerce_float_or_none(upg)
-                    if per_g_value is not None:
-                        per_lb_value = per_g_value * grams_per_lb
-                if per_lb_value is None and show_zeros:
-                    per_lb_value = 0.0
-
-                if per_lb_value is not None:
-                    display_line = f"{_m(per_lb_value)} / lb"
-                    extras: list[str] = []
-                    if price_asof:
-                        extras.append(f"as of {price_asof}")
-                    extra = f" ({', '.join(extras)})" if extras else ""
-                    price_lines = [f"  Material Price: {display_line}{extra}"]
-                else:
-                    price_lines = []
-            else:
-                price_lines = []
-            if price_source:
-                price_lines.append(f"  Source: {price_source}")
-            if minchg or show_zeros:
-                price_lines.append(f"  Supplier Min Charge: {_m(minchg or 0)}")
-            if price_lines:
-                last_line = detail_lines[-1] if detail_lines else ""
-                if (
-                    detail_lines
-                    and last_line != ""
-                    and not last_line.lstrip().startswith("Scrap Credit:")
-                    and not last_line.lstrip().startswith("based on ")
-                ):
-                    detail_lines.append("")
-                detail_lines.extend(price_lines)
+                        material_detail_for_breakdown[key] = value
+            detail_lines.extend(helper_detail_lines)
             def _coerce_dims(candidate: Any) -> tuple[float, float, float] | None:
                 if isinstance(candidate, (list, tuple)) and len(candidate) >= 3:
                     try:
