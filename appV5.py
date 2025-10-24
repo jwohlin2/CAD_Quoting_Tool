@@ -1253,8 +1253,8 @@ def _build_ops_cards_from_chart_lines(
 
     cb_groups: dict[tuple[float | None, str, float | None], int] = {}
     # 3a) Try to build cbore groups from ops rows (best source: table rows)
-    if isinstance(rows_obj, list) and rows_obj:
-        for entry in rows_obj:
+    if ops_rows:
+        for entry in ops_rows:
             if not isinstance(entry, _MappingABC):
                 continue
             try:
