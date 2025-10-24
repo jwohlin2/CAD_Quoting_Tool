@@ -1026,6 +1026,26 @@ _NPT_PILOT_IN: dict[str, float] = {
 }
 
 
+def _count_counterdrill_from_chart(cleaned: list[str]) -> int:
+    tot = 0
+    for s in (cleaned or []):
+        if _CENTER_OR_SPOT_RE.search(s):  # exclude “spot”
+            continue
+        if _COUNTERDRILL_RE.search(s):
+            m = re.match(r"\s*\((\d+)\)", s)
+            tot += int(m.group(1)) if m else 1
+    return tot
+
+
+def _count_jig_from_chart(cleaned: list[str]) -> int:
+    tot = 0
+    for s in (cleaned or []):
+        if re.search(r"\bJIG\s*GRIND\b", str(s), re.IGNORECASE):
+            m = re.match(r"\s*\((\d+)\)", s)
+            tot += int(m.group(1)) if m else 1
+    return tot
+
+
 def _collect_pilot_claims(
     geo_map: dict,
     *,
@@ -1159,45 +1179,27 @@ def _record_drill_claims(
 
 
 def _count_counterdrill(lines_joined: Sequence[str] | None) -> int:
-    total = 0
+    cleaned: list[str] = []
     for raw in lines_joined or []:
         if raw is None:
             continue
         text = str(raw)
         if not text.strip():
             continue
-        if _CENTER_OR_SPOT_RE.search(text):  # exclude “spot” rows
-            continue
-        if _COUNTERDRILL_RE.search(text):
-            match = re.match(r"\s*\((\d+)\)", text)
-            if match:
-                try:
-                    total += int(match.group(1))
-                    continue
-                except Exception:
-                    pass
-            total += 1
-    return total
+        cleaned.append(text)
+    return _count_counterdrill_from_chart(cleaned)
 
 
 def _count_jig(lines_joined: Sequence[str] | None) -> int:
-    total = 0
+    cleaned: list[str] = []
     for raw in lines_joined or []:
         if raw is None:
             continue
         text = str(raw)
         if not text.strip():
             continue
-        if re.search(r"\bJIG\s*GRIND\b", text, re.IGNORECASE):
-            match = re.match(r"\s*\((\d+)\)", text)
-            if match:
-                try:
-                    total += int(match.group(1))
-                    continue
-                except Exception:
-                    pass
-            total += 1
-    return total
+        cleaned.append(text)
+    return _count_jig_from_chart(cleaned)
 
 
 def _parse_ops_and_claims(joined_lines: Sequence[str] | None) -> dict[str, Any]:
@@ -12319,9 +12321,67 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
                     if cleaned_line:
                         cleaned_chart_lines.append(cleaned_line)
 
+                _ctrill = _count_counterdrill_from_chart(cleaned_chart_lines)
+                _jig = _count_jig_from_chart(cleaned_chart_lines)
+
+                extra_bucket_ops_for_chart: MutableMapping[str, Any] | None = None
+                if isinstance(breakdown_mutable, (_MutableMappingABC, dict)):
+                    try:
+                        extra_bucket_ops_for_chart = typing.cast(
+                            MutableMapping[str, Any],
+                            breakdown_mutable.setdefault("extra_bucket_ops", {}),
+                        )
+                    except Exception:
+                        extra_bucket_ops_for_chart = None
+
+                if isinstance(extra_bucket_ops_for_chart, (_MutableMappingABC, dict)):
+                    try:
+                        if _ctrill > 0:
+                            entries = extra_bucket_ops_for_chart.setdefault(
+                                "counterdrill", []
+                            )
+                            if not isinstance(entries, list):
+                                try:
+                                    entries = list(entries)  # type: ignore[arg-type]
+                                except Exception:
+                                    entries = []
+                                extra_bucket_ops_for_chart["counterdrill"] = entries
+                            payload = {"name": "Counterdrill", "qty": int(_ctrill), "side": "front"}
+                            if not any(
+                                isinstance(existing, Mapping)
+                                and existing.get("name") == payload["name"]
+                                and existing.get("qty") == payload["qty"]
+                                and existing.get("side") == payload["side"]
+                                for existing in entries
+                            ):
+                                entries.append(payload)
+                        if _jig > 0:
+                            entries = extra_bucket_ops_for_chart.setdefault(
+                                "jig-grind", []
+                            )
+                            if not isinstance(entries, list):
+                                try:
+                                    entries = list(entries)  # type: ignore[arg-type]
+                                except Exception:
+                                    entries = []
+                                extra_bucket_ops_for_chart["jig-grind"] = entries
+                            payload = {"name": "Jig-grind", "qty": int(_jig), "side": None}
+                            if not any(
+                                isinstance(existing, Mapping)
+                                and existing.get("name") == payload["name"]
+                                and existing.get("qty") == payload["qty"]
+                                and existing.get("side") == payload["side"]
+                                for existing in entries
+                            ):
+                                entries.append(payload)
+                    except Exception:
+                        pass
+
+                _push(lines, f"[DEBUG] counterdrill={_ctrill} jig={_jig}")
+
                 joined_early = _join_wrapped_chart_lines(cleaned_chart_lines)
-                counterdrill_qty = _count_counterdrill(joined_early)
-                jig_qty = _count_jig(joined_early)
+                counterdrill_qty = max(_count_counterdrill(joined_early), _ctrill)
+                jig_qty = max(_count_jig(joined_early), _jig)
                 built = _build_ops_rows_from_lines_fallback(joined_early)
                 _push(
                     lines,
