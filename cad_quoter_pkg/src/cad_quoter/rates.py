@@ -514,6 +514,17 @@ def prepare_render_rates(
     base_defaults = ensure_two_bucket_defaults(default_two_bucket or {})
     fallback_flat = two_bucket_to_flat(base_defaults)
 
+    programmer_floor = max(
+        _positive_float(fallback_flat.get("ProgrammerRate")),
+        _positive_float(fallback_flat.get("ProgrammingRate")),
+        _positive_float(fallback_flat.get("Programmer")),
+    )
+    inspection_floor = max(
+        _positive_float(fallback_flat.get("InspectorRate")),
+        _positive_float(fallback_flat.get("InspectionRate")),
+        _positive_float(fallback_flat.get("Inspector")),
+    )
+
     if isinstance(default_flat, Mapping):
         for key, value in default_flat.items():
             candidate = _positive_float(value)
@@ -580,6 +591,10 @@ def prepare_render_rates(
     programmer_value = _positive_float(prepared_flat.get("ProgrammerRate"))
     if programmer_value <= 0.0:
         programmer_value = _positive_float(prepared_flat.get("ProgrammingRate"))
+    if programmer_value <= 0.0 and programmer_floor > 0.0:
+        programmer_value = programmer_floor
+    if programmer_floor > 0.0 and programmer_value > 0.0:
+        programmer_value = max(programmer_value, programmer_floor)
     if programmer_value > 0.0:
         prepared_flat["ProgrammerRate"] = programmer_value
         prepared_flat["ProgrammingRate"] = programmer_value
@@ -587,6 +602,10 @@ def prepare_render_rates(
     inspection_value = _positive_float(prepared_flat.get("InspectorRate"))
     if inspection_value <= 0.0:
         inspection_value = _positive_float(prepared_flat.get("InspectionRate"))
+    if inspection_value <= 0.0 and inspection_floor > 0.0:
+        inspection_value = inspection_floor
+    if inspection_floor > 0.0 and inspection_value > 0.0:
+        inspection_value = max(inspection_value, inspection_floor)
     if inspection_value > 0.0:
         prepared_flat["InspectorRate"] = inspection_value
         prepared_flat["InspectionRate"] = inspection_value
