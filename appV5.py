@@ -4098,6 +4098,7 @@ from cad_quoter.utils.render_utils.tables import (
 from cad_quoter.app.planner_helpers import _process_plan_job
 from cad_quoter.app.env_flags import FORCE_PLANNER
 from cad_quoter.app.planner_adapter import resolve_planner, resolve_pricing_source_value
+from cad_quoter.app.planner_support import apply_planner_result
 
 from cad_quoter.resources.loading import load_json, load_text
 
@@ -16847,8 +16848,6 @@ def compute_quote_from_df(  # type: ignore[reportGeneralTypeIssues]
     amortized_programming = 0.0
     amortized_fixture = 0.0
     planner_exception: Exception | None = None
-    recognized_line_items = 0
-    use_planner = False
     fallback_reason = ""
     if family:
         if callable(_process_plan_job):
@@ -16871,230 +16870,6 @@ def compute_quote_from_df(  # type: ignore[reportGeneralTypeIssues]
             pricing = {}
 
         planner_result.update(pricing if isinstance(pricing, dict) else {})
-        recognized_line_items = _recognized_line_items_from_planner(planner_result)
-        if (
-            "recognized_line_items" not in planner_result
-            and recognized_line_items > 0
-        ):
-            planner_result["recognized_line_items"] = recognized_line_items
-
-        if planner_result:
-            breakdown["process_plan_pricing"] = planner_result
-            baseline["process_plan_pricing"] = planner_result
-            process_plan_summary["pricing"] = planner_result
-            if isinstance(breakdown, _MutableMappingABC):
-                breakdown["pricing_source"] = "Planner"
-
-        if planner_exception is None and recognized_line_items > 0:
-            use_planner = True
-        else:
-            fallback_reason = (
-                "Planner pricing failed; using legacy fallback"
-                if planner_exception is not None
-                else "Planner recognized no operations; using legacy fallback"
-            )
-
-    if use_planner:
-        totals = (
-            planner_result.get("totals", {})
-            if isinstance(planner_result.get("totals"), _MappingABC)
-            else {}
-        )
-        machine_cost = float(_coerce_float_or_none(totals.get("machine_cost")) or 0.0)
-        labor_cost_total = float(_coerce_float_or_none(totals.get("labor_cost")) or 0.0)
-        total_minutes = float(_coerce_float_or_none(totals.get("minutes")) or 0.0)
-
-        line_items = planner_result.get("line_items")
-        if isinstance(line_items, Sequence):
-            for item in line_items:
-                if not isinstance(item, _MappingABC):
-                    continue
-                raw_label = item.get("op") or item.get("name") or ""
-                canonical_label, is_amortized = _canonical_amortized_label(raw_label)
-                normalized_label = str(canonical_label or raw_label or "").strip().lower()
-                if not is_amortized:
-                    if any(
-                        token in normalized_label
-                        for token in ("per part", "per pc", "per piece")
-                    ):
-                        is_amortized = True
-                if not is_amortized:
-                    continue
-                if not normalized_label:
-                    continue
-                labor_amount = _coerce_float_or_none(item.get("labor_cost"))
-                if labor_amount is None:
-                    continue
-                labor_value = float(labor_amount)
-                if "program" in normalized_label:
-                    amortized_programming += labor_value
-                elif "fixture" in normalized_label:
-                    amortized_fixture += labor_value
-
-        planner_machine_cost_total = machine_cost
-        planner_labor_cost_total = labor_cost_total - amortized_programming - amortized_fixture
-        if planner_labor_cost_total < 0:
-            planner_labor_cost_total = 0.0
-
-        planner_direct_cost_total = planner_machine_cost_total + planner_labor_cost_total
-        if planner_direct_cost_total <= 0.0:
-            zero_cost_message = "Planner produced zero machine/labor cost; using legacy fallback"
-            quote_log = breakdown.setdefault("quote_log", [])
-            if isinstance(quote_log, list):
-                quote_log.append(zero_cost_message)
-            else:
-                breakdown["quote_log"] = [zero_cost_message]
-            fallback_reason = zero_cost_message
-            use_planner = False
-        else:
-            process_costs.clear()
-            process_costs.update(
-                {
-                    "Machine": round(planner_machine_cost_total, 2),
-                    "Labor": round(planner_labor_cost_total, 2),
-                }
-            )
-            planner_totals_map = (
-                planner_result.get("totals", {})
-                if isinstance(planner_result.get("totals"), _MappingABC)
-                else {}
-            )
-            minutes_by_bucket = (
-                planner_totals_map.get("minutes_by_bucket", {})
-                if isinstance(planner_totals_map, _MappingABC)
-                else {}
-            )
-            cost_by_bucket = (
-                planner_totals_map.get("cost_by_bucket", {})
-                if isinstance(planner_totals_map, _MappingABC)
-                else {}
-            )
-            if minutes_by_bucket:
-                hour_summary = {}
-                for key, value in minutes_by_bucket.items():
-                    try:
-                        minutes_val = float(value or 0.0)
-                    except Exception:
-                        minutes_val = 0.0
-                    hour_summary[str(key)] = round(minutes_val / 60.0, 2)
-                process_plan_summary["hour_summary"] = hour_summary
-            if cost_by_bucket:
-                bucket_costs: list[PlannerBucketCost] = []
-                planner_cost_map: dict[str, float] = {}
-                for key, value in cost_by_bucket.items():
-                    try:
-                        numeric_cost = round(float(value or 0.0), 2)
-                    except Exception:
-                        numeric_cost = 0.0
-                    name = str(key)
-                    bucket_costs.append({"name": name, "cost": numeric_cost})
-                    planner_cost_map[name] = numeric_cost
-                process_plan_summary["process_costs"] = bucket_costs
-                process_plan_summary["process_costs_map"] = planner_cost_map
-            process_plan_summary["computed_total_labor_cost"] = float(
-                planner_totals_map.get("labor_cost", 0.0) or 0.0
-            )
-            process_plan_summary["display_labor_for_ladder"] = process_plan_summary[
-                "computed_total_labor_cost"
-            ]
-            process_plan_summary["computed_total_machine_cost"] = float(
-                planner_totals_map.get("machine_cost", 0.0) or 0.0
-            )
-            process_plan_summary["planner_labor_cost_total"] = planner_labor_cost_total
-            process_plan_summary["planner_machine_cost_total"] = planner_machine_cost_total
-            process_plan_summary["pricing_source"] = "Planner"
-            planner_subtotal = (
-                process_plan_summary["display_labor_for_ladder"]
-                + process_plan_summary["computed_total_machine_cost"]
-            )
-            planner_subtotal_rounded = round(planner_subtotal, 2)
-            process_plan_summary["computed_subtotal"] = planner_subtotal_rounded
-            combined_labor_total = (
-                planner_machine_cost_total
-                + planner_labor_cost_total
-                + amortized_programming
-                + amortized_fixture
-            )
-            totals_block.update(
-                {
-                    "machine_cost": planner_machine_cost_total,
-                    "labor_cost": combined_labor_total,
-                    "minutes": total_minutes,
-                    "subtotal": planner_subtotal_rounded,
-                }
-            )
-            breakdown["labor_cost_rendered"] = combined_labor_total
-            breakdown["process_plan_pricing"] = planner_result
-            breakdown["pricing_source"] = "Planner"
-            breakdown["process_minutes"] = total_minutes
-            baseline["pricing_source"] = "Planner"
-            baseline["process_plan_pricing"] = planner_result
-            process_plan_summary["used_planner"] = True
-            planner_used = True
-
-            hr_total = total_minutes / 60.0 if total_minutes else 0.0
-            process_meta["planner_total"] = {
-                "minutes": total_minutes,
-                "hr": hr_total,
-                "cost": machine_cost + labor_cost_total,
-                "machine_cost": machine_cost,
-                "labor_cost": labor_cost_total,
-                "labor_cost_excl_amortized": planner_labor_cost_total,
-                "amortized_programming": amortized_programming,
-                "amortized_fixture": amortized_fixture,
-                "line_items": list(planner_result.get("line_items", []) or []),
-            }
-            process_meta["planner_machine"] = {
-                "minutes": total_minutes,
-                "hr": hr_total,
-                "cost": machine_cost,
-            }
-            process_meta["planner_labor"] = {
-                "minutes": total_minutes,
-                "hr": hr_total,
-                "cost": labor_cost_total,
-                "cost_excl_amortized": planner_labor_cost_total,
-                "amortized_programming": amortized_programming,
-                "amortized_fixture": amortized_fixture,
-            }
-
-            machine_rendered = float(_coerce_float_or_none(process_costs.get("Machine")) or 0.0)
-            if (
-                planner_machine_cost_total > 0.0
-                and machine_rendered > 0.0
-                and abs(planner_machine_cost_total - machine_rendered) > _PLANNER_BUCKET_ABS_EPSILON
-            ):
-                breakdown["red_flags"].append("Planner totals drifted (machine cost)")
-            labor_rendered = float(_coerce_float_or_none(process_costs.get("Labor")) or 0.0)
-            if (
-                planner_labor_cost_total > 0.0
-                and labor_rendered > 0.0
-                and abs(planner_labor_cost_total - labor_rendered) > _PLANNER_BUCKET_ABS_EPSILON
-            ):
-                breakdown["red_flags"].append("Planner totals drifted (labor cost)")
-
-    if not use_planner:
-        breakdown.setdefault("process_minutes", 0.0)
-        breakdown["pricing_source"] = "legacy"
-        baseline.setdefault("pricing_source", "legacy")
-        if fallback_reason:
-            breakdown["red_flags"].append(fallback_reason)
-        breakdown.setdefault("pricing_source", "legacy")
-        baseline.setdefault("pricing_source", "legacy")
-
-    if process_plan_summary:
-        if isinstance(breakdown, dict):
-            existing_summary = breakdown.get("process_plan")
-            if isinstance(existing_summary, dict):
-                existing_summary.update(process_plan_summary)
-            else:
-                breakdown["process_plan"] = dict(process_plan_summary)
-
-    using_planner = str(breakdown.get("pricing_source", "")).strip().lower() == "planner"
-
-    if os.environ.get("ASSERT_PLANNER"):
-        assert str(breakdown.get("pricing_source", "")).strip().lower() == "planner", "Planner not engaged"
-
     merged_two_bucket_rates: dict[str, dict[str, float]] = {"labor": {}, "machine": {}}
     for candidate in (RATES_TWO_BUCKET_DEFAULT, default_rates, rates):
         if not isinstance(candidate, _MappingABC):
@@ -17130,60 +16905,56 @@ def compute_quote_from_df(  # type: ignore[reportGeneralTypeIssues]
         if qty_for_bucketize <= 0:
             qty_for_bucketize = 1
 
-    try:
-        bucketized_raw = bucketize(
-            planner_result if isinstance(planner_result, dict) else {},
-            merged_two_bucket_rates,
-            bucketize_nre,
-            qty=qty_for_bucketize,
-            geom=geom_for_bucketize,
-        )
-    except Exception:
-        bucketized_raw = {}
+    planner_apply_result = apply_planner_result(
+        planner_result,
+        breakdown=breakdown,
+        baseline=baseline,
+        process_plan_summary=process_plan_summary,
+        process_costs=process_costs,
+        process_meta=process_meta,
+        totals_block=totals_block,
+        bucketize_rates=merged_two_bucket_rates,
+        bucketize_nre=bucketize_nre,
+        geom_for_bucketize=geom_for_bucketize,
+        qty_for_bucketize=qty_for_bucketize,
+        planner_exception=planner_exception,
+        fallback_reason=fallback_reason,
+        planner_bucket_abs_epsilon=_PLANNER_BUCKET_ABS_EPSILON,
+    )
 
-    if not isinstance(bucketized_raw, _MappingABC):
-        bucketized_raw = {}
+    use_planner = planner_apply_result.use_planner
+    planner_used = planner_apply_result.planner_used
+    fallback_reason = planner_apply_result.fallback_reason
+    planner_machine_cost_total = planner_apply_result.planner_machine_cost_total
+    planner_labor_cost_total = planner_apply_result.planner_labor_cost_total
+    amortized_programming = planner_apply_result.amortized_programming
+    amortized_fixture = planner_apply_result.amortized_fixture
+    bucket_view_prepared: dict[str, Any] = planner_apply_result.bucket_view_prepared
+    aggregated_bucket_minutes: dict[str, dict[str, float]] = (
+        planner_apply_result.aggregated_bucket_minutes
+    )
 
-    bucket_view_prepared: dict[str, Any] = _prepare_bucket_view(bucketized_raw)
+    if not use_planner:
+        breakdown.setdefault("process_minutes", 0.0)
+        breakdown["pricing_source"] = "legacy"
+        baseline.setdefault("pricing_source", "legacy")
+        if fallback_reason:
+            breakdown["red_flags"].append(fallback_reason)
+        breakdown.setdefault("pricing_source", "legacy")
+        baseline.setdefault("pricing_source", "legacy")
 
-    aggregated_bucket_minutes: dict[str, dict[str, float]] = {}
-    line_items: Sequence[Mapping[str, Any]] | None = None
-    if isinstance(planner_result, _MappingABC):
-        raw_items = planner_result.get("line_items")
-        if isinstance(raw_items, Sequence):
-            # A shallow copy is sufficient for iteration and avoids surprising
-            # behaviour if the planner mutates the list during aggregation.
-            line_items = list(raw_items)
+    if process_plan_summary:
+        if isinstance(breakdown, dict):
+            existing_summary = breakdown.get("process_plan")
+            if isinstance(existing_summary, dict):
+                existing_summary.update(process_plan_summary)
+            else:
+                breakdown["process_plan"] = dict(process_plan_summary)
 
-    if line_items:
-        for entry in line_items:
-            if not isinstance(entry, _MappingABC):
-                continue
-            bucket_key = _planner_bucket_key_for_name(entry.get("op"))
-            if not bucket_key:
-                continue
-            canon_key = _canonical_bucket_key(bucket_key) or bucket_key
-            if not canon_key or canon_key in _FINAL_BUCKET_HIDE_KEYS:
-                continue
-            minutes_val = float(_safe_float(entry.get("minutes")))
-            machine_val = float(_bucket_cost(entry, "machine_cost", "machine$"))
-            labor_val = float(_bucket_cost(entry, "labor_cost", "labor$"))
-            if canon_key == "milling" and labor_val > 0.0:
-                machine_val += labor_val
-                labor_val = 0.0
-            if (
-                minutes_val <= 0.0
-                and machine_val <= 0.0
-                and labor_val <= 0.0
-            ):
-                continue
-            metrics = aggregated_bucket_minutes.setdefault(
-                canon_key,
-                {"minutes": 0.0, "machine$": 0.0, "labor$": 0.0},
-            )
-            metrics["minutes"] += minutes_val
-            metrics["machine$"] += machine_val
-            metrics["labor$"] += labor_val
+    using_planner = str(breakdown.get("pricing_source", "")).strip().lower() == "planner"
+
+    if os.environ.get("ASSERT_PLANNER"):
+        assert str(breakdown.get("pricing_source", "")).strip().lower() == "planner", "Planner not engaged"
 
     hole_diams: list[float] = []
     if isinstance(geo_payload, _MappingABC):
