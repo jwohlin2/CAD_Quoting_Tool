@@ -4732,7 +4732,7 @@ def _compute_drilling_removal_section(
             if not text:
                 return None
 
-            text = re.sub(r"^[^0-9+\-]+", "", text)
+            text = re.sub(r"^[^0-9+\-.]+", "", text)
             if not text:
                 return None
 
