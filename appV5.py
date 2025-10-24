@@ -1045,6 +1045,29 @@ def _ebo_append_unique(
     seen.add(key)
 
 
+# --- compatibility shim: some callsites use _build_extra_ops_lines_list ---
+def _build_extra_ops_lines_list(
+    *,
+    breakdown: Mapping[str, Any] | None,
+    result: Mapping[str, Any] | None,
+    rates: Mapping[str, Any] | None,
+    breakdown_mutable: MutableMapping[str, Any] | None,
+    ctx=None,
+    ctx_a=None,
+    ctx_b=None,
+) -> list[str]:
+    """Alias -> keep old callsites working."""
+    return _build_ops_cards_from_chart_lines(
+        breakdown=breakdown,
+        result=result,
+        rates=rates,
+        breakdown_mutable=breakdown_mutable,
+        ctx=ctx,
+        ctx_a=ctx_a,
+        ctx_b=ctx_b,
+    )
+
+
 def _build_ops_cards_from_chart_lines(
     *,
     breakdown: Mapping[str, Any] | None,
