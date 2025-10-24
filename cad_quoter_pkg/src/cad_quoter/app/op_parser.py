@@ -35,7 +35,7 @@ _BOTH_RE = re.compile(r"\bFRONT\s*(?:[&/]|AND)\s*BACK|BOTH\s+SIDES|2\s+SIDES\b",
 _SPOT_RE_TXT = re.compile(r"(?:C[’']?\s*DRILL|CENTER\s*DRILL|SPOT\s*DRILL|SPOT\b)", re.I)
 _JIG_RE_TXT = re.compile(r"\bJIG\s*GRIND\b", re.I)
 _COUNTERDRILL_RE = re.compile(
-    r"\b(?:C[’']\s*DRILL|C[-\s]*DRILL|COUNTER[-\s]*DRILL)\b",
+    r"\b(?:C[’']\s*DRILL|C\s*DRILL|COUNTER[-\s]*DRILL)\b",
     re.I,
 )
 _CENTER_OR_SPOT_RE = re.compile(r"\b(CENTER\s*DRILL|SPOT\s*DRILL|SPOT)\b", re.I)

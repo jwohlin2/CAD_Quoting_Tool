@@ -10,7 +10,11 @@ from typing import Any, Callable, Mapping, MutableMapping, TypedDict, cast
 from collections.abc import Iterable, Mapping as _MappingABC, MutableMapping as _MutableMappingABC, Sequence
 
 from cad_quoter.config import logger
-from cad_quoter.app.hole_ops import TAP_MINUTES_BY_CLASS, CBORE_MIN_PER_SIDE_MIN
+from cad_quoter.app.hole_ops import (
+    TAP_MINUTES_BY_CLASS,
+    CBORE_MIN_PER_SIDE_MIN,
+    COUNTERDRILL_MIN_PER_SIDE_MIN,
+)
 from cad_quoter.domain_models import coerce_float_or_none as _coerce_float_or_none
 from cad_quoter.pricing.process_buckets import (
     BUCKET_ROLE,
@@ -904,6 +908,7 @@ def _seed_bucket_minutes(
     *,
     tapping_min: float = 0.0,
     cbore_min: float = 0.0,
+    counterdrill_min: float = 0.0,
     spot_min: float = 0.0,
     jig_min: float = 0.0,
     drilling_min: float = 0.0,
@@ -1060,6 +1065,7 @@ def _seed_bucket_minutes(
 
     _ins("tapping", tapping_min)
     _ins("counterbore", cbore_min)
+    _ins("counterdrill", counterdrill_min)
     # spot and jig_grind can roll into "drilling" or "grinding"; keep explicit names if you expose them
     _ins("drilling", drilling_min or spot_min)
     _ins("grinding", jig_min)
@@ -1204,8 +1210,8 @@ def _normalize_ops_rows_from_chart_ops(
 
 def _hole_table_minutes_from_geo(
     geo: Mapping[str, Any] | None,
-) -> tuple[float, float, float, float]:
-    """Return (tap, cbore, spot, jig) minutes inferred from ``geo``."""
+) -> tuple[float, float, float, float, float]:
+    """Return (tap, cbore, counterdrill, spot, jig) minutes inferred from ``geo``."""
 
     if not isinstance(geo, _MappingABC):
         return (0.0, 0.0, 0.0, 0.0)
@@ -1245,6 +1251,11 @@ def _hole_table_minutes_from_geo(
         if cbore_qty > 0.0:
             cbore_minutes = cbore_qty * CBORE_MIN_PER_SIDE_MIN
 
+    counterdrill_minutes = (
+        _ops_total("counterdrill_front", "counterdrill_back")
+        * COUNTERDRILL_MIN_PER_SIDE_MIN
+    )
+
     spot_minutes = _ops_total("spot_front", "spot_back") * SPOT_DRILL_MIN_PER_SIDE_MIN
 
     jig_minutes = _ops_total("jig_grind",) * JIG_GRIND_MIN_PER_FEATURE
@@ -1252,6 +1263,7 @@ def _hole_table_minutes_from_geo(
     return (
         float(max(tap_minutes, 0.0)),
         float(max(cbore_minutes, 0.0)),
+        float(max(counterdrill_minutes, 0.0)),
         float(max(spot_minutes, 0.0)),
         float(max(jig_minutes, 0.0)),
     )

@@ -150,7 +150,7 @@ _MM_DIM_TOKEN = re.compile(
 )
 
 _COUNTERDRILL_RE = re.compile(
-    r"\b(?:C[’']\s*DRILL|C[-\s]*DRILL|COUNTER[-\s]*DRILL)\b",
+    r"\b(?:C[’']\s*DRILL|C\s*DRILL|COUNTER[-\s]*DRILL)\b",
     re.IGNORECASE,
 )
 _CENTER_OR_SPOT_RE = re.compile(
@@ -1145,22 +1145,29 @@ _NPT_PILOT_IN: dict[str, float] = {
 
 def _count_counterdrill_from_chart(cleaned: list[str]) -> int:
     tot = 0
-    for s in (cleaned or []):
-        if _DRILL_THRU.search(s):  # exclude straight drill-thru rows
+    for raw in cleaned or []:
+        text = str(raw or "")
+        if not text.strip():
             continue
-        if _CENTER_OR_SPOT_RE.search(s):  # exclude “spot”
+        upper = text.upper()
+        if "DRILL THRU" in upper:
             continue
-        if _COUNTERDRILL_RE.search(s):
-            m = re.match(r"\s*\((\d+)\)", s)
+        if _CENTER_OR_SPOT_RE.search(text):
+            continue
+        if _COUNTERDRILL_RE.search(text):
+            m = re.match(r"\s*\((\d+)\)", text)
             tot += int(m.group(1)) if m else 1
     return tot
 
 
 def _count_jig_from_chart(cleaned: list[str]) -> int:
     tot = 0
-    for s in (cleaned or []):
-        if re.search(r"\bJIG\s*GRIND\b", str(s), re.IGNORECASE):
-            m = re.match(r"\s*\((\d+)\)", s)
+    for raw in (cleaned or []):
+        text = str(raw or "")
+        if not text.strip():
+            continue
+        if re.search(r"\bJIG\s*GRIND\b", text, re.IGNORECASE):
+            m = re.match(r"\s*\((\d+)\)", text)
             tot += int(m.group(1)) if m else 1
     return tot
 
@@ -3608,6 +3615,10 @@ def summarize_actions(
         re.IGNORECASE,
     )
     spotln_re = re.compile(r'^\s*MATERIAL REMOVAL – SPOT|Spot drill ×\s*(\d+)', re.IGNORECASE)
+    counterdrillln_re = re.compile(
+        r'^\s*MATERIAL REMOVAL – COUNTERDRILL|Counterdrill ×\s*(\d+)',
+        re.IGNORECASE,
+    )
     jigln_re = re.compile(r'^\s*MATERIAL REMOVAL – JIG GRIND|Jig grind ×\s*(\d+)', re.IGNORECASE)
     qty_re = re.compile(r'[×x]\s*(\d+)')
     cbo_hdr_re = re.compile(r'^\s*MATERIAL\s+REMOVAL\s*[–-]\s*COUNTERBORE', re.IGNORECASE)
@@ -3631,12 +3642,21 @@ def summarize_actions(
         r'^\s*Spot\s+drill.*?[×xX]\s*(\d+)\s*\((FRONT|BACK)\)',
         re.IGNORECASE,
     )
+    counterdrill_card_row_re = re.compile(
+        r'^\s*Counterdrill.*?[×xX]\s*(\d+)\s*(?:\((FRONT|BACK)\))?',
+        re.IGNORECASE,
+    )
     jig_card_row_re = re.compile(
         r'^\s*Jig\s+grind.*?[×xX]\s*(\d+)\s*(?:\((FRONT|BACK)\))?',
         re.IGNORECASE,
     )
 
-    card_counts = {"counterbore": False, "spot": False, "jig_grind": False}
+    card_counts = {
+        "counterbore": False,
+        "spot": False,
+        "counterdrill": False,
+        "jig_grind": False,
+    }
     active_card: str | None = None
     in_cbo = False
 
@@ -3691,6 +3711,8 @@ def summarize_actions(
         if header.startswith("MATERIAL REMOVAL –"):
             if "COUNTERBORE" in header:
                 active_card = "counterbore"
+            elif "COUNTERDRILL" in header:
+                active_card = "counterdrill"
             elif "SPOT" in header:
                 active_card = "spot"
             elif "JIG" in header:
@@ -3740,6 +3762,29 @@ def summarize_actions(
                 card_counts["jig_grind"] = True
                 continue
 
+        if active_card == "counterdrill":
+            if "DRILL THRU" in header:
+                continue
+            ctrill_simple = counterdrill_card_row_re.search(ln)
+            if ctrill_simple:
+                qty = int(ctrill_simple.group(1))
+                side_match = ctrill_simple.group(2)
+                side = _side_from(ln) if side_match is None else side_match.lower()
+                if side not in {"front", "back"}:
+                    side = "front"
+                total["counterdrill"] += qty
+                by_side["counterdrill"][side] += qty
+                card_counts["counterdrill"] = True
+                continue
+            qty_match = qty_re.search(ln)
+            if qty_match and "DRILL THRU" not in u:
+                qty = int(qty_match.group(1))
+                side = _side_from(ln)
+                total["counterdrill"] += qty
+                by_side["counterdrill"][side] += qty
+                card_counts["counterdrill"] = True
+                continue
+
         if active_card in {"spot", "jig_grind"}:
             if active_card == "spot":
                 spot_simple = spot_card_row_re.search(ln)
@@ -3767,6 +3812,35 @@ def summarize_actions(
                 by_side[active_card][side] += qty
                 card_counts[active_card] = True
             continue
+
+        if (
+            (not card_counts["counterdrill"] or active_card != "counterdrill")
+            and _RE_COUNTERDRILL.search(ln)
+            and not _RE_CENTER_OR_SPOT.search(ln)
+            and "DRILL THRU" not in u
+        ):
+            mparen = re.match(r"\s*\((\d+)\)", ln)
+            if mparen:
+                qty = int(mparen.group(1))
+            else:
+                qty_match = qty_re.search(ln)
+                qty = int(qty_match.group(1)) if qty_match else 1
+            if qty > 0:
+                side = _side_from(ln)
+                total["counterdrill"] += qty
+                by_side["counterdrill"][side] += qty
+                card_counts["counterdrill"] = True
+                continue
+
+        if not card_counts["counterdrill"]:
+            m = counterdrillln_re.search(ln)
+            if m:
+                qty = int(m.group(1)) if m.lastindex else 0
+                if qty:
+                    total["counterdrill"] += qty
+                    by_side["counterdrill"]["front"] += qty
+                    card_counts["counterdrill"] = True
+                    continue
 
         m = drill_re.search(ln)
         if m:
@@ -3929,6 +4003,7 @@ def summarize_actions(
         "Drills": int(total.get("drill", 0)),
         "Taps": int(total.get("tap", 0)),
         "Counterbores": int(total.get("counterbore", 0)),
+        "Counterdrill": int(total.get("counterdrill", 0)),
         "Spot": int(total.get("spot", 0)),
         "Jig-grind": int(total.get("jig_grind", 0)),
     }
@@ -4272,6 +4347,7 @@ def _compute_drilling_removal_section(
     (
         tap_minutes_inferred,
         cbore_minutes_inferred,
+        counterdrill_minutes_inferred,
         spot_minutes_inferred,
         jig_minutes_inferred,
     ) = _hole_table_minutes_from_geo(geo_map)
@@ -4279,6 +4355,7 @@ def _compute_drilling_removal_section(
     inferred_minutes = {
         "tapping": tap_minutes_inferred,
         "counterbore": cbore_minutes_inferred,
+        "counterdrill": counterdrill_minutes_inferred,
         "drilling": spot_minutes_inferred,
         "grinding": jig_minutes_inferred,
     }
@@ -4291,6 +4368,7 @@ def _compute_drilling_removal_section(
                     typing.cast(MutableMapping[str, Any], breakdown),
                     tapping_min=tap_minutes_inferred,
                     cbore_min=cbore_minutes_inferred,
+                    counterdrill_min=counterdrill_minutes_inferred,
                     spot_min=spot_minutes_inferred,
                     jig_min=jig_minutes_inferred,
                 )
@@ -18065,6 +18143,15 @@ def _normalize_ops_entries(
             op_type_raw = derived_type.strip().lower()
             if op_type_raw in {"counterbore", "c'bore"}:
                 op_type = "cbore"
+            elif op_type_raw in {
+                "counterdrill",
+                "counter_drill",
+                "counter-drill",
+                "counter drill",
+                "c drill",
+                "c-drill",
+            }:
+                op_type = "counterdrill"
             elif op_type_raw in {"countersink", "csink", "c'sink", "csk"}:
                 op_type = "csk"
             elif op_type_raw in {"spot", "spot_drill", "center_drill", "c'drill"}:
@@ -18282,6 +18369,8 @@ def aggregate_ops(
                 totals[f"csk_{'back' if side_norm == 'BACK' else 'front'}"] += qty
             elif op_type == "spot":
                 totals[f"spot_{'back' if side_norm == 'BACK' else 'front'}"] += qty
+            elif op_type == "counterdrill":
+                totals[f"counterdrill_{'back' if side_norm == 'BACK' else 'front'}"] += qty
             if op_type == "drill" and pilot_flag and dia_key is not None:
                 if bucket not in drill_group_refs.setdefault(dia_key, []):
                     drill_group_refs[dia_key].append(bucket)
@@ -18292,6 +18381,8 @@ def aggregate_ops(
                 drill_detail_refs[dia_key].append(detail_entry)
         elif op_type == "jig_grind":
             totals["jig_grind"] += qty
+        elif op_type == "counterdrill":
+            totals["counterdrill"] += qty
         if op_type == "tap" and dia_key is not None and dia_key > 0:
             tap_claim_bins[dia_key] += qty
 
@@ -18299,6 +18390,9 @@ def aggregate_ops(
     totals["cbore_total"] = totals.get("cbore_front", 0) + totals.get("cbore_back", 0)
     totals["csk_total"] = totals.get("csk_front", 0) + totals.get("csk_back", 0)
     totals["spot_total"] = totals.get("spot_front", 0) + totals.get("spot_back", 0)
+    totals["counterdrill_total"] = (
+        totals.get("counterdrill_front", 0) + totals.get("counterdrill_back", 0)
+    )
 
     drill_subtracted_total = 0
     processed_dia_keys: set[float] = set()
@@ -18379,6 +18473,8 @@ def aggregate_ops(
         + totals.get("csk_back", 0)
         + totals.get("spot_front", 0)
         + totals.get("spot_back", 0)
+        + totals.get("counterdrill_front", 0)
+        + totals.get("counterdrill_back", 0)
         + totals.get("jig_grind", 0)
     )
 
@@ -18387,6 +18483,7 @@ def aggregate_ops(
         + totals.get("csk_back", 0)
         + totals.get("tap_back", 0)
         + totals.get("spot_back", 0)
+        + totals.get("counterdrill_back", 0)
     )
 
     grouped_final: dict[str, dict[str, dict[str, dict[str, Any]]]] = {}
@@ -18422,15 +18519,18 @@ def aggregate_ops(
             "tap_total",
             "cbore_front",
             "cbore_back",
-            "cbore_total",
-            "csk_front",
-            "csk_back",
-            "csk_total",
-            "spot_front",
-            "spot_back",
-            "spot_total",
-            "jig_grind",
-        )},
+        "cbore_total",
+        "csk_front",
+        "csk_back",
+        "csk_total",
+        "spot_front",
+        "spot_back",
+        "spot_total",
+        "counterdrill_front",
+        "counterdrill_back",
+        "counterdrill_total",
+        "jig_grind",
+    )},
         "rows": rows_simple,
         "rows_detail": detail,
         "actions_total": int(actions_total),
