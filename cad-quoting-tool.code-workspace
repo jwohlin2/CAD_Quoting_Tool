@@ -4,12 +4,5 @@
       "path": "."
     }
   ],
-  "settings": {
-    "python.analysis.extraPaths": [
-      "./cad_quoter_pkg/src"
-    ],
-    "python.autoComplete.extraPaths": [
-      "./cad_quoter_pkg/src"
-    ]
-  }
+  "settings": {}
 }

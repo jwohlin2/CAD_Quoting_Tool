@@ -327,6 +327,7 @@ CANONICAL_BUCKET_ORDER: tuple[str, ...] = tuple(
     for key in (
         "milling",
         "drilling",
+        "counterdrill",
         "counterbore",
         "countersink",
         "tapping",
