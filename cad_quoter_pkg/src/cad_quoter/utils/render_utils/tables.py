@@ -234,15 +234,38 @@ def render_process_sections(
         buckets_candidate = bucket_view_obj.get("buckets") if bucket_view_obj else None
     except Exception:
         buckets_candidate = None
+    buckets_target: MutableMapping[str, Any] | None
     if isinstance(buckets_candidate, dict):
+        buckets_target = buckets_candidate
         buckets: Mapping[str, Any] = buckets_candidate
+    elif isinstance(buckets_candidate, MutableMapping):
+        buckets_target = buckets_candidate
+        try:
+            buckets = dict(buckets_candidate)
+        except Exception:
+            buckets = {}
     elif isinstance(buckets_candidate, Mapping):
+        buckets_target = None
         try:
             buckets = dict(buckets_candidate)
         except Exception:
             buckets = {}
     else:
+        buckets_target = None
         buckets = {}
+
+    try:
+        aggregated_candidate = (
+            bucket_view_obj.get("aggregated_bucket_minutes") if bucket_view_obj else None
+        )
+    except Exception:
+        aggregated_candidate = None
+    if isinstance(aggregated_candidate, dict):
+        aggregated_minutes_target: MutableMapping[str, Any] | None = aggregated_candidate
+    elif isinstance(aggregated_candidate, MutableMapping):
+        aggregated_minutes_target = aggregated_candidate
+    else:
+        aggregated_minutes_target = None
 
     canonical_bucket_key_fn = (
         canonical_bucket_key if canonical_bucket_key is not None else lambda key: str(key or "").lower()
@@ -303,6 +326,8 @@ def render_process_sections(
     ]
 
     canonical_entries: dict[str, dict[str, float]] = {}
+    bucket_entry_sources: dict[str, list[MutableMapping[str, Any]]] = {}
+    bucket_entry_raw_keys: dict[str, list[str]] = {}
     if isinstance(buckets, Mapping):
         for raw_key, raw_entry in buckets.items():
             if not isinstance(raw_entry, Mapping):
@@ -325,6 +350,10 @@ def render_process_sections(
                 "labor$": labor_val,
                 "total$": total_val,
             }
+            if isinstance(raw_entry, MutableMapping):
+                bucket_entry_sources.setdefault(canon_key, []).append(raw_entry)
+            if buckets_target is not None:
+                bucket_entry_raw_keys.setdefault(canon_key, []).append(key_str)
 
     milling_entry = canonical_entries.get("milling")
     if milling_entry:
@@ -452,6 +481,52 @@ def render_process_sections(
             milling_entry["labor$"] = round(labor_cost, 2)
             milling_entry["total$"] = round(total_cost, 2)
             canonical_entries["milling"] = milling_entry
+
+            new_minutes = milling_entry["minutes"]
+            new_machine = milling_entry["machine$"]
+            new_labor = milling_entry["labor$"]
+            new_total = milling_entry["total$"]
+
+            for source_entry in bucket_entry_sources.get("milling", []):
+                source_entry["minutes"] = new_minutes
+                source_entry["machine$"] = new_machine
+                source_entry["labor$"] = new_labor
+                source_entry["total$"] = new_total
+
+            if buckets_target is not None:
+                for raw_key in bucket_entry_raw_keys.get("milling", []):
+                    try:
+                        existing = buckets_target.get(raw_key)  # type: ignore[index]
+                    except Exception:
+                        existing = None
+                    if isinstance(existing, MutableMapping):
+                        existing["minutes"] = new_minutes
+                        existing["machine$"] = new_machine
+                        existing["labor$"] = new_labor
+                        existing["total$"] = new_total
+                    else:
+                        buckets_target[raw_key] = {
+                            "minutes": new_minutes,
+                            "machine$": new_machine,
+                            "labor$": new_labor,
+                            "total$": new_total,
+                        }
+
+            if aggregated_minutes_target is not None:
+                try:
+                    aggregated_entry = aggregated_minutes_target.get("milling")  # type: ignore[index]
+                except Exception:
+                    aggregated_entry = None
+                if isinstance(aggregated_entry, MutableMapping):
+                    aggregated_entry["minutes"] = new_minutes
+                    aggregated_entry["machine$"] = new_machine
+                    aggregated_entry["labor$"] = new_labor
+                else:
+                    aggregated_minutes_target["milling"] = {
+                        "minutes": new_minutes,
+                        "machine$": new_machine,
+                        "labor$": new_labor,
+                    }
 
     section_lines: list[str] = []
     section_lines.append("Process & Labor Costs")
