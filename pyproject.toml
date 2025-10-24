@@ -2,7 +2,7 @@
 name = "cad-quoter"
 version = "0.1.0"
 description = "Reusable CAD quoting utilities"
-readme = "cad_quoter_pkg/README.md"
+readme = "docs/cad-quoter-package.md"
 authors = [{ name = "CAD Quoting Team" }]
 license = { text = "Proprietary" }
 requires-python = ">=3.11"
