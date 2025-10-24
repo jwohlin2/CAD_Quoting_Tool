@@ -874,7 +874,7 @@ def test_collect_pilot_claims_combines_sources() -> None:
                 {"qty": "4X", "desc": "4X TAP #10-32 THRU"},
                 {"qty": 2, "desc": "2X TAP 5/8-11"},
                 {"qty": 1, "desc": "1/8-27 NPT TAP"},
-                {"qty": 1, "desc": ".339 THRU"},
+                {"qty": 1, "desc": ".339 PILOT DRILL THRU"},
             ]
         }
     }
@@ -885,7 +885,11 @@ def test_collect_pilot_claims_combines_sources() -> None:
         "1/8-27 NPT TAP",
     ]
 
-    pilots = appV5._collect_pilot_claims(geo, chart)
+    pilots = appV5._collect_pilot_claims(
+        geo,
+        chart,
+        geo["ops_summary"]["rows"],
+    )
     counts = Counter(round(val, 4) for val in pilots)
 
     assert counts[round(0.1590, 4)] == 4
@@ -908,11 +912,14 @@ def test_adjust_drill_counts_subtracts_row_pilots() -> None:
         }
     }
 
-    pilots = appV5._collect_pilot_claims(geo, [])
-    ops_claims = {"claimed_pilot_diams": pilots}
+    pilots = appV5._collect_pilot_claims(geo, [], geo["ops_summary"]["rows"])
 
     counts_raw = {0.1590: 4, 0.5312: 2, 0.3390: 1}
-    adjusted = appV5._adjust_drill_counts(counts_raw, ops_claims)
+    adjusted = appV5._adjust_drill_counts(
+        counts_raw,
+        pilot_claims=pilots,
+        cb_groups={},
+    )
 
     assert adjusted[round(0.1590, 4)] == 0
     assert adjusted[round(0.5312, 4)] == 0
@@ -923,16 +930,15 @@ def test_adjust_drill_counts_sanitizes_inputs() -> None:
     import appV5
 
     counts_raw = {0.25: 5, 0.5: 3, 1.25: 4}
-    ops_claims = {
-        "claimed_pilot_diams": ["0.251", 0.25, "888", None, "oops"],
-        "cb_groups": {
+    adjusted = appV5._adjust_drill_counts(
+        counts_raw,
+        pilot_claims=["0.251", 0.25, "888", None, "oops"],
+        cb_groups={
             (0.248, "TOP", None): 10,
             ("5.0", "BOT", None): 2,
             (None, "", None): 7,
         },
-    }
-
-    adjusted = appV5._adjust_drill_counts(counts_raw, ops_claims)
+    )
 
     assert adjusted[round(0.25, 4)] == 0
     assert adjusted[round(0.5, 4)] == 3
