@@ -4695,11 +4695,10 @@ def _compute_drilling_removal_section(
             for ln in drill_group_lines:
                 lines.append(ln)
 
+            _total_drills = sum(_drill_bins_adj.values())
             if isinstance(breakdown_mutable, (_MutableMappingABC, dict)):
                 try:
-                    extra_bucket_ops = typing.cast(
-                        MutableMapping[str, Any], breakdown_mutable
-                    ).setdefault("extra_bucket_ops", {})
+                    extra_bucket_ops = breakdown_mutable.setdefault("extra_bucket_ops", {})
                     extra_bucket_ops.setdefault("drill", []).append(
                         {"name": "Drill", "qty": int(_total_drills), "side": None}
                     )
