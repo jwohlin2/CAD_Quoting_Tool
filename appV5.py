@@ -4645,39 +4645,51 @@ def _compute_drilling_removal_section(
             )
             # ========= END DRILL PIPELINE =========
 
-            counts_by_diam = dict(_drill_bins_adj)
+            drill_actions_from_groups = int(_adj_total)
+
             if isinstance(breakdown_mutable, (_MutableMappingABC, dict)):
                 try:
-                    extra_bucket_ops = typing.cast(
+                    mutable_breakdown = typing.cast(
                         MutableMapping[str, Any],
                         breakdown_mutable,
-                    ).setdefault("extra_bucket_ops", {})
+                    )
+                    derived_ops_obj = mutable_breakdown.setdefault("derived_ops", {})
+                    if not isinstance(derived_ops_obj, MutableMapping):
+                        derived_ops_obj = {}
+                        mutable_breakdown["derived_ops"] = derived_ops_obj
+                    derived_ops = typing.cast(MutableMapping[str, Any], derived_ops_obj)
+                    derived_ops["drill_bins_raw"] = dict(_drill_bins_raw)
+                    derived_ops["drill_bins_adj"] = dict(_drill_bins_adj)
+                    derived_ops["drill_total"] = drill_actions_from_groups
+
+                    extra_bucket_ops_obj = mutable_breakdown.setdefault(
+                        "extra_bucket_ops", {}
+                    )
+                    if not isinstance(extra_bucket_ops_obj, MutableMapping):
+                        extra_bucket_ops_obj = {}
+                        mutable_breakdown["extra_bucket_ops"] = extra_bucket_ops_obj
+                    extra_bucket_ops = typing.cast(
+                        MutableMapping[str, Any],
+                        extra_bucket_ops_obj,
+                    )
                     drill_entries = extra_bucket_ops.setdefault("drill", [])
-                    adjusted_total = int(
-                        sum(max(0, int(v)) for v in counts_by_diam.values())
+                    if not isinstance(drill_entries, list):
+                        drill_entries = []
+                        extra_bucket_ops["drill"] = drill_entries
+                    drill_entries.append(
+                        {
+                            "name": "Drill",
+                            "qty": int(derived_ops["drill_total"]),
+                            "side": None,
+                        }
                     )
-                    existing_entry = next(
-                        (
-                            entry
-                            for entry in drill_entries
-                            if entry.get("name") == "Drill"
-                            and entry.get("side") in (None, "front")
-                        ),
-                        None,
+                    _push(
+                        lines,
+                        f"[DEBUG] DRILL publish raw={sum(_drill_bins_raw.values())} "
+                        f"adj={derived_ops['drill_total']}",
                     )
-                    if existing_entry is not None:
-                        existing_entry["qty"] = adjusted_total
-                        existing_entry["side"] = None
-                    else:
-                        drill_entries.append(
-                            {"name": "Drill", "qty": adjusted_total, "side": None}
-                        )
                 except Exception:
                     pass
-            drill_actions_from_groups = int(
-                sum(max(0, int(v)) for v in counts_by_diam.values())
-            )
-            _push(lines, f"[DEBUG] DRILL bins adj={drill_actions_from_groups}")
             ops_hole_count_from_table = drill_actions_from_groups
 
             remaining_counts = dict(_drill_bins_adj)
