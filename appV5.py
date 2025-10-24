@@ -20351,47 +20351,163 @@ def extract_hole_table_from_text(doc, y_tol: float = 0.04, min_rows: int = 5):
     if len(rows) < min_rows:
         return {}
 
-    total = 0
+    total_qty = 0
     families: dict[str, int] = {}
 
-    def parse_qty(s: str) -> int:
-        try:
-            return int(float((s or "").strip()))
-        except Exception:
-            m = re.search(r"\d+", s or "")
-            return int(m.group()) if m else 0
+    def _clean_text(value: str) -> str:
+        return re.sub(r"\s+", " ", (value or "").replace("\u00A0", " ").strip())
 
-    def parse_dia_inch(s: str) -> float | None:
-        s = (s or "").strip().lstrip("Ø⌀\u00D8 ").strip()
-        if re.fullmatch(r"\d+/\d+", s):
+    _qty_patterns = [
+        re.compile(r"\(\s*(\d+)\s*(?:PL|PLCS|PLACES|X)?\s*\)", re.I),
+        re.compile(r"\bQTY[:\s]*(\d+)\b", re.I),
+        re.compile(r"\b(\d+)\s*(?:X|EA|EACH|PLCS?|PLACES?|HOLES?)\b", re.I),
+    ]
+    _qty_simple = re.compile(r"(?<![\d/])(\d+)(?![\d/])")
+
+    def _extract_qty(text: str, *, allow_simple_digit: bool) -> tuple[int | None, str]:
+        cleaned = _clean_text(text)
+        patterns = list(_qty_patterns)
+        if allow_simple_digit:
+            patterns.append(_qty_simple)
+        for pat in patterns:
+            match = pat.search(cleaned)
+            if not match:
+                continue
+            value_str = next((group for group in match.groups() if group), None)
+            if not value_str:
+                continue
             try:
-                return float(Fraction(s))
+                qty_val = int(value_str)
             except Exception:
-                return None
-        if re.fullmatch(r"(?:\d+)?\.\d+|\d+(?:\.\d+)?", s):
+                continue
+            cleaned = f"{cleaned[: match.start()]} {cleaned[match.end():]}".strip()
+            cleaned = re.sub(r"\s+", " ", cleaned)
+            return qty_val, cleaned
+        return None, cleaned
+
+    def _parse_diameter_value(token: str) -> tuple[float | None, str | None]:
+        if not token:
+            return None, None
+        text = (
+            token.replace("\u00D8", "Ø")
+            .replace("ø", "Ø")
+            .replace("“", '"')
+            .replace("”", '"')
+        )
+        text = re.sub(r"\bDIA(?:METER)?\.?\b", " ", text, flags=re.I)
+        text = re.sub(r"\bIN(?:CH(?:ES)?)?\.?\b", " ", text, flags=re.I)
+        text = text.replace("Ø", " ").replace("⌀", " ").replace("'", " ").replace('"', " ")
+        text = text.replace("±", " ").replace("+/-", " ")
+        text = re.sub(r"\s+", " ", text).strip()
+        if not text:
+            return None, None
+
+        frac = re.search(r"(?<![\d/])(\d+)\s*/\s*(\d+)(?![\d/])", text)
+        if frac:
             try:
-                return float(s)
+                value = float(Fraction(int(frac.group(1)), int(frac.group(2))))
             except Exception:
-                return None
+                value = None
+        else:
+            dec = re.search(r"(?<!\d)(\d*\.\d+)(?!\d)", text)
+            if dec:
+                try:
+                    value = float(dec.group(1))
+                except Exception:
+                    value = None
+            else:
+                whole = re.search(r"(?<!\d)(\d+)(?!\d)", text)
+                if whole:
+                    try:
+                        value = float(whole.group(1))
+                    except Exception:
+                        value = None
+                else:
+                    value = None
+
+        if value is None:
+            return None, None
+        if value <= 0 or value >= 6:
+            return None, None
+        formatted = f"{value:.4f}\""
+        return value, formatted
+
+    _diam_ctx = re.compile(
+        r"(?:Ø|⌀|\u00D8|DIA(?:METER)?\.?|DIAM\.?)\s*([0-9]+\s*/\s*[0-9]+|[0-9]*\.\d+|\d+(?:\.\d+)?)",
+        re.I,
+    )
+    _diam_leading_dot = re.compile(r"(?<![\d/])(\.\d+)(?!\d)")
+
+    def _find_diameter_token(text: str) -> str | None:
+        if not text:
+            return None
+        ctx = _diam_ctx.search(text)
+        if ctx:
+            return ctx.group(1)
+        dot = _diam_leading_dot.search(text)
+        if dot:
+            return dot.group(1)
         return None
 
     clean_rows: list[dict[str, Any]] = []
-    for r in rows:
-        q = parse_qty(r["qty"])
-        if q <= 0:
-            continue
-        d = parse_dia_inch(r["ref"])
-        if d is None:
-            mm = re.search(r"[Ø⌀\u00D8]?\s*((?:\d+)?\.\d+|\d+/\d+|\d+(?:\.\d+)?)", r["desc"])
-            d = parse_dia_inch(mm.group(1)) if mm else None
-        if d is None:
-            continue
-        key = f'{d:.4f}"'
-        families[key] = families.get(key, 0) + q
-        total += q
-        clean_rows.append({**r, "qty": q, "ref": key, "diameter_in": d})
+    from_back = False
+    double_sided = False
 
-    if total <= 0:
+    for r in rows:
+        hole_txt = _clean_text(r.get("hole", ""))
+        ref_txt = _clean_text(r.get("ref", ""))
+        qty_txt = _clean_text(r.get("qty", ""))
+        desc_txt = _clean_text(r.get("desc", ""))
+
+        qty_val, qty_txt = _extract_qty(qty_txt, allow_simple_digit=True)
+        desc_qty, desc_txt = _extract_qty(desc_txt, allow_simple_digit=False)
+        if qty_val is None and desc_qty is not None:
+            qty_val = desc_qty
+        hole_qty: int | None = None
+        if qty_val is None:
+            hole_qty, hole_txt = _extract_qty(hole_txt, allow_simple_digit=False)
+            if hole_qty is not None:
+                qty_val = hole_qty
+                if not hole_txt:
+                    hole_txt = str(hole_qty)
+        qty = int(qty_val or 0)
+        if qty > 0:
+            total_qty += qty
+
+        dia_val, dia_formatted = _parse_diameter_value(ref_txt)
+        if dia_val is None:
+            token = _find_diameter_token(desc_txt)
+            if token:
+                dia_val, dia_formatted = _parse_diameter_value(token)
+        if dia_val is None:
+            token = _find_diameter_token(hole_txt)
+            if token:
+                dia_val, dia_formatted = _parse_diameter_value(token)
+
+        ref_value = dia_formatted if dia_formatted else ref_txt
+        if dia_val is not None and qty > 0 and dia_formatted:
+            families[dia_formatted] = families.get(dia_formatted, 0) + qty
+
+        desc_upper = desc_txt.upper()
+        if "FRONT & BACK" in desc_upper or "BOTH SIDES" in desc_upper:
+            double_sided = True
+            from_back = True
+        elif "FROM BACK" in desc_upper:
+            from_back = True
+
+        hole_txt = re.sub(r"^\(\s*(\d+)\s*\)\s*", r"\1 ", hole_txt).strip()
+
+        clean_rows.append(
+            {
+                "hole": hole_txt,
+                "ref": ref_value,
+                "qty": qty,
+                "desc": desc_txt,
+                "diameter_in": dia_val,
+            }
+        )
+
+    if total_qty <= 0:
         return {}
 
     ops_entries: list[dict[str, Any]] = []
@@ -20422,7 +20538,7 @@ def extract_hole_table_from_text(doc, y_tol: float = 0.04, min_rows: int = 5):
     ops_summary = aggregate_ops(clean_rows, ops_entries=ops_entries) if clean_rows else {}
 
     result = {
-        "hole_count": total,
+        "hole_count": total_qty,
         "hole_diam_families_in": families,
         "rows": clean_rows,
         "provenance_holes": "HOLE TABLE (text)",
@@ -20432,6 +20548,10 @@ def extract_hole_table_from_text(doc, y_tol: float = 0.04, min_rows: int = 5):
         claims_payload = ops_summary.get("claims") if isinstance(ops_summary, dict) else None
         if isinstance(claims_payload, dict) and claims_payload:
             result["ops_claims"] = dict(claims_payload)
+    if from_back:
+        result["from_back"] = True
+    if double_sided:
+        result["double_sided_cbore"] = True
     return result
 
 
