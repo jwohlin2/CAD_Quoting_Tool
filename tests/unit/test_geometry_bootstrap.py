@@ -101,12 +101,12 @@ def _snapshot_capabilities(geometry: object) -> dict[str, tuple[str | None, str 
 
 def test_geometry_capabilities_match_between_installed_and_repo_checkout():
     repo_root = Path(__file__).resolve().parents[2]
-    pkg_src = repo_root / "cad_quoter_pkg" / "src"
+    pkg_src = repo_root / "src"
 
     installed_geometry = _temporarily_load_geometry([pkg_src], drop_repo_root=True)
     installed_snapshot = _snapshot_capabilities(installed_geometry)
 
-    repo_geometry = _temporarily_load_geometry([repo_root], drop_repo_root=False)
+    repo_geometry = _temporarily_load_geometry([repo_root / "src"], drop_repo_root=False)
     repo_snapshot = _snapshot_capabilities(repo_geometry)
 
     assert repo_snapshot == installed_snapshot

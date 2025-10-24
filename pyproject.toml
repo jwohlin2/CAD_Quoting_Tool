@@ -1,25 +1,28 @@
 [project]
-name = "cad-quoting-tool"
-version = "0.0.0"
-description = "Desktop workflow for quoting CAD-driven jobs."
+name = "cad-quoter"
+version = "0.1.0"
+description = "Reusable CAD quoting utilities"
+readme = "cad_quoter_pkg/README.md"
+authors = [{ name = "CAD Quoting Team" }]
+license = { text = "Proprietary" }
 requires-python = ">=3.11"
 dependencies = [
     "beautifulsoup4>=4.12",
-    "lxml>=4.9",
-    "requests>=2.31",
-    "requests-pkcs12>=1.22",
-    "truststore>=0.9.2",
-    "python-dotenv>=1.0",
-    "pandas>=1.5",
-    "openpyxl>=3.1",
-    "OCP>=7.7",
-    "trimesh>=3.22",
     "ezdxf>=1.0",
     "llama-cpp-python>=0.2.0",
+    "lxml>=4.9",
+    "OCP>=7.7",
+    "openpyxl>=3.1",
+    "pandas>=1.5",
     "pandas-stubs==2.2.2.240514",
+    "python-dotenv>=1.0",
+    "requests>=2.31",
+    "requests-pkcs12>=1.22",
+    "trimesh>=3.22",
+    "truststore>=0.9.2",
     "types-ezdxf==1.0.0",
-    "types-pythonocc-core==7.7.0.1",
     "types-PyMuPDF==1.24.3.20240525",
+    "types-pythonocc-core==7.7.0.1",
 ]
 
 [tool.ruff]
@@ -38,11 +41,19 @@ line-length = 100
 include = ["."]
 
 [tool.setuptools]
-package-dir = { "" = "cad_quoter_pkg/src" }
+package-dir = { "" = "src" }
+include-package-data = true
 
 [tool.setuptools.packages.find]
-where = ["cad_quoter_pkg/src"]
+where = ["src"]
 include = ["cad_quoter*"]
+
+[tool.setuptools.package-data]
+cad_quoter = [
+    "resources/**/*",
+    "pricing/resources/**/*",
+    "llm/**/*",
+]
 
 [build-system]
 requires = ["setuptools>=68", "wheel"]
