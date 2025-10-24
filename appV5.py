@@ -5175,24 +5175,49 @@ def _compute_drilling_removal_section(
 
         derived_ops = typing.cast(MutableMapping[str, Any] | dict[str, Any], derived_obj)
 
-        if "drill_bins_raw" not in derived_ops:
+        raw_counts_existing = derived_ops.get("drill_bins_raw")
+        if isinstance(raw_counts_existing, Mapping):
+            counts_by_diam_raw_obj = dict(raw_counts_existing)
+        else:
+            try:
+                counts_by_diam_raw_obj = dict(raw_counts_existing or {})
+            except Exception:
+                counts_by_diam_raw_obj = {}
+
+        if not counts_by_diam_raw_obj:
             seed = _seed_drill_bins_from_geo__local(geo_map) or {}
-            derived_ops["drill_bins_raw"] = dict(seed)
+            counts_by_diam_raw_obj = dict(seed)
+
+        derived_ops["drill_bins_raw"] = dict(counts_by_diam_raw_obj)
 
         cb_groups = derived_ops.get("cb_groups") or {}
 
-        if "drill_bins_adj" not in derived_ops:
-            adj = _adjust_drill_counts__local(
-                derived_ops.get("drill_bins_raw") or {},
-                derived_ops.get("pilot_claims") or {},
-                cb_groups,
-            ) or {}
-            derived_ops["drill_bins_adj"] = dict(adj)
-            derived_ops["drill_total"] = int(sum(adj.values()))
+        adj_counts_existing = derived_ops.get("drill_bins_adj")
+        if isinstance(adj_counts_existing, Mapping):
+            counts_by_diam_adj_obj = dict(adj_counts_existing)
+        else:
+            try:
+                counts_by_diam_adj_obj = dict(adj_counts_existing or {})
+            except Exception:
+                counts_by_diam_adj_obj = {}
+
+        if not counts_by_diam_adj_obj:
+            counts_by_diam_adj_obj = dict(
+                _adjust_drill_counts__local(
+                    counts_by_diam_raw_obj,
+                    derived_ops.get("pilot_claims") or {},
+                    cb_groups,
+                )
+                or {}
+            )
+
+        derived_ops["drill_bins_adj"] = dict(counts_by_diam_adj_obj)
+        drill_total_adj = int(sum(counts_by_diam_adj_obj.values()))
+        derived_ops["drill_total"] = drill_total_adj
 
         counts_by_diam_raw_obj = dict(derived_ops.get("drill_bins_raw") or {})
         counts_by_diam_adj_obj = dict(derived_ops.get("drill_bins_adj") or {})
-        drill_total_adj = int(derived_ops.get("drill_total") or 0)
+        drill_total_adj = int(derived_ops.get("drill_total") or drill_total_adj)
 
         _push(
             lines,
