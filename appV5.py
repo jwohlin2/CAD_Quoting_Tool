@@ -4375,12 +4375,16 @@ def _compute_drilling_removal_section(
                 or {}
             )
 
-            def _seed_drill_bins_from_geo__local(g: dict) -> dict[float, int]:
+            from typing import Mapping, Any
+
+            def _seed_drill_bins_from_geo__local(
+                g: Mapping[str, Any] | None,
+            ) -> dict[float, int]:
                 out: dict[float, int] = {}
-                if not isinstance(g, dict):
+                if not isinstance(g, Mapping):
                     return out
 
-                # Prefer ready-made families
+                # 1) Families (already grouped)
                 for key in (
                     "hole_diam_families_geom_in",
                     "hole_diam_families_in",
@@ -4388,39 +4392,44 @@ def _compute_drilling_removal_section(
                     "hole_diam_families",
                 ):
                     fam = g.get(key)
-                    if isinstance(fam, dict) and fam:
+                    if isinstance(fam, Mapping) and fam:
                         for k, v in fam.items():
                             try:
                                 d = float(str(k).replace('"', "").strip())
                                 q = int(v or 0)
                                 if q > 0:
-                                    out[round(d, 4)] = out.get(round(d, 4), 0) + q
+                                    d = round(d, 3)
+                                    out[d] = out.get(d, 0) + q
                             except Exception:
                                 pass
                         if out:
                             return out
 
-                # Fall back to raw lists
-                holes_in = g.get("hole_diams_in") or g.get("hole_diams_geom_in")
-                holes_mm = g.get("hole_diams_mm") or g.get("hole_diams_geom_mm")
+                # 2) Lists (prefer precise), IN then MM
+                for key_in in ("hole_diams_in_precise", "hole_diams_in"):
+                    seq = g.get(key_in)
+                    if isinstance(seq, (list, tuple)) and seq:
+                        for x in seq:
+                            try:
+                                d = round(float(x), 3)
+                                out[d] = out.get(d, 0) + 1
+                            except Exception:
+                                pass
+                        if out:
+                            return out
 
-                def _acc(seq, mm=False):
-                    if not isinstance(seq, (list, tuple)):
-                        return
-                    for x in seq:
-                        try:
-                            d = float(x)
-                            if mm:
-                                d /= 25.4
-                            d = round(d, 3)
-                            out[d] = out.get(d, 0) + 1
-                        except Exception:
-                            pass
+                for key_mm in ("hole_diams_mm_precise", "hole_diams_mm"):
+                    seq = g.get(key_mm)
+                    if isinstance(seq, (list, tuple)) and seq:
+                        for x in seq:
+                            try:
+                                d = round(float(x) / 25.4, 3)
+                                out[d] = out.get(d, 0) + 1
+                            except Exception:
+                                pass
+                        if out:
+                            return out
 
-                if holes_in:
-                    _acc(holes_in, mm=False)
-                if not out and holes_mm:
-                    _acc(holes_mm, mm=True)
                 return out
 
             # 1) RAW bins (single source of truth)
