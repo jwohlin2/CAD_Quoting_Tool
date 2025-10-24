@@ -98,6 +98,64 @@ def test_two_bucket_to_flat_prefers_known_keys() -> None:
     assert "CAMRate" not in flat
 
 
+def _sample_two_bucket_defaults() -> dict[str, dict[str, float]]:
+    return {
+        "labor": {
+            "LaborRate": 45.0,
+            "Programmer": 55.0,
+            "Inspector": 40.0,
+        },
+        "machine": {
+            "MachineRate": 90.0,
+            "CNC_Mill": 85.0,
+        },
+    }
+
+
+def test_prepare_render_rates_backfills_missing_entries() -> None:
+    flat_rates: dict[str, float] = {}
+
+    prepared = rates.prepare_render_rates(
+        flat_rates,
+        default_two_bucket=_sample_two_bucket_defaults(),
+    )
+
+    assert prepared["LaborRate"] > 0.0
+    assert prepared["MachineRate"] > 0.0
+    assert prepared["ProgrammerRate"] == pytest.approx(prepared["ProgrammingRate"])
+    assert prepared["InspectionRate"] > 0.0
+    assert prepared["ShopRate"] == pytest.approx(prepared["MillingRate"])
+    assert flat_rates["LaborRate"] == pytest.approx(prepared["LaborRate"])
+
+
+def test_prepare_render_rates_preserves_explicit_values() -> None:
+    flat_rates: dict[str, float] = {"InspectionRate": 22.5}
+
+    prepared = rates.prepare_render_rates(
+        flat_rates,
+        default_two_bucket=_sample_two_bucket_defaults(),
+    )
+
+    assert prepared["InspectionRate"] == pytest.approx(22.5)
+    assert flat_rates["InspectionRate"] == pytest.approx(22.5)
+
+
+def test_prepare_render_rates_applies_cfg_overrides() -> None:
+    cfg = SimpleNamespace(separate_machine_labor=True, labor_rate_per_hr=60.0)
+    flat_rates: dict[str, float] = {"MillingRate": 95.0}
+
+    prepared = rates.prepare_render_rates(
+        flat_rates,
+        cfg=cfg,
+        default_two_bucket=_sample_two_bucket_defaults(),
+    )
+
+    assert prepared["LaborRate"] == pytest.approx(60.0)
+    assert prepared["ProgrammerRate"] == pytest.approx(60.0)
+    assert prepared["ProgrammingRate"] == pytest.approx(60.0)
+    assert flat_rates["LaborRate"] == pytest.approx(60.0)
+
+
 def test_op_cost_combines_machine_and_labor_minutes() -> None:
     op = {"op": "wire_edm_windows"}
     two_bucket = {

@@ -7728,7 +7728,12 @@ from cad_quoter.pricing.materials import (
     plan_stock_blank as plan_stock_blank,
 )
 from cad_quoter.config import _ensure_two_bucket_rates
-from cad_quoter.rates import LABOR_RATE_KEYS, MACHINE_RATE_KEYS, two_bucket_to_flat
+from cad_quoter.rates import (
+    LABOR_RATE_KEYS,
+    MACHINE_RATE_KEYS,
+    prepare_render_rates,
+    two_bucket_to_flat,
+)
 from cad_quoter.vendors.mcmaster_stock import lookup_sku_and_price_for_mm
 
 SCRAP_RECOVERY_DEFAULT = _materials.SCRAP_RECOVERY_DEFAULT
@@ -8382,149 +8387,26 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
             return 0.0
 
     separate_labor_cfg = bool(getattr(cfg, "separate_machine_labor", False)) if cfg else False
-    default_flat_rates: Mapping[str, Any] = RATES_DEFAULT if isinstance(RATES_DEFAULT, Mapping) else {}
+    default_flat_rates: Mapping[str, Any] = (
+        RATES_DEFAULT if isinstance(RATES_DEFAULT, Mapping) else {}
+    )
 
-    def _default_rate(*keys: str) -> float:
-        for key in keys:
-            if not key:
-                continue
-            try:
-                value = default_flat_rates.get(key)
-            except Exception:
-                value = None
-            numeric = _coerce_rate_value(value)
-            if numeric > 0.0:
-                return numeric
-        return 0.0
-
-    default_machine_rate_value = _default_rate("MachineRate", "MillingRate", "CNC_Mill")
-    default_labor_rate_value = _default_rate("LaborRate", "Machinist", "DefaultLaborRate")
-    default_programmer_rate_value = _default_rate("ProgrammingRate", "Programmer")
-    default_inspector_rate_value = _default_rate("InspectionRate", "Inspector")
+    prepared_flat_rates = prepare_render_rates(
+        rates,
+        cfg=cfg,
+        default_two_bucket=RATES_TWO_BUCKET_DEFAULT,
+        default_flat=default_flat_rates,
+    )
+    for key, value in prepared_flat_rates.items():
+        rates[key] = value
 
     cfg_labor_rate_value = 0.0
     if separate_labor_cfg:
         cfg_labor_rate_value = _coerce_rate_value(getattr(cfg, "labor_rate_per_hr", 0.0))
         if cfg_labor_rate_value <= 0.0:
-            cfg_labor_rate_value = default_labor_rate_value or 45.0
+            cfg_labor_rate_value = _coerce_rate_value(prepared_flat_rates.get("LaborRate"))
 
-    if "ShopRate" not in rates:
-        fallback_shop = _coerce_rate_value(rates.get("MillingRate"))
-        rates.setdefault("ShopRate", fallback_shop)
-    shop_rate_val = _coerce_rate_value(rates.get("ShopRate"))
-
-    if "EngineerRate" not in rates:
-        engineer_fallback = _coerce_rate_value(rates.get("MillingRate"))
-        if engineer_fallback <= 0 and shop_rate_val > 0:
-            engineer_fallback = shop_rate_val
-        rates.setdefault("EngineerRate", engineer_fallback)
-    engineer_rate_val = _coerce_rate_value(rates.get("EngineerRate"))
-
-    labor_rate_value = _coerce_rate_value(rates.get("LaborRate"))
-    if labor_rate_value <= 0:
-        labor_rate_value = _coerce_rate_value(rates.get("ShopLaborRate"))
-    if labor_rate_value <= 0:
-        labor_rate_value = default_labor_rate_value or 45.0
-    if separate_labor_cfg and cfg_labor_rate_value > 0.0:
-        labor_rate_value = cfg_labor_rate_value
-    rates["LaborRate"] = labor_rate_value
-
-    machine_rate_value = _coerce_rate_value(rates.get("MachineRate"))
-    if machine_rate_value <= 0:
-        machine_rate_value = _coerce_rate_value(rates.get("ShopMachineRate"))
-    if machine_rate_value <= 0:
-        machine_rate_value = default_machine_rate_value or labor_rate_value
-    rates["MachineRate"] = machine_rate_value
-
-    cfg_programmer_rate: float | None = None
-    if cfg and getattr(cfg, "separate_machine_labor", False):
-        cfg_programmer_rate = _coerce_rate_value(getattr(cfg, "labor_rate_per_hr", None))
-        if cfg_programmer_rate <= 0:
-            cfg_programmer_rate = default_programmer_rate_value or default_labor_rate_value or 45.0
-
-    if cfg_programmer_rate is not None and cfg_programmer_rate > 0:
-        programmer_rate_value = float(cfg_programmer_rate)
-        programming_rate_value = float(cfg_programmer_rate)
-    else:
-        if "ProgrammerRate" not in rates:
-            programmer_fallback = (
-                engineer_rate_val if engineer_rate_val > 0 else _coerce_rate_value(rates.get("MillingRate"))
-            )
-            if programmer_fallback <= 0 and shop_rate_val > 0:
-                programmer_fallback = shop_rate_val
-            if programmer_fallback <= 0:
-                programmer_fallback = _coerce_rate_value(rates.get("LaborRate"))
-            if programmer_fallback <= 0:
-                programmer_fallback = default_programmer_rate_value or default_labor_rate_value
-            if programmer_fallback > 0 and default_programmer_rate_value > 0:
-                programmer_fallback = max(programmer_fallback, default_programmer_rate_value)
-            rates.setdefault("ProgrammerRate", programmer_fallback)
-
-        programmer_rate_value = _coerce_rate_value(rates.get("ProgrammerRate"))
-        if programmer_rate_value <= 0:
-            programmer_rate_value = (
-                engineer_rate_val
-                if engineer_rate_val > 0
-                else _coerce_rate_value(rates.get("MillingRate"))
-            )
-        if programmer_rate_value <= 0 and shop_rate_val > 0:
-            programmer_rate_value = shop_rate_val
-        if programmer_rate_value <= 0:
-            programmer_rate_value = labor_rate_value
-        if programmer_rate_value <= 0:
-            programmer_rate_value = default_programmer_rate_value or default_labor_rate_value
-        if programmer_rate_value > 0 and default_programmer_rate_value > 0:
-            programmer_rate_value = max(programmer_rate_value, default_programmer_rate_value)
-
-        programming_rate_value = _coerce_rate_value(rates.get("ProgrammingRate"))
-        if programming_rate_value <= 0:
-            programming_rate_value = programmer_rate_value
-        if programming_rate_value <= 0:
-            programming_rate_value = labor_rate_value
-        if programming_rate_value <= 0:
-            programming_rate_value = default_programmer_rate_value or programmer_rate_value
-        if programming_rate_value > 0 and default_programmer_rate_value > 0:
-            programming_rate_value = max(programming_rate_value, default_programmer_rate_value)
-
-    rates["ProgrammerRate"] = programmer_rate_value
-    rates["ProgrammingRate"] = programming_rate_value
-
-    inspector_rate_value = _coerce_rate_value(rates.get("InspectorRate"))
-    if inspector_rate_value <= 0:
-        inspector_rate_value = labor_rate_value
-    if inspector_rate_value <= 0:
-        inspector_rate_value = default_inspector_rate_value or default_labor_rate_value
-    if inspector_rate_value > 0 and default_inspector_rate_value > 0:
-        inspector_rate_value = max(inspector_rate_value, default_inspector_rate_value)
-    rates["InspectorRate"] = inspector_rate_value
-
-    inspection_rate_value = _coerce_rate_value(rates.get("InspectionRate"))
-    if inspection_rate_value <= 0:
-        inspection_rate_value = inspector_rate_value
-    if inspection_rate_value <= 0:
-        inspection_rate_value = labor_rate_value
-    if inspection_rate_value <= 0:
-        inspection_rate_value = default_inspector_rate_value or default_labor_rate_value
-    if inspection_rate_value > 0 and default_inspector_rate_value > 0:
-        inspection_rate_value = max(inspection_rate_value, default_inspector_rate_value)
-    rates["InspectionRate"] = inspection_rate_value
-
-    if default_labor_rate_value > 0:
-        rates.setdefault("LaborRate", default_labor_rate_value)
-    else:
-        rates.setdefault("LaborRate", 45.0)
-    if default_machine_rate_value > 0:
-        rates.setdefault("MachineRate", default_machine_rate_value)
-    else:
-        rates.setdefault("MachineRate", labor_rate_value or 45.0)
-    rates.setdefault("ProgrammingRate", rates.get("ProgrammerRate", rates["LaborRate"]))
-    rates.setdefault("InspectionRate", rates.get("InspectorRate", rates["LaborRate"]))
-
-    fallback_two_bucket_rates = _normalized_two_bucket_rates(rates)
-    fallback_flat_rates = two_bucket_to_flat(fallback_two_bucket_rates)
-    for key, fallback_value in fallback_flat_rates.items():
-        if _coerce_rate_value(rates.get(key)) <= 0.0:
-            rates[key] = float(fallback_value)
+    fallback_two_bucket_rates = _normalized_two_bucket_rates(prepared_flat_rates)
     params       = breakdown.get("params", {}) or {}
     nre_cost_details = breakdown.get("nre_cost_details", {}) or {}
     labor_cost_details_input_raw = breakdown.get("labor_cost_details", {}) or {}
