@@ -6130,7 +6130,7 @@ def _compute_drilling_removal_section(
 
         counts_by_diam_raw_obj = dict(derived_ops.get("drill_bins_raw") or {})
         counts_by_diam_adj_obj = dict(derived_ops.get("drill_bins_adj") or {})
-        drill_total_adj = int(derived_ops.get("drill_total") or 0)
+        drill_total_adj = int(derived_ops.get("drill_total") or drill_total_adj)
 
         drill_bins_adj_total = int(sum(counts_by_diam_adj_obj.values()))
 
