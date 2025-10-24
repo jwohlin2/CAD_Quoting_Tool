@@ -25,9 +25,12 @@ before export.
    python -m venv .venv
    source .venv/bin/activate  # Windows: .venv\Scripts\activate
    ```
-2. Install the runtime dependencies (make sure your private index hosting
-   `cad-quoter` is available via `PIP_EXTRA_INDEX_URL` or `--extra-index-url`):
+2. Install the repository in editable mode so the in-tree `src/cad_quoter`
+   package is importable during development. Then install the runtime
+   dependencies (make sure your private index hosting `cad-quoter` is available
+   via `PIP_EXTRA_INDEX_URL` or `--extra-index-url`):
    ```bash
+   pip install -e .
    pip install -r requirements.txt
    ```
 3. (Optional) Place Qwen GGUF weights in one of the recognised locations:
