@@ -4422,6 +4422,12 @@ def _compute_drilling_removal_section(
             )
             _push(lines, f"[DEBUG] DRILL bins adj={drill_actions_from_groups}")
             ops_hole_count_from_table = drill_actions_from_groups
+            try:
+                extras["drill_actions_from_groups"] = float(drill_actions_from_groups)
+                extras["drill_actions_adjusted_total"] = float(drill_actions_from_groups)
+                extras["ops_hole_count_from_table"] = float(ops_hole_count_from_table)
+            except Exception:
+                pass
 
             remaining_counts = dict(counts_by_diam)
             adjusted_rows: list[dict[str, Any]] = []
@@ -12597,9 +12603,37 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
         removal_sections_text,
     )
 
+    def _coerce_drill_actions_total(value: Any) -> int:
+        try:
+            numeric_val = float(value)
+        except Exception:
+            return 0
+        if not math.isfinite(numeric_val):
+            return 0
+        try:
+            coerced = int(round(numeric_val))
+        except Exception:
+            return 0
+        return coerced if coerced > 0 else 0
+
+    drill_actions_from_removal = 0
+    if isinstance(removal_card_extra, _MappingABC):
+        for key in (
+            "drill_actions_from_groups",
+            "drill_actions_adjusted_total",
+            "ops_hole_count_from_table",
+        ):
+            try:
+                candidate_value = removal_card_extra.get(key)
+            except Exception:
+                candidate_value = None
+            candidate_total = _coerce_drill_actions_total(candidate_value)
+            if candidate_total > 0:
+                drill_actions_from_removal = max(drill_actions_from_removal, candidate_total)
+
     ops_counts = _apply_ops_audit_counts(
         typing.cast(MutableMapping[str, int], ops_counts),
-        drill_actions=int(locals().get("drill_actions_from_groups") or 0),
+        drill_actions=drill_actions_from_removal,
         ops_claims=ops_claims,
     )
 
@@ -12628,7 +12662,7 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
     if drilling_summary is None:
         drilling_summary = {}
 
-    drill_actions = int(locals().get("drill_actions_from_groups") or 0)
+    drill_actions = int(drill_actions_from_removal or 0)
     if drill_actions <= 0:
         drill_actions = int(ops_counts.get("drills", 0))
 
@@ -12729,6 +12763,7 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
         drilling_summary,
         result.get("drilling_summary") if isinstance(result, _MappingABC) else None,
         breakdown.get("drilling_summary") if isinstance(breakdown, _MappingABC) else None,
+        removal_card_extra,
         result.get("drill_actions_adjusted_total") if isinstance(result, _MappingABC) else None,
         breakdown.get("drill_actions_adjusted_total") if isinstance(breakdown, _MappingABC) else None,
     ):
