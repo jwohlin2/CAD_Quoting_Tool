@@ -4086,10 +4086,8 @@ from cad_quoter.app.effective import (
 from cad_quoter.ui import suggestions as ui_suggestions
 
 from cad_quoter.utils.scrap import (
-    HOLE_SCRAP_CAP,
-    SCRAP_DEFAULT_GUESS,
-    _holes_scrap_fraction,
     normalize_scrap_pct,
+    resolve_material_scrap_state,
 )
 from cad_quoter.utils.render_utils.tables import ascii_table, draw_kv_table
 from cad_quoter.app.planner_helpers import _process_plan_job
@@ -17220,118 +17218,17 @@ def compute_quote_from_df(  # type: ignore[reportGeneralTypeIssues]
     material_text = material_display
 
     scrap_value = value_map.get("Scrap Percent (%)")
-    normalized_scrap = normalize_scrap_pct(scrap_value)
-    scrap_frac: float | None = normalized_scrap if normalized_scrap > 0 else None
-    scrap_source = "ui" if scrap_frac is not None else "default_guess"
-    scrap_source_label = scrap_source
-    hole_reason_applied = False
-    if scrap_frac is None:
-        stock_plan = geo_payload.get("stock_plan_guess") if isinstance(geo_payload, dict) else None
-        if isinstance(stock_plan, _MappingABC):
-            net = _coerce_float_or_none(stock_plan.get("net_volume_in3"))
-            stock = _coerce_float_or_none(stock_plan.get("stock_volume_in3"))
-            if net and stock and net > 0 and stock >= net:
-                scrap_frac = max(0.0, min(0.25, (stock - net) / net))
-                scrap_source = "stock_plan_guess"
-                scrap_source_label = scrap_source
-        if scrap_frac is None:
-            scrap_frac = SCRAP_DEFAULT_GUESS
-            scrap_source = "default_guess"
-            scrap_source_label = scrap_source
-
-    assert scrap_frac is not None
-    scrap_frac = float(scrap_frac)
-
-    hole_scrap_frac_est = _holes_scrap_fraction(geo_payload, cap=HOLE_SCRAP_CAP)
-    if hole_scrap_frac_est > 0:
-        hole_scrap_frac_clamped = max(0.0, min(HOLE_SCRAP_CAP, float(hole_scrap_frac_est)))
-        ui_scrap_frac = normalize_scrap_pct(scrap_value)
-        scrap_candidate = max(ui_scrap_frac, hole_scrap_frac_clamped)
-        if scrap_candidate > scrap_frac + 1e-9:
-            scrap_frac = scrap_candidate
-            scrap_source_label = f"{scrap_source}+holes"
-            hole_reason_applied = True
-
-    density_g_cc = _coerce_float_or_none(value_map.get("Material Density"))
-    if (density_g_cc in (None, 0.0)) and material_text:
-        density_hint = _density_for_material(material_text)
-        if density_hint:
-            density_g_cc = density_hint
-
-    net_volume_cm3 = _coerce_float_or_none(value_map.get("Net Volume (cm^3)"))
-    if net_volume_cm3 is None:
-        length_in = _coerce_float_or_none(value_map.get("Plate Length (in)"))
-        width_in = _coerce_float_or_none(value_map.get("Plate Width (in)"))
-        thickness_in_val = _coerce_float_or_none(value_map.get("Thickness (in)"))
-
-        if isinstance(geo_payload, _MappingABC):
-            if length_in is None:
-                length_in = _coerce_float_or_none(
-                    geo_payload.get("plate_len_in")
-                    or geo_payload.get("plate_length_in")
-                )
-            if width_in is None:
-                width_in = _coerce_float_or_none(
-                    geo_payload.get("plate_wid_in")
-                    or geo_payload.get("plate_width_in")
-                )
-
-            if length_in is None:
-                length_mm = _coerce_positive_float(
-                    geo_payload.get("plate_len_mm")
-                    or geo_payload.get("plate_length_mm")
-                )
-                if length_mm:
-                    length_in = float(length_mm) / 25.4
-            if width_in is None:
-                width_mm = _coerce_positive_float(
-                    geo_payload.get("plate_wid_mm")
-                    or geo_payload.get("plate_width_mm")
-                )
-                if width_mm:
-                    width_in = float(width_mm) / 25.4
-
-            if thickness_in_val is None:
-                thickness_in_val = _coerce_float_or_none(geo_payload.get("thickness_in"))
-                if thickness_in_val is None:
-                    thickness_mm_geo = _coerce_positive_float(geo_payload.get("thickness_mm"))
-                    if thickness_mm_geo:
-                        thickness_in_val = float(thickness_mm_geo) / 25.4
-
-            if length_in is None or width_in is None:
-                derived_ctx = geo_payload.get("derived")
-                if isinstance(derived_ctx, _MappingABC):
-                    bbox_mm = derived_ctx.get("bbox_mm")
-                    if (
-                        isinstance(bbox_mm, (list, tuple))
-                        and len(bbox_mm) == 2
-                    ):
-                        bbox_L_mm = _coerce_positive_float(bbox_mm[0])
-                        bbox_W_mm = _coerce_positive_float(bbox_mm[1])
-                        if length_in is None and bbox_L_mm:
-                            length_in = float(bbox_L_mm) / 25.4
-                        if width_in is None and bbox_W_mm:
-                            width_in = float(bbox_W_mm) / 25.4
-
-        if length_in and width_in and thickness_in_val:
-            volume_in3 = float(length_in) * float(width_in) * float(thickness_in_val)
-            net_volume_cm3 = volume_in3 * 16.387064
-
-    removal_mass_g = _holes_removed_mass_g(geo_payload)
-    if net_volume_cm3 and density_g_cc and removal_mass_g:
-        net_mass_g = float(net_volume_cm3) * float(density_g_cc)
-        base_for_removal = float(scrap_frac or 0.0) if scrap_source != "default_guess" else 0.0
-        removal_result = compute_mass_and_scrap_after_removal(
-            net_mass_g,
-            base_for_removal,
-            removal_mass_g,
-        )
-        scrap_frac = removal_result[1]
-        scrap_source = "geometry"
-        if hole_reason_applied:
-            scrap_source_label = f"{scrap_source_label}+geometry"
-        else:
-            scrap_source_label = scrap_source
+    scrap_state = resolve_material_scrap_state(
+        value_map=value_map if isinstance(value_map, _MappingABC) else None,
+        geo_payload=geo_payload if isinstance(geo_payload, _MappingABC) else None,
+        material_text=material_text,
+        scrap_value=scrap_value,
+        material_group_display=material_group_display,
+        density_lookup=_density_for_material,
+    )
+    scrap_frac = scrap_state.scrap_fraction
+    scrap_source = scrap_state.scrap_source
+    scrap_source_label = scrap_state.scrap_source_label
 
     fai_value = value_map.get("FAIR Required")
     fai_required = coerce_bool(coerce_checkbox_state(fai_value), default=False)
@@ -17561,112 +17458,31 @@ def compute_quote_from_df(  # type: ignore[reportGeneralTypeIssues]
     material_entry["material_cost_before_credit"] = float(base_material_cost)
     mat_block["material_cost_before_credit"] = float(base_material_cost)
 
-    scrap_mass_lb_val = _coerce_float_or_none(
-        mat_block.get("scrap_weight_lb") or mat_block.get("scrap_lb")
+    scrap_state.finalize_credit(
+        material_block=mat_block,
+        overrides=overrides if isinstance(overrides, _MappingABC) else None,
+        geo_context=geo_context if isinstance(geo_context, dict) else None,
+        material_display=material_display,
+        material_group_display=material_group_display,
+        wieland_lookup=_wieland_scrap_usd_per_lb,
+        default_recovery_fraction=_materials.SCRAP_RECOVERY_DEFAULT,
+        default_scrap_price_usd_per_lb=_materials.SCRAP_PRICE_FALLBACK_USD_PER_LB,
     )
-    scrap_mass_lb = (
-        float(scrap_mass_lb_val)
-        if scrap_mass_lb_val is not None and scrap_mass_lb_val > 0
-        else None
-    )
+
+    credit_info = scrap_state.scrap_credit
+    scrap_mass_lb = credit_info.mass_lb
     if scrap_mass_lb is not None:
         mat_block["scrap_credit_mass_lb"] = float(scrap_mass_lb)
         material_entry["scrap_credit_mass_lb"] = float(scrap_mass_lb)
 
-    credit_override_amount: float | None = None
-    unit_price_override: float | None = None
-    recovery_override: float | None = None
-    if isinstance(overrides, _MappingABC):
-        for key in (
-            "Material Scrap / Remnant Value",
-            "material_scrap_credit",
-            "material_scrap_credit_usd",
-            "scrap_credit_usd",
-        ):
-            override_val = overrides.get(key)
-            if override_val in (None, ""):
-                continue
-            coerced_override = _coerce_float_or_none(override_val)
-            if coerced_override is not None:
-                credit_override_amount = abs(float(coerced_override))
-                break
+    scrap_credit_amount = credit_info.amount_usd
+    scrap_price_used = credit_info.unit_price_usd_per_lb
+    scrap_recovery_used = credit_info.recovery_fraction
+    scrap_credit_source = credit_info.source
+    wieland_scrap_price = credit_info.wieland_price_usd_per_lb
 
-        for key in (
-            "scrap_credit_unit_price_usd_per_lb",
-            "scrap_price_usd_per_lb",
-            "scrap_usd_per_lb",
-            "Scrap Price ($/lb)",
-            "Scrap Credit ($/lb)",
-            "Scrap Unit Price ($/lb)",
-        ):
-            price_val = overrides.get(key)
-            if price_val in (None, ""):
-                continue
-            coerced_price = _coerce_float_or_none(price_val)
-            if coerced_price is not None and coerced_price >= 0:
-                unit_price_override = float(coerced_price)
-                break
-
-        for key in (
-            "scrap_recovery_pct",
-            "Scrap Recovery (%)",
-            "scrap_recovery_fraction",
-        ):
-            recovery_val = overrides.get(key)
-            if recovery_val in (None, ""):
-                continue
-            coerced_recovery = _coerce_float_or_none(recovery_val)
-            if coerced_recovery is None:
-                continue
-            recovery_fraction = float(coerced_recovery)
-            if recovery_fraction > 1.0 + 1e-6:
-                recovery_fraction = recovery_fraction / 100.0
-            recovery_override = max(0.0, min(1.0, recovery_fraction))
-            break
-
-    scrap_credit_amount: float | None = None
-    scrap_price_used: float | None = None
-    scrap_recovery_used: float | None = None
-    scrap_credit_source: str | None = None
-    wieland_scrap_price: float | None = None
-
-    if credit_override_amount is not None:
-        scrap_credit_amount = max(0.0, float(credit_override_amount))
-        scrap_credit_source = "override_amount"
-    elif scrap_mass_lb is not None:
-        recovery = (
-            recovery_override
-            if recovery_override is not None
-            else _materials.SCRAP_RECOVERY_DEFAULT
-        )
-        scrap_recovery_used = recovery
-        if unit_price_override is not None:
-            scrap_price_used = max(0.0, float(unit_price_override))
-            scrap_credit_source = "override_unit_price"
-            mat_block["scrap_price_usd_per_lb"] = float(scrap_price_used)
-        else:
-            family_hint = None
-            if isinstance(geo_context, dict):
-                family_hint = (
-                    geo_context.get("material_family")
-                    or geo_context.get("material_group")
-                )
-            family_hint = family_hint or material_group_display or material_display
-            if family_hint is not None and not isinstance(family_hint, str):
-                family_hint = str(family_hint)
-            if isinstance(family_hint, str):
-                family_hint = family_hint.strip() or None
-            price_candidate = _wieland_scrap_usd_per_lb(family_hint)
-            if price_candidate is not None:
-                wieland_scrap_price = float(price_candidate)
-                scrap_price_used = float(price_candidate)
-                scrap_credit_source = "wieland"
-                mat_block["scrap_price_usd_per_lb"] = float(scrap_price_used)
-            else:
-                scrap_price_used = _materials.SCRAP_PRICE_FALLBACK_USD_PER_LB
-                scrap_credit_source = "default"
-                mat_block["scrap_price_usd_per_lb"] = float(scrap_price_used)
-        scrap_credit_amount = float(scrap_mass_lb) * float(scrap_price_used or 0.0) * float(scrap_recovery_used or 0.0)
+    if scrap_price_used is not None:
+        mat_block["scrap_price_usd_per_lb"] = float(scrap_price_used)
 
     if wieland_scrap_price is not None:
         mat_block["scrap_price_usd_per_lb"] = float(wieland_scrap_price)
