@@ -11545,53 +11545,69 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
     if not isinstance(extra_ops_lines, list):
         extra_ops_lines = list(extra_ops_lines or [])
 
+    flags: MutableSet[str] | None = None
+    try:
+        flags_candidate = breakdown_mutable.setdefault("_ops_cards_printed", set())
+        if isinstance(flags_candidate, MutableSet):
+            flags = flags_candidate
+    except Exception:
+        flags = None
+
+    pending_aliases: set[str] = set()
+    pending_owner: MutableMapping[str, Any] | None = None
+    if isinstance(breakdown_mutable, (_MutableMappingABC, dict)):
+        pending_owner = typing.cast(MutableMapping[str, Any], breakdown_mutable)
+        try:
+            pending_candidate = pending_owner.get("_ops_cards_printed_pending")
+        except Exception:
+            pending_candidate = None
+        if isinstance(pending_candidate, (_MutableSetABC, set)):
+            pending_aliases = set(pending_candidate)
+        elif pending_candidate is not None:
+            try:
+                pending_aliases = set(typing.cast(Iterable[str], pending_candidate))
+            except Exception:
+                pending_aliases = set()
+
+    def _clear_pending_ops_flags() -> None:
+        nonlocal pending_aliases, pending_owner
+        if pending_owner is None:
+            return
+        try:
+            pending_candidate_local = pending_owner.get("_ops_cards_printed_pending")
+        except Exception:
+            pending_candidate_local = None
+        if isinstance(pending_candidate_local, (_MutableSetABC, set)):
+            try:
+                pending_candidate_local.clear()
+            except Exception:
+                pass
+        try:
+            pending_owner["_ops_cards_printed_pending"] = set()  # type: ignore[index]
+        except Exception:
+            pass
+        pending_aliases.clear()
+
+    def _mark_pending_ops_flags_as_printed() -> None:
+        aliases_to_mark: Iterable[str]
+        if pending_aliases:
+            aliases_to_mark = tuple(pending_aliases)
+        else:
+            aliases_to_mark = ("counterbore", "cbore")
+        if flags is not None:
+            for alias in aliases_to_mark:
+                try:
+                    flags.add(alias)
+                except Exception:
+                    pass
+        _clear_pending_ops_flags()
+
     if extra_ops_lines:
         already_counterbore = any(
             isinstance(entry, str)
             and entry.strip().upper().startswith("MATERIAL REMOVAL – COUNTERBORE")
             for entry in lines
         )
-        flags: MutableSet[str] | None = None
-        try:
-            flags_candidate = breakdown_mutable.setdefault("_ops_cards_printed", set())
-            if isinstance(flags_candidate, MutableSet):
-                flags = flags_candidate
-        except Exception:
-            flags = None
-
-        pending_aliases: set[str] = set()
-        pending_owner: MutableMapping[str, Any] | None = None
-        if isinstance(breakdown_mutable, (_MutableMappingABC, dict)):
-            pending_owner = typing.cast(MutableMapping[str, Any], breakdown_mutable)
-            try:
-                pending_candidate = pending_owner.get("_ops_cards_printed_pending")
-            except Exception:
-                pending_candidate = None
-            if isinstance(pending_candidate, (_MutableSetABC, set)):
-                pending_aliases = set(pending_candidate)
-            elif pending_candidate is not None:
-                try:
-                    pending_aliases = set(typing.cast(Iterable[str], pending_candidate))
-                except Exception:
-                    pending_aliases = set()
-
-        def _clear_pending_ops_flags() -> None:
-            if pending_owner is None:
-                return
-            try:
-                pending_candidate_local = pending_owner.get("_ops_cards_printed_pending")
-            except Exception:
-                pending_candidate_local = None
-            if isinstance(pending_candidate_local, (_MutableSetABC, set)):
-                try:
-                    pending_candidate_local.clear()
-                except Exception:
-                    pass
-            try:
-                pending_owner["_ops_cards_printed_pending"] = set()  # type: ignore[index]
-            except Exception:
-                pass
-
         should_append_extra_ops = not already_counterbore and (
             flags is None
             or all(alias not in flags for alias in ("counterbore", "cbore"))
@@ -11606,20 +11622,7 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
             if appended_extra_ops_lines:
                 extra_ops_lines_appended = 1
                 extra_ops_lines_cache = list(appended_extra_ops_lines)
-                if flags is not None:
-                    aliases_to_mark: Iterable[str]
-                    if pending_aliases:
-                        aliases_to_mark = tuple(pending_aliases)
-                    else:
-                        aliases_to_mark = ("counterbore", "cbore")
-                    for alias in aliases_to_mark:
-                        try:
-                            flags.add(alias)
-                        except Exception:
-                            pass
-                _clear_pending_ops_flags()
-            else:
-                _clear_pending_ops_flags()
+                _mark_pending_ops_flags_as_printed()
         else:
             _clear_pending_ops_flags()
     if not appended_extra_ops_lines:
@@ -14365,6 +14368,7 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
                     extra_ops_lines_appended = 1
                     extra_ops_lines_cache = list(appended_later_extra_ops_lines)
             if appended_later_extra_ops_lines:
+                _mark_pending_ops_flags_as_printed()
                 _push(
                     lines,
                     f"[DEBUG] extra_ops_lines={len(appended_later_extra_ops_lines)}",
@@ -14412,6 +14416,7 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
                     include_in_removal_cards=False,
                 )
                 if appended_fallback_extra_ops_lines:
+                    _mark_pending_ops_flags_as_printed()
                     for entry in appended_fallback_extra_ops_lines:
                         if not entry.startswith("[DEBUG]"):
                             removal_summary_extra_lines.append(entry)
