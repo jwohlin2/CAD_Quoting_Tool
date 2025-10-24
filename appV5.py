@@ -1309,12 +1309,28 @@ def _build_ops_cards_from_chart_lines(
 
     try:
         geo_map = _get_geo_map(locals().get("result"), breakdown_mutable or breakdown)
-        pre_rows = _ops_rows_from_geo(geo_map)
-        lines: list[str] = [f"[DEBUG] ops_rows_pre={len(pre_rows)}"]
     except Exception:
         geo_map = {}
-        lines = ["[DEBUG] ops_rows_pre=?"]
-        pre_rows = []
+
+    pre_rows = _ops_rows_from_geo(geo_map)
+    print(f"[DEBUG] ops_rows_pre={len(pre_rows)}")
+    lines: list[str] = [f"[DEBUG] ops_rows_pre={len(pre_rows)}"]
+    if not pre_rows:
+        built_rows = ensure_ops_rows_in_geo_from_chart(geo=geo_map if isinstance(geo_map, dict) else None)
+        chart_count = 0
+        try:
+            if isinstance(geo_map, dict):
+                chart_count = len(geo_map.get("chart_lines") or [])
+        except Exception:
+            chart_count = 0
+        print(
+            f"[DEBUG] chart_lines_found={chart_count} built_rows={built_rows}"
+        )
+        lines.append(
+            f"[DEBUG] chart_lines_found={chart_count} built_rows={built_rows}"
+        )
+
+    rows = _ops_rows_from_geo(geo_map)
 
     extra_bucket_ops: MutableMapping[str, Any] | None = None
     if isinstance(breakdown_mutable, dict):
@@ -1358,20 +1374,10 @@ def _build_ops_cards_from_chart_lines(
             ctx_b=ctx_b,
         ) or []
 
-    ops_rows: list[Mapping[str, Any]] = list(pre_rows)
-    try:
-        rows_obj = (((geo_map or {}).get("ops_summary") or {}).get("rows") or [])
-    except Exception:
-        rows_obj = []
-
-    if isinstance(rows_obj, list):
-        for entry in rows_obj:
-            if isinstance(entry, _MappingABC):
-                ops_rows.append(entry)
-    elif isinstance(rows_obj, _MappingABC):
-        for entry in rows_obj.values():  # type: ignore[assignment]
-            if isinstance(entry, _MappingABC):
-                ops_rows.append(entry)
+    ops_rows: list[Mapping[str, Any]] = []
+    for entry in rows:
+        if isinstance(entry, _MappingABC):
+            ops_rows.append(typing.cast(Mapping[str, Any], entry))
 
     cleaned_chart_lines: list[str] = []
     for raw in chart_lines or []:
@@ -1381,49 +1387,17 @@ def _build_ops_cards_from_chart_lines(
     joined_chart = _join_wrapped_chart_lines(cleaned_chart_lines)
 
     lines.append(
-        f"[DEBUG] ops_cards_inputs: chart_lines={len(joined_chart)} rows={len(rows_obj)}"
+        f"[DEBUG] ops_cards_inputs: chart_lines={len(joined_chart)} rows={len(ops_rows)}"
     )
 
     if not joined_chart and not ops_rows:
         return lines
 
-    # If we don't have rows in geo, try to generate them from the chart lines once
-    try:
-        rows_obj = (((geo_map or {}).get("ops_summary") or {}).get("rows") or [])
-    except Exception:
-        rows_obj = []
-    have_ops_rows = isinstance(rows_obj, list) and len(rows_obj) > 0
-    if (not have_ops_rows) and joined_chart:
-        try:
-            # build normalized rows from lines, then persist to geo.ops_summary
-            fallback_rows = _build_ops_rows_from_lines_fallback(joined_chart)
-        except Exception:
-            fallback_rows = []
-        if fallback_rows:
-            try:
-                update_geo_ops_summary_from_hole_rows(geo_map, fallback_rows)
-            except Exception:
-                pass
-            try:
-                rows_obj = (((geo_map or {}).get("ops_summary") or {}).get("rows") or [])
-            except Exception:
-                rows_obj = []
-            if isinstance(rows_obj, list):
-                ops_rows = []
-                for entry in rows_obj:
-                    if isinstance(entry, _MappingABC):
-                        ops_rows.append(entry)
-            elif isinstance(rows_obj, _MappingABC):
-                ops_rows = []
-                for entry in rows_obj.values():  # type: ignore[assignment]
-                    if isinstance(entry, _MappingABC):
-                        ops_rows.append(entry)
-
     chart_claims: dict[str, Any] = {}
     cb_groups: dict[tuple[float | None, str, float | None], int] = {}
     # 3a) Try to build cbore groups from ops rows (best source: table rows)
-    if isinstance(rows_obj, list) and rows_obj:
-        for entry in rows_obj:
+    if ops_rows:
+        for entry in ops_rows:
             if not isinstance(entry, _MappingABC):
                 continue
             try:
@@ -1469,15 +1443,18 @@ def _build_ops_cards_from_chart_lines(
                 key = (dia_val, side_txt, dep_val)
                 cb_groups[key] = cb_groups.get(key, 0) + qty
     # 3b) Parse chart claims (fallback source)
-    try:
-        parsed_claims = _parse_ops_and_claims(joined_chart)
-    except Exception:
-        parsed_claims = {}
-    if isinstance(parsed_claims, dict):
-        chart_claims = parsed_claims
+    if not ops_rows:
+        try:
+            parsed_claims = _parse_ops_and_claims(joined_chart)
+        except Exception:
+            parsed_claims = {}
+        if isinstance(parsed_claims, dict):
+            chart_claims = parsed_claims
+        else:
+            chart_claims = {}
     else:
         chart_claims = {}
-    if not cb_groups:
+    if (not ops_rows) and not cb_groups:
         cb_groups = dict(chart_claims.get("cb_groups") or {})
 
     printed_candidate: Any = None
@@ -1574,7 +1551,7 @@ def _build_ops_cards_from_chart_lines(
                 pass
 
     fallback_rows: list[dict[str, Any]] = []
-    if joined_chart:
+    if (not ops_rows) and joined_chart:
         try:
             fallback_rows = _build_ops_rows_from_lines_fallback(joined_chart)
         except Exception:
@@ -2043,45 +2020,35 @@ def _build_ops_cards_from_chart_lines(
 
     lines.extend(out_lines)
 
-    reviewer_renderer = None
     try:
-        reviewer_renderer = globals().get("_render_table_row_reviewer")
+        result_map = locals().get("result") or {}
     except Exception:
-        reviewer_renderer = None
+        result_map = {}
+    if not isinstance(result_map, (_MappingABC, dict)):
+        result_map = {}
 
-    if callable(reviewer_renderer):
-        try:
-            result_map = locals().get("result") or {}
-        except Exception:
-            result_map = {}
-        if not isinstance(result_map, (_MappingABC, dict)):
-            result_map = {}
+    try:
+        breakdown_map = (breakdown_mutable or breakdown or {})
+    except Exception:
+        breakdown_map = {}
+    if not isinstance(breakdown_map, (_MappingABC, dict)):
+        breakdown_map = {}
 
-        try:
-            breakdown_map = (breakdown_mutable or breakdown or {})
-        except Exception:
-            breakdown_map = {}
-        if not isinstance(breakdown_map, (_MappingABC, dict)):
-            breakdown_map = {}
+    try:
+        reviewer_lines = _render_table_row_reviewer(
+            result=result_map,
+            breakdown=breakdown_map,
+            max_rows=10,
+        )
+    except Exception:
+        reviewer_lines = []
 
-        try:
-            reviewer_lines = reviewer_renderer(
-                result=result_map,
-                breakdown=breakdown_map,
-                max_rows=10,
-            )
-        except Exception:
-            reviewer_lines = []
-
-        if reviewer_lines:
+    if reviewer_lines:
+        for entry in reviewer_lines:
             try:
-                lines.extend(reviewer_lines)
+                lines.append(str(entry))
             except Exception:
-                for entry in reviewer_lines:
-                    try:
-                        lines.append(str(entry))
-                    except Exception:
-                        continue
+                continue
 
     return lines
 
@@ -2897,6 +2864,30 @@ def _ops_counts_from_geo_and_locals(
             key = _norm_op_key(str(k))
             if key in counts:
                 counts[key] += max(qty, 0)
+
+    # Prefer explicit totals when present
+    for candidate in (geo_map, g):
+        if not isinstance(candidate, (_MappingABC, dict)):
+            continue
+        try:
+            ops_summary = candidate.get("ops_summary")  # type: ignore[index]
+        except Exception:
+            ops_summary = None
+        if not isinstance(ops_summary, (_MappingABC, dict)):
+            continue
+        try:
+            totals_candidate = ops_summary.get("totals")  # type: ignore[index]
+        except Exception:
+            totals_candidate = None
+        if not isinstance(totals_candidate, (_MappingABC, dict)) or not totals_candidate:
+            continue
+        for key in ("tap", "counterbore"):
+            try:
+                qty_val = int(float(totals_candidate.get(key, 0)))
+            except Exception:
+                qty_val = 0
+            if key in counts:
+                counts[key] = max(counts[key], qty_val)
 
     # 2) If we have hole diameters but no drill count, use that as a floor.
     if counts["drill"] <= 0:
@@ -4602,6 +4593,66 @@ def _render_table_row_reviewer(*, result=None, breakdown=None, max_rows=10) -> l
         if isinstance(ch, list):
             lines.append(f"chart_lines ......... {len(ch)}")
     return lines
+
+
+def _build_ops_rows_from_chart_lines(chart_lines: list[str]) -> list[dict]:
+    if not chart_lines:
+        return []
+    lines = [(" ".join((s or "").split())).strip() for s in chart_lines if (s or "").strip()]
+    # merge continuations: a new row starts when a line begins with "(n)"
+    rows_txt, cur = [], ""
+    for ln in lines:
+        if _re.match(r"^\(\s*\d+\s*\)", ln):
+            if cur:
+                rows_txt.append(cur.strip())
+            cur = ln
+        else:
+            cur = f"{cur} {ln}".strip()
+    if cur:
+        rows_txt.append(cur.strip())
+
+    rows: list[dict] = []
+    for t in rows_txt:
+        mqty = _re.match(r"^\(\s*(\d+)\s*\)\s*(.+)$", t)
+        if not mqty:
+            continue
+        qty = int(mqty.group(1))
+        desc = mqty.group(2).strip()
+        # REF diameter if present (Ø, decimal, or fraction)
+        mref = _re.search(r"[Ø⌀\u00D8]?\s*((?:\d+/\d+)|(?:\d+(?:\.\d+)?))", desc)
+        ref = None
+        if mref:
+            s = mref.group(1)
+            if "/" in s:
+                num, den = s.split("/")
+                try:
+                    ref = f'{float(int(num))/float(int(den)):.4f}"'
+                except Exception:
+                    ref = None
+            else:
+                try:
+                    ref = f'{float(s):.4f}"'
+                except Exception:
+                    ref = None
+        rows.append({"hole": "", "ref": ref or "", "qty": qty, "desc": desc})
+    return rows
+
+
+def ensure_ops_rows_in_geo_from_chart(*, geo: dict | None) -> int:
+    """If geo.ops_summary.rows is missing/empty but chart_lines exist, build and persist them."""
+
+    if not isinstance(geo, dict):
+        return 0
+    curr = ((geo.get("ops_summary") or {}).get("rows") or [])
+    if isinstance(curr, list) and curr:
+        return len(curr)  # already have rows
+    chart = geo.get("chart_lines") if isinstance(geo.get("chart_lines"), list) else []
+    built = _build_ops_rows_from_chart_lines(chart)
+    if built:
+        geo.setdefault("ops_summary", {})["rows"] = built
+        # no totals here (extractor should do it), but at least the app can render groups now
+        return len(built)
+    return 0
 
 
 _thread_tpi = re.compile(r"#?\s*\d{1,2}\s*-\s*(\d+)", re.I)
