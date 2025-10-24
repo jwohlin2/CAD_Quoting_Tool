@@ -1281,16 +1281,32 @@ def _ops_rows_from_geo(geo_map: Mapping[str, Any] | None) -> list[Mapping[str, A
     if not isinstance(geo_map, (_MappingABC, dict)):
         return rows
 
+    ops_summary: Mapping[str, Any] | None
     try:
-        rows_obj = (((geo_map or {}).get("ops_summary") or {}).get("rows") or [])
+        ops_summary = typing.cast(
+            Mapping[str, Any] | None, (geo_map or {}).get("ops_summary")
+        )
     except Exception:
-        rows_obj = []
+        ops_summary = None
+
+    if not isinstance(ops_summary, (_MappingABC, dict)):
+        return rows
+
+    rows_obj: Any = []
+    for key in ("rows", "rows_detail", "rows_raw"):
+        try:
+            candidate = ops_summary.get(key)  # type: ignore[assignment]
+        except Exception:
+            candidate = None
+        if candidate:
+            rows_obj = candidate
+            break
 
     if isinstance(rows_obj, list):
         for entry in rows_obj:
             if isinstance(entry, _MappingABC):
                 rows.append(entry)
-    elif isinstance(rows_obj, _MappingABC):
+    elif isinstance(rows_obj, (_MappingABC, dict)):
         for entry in rows_obj.values():  # type: ignore[assignment]
             if isinstance(entry, _MappingABC):
                 rows.append(entry)
@@ -1382,18 +1398,10 @@ def _build_ops_cards_from_chart_lines(
     except Exception:
         geo_map = {}
 
-    pre_rows_obj: Any = []
-    if isinstance(geo_map, dict):
-        try:
-            pre_rows_obj = ((geo_map.get("ops_summary") or {}).get("rows") or [])
-        except Exception:
-            pre_rows_obj = []
     rows: list[Any] = []
-    if isinstance(pre_rows_obj, list):
-        rows = pre_rows_obj
-    elif isinstance(pre_rows_obj, (_MappingABC, dict)):
+    if isinstance(geo_map, (_MappingABC, dict)):
         try:
-            rows = [value for value in pre_rows_obj.values() if value is not None]
+            rows = list(_ops_rows_from_geo(geo_map))
         except Exception:
             rows = []
     print(f"[DEBUG] ops_rows_pre={len(rows)}")
