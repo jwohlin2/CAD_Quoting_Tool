@@ -4163,6 +4163,10 @@ def _emit_hole_table_ops_cards(
         else:
             rows = rows_obj
 
+        print(
+            f"[DEBUG] ops_rows_pre={len(rows)} source={(ops_summary or {}).get('source')}"
+        )
+
         if not rows:
             return
 
@@ -21864,6 +21868,14 @@ def extract_2d_features_from_dxf_or_dwg(path: str | Path) -> dict[str, Any]:
         text_info = extract_hole_table_from_text(doc) or {}
     except Exception:
         text_info = {}
+    acad_rows_count = (
+        len((acad_info.get("rows") if isinstance(acad_info, _MappingABC) else []) or [])
+    )
+    text_rows_count = (
+        len((text_info.get("rows") if isinstance(text_info, _MappingABC) else []) or [])
+    )
+    print("[ACAD] rows=", acad_rows_count)
+    print("[TEXT] rows=", text_rows_count)
 
     best_table_info = _choose_better(acad_info, text_info)
     if best_table_info.get("rows"):
@@ -21872,9 +21884,27 @@ def extract_2d_features_from_dxf_or_dwg(path: str | Path) -> dict[str, Any]:
             best_table_info,
             src=("acad_table" if best_table_info is acad_info else "text_table"),
         )
+    ops_summary_debug = geo.get("ops_summary") if isinstance(geo, _MappingABC) else None
+    if not isinstance(ops_summary_debug, _MappingABC):
+        ops_summary_debug = {}
+    rows_debug = ops_summary_debug.get("rows") or []
+    if isinstance(rows_debug, _MappingABC):
+        try:
+            rows_debug = list(rows_debug.values())
+        except Exception:
+            rows_debug = []
+    elif not isinstance(rows_debug, list):
+        try:
+            rows_debug = list(rows_debug)
+        except Exception:
+            rows_debug = []
+    sum_qty_debug = _rows_qty_sum(rows_debug)
+    source_debug = (
+        ops_summary_debug.get("source") if isinstance(ops_summary_debug, _MappingABC) else None
+    )
     print(
-        f"[EXTRACTOR] wrote ops rows: {len((geo.get('ops_summary') or {}).get('rows') or [])} "
-        f"(qty_sum={_rows_qty_sum((geo.get('ops_summary') or {}).get('rows') or [])})"
+        f"[EXTRACTOR] wrote ops rows: {len(rows_debug)} (qty_sum={sum_qty_debug}) "
+        f"source={source_debug}"
     )
 
     table_info = best_table_info or {}
@@ -22358,6 +22388,14 @@ def extract_2d_features_from_dxf_or_dwg(path: str | Path) -> dict[str, Any]:
         text2 = extract_hole_table_from_text(doc) or {}
     except Exception:
         text2 = {}
+    acad2_rows_count = (
+        len((acad2.get("rows") if isinstance(acad2, _MappingABC) else []) or [])
+    )
+    text2_rows_count = (
+        len((text2.get("rows") if isinstance(text2, _MappingABC) else []) or [])
+    )
+    print("[ACAD] rows=", acad2_rows_count)
+    print("[TEXT] rows=", text2_rows_count)
     if text2 and text2.get("hole_count"):
         text2 = dict(text2)
         text2.setdefault("provenance", "HOLE TABLE (TEXT)")
@@ -22373,9 +22411,27 @@ def extract_2d_features_from_dxf_or_dwg(path: str | Path) -> dict[str, Any]:
             src=("acad_table" if candidate is acad2 else "text_table"),
         )
 
+    ops_summary_debug = geo.get("ops_summary") if isinstance(geo, _MappingABC) else None
+    if not isinstance(ops_summary_debug, _MappingABC):
+        ops_summary_debug = {}
+    rows_debug = ops_summary_debug.get("rows") or []
+    if isinstance(rows_debug, _MappingABC):
+        try:
+            rows_debug = list(rows_debug.values())
+        except Exception:
+            rows_debug = []
+    elif not isinstance(rows_debug, list):
+        try:
+            rows_debug = list(rows_debug)
+        except Exception:
+            rows_debug = []
+    sum_qty_debug = _rows_qty_sum(rows_debug)
+    source_debug = (
+        ops_summary_debug.get("source") if isinstance(ops_summary_debug, _MappingABC) else None
+    )
     print(
-        f"[EXTRACTOR] wrote ops rows: {len((geo.get('ops_summary') or {}).get('rows') or [])} "
-        f"(qty_sum={_rows_qty_sum((geo.get('ops_summary') or {}).get('rows') or [])})"
+        f"[EXTRACTOR] wrote ops rows: {len(rows_debug)} (qty_sum={sum_qty_debug}) "
+        f"source={source_debug}"
     )
 
     table_info = best_table_info or {}
