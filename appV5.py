@@ -18529,14 +18529,25 @@ def compute_quote_from_df(  # type: ignore[reportGeneralTypeIssues]
             )
             break
 
-    _ensure_drilling_override(
-        drill_hr,
-        planner_bucket_view=planner_bucket_view_candidate,
-        canonical_bucket_rollup=canonical_bucket_rollup_candidate,
-        process_meta=process_meta_map,
-        hour_summary_entries=hour_summary_for_override,
-        label_overrides=typing.cast(Mapping[str, str] | None, label_overrides_map),
+    should_update_planner_views = any(
+        candidate is not None
+        for candidate in (
+            planner_bucket_view_candidate,
+            canonical_bucket_rollup_candidate,
+            hour_summary_for_override,
+            process_meta_map,
+        )
     )
+
+    if should_update_planner_views:
+        _ensure_drilling_override(
+            drill_hr,
+            planner_bucket_view=planner_bucket_view_candidate,
+            canonical_bucket_rollup=canonical_bucket_rollup_candidate,
+            process_meta=process_meta_map,
+            hour_summary_entries=hour_summary_for_override,
+            label_overrides=typing.cast(Mapping[str, str] | None, label_overrides_map),
+        )
 
     drilling_summary["total_minutes_billed"] = float(drill_min)
 
