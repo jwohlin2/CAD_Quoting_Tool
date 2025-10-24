@@ -1421,21 +1421,47 @@ def _build_ops_cards_from_chart_lines(
             except Exception:
                 pass
 
-    def _print_once(tag: str) -> bool:
-        if printed_set is None:
-            return True
+    pending_prints: set[str] = set()
+
+    def _aliases_for_tag(tag: str) -> set[str]:
         aliases = {tag}
         if tag == "counterbore":
             aliases.add("cbore")
-        if any(alias in printed_set for alias in aliases):
-            return False
-        for alias in aliases:
-            printed_set.add(alias)
-        return True
+        return aliases
+
+    def _should_print(tag: str) -> bool:
+        if printed_set is None:
+            return True
+        aliases = _aliases_for_tag(tag)
+        return not any(alias in printed_set for alias in aliases)
+
+    def _register_pending(tag: str) -> None:
+        pending_prints.update(_aliases_for_tag(tag))
 
     out_lines: list[str] = []
 
-    if cb_groups and not skip_cbore_card:
+    if cb_groups and _should_print("counterbore"):
+        if isinstance(mutation_owner, (_MutableMappingABC, dict)):
+            derived_owner: MutableMapping[str, Any] | None = None
+            try:
+                derived_owner = mutation_owner.setdefault("derived_ops", {})
+            except Exception:
+                derived_owner = None
+            if isinstance(derived_owner, (_MutableMappingABC, dict)):
+                serial_cb: dict[tuple[float | None, str, float | None], int] = {}
+                for (dia, side, depth), qty in cb_groups.items():
+                    serial_cb[
+                        (
+                            float(dia) if dia is not None else None,
+                            str(side or ""),
+                            float(depth) if depth is not None else None,
+                        )
+                    ] = int(qty or 0)
+                try:
+                    derived_owner["cb_groups"] = serial_cb  # type: ignore[index]
+                except Exception:
+                    pass
+
         front_cb = sum(
             int(qty)
             for (dia, side, _depth), qty in cb_groups.items()
@@ -1528,7 +1554,9 @@ def _build_ops_cards_from_chart_lines(
         except Exception:
             pass
 
-    if spot_qty > 0 and not skip_cbore_card:
+        _register_pending("counterbore")
+
+    if spot_qty > 0 and _should_print("spot"):
         per_spot = 0.05
         t_group = spot_qty * per_spot
         out_lines.extend(
@@ -1554,7 +1582,9 @@ def _build_ops_cards_from_chart_lines(
             {"name": "Spot drill", "qty": int(spot_qty), "side": "front"},
         )
 
-    if jig_qty > 0 and not skip_cbore_card:
+        _register_pending("spot")
+
+    if jig_qty > 0 and _should_print("jig-grind"):
         per_jig = float(globals().get("JIG_GRIND_MIN_PER_FEATURE") or 0.75)
         t_group = jig_qty * per_jig
         out_lines.extend(
@@ -1582,9 +1612,38 @@ def _build_ops_cards_from_chart_lines(
             {"name": "Jig-grind", "qty": int(jig_qty), "side": None},
         )
 
+        _register_pending("jig-grind")
+
     if out_lines:
         try:
             _normalize_buckets(bucket_view_obj)
+        except Exception:
+            pass
+
+    if pending_prints and isinstance(mutation_owner, (_MutableMappingABC, dict)):
+        try:
+            pending_owner = typing.cast(MutableMapping[str, Any], mutation_owner)
+            try:
+                pending_candidate = pending_owner.setdefault("_ops_cards_printed_pending", set())
+            except Exception:
+                pending_candidate = None
+            if isinstance(pending_candidate, (_MutableSetABC, set)):
+                pending_candidate.update(pending_prints)
+            elif pending_candidate is not None:
+                try:
+                    pending_set = set(typing.cast(Iterable[str], pending_candidate))
+                except Exception:
+                    pending_set = set()
+                pending_set.update(pending_prints)
+                try:
+                    pending_owner["_ops_cards_printed_pending"] = pending_set  # type: ignore[index]
+                except Exception:
+                    pass
+            else:
+                try:
+                    pending_owner["_ops_cards_printed_pending"] = set(pending_prints)  # type: ignore[index]
+                except Exception:
+                    pass
         except Exception:
             pass
 
@@ -11193,6 +11252,39 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
         except Exception:
             flags = None
 
+        pending_aliases: set[str] = set()
+        pending_owner: MutableMapping[str, Any] | None = None
+        if isinstance(breakdown_mutable, (_MutableMappingABC, dict)):
+            pending_owner = typing.cast(MutableMapping[str, Any], breakdown_mutable)
+            try:
+                pending_candidate = pending_owner.get("_ops_cards_printed_pending")
+            except Exception:
+                pending_candidate = None
+            if isinstance(pending_candidate, (_MutableSetABC, set)):
+                pending_aliases = set(pending_candidate)
+            elif pending_candidate is not None:
+                try:
+                    pending_aliases = set(typing.cast(Iterable[str], pending_candidate))
+                except Exception:
+                    pending_aliases = set()
+
+        def _clear_pending_ops_flags() -> None:
+            if pending_owner is None:
+                return
+            try:
+                pending_candidate_local = pending_owner.get("_ops_cards_printed_pending")
+            except Exception:
+                pending_candidate_local = None
+            if isinstance(pending_candidate_local, (_MutableSetABC, set)):
+                try:
+                    pending_candidate_local.clear()
+                except Exception:
+                    pass
+            try:
+                pending_owner["_ops_cards_printed_pending"] = set()  # type: ignore[index]
+            except Exception:
+                pass
+
         should_append_extra_ops = not already_counterbore and (
             flags is None
             or all(alias not in flags for alias in ("counterbore", "cbore"))
@@ -11208,11 +11300,21 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
                 extra_ops_lines_appended = 1
                 extra_ops_lines_cache = list(appended_extra_ops_lines)
                 if flags is not None:
-                    for alias in ("counterbore", "cbore"):
+                    aliases_to_mark: Iterable[str]
+                    if pending_aliases:
+                        aliases_to_mark = tuple(pending_aliases)
+                    else:
+                        aliases_to_mark = ("counterbore", "cbore")
+                    for alias in aliases_to_mark:
                         try:
                             flags.add(alias)
                         except Exception:
                             pass
+                _clear_pending_ops_flags()
+            else:
+                _clear_pending_ops_flags()
+        else:
+            _clear_pending_ops_flags()
     if not appended_extra_ops_lines:
         appended_extra_ops_lines = []
     if appended_extra_ops_lines:
