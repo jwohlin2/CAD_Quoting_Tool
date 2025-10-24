@@ -13,4 +13,6 @@ pip install cad-quoter --extra-index-url <your-internal-index>
 ```
 
 Once installed, the main `appV5.py` GUI and associated scripts can `import cad_quoter`
-without requiring an in-tree copy.
+without requiring an in-tree copy. During local development against the monorepo,
+install the project in editable mode (`pip install -e .`) so Python resolves the
+`cad_quoter` package directly from `src/`.
