@@ -14138,7 +14138,7 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
     if not isinstance(counts_by_diam_final, (_MappingABC, dict)):
         counts_by_diam_final = {}
     def _audit_tallies(state: _MappingABC[str, Any] | None) -> dict[str, int]:
-        tallies: dict[str, int] = {
+        tallies = {
             "drill": 0,
             "tap": 0,
             "counterbore": 0,
@@ -14147,18 +14147,27 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
             "spot": 0,
         }
 
+        source: Mapping[str, Any] | None
         if isinstance(state, (_MappingABC, dict)):
-            source: Mapping[str, Any] | None = typing.cast(Mapping[str, Any], state)
+            source = typing.cast(Mapping[str, Any], state)
         else:
             source = None
 
-        xbo_candidate = source.get("extra_bucket_ops") if isinstance(source, (_MappingABC, dict)) else None
-        if isinstance(xbo_candidate, (_MappingABC, dict)):
-            for bucket, entries in xbo_candidate.items():
+        dop = (source or {}).get("derived_ops") if isinstance(source, (_MappingABC, dict)) else None
+        if isinstance(dop, (_MappingABC, dict)):
+            try:
+                tallies["drill"] = int(dop.get("drill_total") or 0)
+            except Exception:
+                pass
+
+        xbo = (source or {}).get("extra_bucket_ops") if isinstance(source, (_MappingABC, dict)) else None
+        if isinstance(xbo, (_MappingABC, dict)):
+            for bucket, entries in xbo.items():
                 if bucket not in tallies:
                     continue
                 for entry in entries or []:
                     try:
+                        qty_value: Any
                         if isinstance(entry, _MappingABC):
                             qty_value = entry.get("qty")
                         else:
@@ -14166,13 +14175,6 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
                         tallies[bucket] += int(qty_value or 0)
                     except Exception:
                         pass
-
-        dop_candidate = source.get("derived_ops") if isinstance(source, (_MappingABC, dict)) else None
-        if isinstance(dop_candidate, (_MappingABC, dict)):
-            try:
-                tallies["drill"] = int(dop_candidate.get("drill_total") or tallies["drill"])
-            except Exception:
-                pass
 
         return tallies
 
