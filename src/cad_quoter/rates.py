@@ -5,7 +5,7 @@ from __future__ import annotations
 import math
 import re
 from functools import lru_cache
-from typing import Any, Dict, FrozenSet, Mapping
+from typing import Any, Dict, FrozenSet, Mapping, MutableMapping
 
 from cad_quoter.utils import _dict
 
@@ -489,6 +489,114 @@ def ensure_two_bucket_defaults(
     return _finalize_two_bucket(labor, machine, numeric)
 
 
+# ---- render helper ----------------------------------------------------------
+
+
+def _positive_float(value: Any) -> float:
+    try:
+        numeric = float(value)
+    except Exception:
+        return 0.0
+    if not math.isfinite(numeric) or numeric <= 0.0:
+        return 0.0
+    return float(numeric)
+
+
+def prepare_render_rates(
+    rates: MutableMapping[str, Any],
+    *,
+    cfg: Any | None = None,
+    default_two_bucket: Mapping[str, Mapping[str, Any]] | None = None,
+    default_flat: Mapping[str, Any] | None = None,
+) -> dict[str, float]:
+    """Normalize flat rate mappings used by :mod:`appV5.render_quote`."""
+
+    base_defaults = ensure_two_bucket_defaults(default_two_bucket or {})
+    fallback_flat = two_bucket_to_flat(base_defaults)
+
+    if isinstance(default_flat, Mapping):
+        for key, value in default_flat.items():
+            candidate = _positive_float(value)
+            if candidate > 0.0:
+                fallback_flat[str(key)] = candidate
+
+    normalized_input: dict[str, float] = {}
+    for key, value in list(rates.items()):
+        numeric = _positive_float(value)
+        if numeric > 0.0:
+            normalized_input[str(key)] = numeric
+
+    merged_flat: dict[str, float] = dict(fallback_flat)
+    merged_flat.update(normalized_input)
+
+    overrides_two_bucket = migrate_flat_to_two_bucket(merged_flat)
+    combined_two_bucket = {
+        "labor": {
+            **base_defaults.get("labor", {}),
+            **overrides_two_bucket.get("labor", {}),
+        },
+        "machine": {
+            **base_defaults.get("machine", {}),
+            **overrides_two_bucket.get("machine", {}),
+        },
+    }
+
+    normalized_two_bucket = ensure_two_bucket_defaults(combined_two_bucket)
+    prepared_flat = two_bucket_to_flat(normalized_two_bucket)
+
+    separate_labor = bool(getattr(cfg, "separate_machine_labor", False)) if cfg else False
+    if separate_labor:
+        labor_override = _positive_float(getattr(cfg, "labor_rate_per_hr", None))
+        if labor_override <= 0.0:
+            labor_override = _positive_float(prepared_flat.get("LaborRate"))
+        if labor_override > 0.0:
+            prepared_flat["LaborRate"] = labor_override
+            prepared_flat["ProgrammerRate"] = labor_override
+            prepared_flat["ProgrammingRate"] = labor_override
+
+    machine_override = _positive_float(getattr(cfg, "machine_rate_per_hr", None)) if cfg else 0.0
+    if machine_override > 0.0:
+        prepared_flat["MachineRate"] = machine_override
+        prepared_flat.setdefault("MillingRate", machine_override)
+
+    shop_fallback = _positive_float(prepared_flat.get("ShopRate"))
+    if shop_fallback <= 0.0:
+        shop_fallback = _positive_float(prepared_flat.get("MillingRate"))
+    if shop_fallback <= 0.0:
+        shop_fallback = _positive_float(prepared_flat.get("MachineRate"))
+    if shop_fallback > 0.0:
+        prepared_flat["ShopRate"] = shop_fallback
+
+    engineer_fallback = _positive_float(prepared_flat.get("EngineerRate"))
+    if engineer_fallback <= 0.0:
+        engineer_fallback = (
+            _positive_float(prepared_flat.get("MillingRate"))
+            or _positive_float(prepared_flat.get("ShopRate"))
+            or _positive_float(prepared_flat.get("LaborRate"))
+        )
+    if engineer_fallback > 0.0:
+        prepared_flat["EngineerRate"] = engineer_fallback
+
+    programmer_value = _positive_float(prepared_flat.get("ProgrammerRate"))
+    if programmer_value <= 0.0:
+        programmer_value = _positive_float(prepared_flat.get("ProgrammingRate"))
+    if programmer_value > 0.0:
+        prepared_flat["ProgrammerRate"] = programmer_value
+        prepared_flat["ProgrammingRate"] = programmer_value
+
+    inspection_value = _positive_float(prepared_flat.get("InspectorRate"))
+    if inspection_value <= 0.0:
+        inspection_value = _positive_float(prepared_flat.get("InspectionRate"))
+    if inspection_value > 0.0:
+        prepared_flat["InspectorRate"] = inspection_value
+        prepared_flat["InspectionRate"] = inspection_value
+
+    for key, value in prepared_flat.items():
+        rates[key] = float(value)
+
+    return prepared_flat
+
+
 # ---- helpers for costing layers ----
 
 
@@ -644,6 +752,7 @@ __all__ = [
     "OP_TO_LABOR",
     "migrate_flat_to_two_bucket",
     "ensure_two_bucket_defaults",
+    "prepare_render_rates",
     "shared_two_bucket_rate_defaults",
     "default_process_rate",
     "default_machine_rate",

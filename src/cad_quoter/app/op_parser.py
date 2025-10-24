@@ -3,10 +3,10 @@
 from __future__ import annotations
 
 import re
-from fractions import Fraction
 from typing import Any, Callable, Sequence
 
 from cad_quoter.geometry.dxf_text import _clean_mtext as _shared_clean_mtext
+from cad_quoter.utils.number_parse import VALUE_PATTERN, _to_inch
 
 __all__ = [
     "LETTER_DRILLS",
@@ -24,11 +24,11 @@ __all__ = [
 ]
 
 _CB_DIA_RE = re.compile(
-    r"(?:(?:[Ø⌀\u00D8]|%%[Cc])\s*)?(?P<numA>\d+(?:\.\d+)?|\.\d+|\d+\s*/\s*\d+)\s*(?:C[’']?\s*BORE|CBORE|COUNTER\s*BORE)"
-    r"|(?P<numB>\d+(?:\.\d+)?|\.\d+|\d+\s*/\s*\d+)\s*(?:[Ø⌀\u00D8]|%%[Cc])\s*(?:C[’']?\s*BORE|CBORE|COUNTER\s*BORE)",
+    rf"(?:(?:[Ø⌀\u00D8]|%%[Cc])\s*)?(?P<numA>{VALUE_PATTERN})\s*(?:C[’']?\s*BORE|CBORE|COUNTER\s*BORE)"
+    rf"|(?P<numB>{VALUE_PATTERN})\s*(?:[Ø⌀\u00D8]|%%[Cc])\s*(?:C[’']?\s*BORE|CBORE|COUNTER\s*BORE)",
     re.I,
 )
-_X_DEPTH_RE = re.compile(r"[×xX]\s*([0-9]+(?:\.[0-9]+)?)")
+_X_DEPTH_RE = re.compile(rf"[×xX]\s*({VALUE_PATTERN})")
 _BACK_RE = re.compile(r"\bFROM\s+BACK\b", re.I)
 _FRONT_RE = re.compile(r"\bFROM\s+FRONT\b", re.I)
 _BOTH_RE = re.compile(r"\bFRONT\s*(?:[&/]|AND)\s*BACK|BOTH\s+SIDES|2\s+SIDES\b", re.I)
@@ -44,7 +44,7 @@ _TAP_RE = re.compile(
     re.I,
 )
 _DRILL_THRU = re.compile(r"\bDRILL(?:[-\s]+)THRU\b", re.I)
-_SIZE_INCH_RE = re.compile(r"\((\d+(?:\.\d+)?|\.\d+)\)")
+_SIZE_INCH_RE = re.compile(rf"\(({VALUE_PATTERN})\)")
 _LETTER_RE = re.compile(r"\b([A-Z])\b")
 
 LETTER_DRILLS = {
@@ -107,25 +107,11 @@ def _parse_ops_and_claims(
         mcb = _CB_DIA_RE.search(s)
         if mcb:
             rawnum = (mcb.group("numA") or mcb.group("numB") or "").strip()
-            dia: float | None = None
-            if rawnum:
-                if "/" in rawnum:
-                    try:
-                        dia = float(Fraction(rawnum))
-                    except Exception:
-                        dia = None
-                else:
-                    try:
-                        dia = float(rawnum)
-                    except Exception:
-                        dia = None
+            dia = _to_inch(rawnum)
             depth_match = _X_DEPTH_RE.search(s)
             depth: float | None = None
             if depth_match:
-                try:
-                    depth = float(depth_match.group(1))
-                except Exception:
-                    depth = None
+                depth = _to_inch(depth_match.group(1))
             side = _side(U)
             if side == "BOTH":
                 for sd in ("FRONT", "BACK"):
@@ -154,10 +140,9 @@ def _parse_ops_and_claims(
             npt_qty += qty
             mdec = _SIZE_INCH_RE.search(s)
             if mdec:
-                try:
-                    claimed_pilot_diams.extend([float(mdec.group(1))] * qty)
-                except Exception:
-                    pass
+                size_val = _to_inch(mdec.group(1))
+                if size_val is not None:
+                    claimed_pilot_diams.extend([size_val] * qty)
             else:
                 mlet = _LETTER_RE.search(s)
                 if mlet and mlet.group(1) in LETTER_DRILLS:
@@ -168,10 +153,9 @@ def _parse_ops_and_claims(
             tap_qty += qty
             mdec = _SIZE_INCH_RE.search(s)
             if mdec:
-                try:
-                    claimed_pilot_diams.extend([float(mdec.group(1))] * qty)
-                except Exception:
-                    pass
+                size_val = _to_inch(mdec.group(1))
+                if size_val is not None:
+                    claimed_pilot_diams.extend([size_val] * qty)
             else:
                 mlet = _LETTER_RE.search(s)
                 if mlet and mlet.group(1) in LETTER_DRILLS:
@@ -181,10 +165,9 @@ def _parse_ops_and_claims(
         if _DRILL_THRU.search(U):
             mdec = _SIZE_INCH_RE.search(s)
             if mdec:
-                try:
-                    claimed_pilot_diams.extend([float(mdec.group(1))] * qty)
-                except Exception:
-                    pass
+                size_val = _to_inch(mdec.group(1))
+                if size_val is not None:
+                    claimed_pilot_diams.extend([size_val] * qty)
             else:
                 mlet = _LETTER_RE.search(s)
                 if mlet and mlet.group(1) in LETTER_DRILLS:

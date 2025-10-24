@@ -9,6 +9,13 @@ from collections.abc import Iterable, Mapping, MutableMapping
 from fractions import Fraction
 from typing import Any, Callable
 
+from cad_quoter.utils.number_parse import (
+    NUM_DEC_RE,
+    VALUE_PATTERN,
+    _to_inch,
+    first_inch_value,
+)
+
 
 from .chart_lines import (
     _build_ops_rows_from_lines_fallback as _chart_build_ops_rows_from_lines_fallback,
@@ -29,9 +36,15 @@ RE_NPT = re.compile(r"(\d+/\d+)\s*-\s*N\.?P\.?T\.?", re.I)
 RE_THRU = re.compile(r"\bTHRU\b", re.I)
 RE_CBORE = re.compile(r"C[’']?BORE|CBORE|COUNTERBORE", re.I)
 RE_CSK = re.compile(r"CSK|C'SINK|COUNTERSINK", re.I)
-_RE_DEPTH_OR_THICK = re.compile(r"(\d+(?:\.\d+)?)\s*DEEP(?:\s+FROM\s+(FRONT|BACK))?", re.I)
+_RE_DEPTH_OR_THICK = re.compile(
+    rf"({VALUE_PATTERN})\s*DEEP(?:\s+FROM\s+(FRONT|BACK))?",
+    re.I,
+)
 RE_DEPTH = _RE_DEPTH_OR_THICK
-RE_DIA = re.compile(r"(?:%%[Cc]\s*|[Ø⌀\u00D8]\s*)?(\d+(?:\.\d+)?)", re.I)
+RE_DIA = re.compile(
+    rf"(?:%%[Cc]\s*|[Ø⌀\u00D8]\s*)?({VALUE_PATTERN})",
+    re.I,
+)
 RE_FRONT_BACK = re.compile(
     r"FRONT\s*&\s*BACK|FRONT\s+AND\s+BACK|BOTH\s+SIDES|TWO\s+SIDES|2\s+SIDES|OPPOSITE\s+SIDE",
     re.I,
@@ -75,14 +88,14 @@ _THREAD_WITH_NPT_RE = re.compile(
     re.I,
 )
 _CBORE_RE = re.compile(
-    r"(?:^|[ ;])(?:%%[Cc]|Ø|⌀|DIA)?\s*((?:\d+\s*/\s*\d+)|(?:\d+(?:\.\d+)?))\s*(?:C['’]?\s*BORE|CBORE|COUNTER\s*BORE)",
+    rf"(?:^|[ ;])(?:%%[Cc]|Ø|⌀|DIA)?\s*({VALUE_PATTERN})\s*(?:C['’]?\s*BORE|CBORE|COUNTER\s*BORE)",
     re.I,
 )
 _SIDE_BACK = re.compile(r"\b(?:FROM\s+)?BACK\b", re.I)
 _SIDE_FRONT = re.compile(r"\b(?:FROM\s+)?FRONT\b", re.I)
 _DEPTH_TOKEN = re.compile(r"[×xX]\s*([0-9.]+)\b")
 _DIA_TOKEN = re.compile(
-    r"(?:%%[Cc]|Ø|⌀|REF|DIA)[^0-9]*((?:\d+\s*/\s*\d+)|(?:\d+)?\.\d+|\d+(?:\.\d+)?)",
+    rf"(?:%%[Cc]|Ø|⌀|REF|DIA)[^0-9]*({VALUE_PATTERN})",
     re.I,
 )
 
@@ -376,19 +389,27 @@ def update_geo_ops_summary_from_hole_rows(
         Iterable[Mapping[str, Any]] | None,
     ], int]
     | None = None,
-) -> list[dict[str, Any]]:
-    """Populate geo["ops_summary"] with rows derived from hole data."""
+) -> dict[str, Any]:
+    """Populate geo["ops_summary"] with rows and totals derived from hole data."""
 
     ops_rows = build_ops_summary_rows_from_hole_rows(hole_rows)
     if not ops_rows and chart_lines:
         ops_rows = _chart_build_ops_rows_from_lines_fallback(chart_lines)
 
     if not ops_rows:
-        return []
+        return {"rows": [], "totals": {}}
 
     ops_summary_map = geo.setdefault("ops_summary", {})
     ops_summary_map["rows"] = ops_rows
     ops_summary_map["source"] = chart_source or "chart_lines"
+    rows = ops_rows
+    try:
+        qty_sum = sum(int(r.get("qty") or 0) for r in rows)
+    except Exception:
+        qty_sum = 0
+    print(f"[EXTRACTOR] wrote ops rows: {len(rows)} (qty_sum={qty_sum})")
+
+    totals_from_summary: dict[str, int] = {}
 
     if apply_built_rows:
         try:
@@ -400,23 +421,38 @@ def update_geo_ops_summary_from_hole_rows(
         try:
             tap_qty = int(chart_summary.get("tap_qty") or 0)
             if tap_qty:
-                ops_summary_map["tap_total"] = tap_qty
+                totals_from_summary["tap_total"] = tap_qty
         except Exception:
             pass
         try:
             cbore_qty = int(chart_summary.get("cbore_qty") or 0)
             if cbore_qty:
-                ops_summary_map["cbore_total"] = cbore_qty
+                totals_from_summary["cbore_total"] = cbore_qty
         except Exception:
             pass
         try:
             csk_qty = int(chart_summary.get("csk_qty") or 0)
             if csk_qty:
-                ops_summary_map["csk_total"] = csk_qty
+                totals_from_summary["csk_total"] = csk_qty
         except Exception:
             pass
 
-    return ops_rows
+    if totals_from_summary:
+        existing_totals = ops_summary_map.get("totals")
+        if isinstance(existing_totals, Mapping):
+            totals_map = dict(existing_totals)
+            totals_map.update(totals_from_summary)
+        else:
+            totals_map = dict(totals_from_summary)
+        ops_summary_map["totals"] = totals_map
+        # Maintain legacy top-level keys for downstream compatibility.
+        for key, value in totals_from_summary.items():
+            ops_summary_map[key] = value
+
+    return {
+        "rows": ops_rows,
+        "totals": ops_summary_map.get("totals", {}),
+    }
 
 
 def _parse_hole_line(line: str, to_in: float, *, source: str | None = None) -> dict[str, Any] | None:
@@ -486,9 +522,17 @@ def _parse_hole_line(line: str, to_in: float, *, source: str | None = None) -> d
     md = RE_DEPTH.search(U)
     if md:
         try:
-            depth = float(md.group(1)) * float(to_in)
-        except Exception:
-            depth = None
+            depth_token = md.group(1)
+        except IndexError:
+            depth_token = None
+        depth = None
+        if depth_token:
+            depth_val = _to_inch(depth_token)
+            if depth_val is not None:
+                try:
+                    depth = depth_val * float(to_in)
+                except Exception:
+                    depth = None
         side = (md.group(2) or "").upper() or None
         if depth is not None:
             entry["depth_in"] = depth
@@ -509,20 +553,29 @@ def _parse_hole_line(line: str, to_in: float, *, source: str | None = None) -> d
     if re.search(r"\b(FRONT\s*&\s*BACK|BOTH\s+SIDES)\b", U):
         entry["double_sided"] = True
 
-    mref = re.search(r"REF\s*(?:%%[Cc]|[Ø⌀])\s*(\d+(?:\.\d+)?)", U)
+    mref = re.search(r"REF\s*(?:%%[Cc]|[Ø⌀])\s*({VALUE_PATTERN})", U)
     if mref:
-        try:
-            entry["ref_dia_in"] = float(mref.group(1)) * float(to_in)
-        except Exception:
-            entry["ref_dia_in"] = None
+        ref_token = mref.group(1)
+        ref_val = _to_inch(ref_token)
+        if ref_val is None:
+            ref_val = first_inch_value(mref.group(0))
+        if ref_val is not None:
+            try:
+                entry["ref_dia_in"] = ref_val * float(to_in)
+            except Exception:
+                entry["ref_dia_in"] = None
 
     if entry.get("ref_dia_in") is None:
         mdia = RE_DIA.search(U)
         if mdia and ("Ø" in U or "⌀" in U or " REF" in U or "%%C" in U or "%%c" in U):
-            try:
-                entry["ref_dia_in"] = float(mdia.group(1)) * float(to_in)
-            except Exception:
-                entry["ref_dia_in"] = None
+            val = _to_inch(mdia.group(1)) if mdia.lastindex else None
+            if val is None:
+                val = first_inch_value(mdia.group(0))
+            if val is not None:
+                try:
+                    entry["ref_dia_in"] = val * float(to_in)
+                except Exception:
+                    entry["ref_dia_in"] = None
 
     def _int_or_zero(value: Any) -> int:
         if value in (None, ""):
