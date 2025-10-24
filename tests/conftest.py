@@ -4,6 +4,7 @@ import sys
 import importlib
 import importlib.resources as importlib_resources
 import os
+import tempfile
 import types
 from importlib.machinery import ModuleSpec
 from pathlib import Path
@@ -41,7 +42,7 @@ def _install_runtime_dependency_stubs() -> None:
         bs4_stub.BeautifulSoup = _BeautifulSoup
         sys.modules["bs4"] = bs4_stub
 
-    dummy_pfx = Path(__file__).resolve().parent / "mcmaster_dummy.pfx"
+    dummy_pfx = Path(tempfile.gettempdir()) / "cad_quoter_mcmaster_dummy.pfx"
     try:
         dummy_pfx.touch(exist_ok=True)
     except Exception:
