@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import importlib
 import os
 import sys
 from collections.abc import Mapping
@@ -47,6 +48,13 @@ def main(argv: Sequence[str] | None = None) -> int:
         print(f"[geo_dump] Using default sample: {path}")
 
     if args.show_helpers:
+        try:
+            app_module = importlib.import_module("appV5")
+        except Exception as exc:
+            print(f"[geo_dump] appV5 import failed: {exc}")
+        else:
+            module_path = getattr(app_module, "__file__", None)
+            print(f"[geo_dump] appV5 import ok: {module_path or app_module}")
         acad_helper = geo_extractor._resolve_app_callable("hole_count_from_acad_table")
         text_helper = geo_extractor._resolve_app_callable("extract_hole_table_from_text")
         text_alt_helper = geo_extractor._resolve_app_callable("hole_count_from_text_table")

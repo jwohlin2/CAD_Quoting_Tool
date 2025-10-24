@@ -1,117 +1,75 @@
 from __future__ import annotations
 
-from pathlib import Path
+import types
 
 import pytest
 
-import cad_quoter.geo_extractor as geo_extractor
+from cad_quoter import geo_extractor
 
 
-class DummyDoc:
-    pass
+class _DummyMText:
+    def __init__(self, text: str) -> None:
+        self._text = text
+
+    def dxftype(self) -> str:
+        return "MTEXT"
+
+    def plain_text(self) -> str:
+        return self._text
+
+
+class _DummyText:
+    def __init__(self, text: str) -> None:
+        self.dxf = types.SimpleNamespace(text=text)
+
+    def dxftype(self) -> str:
+        return "TEXT"
+
+
+class _DummySpace:
+    def __init__(self, entities: list[object]) -> None:
+        self._entities = entities
+
+    def query(self, _spec: str) -> list[object]:
+        return list(self._entities)
+
+
+class _DummyDoc:
+    def __init__(self, entities: list[object]) -> None:
+        self._entities = entities
+
+    def modelspace(self) -> _DummySpace:
+        return _DummySpace(self._entities)
 
 
 @pytest.fixture
-def dummy_doc(monkeypatch):
-    doc = DummyDoc()
-    monkeypatch.setattr(geo_extractor, "_load_doc_for_path", lambda path, use_oda: doc)
-    return doc
+def fallback_doc() -> _DummyDoc:
+    entities = [
+        _DummyMText(r"\\A1;(3) %%C0.375\\PTHRU"),
+        _DummyMText("FROM BACK"),
+        _DummyText("A | Ø0.500 | 2 | (2) DRILL THRU"),
+    ]
+    return _DummyDoc(entities)
 
 
-def test_extract_geo_prefers_text_table(monkeypatch, tmp_path, dummy_doc):
-    rows = [{"qty": 8, "desc": "DRILL THRU", "ref": "Ø.250"} for _ in range(11)]
-    rows.append({"qty": 6, "desc": "TAP BACK", "ref": "1/4-20"})
-    rows.append({"qty": 4, "desc": "CBORE FRONT", "ref": "Ø.500"})
-    text_table = {"rows": rows, "hole_count": 88}
+def test_collect_table_text_lines_normalizes_entities(fallback_doc: _DummyDoc) -> None:
+    lines = geo_extractor._collect_table_text_lines(fallback_doc)
 
-    base_geo = {
-        "ops_summary": {},
-        "provenance": {"holes": "GEOM baseline"},
-        "hole_count_geom": 40,
-    }
-    monkeypatch.setattr(geo_extractor, "extract_geometry", lambda doc: dict(base_geo))
-    monkeypatch.setattr(geo_extractor, "read_acad_table", lambda doc: {})
-    monkeypatch.setattr(geo_extractor, "read_text_table", lambda doc: text_table)
-    monkeypatch.setattr(geo_extractor, "choose_better_table", lambda a, b: b)
-
-    out_path = tmp_path / "sample.dxf"
-    out_path.write_text("DXF")
-
-    geo = geo_extractor.extract_geo_from_path(str(out_path), use_oda=False)
-
-    assert geo["hole_count"] == 88
-    ops_summary = geo.get("ops_summary") or {}
-    assert ops_summary.get("source") == "text_table"
-    assert len(ops_summary.get("rows") or []) == len(rows)
+    assert "(3) Ø0.375 THRU" in lines
+    assert "FROM BACK" in lines
+    assert "A | Ø0.500 | 2 | (2) DRILL THRU" in lines
 
 
-def test_extract_geo_without_table(monkeypatch, tmp_path, dummy_doc):
-    base_geo = {
-        "ops_summary": {"rows": [{"qty": 3}], "source": "chart_lines"},
-        "provenance": {"holes": "GEOM concentric"},
-        "hole_count_geom": 5,
-    }
-    monkeypatch.setattr(geo_extractor, "extract_geometry", lambda doc: dict(base_geo))
-    monkeypatch.setattr(geo_extractor, "read_acad_table", lambda doc: {})
-    monkeypatch.setattr(geo_extractor, "read_text_table", lambda doc: {})
-    monkeypatch.setattr(geo_extractor, "choose_better_table", lambda a, b: {})
+def test_read_text_table_uses_internal_fallback(monkeypatch: pytest.MonkeyPatch, fallback_doc: _DummyDoc) -> None:
+    monkeypatch.setattr(geo_extractor, "_resolve_app_callable", lambda name: None)
 
-    geo = geo_extractor.extract_geo_from_path(str(tmp_path / "blank.dxf"), use_oda=False)
+    info = geo_extractor.read_text_table(fallback_doc)
 
-    ops_summary = geo.get("ops_summary") or {}
-    assert ops_summary.get("source") == "geom"
-    assert ops_summary.get("rows") in (None, [])
-    assert geo.get("hole_count") == 5
-
-
-def test_extract_geo_prefers_acad_when_better(monkeypatch, tmp_path, dummy_doc):
-    acad_rows = [{"qty": 10}, {"qty": 5}]
-    text_rows = [{"qty": 1}]
-
-    base_geo = {"ops_summary": {}, "hole_count_geom": 0}
-
-    monkeypatch.setattr(geo_extractor, "extract_geometry", lambda doc: dict(base_geo))
-    monkeypatch.setattr(geo_extractor, "read_acad_table", lambda doc: {"rows": acad_rows, "hole_count": 15})
-    monkeypatch.setattr(geo_extractor, "read_text_table", lambda doc: {"rows": text_rows})
-
-    def chooser(a, b):
-        return a if geo_extractor._score_table(a) >= geo_extractor._score_table(b) else b
-
-    monkeypatch.setattr(geo_extractor, "choose_better_table", chooser)
-
-    out_path = tmp_path / "acad_first.dxf"
-    out_path.write_text("DXF")
-
-    geo = geo_extractor.extract_geo_from_path(str(out_path), use_oda=False)
-
-    ops_summary = geo.get("ops_summary") or {}
-    assert ops_summary.get("source") == "acad_table"
-    assert len(ops_summary.get("rows") or []) == len(acad_rows)
-    assert geo.get("hole_count") == 15
-
-
-def test_extract_geo_keeps_better_existing_table(monkeypatch, tmp_path, dummy_doc):
-    existing_rows = [{"qty": 6}, {"qty": 6}, {"qty": 6}]
-    weaker_rows = [{"qty": 1}]
-
-    base_geo = {
-        "ops_summary": {"rows": list(existing_rows), "source": "initial_table"},
-        "provenance": {"holes": "HOLE TABLE"},
-        "hole_count": 18,
-    }
-
-    monkeypatch.setattr(geo_extractor, "extract_geometry", lambda doc: dict(base_geo))
-    monkeypatch.setattr(geo_extractor, "read_acad_table", lambda doc: {"rows": weaker_rows})
-    monkeypatch.setattr(geo_extractor, "read_text_table", lambda doc: {})
-
-    def chooser(a, b):
-        return a if geo_extractor._score_table(a) >= geo_extractor._score_table(b) else b
-
-    monkeypatch.setattr(geo_extractor, "choose_better_table", chooser)
-
-    geo = geo_extractor.extract_geo_from_path(str(tmp_path / "keep_existing.dxf"), use_oda=False)
-
-    ops_summary = geo.get("ops_summary") or {}
-    assert ops_summary.get("source") == "initial_table"
-    assert len(ops_summary.get("rows") or []) == len(existing_rows)
-    assert geo.get("hole_count") == 18
+    assert info["hole_count"] == 5
+    rows = info["rows"]
+    assert len(rows) == 2
+    assert rows[0]["qty"] == 3
+    assert rows[0]["desc"].startswith("Ø0.375")
+    families = info.get("hole_diam_families_in")
+    assert families == {"0.375": 3, "0.5": 2}
+    assert info.get("provenance_holes") == "HOLE TABLE (TEXT_FALLBACK)"

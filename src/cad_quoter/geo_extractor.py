@@ -4,9 +4,11 @@ from __future__ import annotations
 
 from collections import defaultdict
 from collections.abc import Iterable, Mapping
+from fractions import Fraction
 import inspect
 from functools import lru_cache
 from pathlib import Path
+import re
 from typing import Any, Callable
 
 from cad_quoter import geometry
@@ -47,6 +49,19 @@ def _print_helper_debug(tag: str, helper: Any) -> None:
     except Exception:
         helper_desc = repr(helper)
     print(f"[EXTRACT] {tag} helper: {helper_desc}")
+
+
+_ROW_START_RE = re.compile(r"\(\s*\d+\s*\)")
+_DIAMETER_PREFIX_RE = re.compile(
+    r"(?:Ø|⌀|DIA(?:\.\b|\b))\s*(\d+\s*/\s*\d+|\d*\.\d+|\.\d+|\d+)",
+    re.IGNORECASE,
+)
+_DIAMETER_SUFFIX_RE = re.compile(
+    r"(\d+\s*/\s*\d+|\d*\.\d+|\.\d+|\d+)\s*(?:Ø|⌀|DIA(?:\.\b|\b))",
+    re.IGNORECASE,
+)
+_MTEXT_ALIGN_RE = re.compile(r"\\A\d;", re.IGNORECASE)
+_MTEXT_BREAK_RE = re.compile(r"\\P", re.IGNORECASE)
 
 
 def _score_table(info: Mapping[str, Any] | None) -> tuple[int, int]:
@@ -134,15 +149,123 @@ def _collect_table_text_lines(doc: Any) -> list[str]:
             if not raw_text:
                 continue
             for line in str(raw_text).splitlines():
-                normalized = " ".join(line.split())
+                normalized = _normalize_table_fragment(line)
                 if normalized:
                     lines.append(normalized)
     return lines
 
 
+def _normalize_table_fragment(fragment: str) -> str:
+    if not isinstance(fragment, str):
+        fragment = str(fragment)
+    cleaned = fragment.replace("%%C", "Ø").replace("%%c", "Ø")
+    cleaned = _MTEXT_ALIGN_RE.sub("", cleaned)
+    cleaned = _MTEXT_BREAK_RE.sub(" ", cleaned)
+    cleaned = cleaned.replace("|", " |")
+    cleaned = cleaned.replace("\\~", "~")
+    cleaned = cleaned.replace("\\`", "`")
+    cleaned = cleaned.replace("\\", " ")
+    return " ".join(cleaned.split())
+
+
+def _parse_number_token(token: str) -> float | None:
+    text = (token or "").strip()
+    if not text:
+        return None
+    if "/" in text:
+        try:
+            return float(Fraction(text))
+        except Exception:
+            return None
+    if text.startswith("."):
+        text = "0" + text
+    try:
+        return float(text)
+    except Exception:
+        return None
+
+
+def _merge_table_lines(lines: Iterable[str]) -> list[str]:
+    merged: list[str] = []
+    current: list[str] | None = None
+    for raw_line in lines:
+        line = raw_line.strip()
+        if not line:
+            continue
+        has_row_start = bool(_ROW_START_RE.search(line))
+        if has_row_start:
+            if current:
+                merged.append(" ".join(current))
+            current = [line]
+        elif current:
+            current.append(line)
+    if current:
+        merged.append(" ".join(current))
+    return merged
+
+
+def _extract_diameter(text: str) -> float | None:
+    search_space = text or ""
+    match = _DIAMETER_PREFIX_RE.search(search_space)
+    if not match:
+        match = _DIAMETER_SUFFIX_RE.search(search_space)
+    if not match:
+        return None
+    return _parse_number_token(match.group(1))
+
+
+def _fallback_text_table(lines: Iterable[str]) -> dict[str, Any]:
+    merged = _merge_table_lines(lines)
+    rows: list[dict[str, Any]] = []
+    families: dict[str, int] = {}
+    total_qty = 0
+
+    for entry in merged:
+        qty_match = _ROW_START_RE.search(entry)
+        if not qty_match:
+            continue
+        qty_text = qty_match.group(0).strip("() ")
+        try:
+            qty = int(qty_text)
+        except Exception:
+            continue
+        prefix = entry[: qty_match.start()].strip()
+        suffix = entry[qty_match.end() :].strip()
+        combined = " ".join(part for part in (prefix, suffix) if part)
+        combined = combined.replace("|", " ")
+        desc = " ".join(combined.split())
+        if not desc:
+            continue
+        rows.append({"hole": "", "ref": "", "qty": qty, "desc": desc})
+        total_qty += qty
+
+        diameter = _extract_diameter(prefix + " " + suffix)
+        if diameter is not None:
+            key = f"{diameter:.4f}".rstrip("0").rstrip(".")
+            families[key] = families.get(key, 0) + qty
+
+    if not rows:
+        return {}
+
+    result: dict[str, Any] = {"rows": rows, "hole_count": total_qty}
+    if families:
+        result["hole_diam_families_in"] = families
+    result["provenance_holes"] = "HOLE TABLE (TEXT_FALLBACK)"
+    return result
+
+
 def read_text_table(doc) -> dict[str, Any]:
     helper = _resolve_app_callable("extract_hole_table_from_text")
     _print_helper_debug("text", helper)
+    table_lines: list[str] | None = None
+    fallback_candidate: Mapping[str, Any] | None = None
+
+    def ensure_lines() -> list[str]:
+        nonlocal table_lines
+        if table_lines is None:
+            table_lines = _collect_table_text_lines(doc)
+        return table_lines
+
     if callable(helper):
         try:
             result = helper(doc) or {}
@@ -150,45 +273,61 @@ def read_text_table(doc) -> dict[str, Any]:
             print(f"[EXTRACT] text helper error: {exc}")
             raise
         if isinstance(result, Mapping):
-            return dict(result)
-        return {}
+            result_map = dict(result)
+            if result_map.get("rows"):
+                return result_map
+            fallback_candidate = result_map
+        else:
+            fallback_candidate = {}
 
     legacy_helper = _resolve_app_callable("hole_count_from_text_table")
     _print_helper_debug("text_alt", legacy_helper)
-    if not callable(legacy_helper):
-        return {}
+    if callable(legacy_helper):
+        needs_lines = False
+        try:
+            signature = inspect.signature(legacy_helper)
+        except (TypeError, ValueError):
+            signature = None
+        if signature is not None:
+            required = [
+                param
+                for param in signature.parameters.values()
+                if param.kind in (param.POSITIONAL_ONLY, param.POSITIONAL_OR_KEYWORD)
+                and param.default is param.empty
+            ]
+            needs_lines = len(required) >= 2
 
-    table_lines: list[str] | None = None
-    needs_lines = False
-    try:
-        signature = inspect.signature(legacy_helper)
-    except (TypeError, ValueError):
-        signature = None
-    if signature is not None:
-        required = [
-            param
-            for param in signature.parameters.values()
-            if param.kind in (param.POSITIONAL_ONLY, param.POSITIONAL_OR_KEYWORD)
-            and param.default is param.empty
-        ]
-        needs_lines = len(required) >= 2
+        try:
+            if needs_lines:
+                lines = ensure_lines()
+                result = legacy_helper(doc, lines) or {}
+            else:
+                result = legacy_helper(doc) or {}
+        except TypeError as exc:
+            print(f"[EXTRACT] text helper error: {exc}")
+            lines = ensure_lines()
+            result = legacy_helper(doc, lines) or {}
+        except Exception as exc:
+            print(f"[EXTRACT] text helper error: {exc}")
+            raise
 
-    try:
-        if needs_lines:
-            table_lines = _collect_table_text_lines(doc)
-            result = legacy_helper(doc, table_lines) or {}
-        else:
-            result = legacy_helper(doc) or {}
-    except TypeError as exc:
-        print(f"[EXTRACT] text helper error: {exc}")
-        table_lines = _collect_table_text_lines(doc)
-        result = legacy_helper(doc, table_lines) or {}
-    except Exception as exc:
-        print(f"[EXTRACT] text helper error: {exc}")
-        raise
+        if isinstance(result, Mapping):
+            result_map = dict(result)
+            if result_map.get("rows"):
+                return result_map
+            if fallback_candidate is None:
+                fallback_candidate = result_map
+    else:
+        if fallback_candidate is None:
+            fallback_candidate = {}
 
-    if isinstance(result, Mapping):
-        return dict(result)
+    lines = ensure_lines()
+    fallback = _fallback_text_table(lines)
+    if fallback:
+        return fallback
+
+    if isinstance(fallback_candidate, Mapping):
+        return dict(fallback_candidate)
     return {}
 
 
