@@ -1047,25 +1047,56 @@ def _ebo_append_unique(
 
 # --- compatibility shim: some callsites use _build_extra_ops_lines_list ---
 def _build_extra_ops_lines_list(
-    *,
-    breakdown: Mapping[str, Any] | None,
-    result: Mapping[str, Any] | None,
-    rates: Mapping[str, Any] | None,
-    breakdown_mutable: MutableMapping[str, Any] | None,
+    breakdown=None,
+    result=None,
+    rates=None,
+    breakdown_mutable=None,
     ctx=None,
     ctx_a=None,
     ctx_b=None,
+    **_kwargs,
 ) -> list[str]:
-    """Alias -> keep old callsites working."""
-    return _build_ops_cards_from_chart_lines(
-        breakdown=breakdown,
-        result=result,
-        rates=rates,
-        breakdown_mutable=breakdown_mutable,
-        ctx=ctx,
-        ctx_a=ctx_a,
-        ctx_b=ctx_b,
-    )
+    """
+    Compatibility shim.
+    - Accepts zero-arg legacy calls.
+    - If args are missing, it introspects the caller's locals to find
+      breakdown/result/rates/breakdown_mutable.
+    """
+
+    # Try to borrow context from the caller if any arg is missing.
+    if breakdown is None or result is None or rates is None:
+        try:
+            import inspect  # local import to avoid global dependency
+
+            _frm = inspect.currentframe()
+            _caller_locals = _frm.f_back.f_locals if (_frm and _frm.f_back) else {}
+        except Exception:
+            _caller_locals = {}
+        breakdown = breakdown or _caller_locals.get("breakdown")
+        result = result or _caller_locals.get("result")
+        rates = rates or _caller_locals.get("rates")
+        breakdown_mutable = (
+            breakdown_mutable
+            or _caller_locals.get("breakdown_mutable")
+            or (breakdown if isinstance(breakdown, (dict, MutableMapping)) else None)
+        )
+
+    # If we still don't have enough to proceed, fail soft with a debug line.
+    if breakdown is None and result is None:
+        return ["[DEBUG] extra_ops_lines=0 (no chart_lines/rows visible at callsite)"]
+
+    try:
+        return _build_ops_cards_from_chart_lines(
+            breakdown=breakdown,
+            result=result,
+            rates=rates,
+            breakdown_mutable=breakdown_mutable,
+            ctx=ctx,
+            ctx_a=ctx_a,
+            ctx_b=ctx_b,
+        )
+    except Exception as e:
+        return [f"[DEBUG] extra_ops_build_failed={e.__class__.__name__}: {e}"]
 
 
 def _build_ops_cards_from_chart_lines(
