@@ -21609,6 +21609,16 @@ def _coerce_int_or_zero(value: Any) -> int:
         return 0
 
 def extract_2d_features_from_dxf_or_dwg(path: str | Path) -> dict[str, Any]:
+    if os.environ.get("GEO_EXTRACTOR_V2") == "1":
+        from cad_quoter.geo_extractor import extract_geo_from_path
+
+        return extract_geo_from_path(
+            str(path),
+            prefer_table=True,
+            use_oda=_HAS_ODAFC,
+            feature_flags=os.environ,
+        )
+
     ezdxf_mod = geometry.require_ezdxf()
 
     # --- load doc ---
