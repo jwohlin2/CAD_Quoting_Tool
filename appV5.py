@@ -5256,31 +5256,27 @@ def _compute_drilling_removal_section(
             drill_actions_from_groups = int(sum(counts_by_diam_adj_obj.values()))
             drill_total_adj = drill_actions_from_groups
 
+            try:
+                derived_ops["pilot_claims"] = list(_pilot_claims)
+            except Exception:
+                derived_ops["pilot_claims"] = []
+
+            derived_ops["drill_bins_raw"] = dict(counts_by_diam_raw_obj)
+            derived_ops["drill_bins_adj"] = dict(counts_by_diam_adj_obj)
+            derived_ops["drill_total"] = drill_actions_from_groups
+
+            _log.info(
+                "[drill_seed] wrote derived_ops drill_bins_raw bins=%s total=%s",
+                len(counts_by_diam_raw_obj),
+                _sum_count_values(counts_by_diam_raw_obj),
+            )
+
             if isinstance(breakdown_mutable, (_MutableMappingABC, dict)):
                 try:
                     mutable_breakdown = typing.cast(
                         MutableMapping[str, Any],
                         breakdown_mutable,
                     )
-                    derived_ops_obj = mutable_breakdown.setdefault("derived_ops", {})
-                    if not isinstance(derived_ops_obj, MutableMapping):
-                        derived_ops_obj = {}
-                        mutable_breakdown["derived_ops"] = derived_ops_obj
-                    derived_ops = typing.cast(MutableMapping[str, Any], derived_ops_obj)
-                    derived_ops["drill_bins_raw"] = dict(counts_by_diam_raw_obj)
-                    derived_ops["drill_bins_adj"] = dict(counts_by_diam_adj_obj)
-                    derived_ops["drill_total"] = drill_actions_from_groups
-
-                    _log.info(
-                        "[drill_seed] wrote derived_ops drill_bins_raw bins=%s total=%s",
-                        len(counts_by_diam_raw_obj),
-                        _sum_count_values(counts_by_diam_raw_obj),
-                    )
-
-                    counts_by_diam_raw_obj = dict(derived_ops["drill_bins_raw"])
-                    counts_by_diam_adj_obj = dict(derived_ops["drill_bins_adj"])
-                    drill_total_adj = int(derived_ops["drill_total"])
-
                     extra_bucket_ops_obj = mutable_breakdown.setdefault(
                         "extra_bucket_ops", {}
                     )
@@ -5302,13 +5298,9 @@ def _compute_drilling_removal_section(
                             "side": None,
                         }
                     )
-                    raw_total_for_log = _sum_count_values(counts_by_diam_raw_obj)
-                    _push(
-                        lines,
-                        f"[DEBUG] DRILL publish raw={raw_total_for_log} adj={int(drill_total_adj)}",
-                    )
                 except Exception:
                     pass
+
             ops_hole_count_from_table = drill_actions_from_groups
 
             remaining_counts = dict(counts_by_diam_adj_obj)
@@ -5342,38 +5334,33 @@ def _compute_drilling_removal_section(
             or {}
         )
 
-        owner_candidate: MutableMapping[str, Any] | dict[str, Any] | Mapping[str, Any] | None
-        if isinstance(breakdown_mutable, (_MutableMappingABC, dict)):
-            owner_candidate = typing.cast(MutableMapping[str, Any], breakdown_mutable)
-        elif isinstance(breakdown, (_MutableMappingABC, dict)):
-            owner_candidate = typing.cast(MutableMapping[str, Any], breakdown)
+        root_state_candidate: Any = breakdown_mutable or breakdown or {}
+        if isinstance(root_state_candidate, (_MutableMappingABC, dict)):
+            root_state = typing.cast(MutableMapping[str, Any], root_state_candidate)
         else:
-            owner_candidate = None
+            root_state = {}
 
-        if isinstance(owner_candidate, dict):
-            derived_obj = owner_candidate.setdefault("derived_ops", derived_ops)
-        elif isinstance(owner_candidate, _MutableMappingABC):
-            derived_obj = owner_candidate.setdefault("derived_ops", derived_ops)
+        derived_seed: dict[str, Any]
+        if isinstance(derived_ops, dict):
+            derived_seed = derived_ops
+        elif isinstance(derived_ops, MutableMapping):
+            derived_seed = dict(derived_ops)
         else:
-            derived_obj = derived_ops
+            derived_seed = {}
 
+        derived_obj = root_state.setdefault("derived_ops", derived_seed)
         if isinstance(derived_obj, Mapping) and not isinstance(derived_obj, dict):
-            try:
-                derived_obj = dict(derived_obj)
-            except Exception:
-                derived_obj = {}
-
+            derived_obj = dict(derived_obj)
+            root_state["derived_ops"] = derived_obj  # type: ignore[index]
         if not isinstance(derived_obj, dict):
             derived_obj = {}
+            root_state["derived_ops"] = derived_obj  # type: ignore[index]
 
-        if isinstance(owner_candidate, (_MutableMappingABC, dict)):
-            owner_candidate["derived_ops"] = derived_obj  # type: ignore[index]
-
-        derived_ops = typing.cast(MutableMapping[str, Any] | dict[str, Any], derived_obj)
+        derived_ops = typing.cast(dict[str, Any], derived_obj)
 
         if "drill_bins_raw" not in derived_ops:
-            seed = _seed_drill_bins_from_geo__local(geo_map) or {}
-            derived_ops["drill_bins_raw"] = dict(seed)
+            seed_raw = _seed_drill_bins_from_geo__local(geo_map) or {}
+            derived_ops["drill_bins_raw"] = dict(seed_raw)
 
         cb_groups = derived_ops.get("cb_groups") or {}
 
@@ -5384,7 +5371,9 @@ def _compute_drilling_removal_section(
                 cb_groups,
             ) or {}
             derived_ops["drill_bins_adj"] = dict(adj)
-            derived_ops["drill_total"] = int(sum(adj.values()))
+            derived_ops["drill_total"] = int(
+                sum(int(v or 0) for v in adj.values())
+            )
 
         counts_by_diam_raw_obj = dict(derived_ops.get("drill_bins_raw") or {})
         counts_by_diam_adj_obj = dict(derived_ops.get("drill_bins_adj") or {})
@@ -5392,7 +5381,7 @@ def _compute_drilling_removal_section(
 
         _push(
             lines,
-            f"[DEBUG] DRILL publish raw={sum(counts_by_diam_raw_obj.values())} adj={drill_total_adj}",
+            f"[DEBUG] DRILL publish raw={sum(int(v or 0) for v in counts_by_diam_raw_obj.values())} adj={drill_total_adj}",
         )
 
         drill_bins_adj_total = int(sum(counts_by_diam_adj_obj.values()))
