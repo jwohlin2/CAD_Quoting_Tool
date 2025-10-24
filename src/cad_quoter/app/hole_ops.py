@@ -15,6 +15,7 @@ from cad_quoter.utils.number_parse import (
     _to_inch,
     first_inch_value,
 )
+from cad_quoter.utils.numeric import parse_mixed_fraction
 
 
 from .chart_lines import (
@@ -98,6 +99,7 @@ _DIA_TOKEN = re.compile(
     rf"(?:%%[Cc]|Ø|⌀|REF|DIA)[^0-9]*({VALUE_PATTERN})",
     re.I,
 )
+_MIXED_FRACTION_ONLY = re.compile(r"^[+-]?\s*(?:\d+\s+)?\d+/\d+\s*$")
 
 
 def _parse_ref_to_inch(value: Any) -> float | None:
@@ -109,9 +111,11 @@ def _parse_ref_to_inch(value: Any) -> float | None:
         except Exception:
             return None
         return val if math.isfinite(val) and val > 0 else None
+
     text = str(value).strip()
     if not text:
         return None
+
     cleaned = (
         text.replace("%%C", "")
         .replace("%%c", "")
@@ -122,17 +126,22 @@ def _parse_ref_to_inch(value: Any) -> float | None:
         .replace("in", "")
         .strip("\"' ")
     )
-    if not cleaned:
-        return None
-    try:
-        if "/" in cleaned:
-            return float(Fraction(cleaned))
-        return float(cleaned)
-    except Exception:
-        try:
-            return float(Fraction(cleaned))
-        except Exception:
-            return None
+
+    cleaned_for_mix = cleaned.replace("-", " ") if cleaned else ""
+    if cleaned_for_mix and _MIXED_FRACTION_ONLY.match(cleaned_for_mix):
+        mixed = parse_mixed_fraction(cleaned)
+        if mixed and mixed > 0:
+            return mixed
+
+    for candidate in (cleaned, text):
+        num = _to_inch(candidate)
+        if num and num > 0:
+            return num
+        fallback = first_inch_value(candidate)
+        if fallback and fallback > 0:
+            return fallback
+
+    return None
 
 
 def _rows_from_ops_summary(
