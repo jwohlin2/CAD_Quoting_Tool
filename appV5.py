@@ -1293,9 +1293,57 @@ def _build_ops_cards_from_chart_lines(
 
     chart_claims = _parse_ops_and_claims(joined_chart)
 
-    cb_groups: dict[tuple[float | None, str, float | None], int] = dict(
-        chart_claims.get("cb_groups") or {}
-    )
+    cb_groups: dict[tuple[float | None, str, float | None], int] = {}
+    # 3a) Try to build cbore groups from ops rows (best source: table rows)
+    if isinstance(rows_obj, list) and rows_obj:
+        for entry in rows_obj:
+            if not isinstance(entry, _MappingABC):
+                continue
+            try:
+                qty = int(entry.get("qty") or 0)
+            except Exception:
+                qty = 0
+            if qty <= 0:
+                continue
+            desc = str(entry.get("desc") or "")
+            # side
+            side_txt = "FRONT"
+            side_match = RE_FRONT_BACK.search(desc or "")
+            if side_match:
+                side_txt = (
+                    "BACK"
+                    if "BACK" in side_match.group(0).upper()
+                    else "FRONT"
+                )
+            # diameter & depth (prefer explicit CBORE tokens)
+            dia_val: float | None = None
+            dia_match = _CB_DIA_RE.search(desc or "")
+            if dia_match:
+                try:
+                    dia_val = float(dia_match.group(1))
+                except Exception:
+                    dia_val = None
+            if dia_val is None:
+                dm = RE_DIA.search(desc or "")
+                if dm:
+                    try:
+                        dia_val = float(dm.group(1))
+                    except Exception:
+                        dia_val = None
+            dep_val: float | None = None
+            dep_match = _X_DEPTH_RE.search(desc or "")
+            if dep_match:
+                try:
+                    dep_val = float(dep_match.group(1))
+                except Exception:
+                    dep_val = None
+            # must be a counterbore clause
+            if RE_CBORE.search(desc or ""):
+                key = (dia_val, side_txt, dep_val)
+                cb_groups[key] = cb_groups.get(key, 0) + qty
+    # 3b) If still empty, fall back to claims from the chart parser
+    if not cb_groups:
+        cb_groups = dict(chart_claims.get("cb_groups") or {})
 
     printed_candidate: Any = None
     try:
