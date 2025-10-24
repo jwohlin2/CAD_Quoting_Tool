@@ -19952,9 +19952,22 @@ def _merge_wrapped_text_rows(
     if not rows:
         return merged
 
+    normalized: list[tuple[dict[str, str], str]] = []
+    has_wrapped_markers = False
+
     for raw in rows:
-        base = {key: " ".join(str(raw.get(key, "")).split()) for key in ("hole", "ref", "qty", "desc")}
+        base = {
+            key: " ".join(str(raw.get(key, "")).split()) for key in ("hole", "ref", "qty", "desc")
+        }
         lead = next((base[key] for key in ("hole", "ref", "qty", "desc") if base[key]), "")
+        if _RE_TEXT_ROW_START.match(lead):
+            has_wrapped_markers = True
+        normalized.append((base, lead))
+
+    if not has_wrapped_markers:
+        return [base for base, _ in normalized]
+
+    for base, lead in normalized:
         starts_new = bool(_RE_TEXT_ROW_START.match(lead))
         if starts_new or not merged:
             if not base.get("qty"):
