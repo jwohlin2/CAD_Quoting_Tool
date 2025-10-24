@@ -144,6 +144,82 @@ def _coerce_positive_float(value: _AnyForCoerce) -> float | None:
     return number if number > 0 else None
 
 
+# --- GEO helpers -------------------------------------------------------------
+
+
+def _get_core_geo_map(geo_map: dict | None) -> dict:
+    """Return the dict that actually holds the hole lists / feature counts."""
+
+    g = geo_map or {}
+    if isinstance(g.get("geo"), dict):
+        g2 = g["geo"]
+        for key in (
+            "hole_diams_in",
+            "hole_diams_in_precise",
+            "hole_diams_mm",
+            "hole_diams_mm_precise",
+            "hole_sets",
+            "feature_counts",
+        ):
+            if key in g2:
+                return g2
+    return g
+
+
+def _seed_drill_bins_from_geo__local(geo_map) -> dict[float, int]:
+    """Return {diam_in_rounded: count} from GEO (supports inch + mm + hole_sets)."""
+
+    if not isinstance(geo_map, dict):
+        return {}
+
+    g = _get_core_geo_map(geo_map)
+    diams_in: list[float] = []
+
+    # inch sources
+    for key in ("hole_diams_in", "hole_diams_in_precise", "hole_diams_inch"):
+        vals = g.get(key)
+        if isinstance(vals, (list, tuple)):
+            for v in vals:
+                try:
+                    diams_in.append(float(v))
+                except Exception:
+                    pass
+
+    # mm sources → inch
+    if not diams_in:
+        mm_list = g.get("hole_diams_mm_precise") or g.get("hole_diams_mm") or []
+        if isinstance(mm_list, (list, tuple)):
+            for v in mm_list:
+                try:
+                    diams_in.append(float(v) / 25.4)
+                except Exception:
+                    pass
+
+    # hole_sets may carry per-set diameter (in or mm)
+    for hs in (g.get("hole_sets") or []):
+        if isinstance(hs, dict):
+            d_in = None
+            try:
+                if "diam_in" in hs:
+                    d_in = float(hs["diam_in"])
+                elif "diam_mm" in hs:
+                    d_in = float(hs["diam_mm"]) / 25.4
+            except Exception:
+                d_in = None
+            if d_in:
+                diams_in.append(d_in)
+
+    bins: dict[float, int] = {}
+    for d in diams_in:
+        try:
+            key = round(float(d), 3)
+        except Exception:
+            continue
+        bins[key] = bins.get(key, 0) + 1
+
+    return bins
+
+
 _MM_DIM_TOKEN = re.compile(
     r"(?:Ø|⌀|DIA|REF)?\s*((?:\d+\s*/\s*\d+)|(?:\d+(?:\.\d+)?))\s*(?:MM|MILLIM(?:E|E)T(?:E|)RS?)",
     re.IGNORECASE,
@@ -167,14 +243,15 @@ def _seed_drill_bins_from_geo(geo: dict) -> dict[float, int]:
     if not isinstance(geo, dict):
         return out
 
-    # preferred maps
+    core_geo = _get_core_geo_map(geo)
+
     for key in (
         "hole_diam_families_geom_in",
         "hole_diam_families_in",
         "hole_diam_families_geom",
         "hole_diam_families",
     ):
-        fam = geo.get(key)
+        fam = core_geo.get(key)
         if isinstance(fam, dict) and fam:
             for k, v in fam.items():
                 try:
@@ -188,27 +265,9 @@ def _seed_drill_bins_from_geo(geo: dict) -> dict[float, int]:
             if out:
                 return out
 
-    # fallbacks from raw lists
-    holes_in = geo.get("hole_diams_in") or geo.get("hole_diams_geom_in")
-    holes_mm = geo.get("hole_diams_mm") or geo.get("hole_diams_geom_mm")
-
-    def _acc(seq, mm=False):
-        if not isinstance(seq, (list, tuple)):
-            return
-        for x in seq:
-            try:
-                d = float(x)
-                if mm:
-                    d /= 25.4
-                d = round(d, 3)
-                out[d] = out.get(d, 0) + 1
-            except Exception:
-                pass
-
-    if holes_in:
-        _acc(holes_in, mm=False)
-    if not out and holes_mm:
-        _acc(holes_mm, mm=True)
+    fallback = _seed_drill_bins_from_geo__local(core_geo)
+    if fallback:
+        out.update(fallback)
     return out
 
 
@@ -4750,62 +4809,6 @@ def _compute_drilling_removal_section(
             derived_ops_owner["derived_ops"] = derived_ops
 
     # ---- END SAFE INITIALIZATION ----
-
-    def _seed_drill_bins_from_geo__local(geo_map) -> dict[float, int]:
-        """Return {diam_in_rounded: count} from several possible GEO shapes."""
-        if not isinstance(geo_map, dict):
-            return {}
-
-        diams_in: list[float] = []
-
-        # Common direct inch lists
-        for key in ("hole_diams_in", "hole_diams_in_precise", "hole_diams_inch"):
-            vals = geo_map.get(key)
-            if isinstance(vals, (list, tuple)):
-                for v in vals:
-                    try:
-                        diams_in.append(float(v))
-                    except Exception:
-                        pass
-
-        # mm sources → convert to inch
-        if not diams_in:
-            mm_list = (
-                geo_map.get("hole_diams_mm_precise")
-                or geo_map.get("hole_diams_mm")
-                or []
-            )
-            if isinstance(mm_list, (list, tuple)):
-                for v in mm_list:
-                    try:
-                        diams_in.append(float(v) / 25.4)
-                    except Exception:
-                        pass
-
-        # hole_sets sometimes carry diameters per set
-        for hs in (geo_map.get("hole_sets") or []):
-            if isinstance(hs, dict):
-                d_in = None
-                try:
-                    if "diam_in" in hs:
-                        d_in = float(hs["diam_in"])
-                    elif "diam_mm" in hs:
-                        d_in = float(hs["diam_mm"]) / 25.4
-                except Exception:
-                    d_in = None
-                if d_in:
-                    diams_in.append(d_in)
-
-        # Bin (rounded to thousandths to keep families stable)
-        bins: dict[float, int] = {}
-        for d in diams_in:
-            try:
-                k = round(float(d), 3)
-            except Exception:
-                continue
-            bins[k] = bins.get(k, 0) + 1
-
-        return bins
 
     def _collect_pilot_claims__local(
         g: Mapping[str, Any] | None, cleaned_chart: list[str]
