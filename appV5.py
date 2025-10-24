@@ -20493,7 +20493,7 @@ def extract_hole_table_from_text(doc, y_tol: float = 0.04, min_rows: int = 5):
 
     clean_rows, total, families = _normalize_text_table_rows(rows)
 
-    if total <= 0:
+    if total_qty <= 0:
         return {}
 
     ops_entries: list[dict[str, Any]] = []
@@ -20524,7 +20524,7 @@ def extract_hole_table_from_text(doc, y_tol: float = 0.04, min_rows: int = 5):
     ops_summary = aggregate_ops(clean_rows, ops_entries=ops_entries) if clean_rows else {}
 
     result = {
-        "hole_count": total,
+        "hole_count": total_qty,
         "hole_diam_families_in": families,
         "rows": clean_rows,
         "provenance_holes": "HOLE TABLE (text)",
@@ -20534,6 +20534,10 @@ def extract_hole_table_from_text(doc, y_tol: float = 0.04, min_rows: int = 5):
         claims_payload = ops_summary.get("claims") if isinstance(ops_summary, dict) else None
         if isinstance(claims_payload, dict) and claims_payload:
             result["ops_claims"] = dict(claims_payload)
+    if from_back:
+        result["from_back"] = True
+    if double_sided:
+        result["double_sided_cbore"] = True
     return result
 
 

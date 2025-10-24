@@ -1631,6 +1631,64 @@ def test_drilling_groups_case(case: Case, request: pytest.FixtureRequest) -> Non
 # ----- Drilling time estimation domain -----
 
 
+def test_text_hole_table_fallback_keeps_parenthetical_rows(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import appV5
+
+    header_y = 100.0
+    text_rows = [
+        ("HOLE", 0.0, header_y),
+        ("REF Ø", 1.0, header_y),
+        ("QTY", 2.0, header_y),
+        ("DESC", 3.0, header_y),
+        ("(1)", 0.0, 99.0),
+        ("Ø.257", 1.0, 99.0),
+        ("(2)", 2.0, 99.0),
+        ("DRILL FROM FRONT", 3.0, 99.0),
+        ("(2)", 0.0, 98.0),
+        (".375", 1.0, 98.0),
+        ("4", 2.0, 98.0),
+        ("COUNTERBORE FRONT & BACK", 3.0, 98.0),
+        ("(3)", 0.0, 97.0),
+        ("TAP 1/4-20 (3 PLACES) FROM BACK", 3.0, 97.0),
+        ("(4)", 0.0, 96.0),
+        ("Ø.187", 1.0, 96.0),
+        ("QTY 1", 2.0, 96.0),
+        ("SPOT DRILL", 3.0, 96.0),
+        ("(5)", 0.0, 95.0),
+        ("75", 1.0, 95.0),
+        ("1", 2.0, 95.0),
+        ("REWORK", 3.0, 95.0),
+    ]
+
+    def fake_iter_text_with_xy(_doc):
+        yield from text_rows
+
+    monkeypatch.setattr(appV5, "_iter_text_with_xy", fake_iter_text_with_xy)
+
+    result = appV5.extract_hole_table_from_text(object(), min_rows=5)
+
+    assert result["provenance_holes"] == "HOLE TABLE (text)"
+    assert len(result["rows"]) == 5
+    assert result["hole_count"] == 11
+    assert result["hole_diam_families_in"] == {
+        '0.1870"': 1,
+        '0.2570"': 2,
+        '0.3750"': 4,
+    }
+
+    row_refs = [row["ref"] for row in result["rows"]]
+    assert row_refs[:3] == ['0.2570"', '0.3750"', ""]
+    assert result["rows"][2]["diameter_in"] is None
+    assert result["rows"][2]["qty"] == 3
+    assert result["rows"][2]["desc"] == "TAP 1/4-20 FROM BACK"
+    assert result["rows"][0]["hole"] == "1"
+    assert result["rows"][4]["ref"] == "75"
+    assert result["from_back"] is True
+    assert result["double_sided_cbore"] is True
+
+
 def _run_estimate_drilling_hours_uses_table(_: pytest.FixtureRequest) -> None:
     import pandas as pd
 
