@@ -197,7 +197,26 @@ def aggregate_ops_from_rows(rows: list[dict]) -> dict:
     }
 
 
-# --- Hole-table row promotion helpers ---------------------------------------
+# --- HOLE TABLE promotion helpers -------------------------------------------
+NUM_DEC_RE = re.compile(r"(?<!\d)(?:\d+\.\d+|\.\d+|\d+)(?!\d)")
+NUM_FRAC_RE = re.compile(r"(?<!\d)(\d+)\s*/\s*(\d+)(?!\d)")
+
+
+def _to_inch(num_text: str) -> float | None:
+    s = (num_text or "").strip()
+    if "/" in s:
+        try:
+            return float(Fraction(s))
+        except Exception:
+            return None
+    if s.startswith("."):
+        s = "0" + s
+    try:
+        return float(s)
+    except Exception:
+        return None
+
+
 def _rows_qty_sum(rows):
     s = 0
     for r in rows or []:
@@ -208,41 +227,38 @@ def _rows_qty_sum(rows):
     return s
 
 
-def _score_table_info(info):
+def _score_table(info: dict | None) -> tuple[int, int]:
     if not isinstance(info, dict):
         return (0, 0)
     rows = info.get("rows") or []
     return (_rows_qty_sum(rows), len(rows))
 
 
-def _better(a, b):
-    # prefer higher qty sum; tie-break: more rows
-    return _score_table_info(a) >= _score_table_info(b)
+def _choose_better(a: dict | None, b: dict | None) -> dict:
+    return a if _score_table(a) >= _score_table(b) else (b or {})
 
 
-def _persist_rows_and_totals(geo, info, source_tag):
-    """Write ops_summary.rows & totals into the SAME geo the app reads."""
+def _persist_rows_and_totals(geo: dict, info: dict, *, src: str) -> None:
+    """Publish rows & totals into the *same* geo the app reads."""
 
     if not isinstance(info, dict):
         return
     rows = info.get("rows") or []
     if not rows:
         return
-    geo.setdefault("ops_summary", {})["rows"] = rows
-    geo["ops_summary"]["source"] = source_tag
-    # minimal per-row aggregator (tap/cbore split by side)
-    totals: defaultdict[str, int] = defaultdict(int)
+    ops = geo.setdefault("ops_summary", {})
+    ops["rows"] = rows
+    ops["source"] = src
+    # Totals: count tap/cbore/spot/jig; split front/back using desc
+    totals = defaultdict(int)
     for r in rows:
-        try:
-            q = int(float(r.get("qty") or 0))
-        except Exception:
-            continue
+        q = int(float(r.get("qty") or 0))
         U = (r.get("desc", "") or "").upper()
         back = "FROM BACK" in U
         both = ("FRONT & BACK" in U) or ("BOTH SIDES" in U)
         if "TAP" in U:
             totals["tap"] += q
-            totals["drill"] += q
+            totals["drill"] += q  # pilot drill
             if both:
                 totals["tap_front"] += q
                 totals["tap_back"] += q
@@ -250,7 +266,7 @@ def _persist_rows_and_totals(geo, info, source_tag):
                 totals["tap_back"] += q
             else:
                 totals["tap_front"] += q
-        if ("CBORE" in U) or ("C'BORE" in U) or ("COUNTER BORE" in U):
+        if ("CBORE" in U) or ("C'BORE" in U) or ("COUNTER BORE" in U) or ("COUNTERBORE" in U):
             totals["counterbore"] += q
             if both:
                 totals["counterbore_front"] += q
@@ -261,11 +277,19 @@ def _persist_rows_and_totals(geo, info, source_tag):
                 totals["counterbore_front"] += q
         if "JIG GRIND" in U:
             totals["jig_grind"] += q
-        if ("SPOT" in U or "CENTER DRILL" in U) and ("THRU" not in U and "TAP" not in U):
+        if ("SPOT" in U or "CENTER DRILL" in U or "C DRILL" in U or "C’DRILL" in U) and (
+            "TAP" not in U and "THRU" not in U
+        ):
             totals["spot"] += q
-    geo["ops_summary"]["totals"] = dict(totals)
-    geo["provenance"] = geo.get("provenance", {})
-    geo["provenance"]["holes"] = "HOLE TABLE"
+    ops["totals"] = dict(totals)
+    # Prefer table hole_count; else sum of QTY
+    try:
+        hc = int(info.get("hole_count") or _rows_qty_sum(rows))
+        geo["hole_count"] = hc
+    except Exception:
+        pass
+    # provenance for sanity
+    geo.setdefault("provenance", {}).update({"holes": "HOLE TABLE"})
 
 from cad_quoter.app._value_utils import (
     _format_value,
@@ -920,7 +944,7 @@ from cad_quoter.app.hole_ops import (
     _SPOT_TOKENS,
     summarize_hole_chart_lines,
 )
-from cad_quoter.utils.number_parse import NUM_DEC_RE, NUM_FRAC_RE, _to_inch, first_inch_value
+from cad_quoter.utils.number_parse import first_inch_value
 from cad_quoter.app.container import (
     ServiceContainer,
     SupportsPricingEngine,
@@ -21848,21 +21872,16 @@ def extract_2d_features_from_dxf_or_dwg(path: str | Path) -> dict[str, Any]:
     except Exception:
         text_info = {}
 
-    best_table_info = acad_info if _better(acad_info, text_info) else text_info
+    best_table_info = _choose_better(acad_info, text_info)
     if best_table_info.get("rows"):
-        source_tag = "acad_table" if best_table_info is acad_info else "text_table"
-        _persist_rows_and_totals(geo, best_table_info, source_tag)
-        try:
-            geo["hole_count"] = int(
-                best_table_info.get("hole_count")
-                or _rows_qty_sum(best_table_info.get("rows") or [])
-            )
-        except Exception:
-            pass
-
-    persisted_rows = (geo.get("ops_summary") or {}).get("rows") or []
+        _persist_rows_and_totals(
+            geo,
+            best_table_info,
+            src=("acad_table" if best_table_info is acad_info else "text_table"),
+        )
     print(
-        f"[EXTRACTOR] wrote ops rows: {len(persisted_rows)} (qty_sum={_rows_qty_sum(persisted_rows)})"
+        f"[EXTRACTOR] wrote ops rows: {len((geo.get('ops_summary') or {}).get('rows') or [])} "
+        f"(qty_sum={_rows_qty_sum((geo.get('ops_summary') or {}).get('rows') or [])})"
     )
 
     table_info = best_table_info or {}
@@ -22350,24 +22369,21 @@ def extract_2d_features_from_dxf_or_dwg(path: str | Path) -> dict[str, Any]:
         text2 = dict(text2)
         text2.setdefault("provenance", "HOLE TABLE (TEXT)")
 
-    candidate = acad2 if _better(acad2, text2) else text2
+    candidate = _choose_better(acad2, text2)
 
-    have_rows = (geo.get("ops_summary") or {}).get("rows") or []
-    if _better(candidate, {"rows": have_rows}):
+    have_rows = ((geo.get("ops_summary") or {}).get("rows") or [])
+    if _score_table(candidate) > _score_table({"rows": have_rows}):
         best_table_info = candidate
-        source_tag = "acad_table" if candidate is acad2 else "text_table"
-        _persist_rows_and_totals(geo, candidate, source_tag)
-        try:
-            geo["hole_count"] = int(
-                candidate.get("hole_count")
-                or _rows_qty_sum(candidate.get("rows") or [])
-            )
-        except Exception:
-            pass
-        updated_rows = (geo.get("ops_summary") or {}).get("rows") or []
-        print(
-            f"[EXTRACTOR] wrote ops rows: {len(updated_rows)} (qty_sum={_rows_qty_sum(updated_rows)})"
+        _persist_rows_and_totals(
+            geo,
+            candidate,
+            src=("acad_table" if candidate is acad2 else "text_table"),
         )
+
+    print(
+        f"[EXTRACTOR] wrote ops rows: {len((geo.get('ops_summary') or {}).get('rows') or [])} "
+        f"(qty_sum={_rows_qty_sum((geo.get('ops_summary') or {}).get('rows') or [])})"
+    )
 
     table_info = best_table_info or {}
     if not table_counts_trusted:
