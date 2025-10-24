@@ -4098,7 +4098,6 @@ def _compute_drilling_removal_section(
                     continue
         return total
 
-    drill_bins_raw_total = 0
     drill_bins_adj_total = 0
 
     pricing_buckets: MutableMapping[str, Any] | dict[str, Any] = {}
@@ -12771,29 +12770,12 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
                     except Exception:
                         pass
 
-                counts_by_diam_raw_obj = locals().get("counts_by_diam_raw")
                 counts_by_diam_obj = locals().get("counts_by_diam")
-                drilling_meta_snapshot = locals().get("drilling_meta_container")
-                if not isinstance(drilling_meta_snapshot, (_MappingABC, dict)):
-                    drilling_meta_snapshot = None
-                    if isinstance(breakdown_mutable, (_MappingABC, dict)):
-                        candidate_meta = breakdown_mutable.get("drilling_meta")
-                        if isinstance(candidate_meta, (_MappingABC, dict)):
-                            drilling_meta_snapshot = candidate_meta
-                if not isinstance(counts_by_diam_raw_obj, (_MappingABC, dict, Sequence)):
-                    counts_by_diam_raw_obj = None
+                if not isinstance(counts_by_diam_obj, (_MappingABC, dict, Sequence)):
+                    counts_by_diam_obj = locals().get("_drill_bins_adj")
                 if not isinstance(counts_by_diam_obj, (_MappingABC, dict, Sequence)):
                     counts_by_diam_obj = None
-                if counts_by_diam_raw_obj is None and isinstance(drilling_meta_snapshot, _MappingABC):
-                    candidate = drilling_meta_snapshot.get("counts_by_diam_raw")
-                    if isinstance(candidate, (_MappingABC, dict, Sequence)):
-                        counts_by_diam_raw_obj = candidate
-                if counts_by_diam_obj is None and isinstance(drilling_meta_snapshot, _MappingABC):
-                    candidate = drilling_meta_snapshot.get("counts_by_diam")
-                    if isinstance(candidate, (_MappingABC, dict, Sequence)):
-                        counts_by_diam_obj = candidate
 
-                drill_bins_raw_total = _sum_count_values(counts_by_diam_raw_obj)
                 drill_bins_adj_total = _sum_count_values(counts_by_diam_obj)
                 _push(lines, f"[DEBUG] chart_lines_found={len(chart_lines_all)}")
                 _push(
@@ -12802,10 +12784,7 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
                     f"npt={ops_claims.get('npt', 0)} spot={ops_claims.get('spot', 0)} "
                     f"counterdrill={ops_claims.get('counterdrill', 0)} jig={ops_claims.get('jig', 0)}",
                 )
-                _push(
-                    lines,
-                    f"[DEBUG] DRILL bins raw={drill_bins_raw_total} adj={drill_bins_adj_total}",
-                )
+                _push(lines, f"[DEBUG] DRILL bins adj={drill_bins_adj_total}")
 
                 # Seed minutes so Process table shows rows
                 try:
