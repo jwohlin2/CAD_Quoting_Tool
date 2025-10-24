@@ -1170,6 +1170,16 @@ def _build_ops_cards_from_chart_lines(
 ) -> list[str]:
     """Return extra MATERIAL REMOVAL cards for Counterbore / Spot / Jig."""
 
+    # hard guard: only build once per render pass
+    try:
+        root_state = breakdown_mutable or breakdown or {}
+        if isinstance(root_state, dict):
+            if root_state.get("_ops_cards_once"):
+                return ["[DEBUG] extra_ops_appended=1 (skipped duplicate)"]
+            root_state["_ops_cards_once"] = True
+    except Exception:
+        pass
+
     lines: list[str] = []
 
     extra_bucket_ops: MutableMapping[str, Any] | None = None
