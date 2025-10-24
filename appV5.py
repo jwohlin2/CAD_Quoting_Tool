@@ -9912,6 +9912,8 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
     removal_card_lines: list[str] = []
     removal_summary_lines: list[str] = []
     removal_summary_extra_lines: list[str] = []
+    extra_ops_lines_cache: list[str] = []
+    extra_ops_lines_appended = 0
     removal_summary_lines: list[str] = []
     removal_card_extra: dict[str, float] = {}
     speeds_feeds_table = None
@@ -10200,20 +10202,29 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
         return normalized_lines
 
     # Extra MATERIAL REMOVAL cards from HOLE TABLE text (Counterbore / Spot / Jig)
-    extra_ops_lines = _build_ops_cards_from_chart_lines(
-        breakdown=breakdown,
-        result=result,
-        rates=rates,
-        breakdown_mutable=breakdown_mutable,  # so buckets get minutes
-        ctx=ctx,
-        ctx_a=ctx_a,
-        ctx_b=ctx_b,
-    )
+    extra_ops_lines: Sequence[Any] | None = []
+    appended_extra_ops_lines: list[str] = []
+    attempted_append = False
+    try:
+        extra_ops_lines = _build_ops_cards_from_chart_lines(
+            breakdown=breakdown,
+            result=result,
+            rates=rates,
+            breakdown_mutable=breakdown_mutable,  # so buckets get minutes
+            ctx=ctx,
+            ctx_a=ctx_a,
+            ctx_b=ctx_b,
+        )
+    except Exception as exc:
+        extra_ops_lines = []
+        _push(
+            lines,
+            f"[DEBUG] material_removal_emit_skipped={exc.__class__.__name__}: {exc}",
+        )
+
     if not isinstance(extra_ops_lines, list):
         extra_ops_lines = list(extra_ops_lines or [])
 
-    appended_extra_ops_lines: list[str] = []
-    attempted_append = False
     if extra_ops_lines:
         already_counterbore = any(
             isinstance(entry, str)
@@ -10238,11 +10249,14 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
                 extra_ops_lines,
                 include_in_removal_cards=True,
             )
-            if appended_extra_ops_lines and flags is not None:
-                try:
-                    flags.add("cbore")
-                except Exception:
-                    pass
+            if appended_extra_ops_lines:
+                extra_ops_lines_appended = 1
+                extra_ops_lines_cache = list(appended_extra_ops_lines)
+                if flags is not None:
+                    try:
+                        flags.add("cbore")
+                    except Exception:
+                        pass
     if not appended_extra_ops_lines:
         appended_extra_ops_lines = []
     if appended_extra_ops_lines:
@@ -12667,7 +12681,6 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
     except Exception as e:
         _push(lines, f"[DEBUG] material_removal_emit_skipped={e.__class__.__name__}: {e}")
     else:
-        extra_ops_lines_appended = 0
         try:
             if not ops_rows:
                 chart_lines_all = _collect_chart_lines_context(ctx, geo_map, ctx_a, ctx_b)
@@ -12878,22 +12891,25 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
                 _push(lines, f"[DEBUG] extra_ops_appended={_appended}")
 
             # Extra MATERIAL REMOVAL cards from HOLE TABLE text (Counterbore / Spot / Jig)
+            appended_later_extra_ops_lines: list[str] = []
             if extra_ops_lines_appended:
                 extra_ops_source = extra_ops_lines_cache
             else:
                 extra_ops_lines_cache = _build_extra_ops_lines_list()
                 extra_ops_source = extra_ops_lines_cache
-            appended_later_extra_ops_lines = _append_extra_ops_lines(
-                extra_ops_source,
-                include_in_removal_cards=True,
-            )
+                appended_later_extra_ops_lines = _append_extra_ops_lines(
+                    extra_ops_source,
+                    include_in_removal_cards=True,
+                )
+                if appended_later_extra_ops_lines:
+                    extra_ops_lines_appended = 1
+                    extra_ops_lines_cache = list(appended_later_extra_ops_lines)
             if appended_later_extra_ops_lines:
                 _push(
                     lines,
                     f"[DEBUG] extra_ops_lines={len(appended_later_extra_ops_lines)}",
                 )
                 removal_summary_extra_lines.extend(appended_later_extra_ops_lines)
-                extra_ops_lines_appended = 1
 
             # Emit the cards (will no-op if no TAP/CBore/Spot rows)
             pre_ops_len = len(lines)
@@ -12940,6 +12956,7 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
                         if not entry.startswith("[DEBUG]"):
                             removal_summary_extra_lines.append(entry)
                     extra_ops_lines_appended = 1
+                    extra_ops_lines_cache = list(appended_fallback_extra_ops_lines)
         except Exception as e:
             _push(
                 lines,
