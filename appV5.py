@@ -542,6 +542,124 @@ def _ensure_bucket_view_mapping(
     return None
 
 
+def _ebo_upsert_entry(
+    owner: MutableMapping[str, Any] | Mapping[str, Any] | None,
+    bucket: str,
+    payload: Mapping[str, Any] | Any,
+) -> Mapping[str, Any] | None:
+    """Insert or merge an extra bucket entry for ``bucket`` on ``owner``."""
+
+    if not isinstance(owner, (_MutableMappingABC, dict)):
+        return None
+
+    owner_map = typing.cast(MutableMapping[str, Any], owner)
+    try:
+        extra_ops_obj = owner_map.setdefault("extra_bucket_ops", {})
+    except Exception:
+        return None
+
+    if not isinstance(extra_ops_obj, (_MutableMappingABC, dict)):
+        try:
+            extra_ops_obj = dict(extra_ops_obj)  # type: ignore[arg-type]
+        except Exception:
+            extra_ops_obj = {}
+        try:
+            owner_map["extra_bucket_ops"] = extra_ops_obj  # type: ignore[index]
+        except Exception:
+            pass
+
+    extra_ops = typing.cast(MutableMapping[str, Any], extra_ops_obj)
+    try:
+        entries_obj = extra_ops.setdefault(bucket, [])
+    except Exception:
+        return None
+
+    if isinstance(entries_obj, list):
+        entries = entries_obj
+    else:
+        try:
+            entries = list(entries_obj)  # type: ignore[arg-type]
+        except Exception:
+            entries = []
+        try:
+            extra_ops[bucket] = entries  # type: ignore[index]
+        except Exception:
+            pass
+
+    try:
+        seen_obj = owner_map.setdefault("_ebo_seen", set())
+    except Exception:
+        seen_obj = None
+
+    seen: MutableSet[tuple[Any, ...]] | None
+    if isinstance(seen_obj, (_MutableSetABC, set)):
+        seen = typing.cast(MutableSet[tuple[Any, ...]], seen_obj)
+    elif seen_obj is not None:
+        try:
+            seen = set(typing.cast(Iterable[tuple[Any, ...]], seen_obj))
+        except Exception:
+            seen = set()
+        try:
+            owner_map["_ebo_seen"] = seen  # type: ignore[index]
+        except Exception:
+            pass
+    else:
+        seen = set()
+        try:
+            owner_map["_ebo_seen"] = seen  # type: ignore[index]
+        except Exception:
+            pass
+
+    normalized = _normalize_extra_bucket_payload(payload)
+    if not normalized:
+        return None
+
+    new_key = _extra_bucket_entry_key(normalized)
+    new_qty = int(normalized.get("qty") or 0)
+
+    for idx, existing in enumerate(entries):
+        if isinstance(existing, _MutableMappingABC):
+            existing_map = typing.cast(MutableMapping[str, Any], existing)
+        elif isinstance(existing, dict):
+            existing_map = typing.cast(MutableMapping[str, Any], existing)
+        elif isinstance(existing, _MappingABC):
+            try:
+                existing_map = dict(existing)
+                entries[idx] = existing_map
+            except Exception:
+                continue
+        else:
+            continue
+
+        if _extra_bucket_entry_key(existing_map) != new_key:
+            continue
+
+        old_name = existing_map.get("name")
+        old_side = existing_map.get("side")
+        try:
+            old_qty = int(existing_map.get("qty") or 0)
+        except Exception:
+            old_qty = 0
+
+        _merge_extra_bucket_entries(existing_map, normalized)
+
+        if seen is not None and old_name is not None:
+            seen.discard((bucket, old_name, old_side, old_qty))
+            try:
+                merged_qty = int(existing_map.get("qty") or 0)
+            except Exception:
+                merged_qty = new_qty
+            seen.add((bucket, existing_map.get("name"), existing_map.get("side"), merged_qty))
+
+        return existing_map
+
+    entries.append(normalized)
+    if seen is not None:
+        seen.add((bucket, normalized.get("name"), normalized.get("side"), new_qty))
+
+    return normalized
+
+
 def _append_counterdrill_extra(
     owner: MutableMapping[str, Any] | Mapping[str, Any] | None,
     qty: int,
@@ -558,18 +676,18 @@ def _append_counterdrill_extra(
     if qty_val <= 0:
         return 0.0
 
-    _ebo_append_unique(
-        owner,
-        "counterdrill",
-        {"name": "Counterdrill", "qty": qty_val, "side": side},
-    )
-
     minutes_per = float(
         globals().get("COUNTERDRILL_MIN_PER_SIDE_MIN")
         or COUNTERDRILL_MIN_PER_SIDE_MIN
         or 0.12
     )
     total_minutes = float(qty_val) * minutes_per
+
+    _ebo_upsert_entry(
+        owner,
+        "counterdrill",
+        {"name": "Counterdrill", "qty": qty_val, "side": side},
+    )
 
     bucket_view_obj = _ensure_bucket_view_mapping(owner)
     if bucket_view_obj is not None:
@@ -610,14 +728,14 @@ def _append_jig_extra(
     if qty_val <= 0:
         return 0.0
 
-    _ebo_append_unique(
+    minutes_per = float(globals().get("JIG_GRIND_MIN_PER_FEATURE") or 0.75)
+    total_minutes = float(qty_val) * minutes_per
+
+    _ebo_upsert_entry(
         owner,
         "jig-grind",
         {"name": "Jig-grind", "qty": qty_val, "side": None},
     )
-
-    minutes_per = float(globals().get("JIG_GRIND_MIN_PER_FEATURE") or 0.75)
-    total_minutes = float(qty_val) * minutes_per
 
     bucket_view_obj = _ensure_bucket_view_mapping(owner)
     if bucket_view_obj is not None:
