@@ -144,13 +144,89 @@ def _coerce_positive_float(value: _AnyForCoerce) -> float | None:
     return number if number > 0 else None
 
 
+# --- GEO helpers -------------------------------------------------------------
+
+
+def _get_core_geo_map(geo_map: dict | None) -> dict:
+    """Return the dict that actually holds the hole lists / feature counts."""
+
+    g = geo_map or {}
+    if isinstance(g.get("geo"), dict):
+        g2 = g["geo"]
+        for key in (
+            "hole_diams_in",
+            "hole_diams_in_precise",
+            "hole_diams_mm",
+            "hole_diams_mm_precise",
+            "hole_sets",
+            "feature_counts",
+        ):
+            if key in g2:
+                return g2
+    return g
+
+
+def _seed_drill_bins_from_geo__local(geo_map) -> dict[float, int]:
+    """Return {diam_in_rounded: count} from GEO (supports inch + mm + hole_sets)."""
+
+    if not isinstance(geo_map, dict):
+        return {}
+
+    g = _get_core_geo_map(geo_map)
+    diams_in: list[float] = []
+
+    # inch sources
+    for key in ("hole_diams_in", "hole_diams_in_precise", "hole_diams_inch"):
+        vals = g.get(key)
+        if isinstance(vals, (list, tuple)):
+            for v in vals:
+                try:
+                    diams_in.append(float(v))
+                except Exception:
+                    pass
+
+    # mm sources → inch
+    if not diams_in:
+        mm_list = g.get("hole_diams_mm_precise") or g.get("hole_diams_mm") or []
+        if isinstance(mm_list, (list, tuple)):
+            for v in mm_list:
+                try:
+                    diams_in.append(float(v) / 25.4)
+                except Exception:
+                    pass
+
+    # hole_sets may carry per-set diameter (in or mm)
+    for hs in (g.get("hole_sets") or []):
+        if isinstance(hs, dict):
+            d_in = None
+            try:
+                if "diam_in" in hs:
+                    d_in = float(hs["diam_in"])
+                elif "diam_mm" in hs:
+                    d_in = float(hs["diam_mm"]) / 25.4
+            except Exception:
+                d_in = None
+            if d_in:
+                diams_in.append(d_in)
+
+    bins: dict[float, int] = {}
+    for d in diams_in:
+        try:
+            key = round(float(d), 3)
+        except Exception:
+            continue
+        bins[key] = bins.get(key, 0) + 1
+
+    return bins
+
+
 _MM_DIM_TOKEN = re.compile(
     r"(?:Ø|⌀|DIA|REF)?\s*((?:\d+\s*/\s*\d+)|(?:\d+(?:\.\d+)?))\s*(?:MM|MILLIM(?:E|E)T(?:E|)RS?)",
     re.IGNORECASE,
 )
 
 RE_COUNTERDRILL = re.compile(
-    r"\b(?:C[’']?\s*DRILL|COUNTER[-\s]*DRILL|CTR\s*DRILL)\b",
+    r"\b(?:C[’']\s*DRILL|COUNTER[\s-]*DRILL|CTR\s*DRILL)\b",
     re.IGNORECASE,
 )
 RE_JIG = re.compile(r"\bJIG\s*GRIND\b", re.IGNORECASE)
@@ -167,14 +243,15 @@ def _seed_drill_bins_from_geo(geo: dict) -> dict[float, int]:
     if not isinstance(geo, dict):
         return out
 
-    # preferred maps
+    core_geo = _get_core_geo_map(geo)
+
     for key in (
         "hole_diam_families_geom_in",
         "hole_diam_families_in",
         "hole_diam_families_geom",
         "hole_diam_families",
     ):
-        fam = geo.get(key)
+        fam = core_geo.get(key)
         if isinstance(fam, dict) and fam:
             for k, v in fam.items():
                 try:
@@ -188,27 +265,9 @@ def _seed_drill_bins_from_geo(geo: dict) -> dict[float, int]:
             if out:
                 return out
 
-    # fallbacks from raw lists
-    holes_in = geo.get("hole_diams_in") or geo.get("hole_diams_geom_in")
-    holes_mm = geo.get("hole_diams_mm") or geo.get("hole_diams_geom_mm")
-
-    def _acc(seq, mm=False):
-        if not isinstance(seq, (list, tuple)):
-            return
-        for x in seq:
-            try:
-                d = float(x)
-                if mm:
-                    d /= 25.4
-                d = round(d, 3)
-                out[d] = out.get(d, 0) + 1
-            except Exception:
-                pass
-
-    if holes_in:
-        _acc(holes_in, mm=False)
-    if not out and holes_mm:
-        _acc(holes_mm, mm=True)
+    fallback = _seed_drill_bins_from_geo__local(core_geo)
+    if fallback:
+        out.update(fallback)
     return out
 
 
@@ -519,6 +578,123 @@ def _publish_extra_bucket_op(
             return
 
     entries.append(normalized)
+
+
+def _ensure_bucket_view_mapping(
+    owner: MutableMapping[str, Any] | Mapping[str, Any] | None,
+) -> MutableMapping[str, Any] | Mapping[str, Any] | None:
+    """Return a mutable bucket-view mapping for ``owner`` if possible."""
+
+    if isinstance(owner, dict):
+        try:
+            return owner.setdefault("bucket_view", {})
+        except Exception:
+            return owner.get("bucket_view")
+    if isinstance(owner, _MutableMappingABC):
+        try:
+            return typing.cast(MutableMapping[str, Any], owner.setdefault("bucket_view", {}))
+        except Exception:
+            try:
+                return owner.get("bucket_view")
+            except Exception:
+                return None
+    return None
+
+
+def _append_counterdrill_extra(
+    owner: MutableMapping[str, Any] | Mapping[str, Any] | None,
+    qty: int,
+    *,
+    rates: Mapping[str, Any] | None,
+    side: str | None = "front",
+) -> float:
+    """Append a counterdrill extra op entry and update bucket minutes."""
+
+    try:
+        qty_val = int(qty)
+    except Exception:
+        qty_val = 0
+    if qty_val <= 0:
+        return 0.0
+
+    _ebo_append_unique(
+        owner,
+        "counterdrill",
+        {"name": "Counterdrill", "qty": qty_val, "side": side},
+    )
+
+    minutes_per = float(
+        globals().get("COUNTERDRILL_MIN_PER_SIDE_MIN")
+        or COUNTERDRILL_MIN_PER_SIDE_MIN
+        or 0.12
+    )
+    total_minutes = float(qty_val) * minutes_per
+
+    bucket_view_obj = _ensure_bucket_view_mapping(owner)
+    if bucket_view_obj is not None:
+        machine_rate = (
+            _lookup_bucket_rate("counterdrill", rates)
+            or _lookup_bucket_rate("drilling", rates)
+            or _lookup_bucket_rate("machine", rates)
+            or 53.76
+        )
+        labor_rate = (
+            _lookup_bucket_rate("drilling_labor", rates)
+            or _lookup_bucket_rate("labor", rates)
+            or 25.46
+        )
+        _set_bucket_minutes_cost(
+            bucket_view_obj,
+            "counterdrill",
+            total_minutes,
+            machine_rate,
+            labor_rate,
+        )
+
+    return total_minutes
+
+
+def _append_jig_extra(
+    owner: MutableMapping[str, Any] | Mapping[str, Any] | None,
+    qty: int,
+    *,
+    rates: Mapping[str, Any] | None,
+) -> float:
+    """Append a jig-grind extra op entry and update bucket minutes."""
+
+    try:
+        qty_val = int(qty)
+    except Exception:
+        qty_val = 0
+    if qty_val <= 0:
+        return 0.0
+
+    _ebo_append_unique(
+        owner,
+        "jig-grind",
+        {"name": "Jig-grind", "qty": qty_val, "side": None},
+    )
+
+    minutes_per = float(globals().get("JIG_GRIND_MIN_PER_FEATURE") or 0.75)
+    total_minutes = float(qty_val) * minutes_per
+
+    bucket_view_obj = _ensure_bucket_view_mapping(owner)
+    if bucket_view_obj is not None:
+        machine_rate = (
+            _lookup_bucket_rate("grinding", rates)
+            or _lookup_bucket_rate("machine", rates)
+            or 53.76
+        )
+        labor_rate = _lookup_bucket_rate("labor", rates) or 25.46
+        _set_bucket_minutes_cost(
+            bucket_view_obj,
+            "grinding",
+            total_minutes,
+            machine_rate,
+            labor_rate,
+        )
+
+    return total_minutes
 
 from cad_quoter.app.chart_lines import (
     collect_chart_lines_context as _collect_chart_lines_context,
@@ -928,6 +1104,60 @@ def _ebo_append_unique(
     seen.add(key)
 
 
+# --- compatibility shim: some callsites use _build_extra_ops_lines_list ---
+def _build_extra_ops_lines_list(
+    breakdown=None,
+    result=None,
+    rates=None,
+    breakdown_mutable=None,
+    ctx=None,
+    ctx_a=None,
+    ctx_b=None,
+    **_kwargs,
+) -> list[str]:
+    """
+    Compatibility shim.
+    - Accepts zero-arg legacy calls.
+    - If args are missing, it introspects the caller's locals to find
+      breakdown/result/rates/breakdown_mutable.
+    """
+
+    # Try to borrow context from the caller if any arg is missing.
+    if breakdown is None or result is None or rates is None:
+        try:
+            import inspect  # local import to avoid global dependency
+
+            _frm = inspect.currentframe()
+            _caller_locals = _frm.f_back.f_locals if (_frm and _frm.f_back) else {}
+        except Exception:
+            _caller_locals = {}
+        breakdown = breakdown or _caller_locals.get("breakdown")
+        result = result or _caller_locals.get("result")
+        rates = rates or _caller_locals.get("rates")
+        breakdown_mutable = (
+            breakdown_mutable
+            or _caller_locals.get("breakdown_mutable")
+            or (breakdown if isinstance(breakdown, (dict, MutableMapping)) else None)
+        )
+
+    # If we still don't have enough to proceed, fail soft with a debug line.
+    if breakdown is None and result is None:
+        return ["[DEBUG] extra_ops_lines=0 (no chart_lines/rows visible at callsite)"]
+
+    try:
+        return _build_ops_cards_from_chart_lines(
+            breakdown=breakdown,
+            result=result,
+            rates=rates,
+            breakdown_mutable=breakdown_mutable,
+            ctx=ctx,
+            ctx_a=ctx_a,
+            ctx_b=ctx_b,
+        )
+    except Exception as e:
+        return [f"[DEBUG] extra_ops_build_failed={e.__class__.__name__}: {e}"]
+
+
 def _build_ops_cards_from_chart_lines(
     *,
     breakdown: Mapping[str, Any] | None,
@@ -941,6 +1171,34 @@ def _build_ops_cards_from_chart_lines(
     """Return extra MATERIAL REMOVAL cards for Counterbore / Spot / Jig."""
 
     lines: list[str] = []
+
+    extra_bucket_ops: MutableMapping[str, Any] | None = None
+    if isinstance(breakdown_mutable, dict):
+        try:
+            extra_bucket_ops = breakdown_mutable.setdefault("extra_bucket_ops", {})
+        except Exception:
+            extra_bucket_ops = None
+    elif isinstance(breakdown_mutable, _MutableMappingABC):
+        try:
+            extra_bucket_ops = typing.cast(
+                MutableMapping[str, Any],
+                breakdown_mutable.setdefault("extra_bucket_ops", {}),
+            )
+        except Exception:
+            extra_bucket_ops = None
+    elif isinstance(breakdown, dict):
+        try:
+            extra_bucket_ops = breakdown.setdefault("extra_bucket_ops", {})
+        except Exception:
+            extra_bucket_ops = None
+    elif isinstance(breakdown, _MutableMappingABC):
+        try:
+            extra_bucket_ops = typing.cast(
+                MutableMapping[str, Any],
+                breakdown.setdefault("extra_bucket_ops", {}),
+            )
+        except Exception:
+            extra_bucket_ops = None
 
     geo_map = (
         ((result or {}).get("geo") if isinstance(result, _MappingABC) else None)
@@ -997,6 +1255,64 @@ def _build_ops_cards_from_chart_lines(
         chart_claims.get("cb_groups") or {}
     )
 
+    printed_candidate: Any = None
+    try:
+        if isinstance(breakdown_mutable, dict):
+            printed_candidate = breakdown_mutable.setdefault(
+                "_ops_cards_printed", set()
+            )
+        elif isinstance(breakdown_mutable, _MutableMappingABC):
+            printed_candidate = typing.cast(
+                MutableMapping[str, Any],
+                breakdown_mutable,
+            ).setdefault("_ops_cards_printed", set())
+    except Exception:
+        printed_candidate = None
+
+    skip_cbore_card = False
+    cbore_flag_preexisting = False
+    try:
+        if printed_candidate is not None and "cbore" in typing.cast(Iterable[str], printed_candidate):
+            cbore_flag_preexisting = True
+    except Exception:
+        cbore_flag_preexisting = False
+    printed: MutableSet[str] | None = None
+    if isinstance(printed_candidate, (_MutableSetABC, set)):
+        printed = typing.cast(MutableSet[str], printed_candidate)
+
+    if printed is not None:
+        if "cbore" in printed:
+            cbore_flag_preexisting = True
+        else:
+            printed.add("cbore")
+    if cbore_flag_preexisting:
+        skip_cbore_card = True
+
+    derived_candidate: Any = None
+    try:
+        if isinstance(breakdown_mutable, dict):
+            derived_candidate = breakdown_mutable.setdefault("derived_ops", {})
+        elif isinstance(breakdown_mutable, _MutableMappingABC):
+            derived_candidate = typing.cast(
+                MutableMapping[str, Any],
+                breakdown_mutable,
+            ).setdefault("derived_ops", {})
+    except Exception:
+        derived_candidate = None
+
+    if isinstance(derived_candidate, (_MutableMappingABC, dict)):
+        serial: dict[tuple[float | None, str, float | None], int] = {}
+        for (dia, side, depth), qty in cb_groups.items():
+            key = (
+                float(dia) if dia is not None else None,
+                str(side),
+                float(depth) if depth is not None else None,
+            )
+            serial[key] = int(qty or 0)
+        try:
+            derived_candidate["cb_groups"] = serial  # type: ignore[index]
+        except Exception:
+            pass
     spot_qty = int(chart_claims.get("spot") or 0)
     jig_qty = int(chart_claims.get("jig") or 0)
 
@@ -1048,6 +1364,126 @@ def _build_ops_cards_from_chart_lines(
         jig_qty = max(jig_qty, jig_from_rows)
 
     total_cb = int(sum(cb_groups.values()))
+
+    try:
+        core_geo_candidate: Any = None
+        if isinstance(result, (_MappingABC, dict)):
+            try:
+                core_geo_candidate = result.get("geo")  # type: ignore[attr-defined]
+            except Exception:
+                core_geo_candidate = None
+        if not core_geo_candidate and isinstance(breakdown, (_MappingABC, dict)):
+            try:
+                core_geo_candidate = breakdown.get("geo")  # type: ignore[attr-defined]
+            except Exception:
+                core_geo_candidate = None
+        core_geo = (
+            core_geo_candidate
+            if isinstance(core_geo_candidate, (_MappingABC, dict))
+            else {}
+        )
+        total_cb_from_groups = total_cb
+        op_counts = _ops_counts_from_geo_and_locals(
+            core_geo,
+            counterbore_from_groups=total_cb_from_groups,
+            chart_lines=cleaned_chart_lines,
+        )
+        _push(
+            lines,
+            "[DEBUG] OPS PUBLISH "
+            + ", ".join(
+                f"{k}={op_counts[k]}"
+                for k in (
+                    "drill",
+                    "tap",
+                    "counterbore",
+                    "counterdrill",
+                    "jig-grind",
+                )
+            ),
+        )
+    except Exception as _e:
+        op_counts = {
+            "drill": 0,
+            "tap": 0,
+            "counterbore": 0,
+            "counterdrill": 0,
+            "jig-grind": 0,
+        }
+        _push(
+            lines,
+            f"[DEBUG] OPS PUBLISH skipped={_e.__class__.__name__}: {_e}",
+        )
+
+    root_state_candidate: Any = breakdown_mutable or breakdown or {}
+    if isinstance(root_state_candidate, dict):
+        root_state = root_state_candidate
+    elif isinstance(root_state_candidate, _MutableMappingABC):
+        root_state = typing.cast(MutableMapping[str, Any], root_state_candidate)
+    else:
+        root_state = None
+    if isinstance(root_state, (_MutableMappingABC, dict)):
+        try:
+            derived_ops = root_state.setdefault("derived_ops", {})  # type: ignore[index]
+        except Exception:
+            derived_ops = None
+        if isinstance(derived_ops, (_MutableMappingABC, dict)):
+            try:
+                typing.cast(MutableMapping[str, Any], derived_ops).update(op_counts)
+            except Exception:
+                for key, value in op_counts.items():
+                    try:
+                        derived_ops[key] = value  # type: ignore[index]
+                    except Exception:
+                        pass
+
+    def _ebo_append_unique(
+        bucket: str, name: str, qty: int, side: str | None = None
+    ) -> None:
+        nonlocal extra_bucket_ops
+        if extra_bucket_ops is None or qty <= 0:
+            return
+        bucket_map = {
+            "drilling": "drill",
+            "tapping": "tap",
+        }
+        bucket_key = bucket_map.get(bucket, bucket)
+        try:
+            lst = extra_bucket_ops.setdefault(bucket_key, [])
+        except Exception:
+            return
+        if not isinstance(lst, list):
+            try:
+                lst = list(lst)  # type: ignore[arg-type]
+            except Exception:
+                return
+            try:
+                extra_bucket_ops[bucket_key] = lst  # type: ignore[index]
+            except Exception:
+                return
+        signature = (name, side)
+        for entry in lst:
+            if not isinstance(entry, (_MappingABC, dict)):
+                continue
+            entry_name = str(entry.get("name") or "")
+            entry_side = entry.get("side")
+            if (entry_name, entry_side) == signature:
+                return
+        try:
+            lst.append({"name": name, "qty": int(qty), "side": side})
+        except Exception:
+            pass
+
+    _ebo_append_unique("drilling", "Drill", op_counts["drill"])
+    _ebo_append_unique("tapping", "Tap", op_counts["tap"])
+    _ebo_append_unique("counterbore", "Counterbore", op_counts["counterbore"])
+    _ebo_append_unique(
+        "counterdrill",
+        "Counterdrill",
+        op_counts["counterdrill"],
+    )
+    _ebo_append_unique("jig-grind", "Jig-grind", op_counts["jig-grind"])
+
     if total_cb <= 0 and spot_qty <= 0 and jig_qty <= 0:
         return lines
 
@@ -1057,6 +1493,41 @@ def _build_ops_cards_from_chart_lines(
             target_breakdown = breakdown
         elif isinstance(breakdown, _MutableMappingABC):
             target_breakdown = typing.cast(MutableMapping[str, Any], breakdown)
+
+    printed_flags: set[str] | None = None
+    try:
+        if isinstance(breakdown_mutable, dict):
+            printed_flags = breakdown_mutable.setdefault("_ops_cards_printed", set())
+        elif isinstance(breakdown_mutable, _MutableMappingABC):
+            printed_flags = typing.cast(
+                MutableMapping[str, Any],
+                breakdown_mutable,
+            ).setdefault("_ops_cards_printed", set())
+    except Exception:
+        printed_flags = None
+
+    if printed_flags is not None and not isinstance(printed_flags, set):
+        try:
+            printed_flags = set(printed_flags)  # type: ignore[arg-type]
+        except Exception:
+            printed_flags = set()
+        try:
+            if isinstance(breakdown_mutable, dict):
+                breakdown_mutable["_ops_cards_printed"] = printed_flags
+            elif isinstance(breakdown_mutable, _MutableMappingABC):
+                typing.cast(
+                    MutableMapping[str, Any],
+                    breakdown_mutable,
+                )["_ops_cards_printed"] = printed_flags
+        except Exception:
+            pass
+
+    if isinstance(printed_flags, set):
+        if "cbore" in printed_flags:
+            if cbore_flag_preexisting:
+                skip_cbore_card = True
+        else:
+            printed_flags.add("cbore")
 
     bucket_view_obj: MutableMapping[str, Any] | Mapping[str, Any] | None = None
     if isinstance(target_breakdown, dict):
@@ -1098,21 +1569,26 @@ def _build_ops_cards_from_chart_lines(
             except Exception:
                 pass
 
-    def _print_once(tag: str) -> bool:
-        if printed_set is None:
-            return True
+    pending_prints: set[str] = set()
+
+    def _aliases_for_tag(tag: str) -> set[str]:
         aliases = {tag}
         if tag == "counterbore":
             aliases.add("cbore")
-        if any(alias in printed_set for alias in aliases):
-            return False
-        for alias in aliases:
-            printed_set.add(alias)
-        return True
+        return aliases
+
+    def _should_print(tag: str) -> bool:
+        if printed_set is None:
+            return True
+        aliases = _aliases_for_tag(tag)
+        return not any(alias in printed_set for alias in aliases)
+
+    def _register_pending(tag: str) -> None:
+        pending_prints.update(_aliases_for_tag(tag))
 
     out_lines: list[str] = []
 
-    if cb_groups and _print_once("counterbore"):
+    if cb_groups and _should_print("counterbore"):
         if isinstance(mutation_owner, (_MutableMappingABC, dict)):
             derived_owner: MutableMapping[str, Any] | None = None
             try:
@@ -1187,14 +1663,12 @@ def _build_ops_cards_from_chart_lines(
                 mutation_owner,
                 "counterbore",
                 {"name": "Counterbore", "qty": int(front_cb), "side": "front"},
-                minutes=float(front_cb) * per,
             )
         if back_cb > 0:
             _ebo_append_unique(
                 mutation_owner,
                 "counterbore",
                 {"name": "Counterbore", "qty": int(back_cb), "side": "back"},
-                minutes=float(back_cb) * per,
             )
 
         cb_mrate = (
@@ -1228,7 +1702,9 @@ def _build_ops_cards_from_chart_lines(
         except Exception:
             pass
 
-    if spot_qty > 0 and _print_once("spot"):
+        _register_pending("counterbore")
+
+    if spot_qty > 0 and _should_print("spot"):
         per_spot = 0.05
         t_group = spot_qty * per_spot
         out_lines.extend(
@@ -1252,10 +1728,11 @@ def _build_ops_cards_from_chart_lines(
             mutation_owner,
             "spot",
             {"name": "Spot drill", "qty": int(spot_qty), "side": "front"},
-            minutes=t_group,
         )
 
-    if jig_qty > 0 and _print_once("jig-grind"):
+        _register_pending("spot")
+
+    if jig_qty > 0 and _should_print("jig-grind"):
         per_jig = float(globals().get("JIG_GRIND_MIN_PER_FEATURE") or 0.75)
         t_group = jig_qty * per_jig
         out_lines.extend(
@@ -1281,12 +1758,40 @@ def _build_ops_cards_from_chart_lines(
             mutation_owner,
             "jig-grind",
             {"name": "Jig-grind", "qty": int(jig_qty), "side": None},
-            minutes=t_group,
         )
+
+        _register_pending("jig-grind")
 
     if out_lines:
         try:
             _normalize_buckets(bucket_view_obj)
+        except Exception:
+            pass
+
+    if pending_prints and isinstance(mutation_owner, (_MutableMappingABC, dict)):
+        try:
+            pending_owner = typing.cast(MutableMapping[str, Any], mutation_owner)
+            try:
+                pending_candidate = pending_owner.setdefault("_ops_cards_printed_pending", set())
+            except Exception:
+                pending_candidate = None
+            if isinstance(pending_candidate, (_MutableSetABC, set)):
+                pending_candidate.update(pending_prints)
+            elif pending_candidate is not None:
+                try:
+                    pending_set = set(typing.cast(Iterable[str], pending_candidate))
+                except Exception:
+                    pending_set = set()
+                pending_set.update(pending_prints)
+                try:
+                    pending_owner["_ops_cards_printed_pending"] = pending_set  # type: ignore[index]
+                except Exception:
+                    pass
+            else:
+                try:
+                    pending_owner["_ops_cards_printed_pending"] = set(pending_prints)  # type: ignore[index]
+                except Exception:
+                    pass
         except Exception:
             pass
 
@@ -1399,6 +1904,335 @@ def _count_jig_from_chart(cleaned: list[str]) -> int:
             m = re.match(r"\s*\((\d+)\)", text)
             tot += int(m.group(1)) if m else 1
     return tot
+
+
+def _ops_counts_from_geo_and_locals(
+    core_geo: Mapping[str, Any] | None,
+    *,
+    counterbore_from_groups: int = 0,
+    chart_lines: Sequence[str] | None = None,
+) -> dict[str, int]:
+    counts: dict[str, int] = {
+        "drill": 0,
+        "tap": 0,
+        "counterbore": max(0, int(counterbore_from_groups or 0)),
+        "counterdrill": 0,
+        "jig-grind": 0,
+    }
+
+    def _coerce_int(value: Any) -> int:
+        if value is None:
+            return 0
+        if isinstance(value, bool):
+            return int(value)
+        try:
+            if isinstance(value, (int, float)):
+                numeric = float(value)
+            elif isinstance(value, str):
+                text = value.strip()
+                if not text:
+                    return 0
+                if "/" in text and not any(ch.isalpha() for ch in text):
+                    numeric = float(Fraction(text))
+                else:
+                    numeric = float(text)
+            else:
+                numeric = float(value)
+        except Exception:
+            try:
+                return int(value)  # type: ignore[arg-type]
+            except Exception:
+                return 0
+        if not math.isfinite(numeric):
+            return 0
+        try:
+            return int(round(numeric))
+        except Exception:
+            return 0
+
+    def _get_field(container: Any, key: str) -> Any:
+        if not isinstance(container, (_MappingABC, dict)):
+            return None
+        try:
+            if key in container:  # type: ignore[operator]
+                try:
+                    return container.get(key)  # type: ignore[attr-defined]
+                except Exception:
+                    return container[key]  # type: ignore[index]
+        except Exception:
+            pass
+        key_lower = key.lower()
+        try:
+            keys_iter = container.keys()  # type: ignore[attr-defined]
+        except Exception:
+            keys_iter = []
+        for existing_key in keys_iter:
+            if not isinstance(existing_key, str):
+                continue
+            if existing_key.lower() != key_lower:
+                continue
+            try:
+                return container.get(existing_key)  # type: ignore[attr-defined]
+            except Exception:
+                try:
+                    return container[existing_key]  # type: ignore[index]
+                except Exception:
+                    return None
+        return None
+
+    def _count_sequence(seq: Any) -> int:
+        if not isinstance(seq, Sequence) or isinstance(seq, (str, bytes, bytearray)):
+            return 0
+        total = 0
+        for item in seq:
+            if isinstance(item, (_MappingABC, dict)):
+                qty = 0
+                for key in ("qty", "count", "quantity", "holes", "total"):
+                    qty = _coerce_int(_get_field(item, key))
+                    if qty > 0:
+                        break
+                if qty <= 0:
+                    nested_rows = _get_field(item, "rows")
+                    qty = _count_sequence(nested_rows)
+                if qty > 0:
+                    total += qty
+                else:
+                    total += 1
+            elif isinstance(item, Sequence) and not isinstance(
+                item, (str, bytes, bytearray)
+            ):
+                nested = _count_sequence(item)
+                total += nested if nested > 0 else 0
+            else:
+                total += 1
+        return total
+
+    geo_layers: list[_MappingABC[str, Any]] = []
+    queue: list[_MappingABC[str, Any]] = []
+    seen: set[int] = set()
+
+    def _enqueue(candidate: Any) -> None:
+        if not isinstance(candidate, (_MappingABC, dict)):
+            return
+        ident = id(candidate)
+        if ident in seen:
+            return
+        seen.add(ident)
+        geo_layers.append(candidate)
+        queue.append(candidate)
+
+    if isinstance(core_geo, (_MappingABC, dict)):
+        _enqueue(core_geo)
+
+    while queue:
+        layer = queue.pop(0)
+        fc_candidate = _get_field(layer, "feature_counts")
+        if isinstance(fc_candidate, (_MappingABC, dict)):
+            _enqueue(fc_candidate)
+        for nested_key in (
+            "geo",
+            "geom",
+            "geometry",
+            "geo_map",
+            "geo_ctx",
+            "geo_context",
+            "geo_read_more",
+            "read_more",
+            "read_more_geo",
+            "readmore",
+            "derived",
+            "derived_geo",
+            "derived_geom",
+            "derived_geo_map",
+        ):
+            nested = _get_field(layer, nested_key)
+            if isinstance(nested, (_MappingABC, dict)):
+                _enqueue(nested)
+        try:
+            for key, value in layer.items():
+                if not isinstance(key, str):
+                    continue
+                key_lower = key.lower()
+                if "geo" in key_lower and isinstance(value, (_MappingABC, dict)):
+                    _enqueue(value)
+        except Exception:
+            pass
+
+    chart_cleaned = [
+        str(line or "").strip()
+        for line in (chart_lines or [])
+        if str(line or "").strip()
+    ]
+    try:
+        joined_chart = _join_wrapped_chart_lines(chart_cleaned)
+    except Exception:
+        joined_chart = chart_cleaned
+
+    chart_claims: Mapping[str, Any] | dict[str, Any]
+    try:
+        chart_claims = _parse_ops_and_claims(joined_chart)
+    except Exception:
+        chart_claims = {}
+
+    counts["drill"] = max(counts["drill"], _coerce_int(_get_field(chart_claims, "drill")))
+    counts["tap"] = max(counts["tap"], _coerce_int(_get_field(chart_claims, "tap")))
+    counts["counterdrill"] = max(
+        counts["counterdrill"],
+        _coerce_int(_get_field(chart_claims, "counterdrill")),
+        _count_counterdrill_from_chart(joined_chart),
+    )
+    counts["jig-grind"] = max(
+        counts["jig-grind"],
+        _coerce_int(_get_field(chart_claims, "jig")),
+        _count_jig_from_chart(joined_chart),
+    )
+
+    cb_groups_chart = _get_field(chart_claims, "cb_groups")
+    if isinstance(cb_groups_chart, (_MappingABC, dict)):
+        cb_total = 0
+        try:
+            for qty in cb_groups_chart.values():
+                cb_total += max(0, _coerce_int(qty))
+        except Exception:
+            cb_total = 0
+        if cb_total > counts["counterbore"]:
+            counts["counterbore"] = cb_total
+
+    drill_candidates: list[int] = [counts["drill"]]
+    tap_candidates: list[int] = [counts["tap"]]
+    cb_candidates: list[int] = [counts["counterbore"]]
+    counterdrill_candidates: list[int] = [counts["counterdrill"]]
+    jig_candidates: list[int] = [counts["jig-grind"]]
+
+    KEY_MAP: dict[str, tuple[str, ...]] = {
+        "drill": (
+            "drill_qty",
+            "drill_total",
+            "drill_count",
+            "drills",
+            "hole_qty",
+            "hole_count",
+            "hole_total",
+            "holes",
+            "drill_actions",
+        ),
+        "tap": ("tap_qty", "tap_total", "taps_total", "tap_count", "taps"),
+        "counterbore": (
+            "cbore_qty",
+            "counterbore_qty",
+            "cbore_total",
+            "counterbore_total",
+            "counterbores_total",
+        ),
+        "counterdrill": (
+            "counterdrill_qty",
+            "ctrill_qty",
+            "counter_drill_qty",
+            "counterdrill_total",
+        ),
+        "jig-grind": (
+            "jig_qty",
+            "jig_grind_qty",
+            "jig_total",
+            "jig_grind_total",
+        ),
+    }
+
+    for layer in geo_layers:
+        layer_dict: dict[str, Any] | None
+        if isinstance(layer, dict):
+            layer_dict = layer
+        else:
+            try:
+                layer_dict = dict(layer)
+            except Exception:
+                layer_dict = None
+
+        if layer_dict:
+            try:
+                seeded_bins = _seed_drill_bins_from_geo__local(layer_dict)
+            except Exception:
+                seeded_bins = {}
+            if seeded_bins:
+                drill_candidates.append(
+                    sum(max(0, _coerce_int(value)) for value in seeded_bins.values())
+                )
+
+        for op_key, keys in KEY_MAP.items():
+            target_list = (
+                drill_candidates
+                if op_key == "drill"
+                else tap_candidates
+                if op_key == "tap"
+                else cb_candidates
+                if op_key == "counterbore"
+                else counterdrill_candidates
+                if op_key == "counterdrill"
+                else jig_candidates
+            )
+            for key in keys:
+                value = _get_field(layer, key)
+                qty = _coerce_int(value)
+                if qty > 0:
+                    target_list.append(qty)
+
+        ops_summary = _get_field(layer, "ops_summary")
+        if isinstance(ops_summary, (_MappingABC, dict)):
+            totals_map = _get_field(ops_summary, "totals")
+            if isinstance(totals_map, (_MappingABC, dict)):
+                drill_candidates.append(_coerce_int(_get_field(totals_map, "drill")))
+                tap_candidates.append(_coerce_int(_get_field(totals_map, "tap_total")))
+                cb_candidates.append(_coerce_int(_get_field(totals_map, "cbore_total")))
+                counterdrill_candidates.append(
+                    _coerce_int(_get_field(totals_map, "counterdrill_total"))
+                )
+                jig_candidates.append(_coerce_int(_get_field(totals_map, "jig_grind")))
+
+        for seq_key in (
+            "hole_groups",
+            "hole_sets",
+            "hole_features",
+            "hole_diams_in",
+            "hole_diams_in_precise",
+            "hole_diams_inch",
+            "hole_diams",
+            "hole_diams_mm",
+            "hole_diams_mm_precise",
+        ):
+            seq_val = _get_field(layer, seq_key)
+            qty = _count_sequence(seq_val)
+            if qty > 0:
+                drill_candidates.append(qty)
+
+        bins_adj = _get_field(layer, "drill_bins_adj")
+        if isinstance(bins_adj, (_MappingABC, dict)):
+            drill_candidates.append(
+                sum(max(0, _coerce_int(value)) for value in bins_adj.values())
+            )
+
+        bins_raw = _get_field(layer, "drill_bins_raw")
+        if isinstance(bins_raw, (_MappingABC, dict)):
+            drill_candidates.append(
+                sum(max(0, _coerce_int(value)) for value in bins_raw.values())
+            )
+
+    def _max_positive(values: Sequence[int]) -> int:
+        best = 0
+        for val in values:
+            if val > best:
+                best = val
+        return best
+
+    counts["drill"] = _max_positive(drill_candidates)
+    counts["tap"] = _max_positive(tap_candidates)
+    counts["counterbore"] = _max_positive(cb_candidates)
+    counts["counterdrill"] = _max_positive(counterdrill_candidates)
+    counts["jig-grind"] = _max_positive(jig_candidates)
+
+    for key in tuple(counts):
+        counts[key] = max(0, _coerce_int(counts.get(key)))
+
+    return counts
 
 
 def _collect_pilot_claims(
@@ -1633,6 +2467,161 @@ def _adjust_drill_counts(
     return {d: q for d, q in counts.items() if q > 0}
 
 
+def _get_core_geo_map(
+    geo_map: Mapping[str, Any] | dict[str, Any] | None,
+) -> dict[str, Any]:
+    """Return a mutable geo dict, merging top-level helpers when present."""
+
+    base: dict[str, Any]
+    if isinstance(geo_map, dict):
+        base = geo_map
+    elif isinstance(geo_map, _MappingABC):
+        try:
+            base = dict(geo_map)
+        except Exception:
+            base = {}
+    else:
+        base = {}
+
+    nested: Any = None
+    try:
+        nested = base.get("geo")
+    except Exception:
+        nested = None
+
+    if isinstance(nested, dict):
+        core = nested
+    elif isinstance(nested, _MappingABC):
+        try:
+            core = dict(nested)
+        except Exception:
+            core = {}
+    else:
+        core = base
+
+    if core is not base and isinstance(base, dict):
+        for helper_key in ("feature_counts", "chart_lines", "chart_summary", "chart_source"):
+            if helper_key not in core and helper_key in base:
+                core[helper_key] = base[helper_key]
+
+    return core if isinstance(core, dict) else {}
+
+
+def _norm_op_key(name: str) -> str:
+    n = (name or "").strip().lower()
+    n = n.replace("’", "'").replace(" ", "").replace("_", "").replace("-", "")
+    if n.endswith("qty"):
+        n = n[:-3]
+    if n.endswith("count"):
+        n = n[:-5]
+    # synonyms → canonical
+    if n in {"drill", "drilling", "deepdrill", "deepdrilling", "stdandrill", "standarddrill"}:
+        return "drill"
+    if n in {"tap", "taps", "tapping"}:
+        return "tap"
+    if n in {"counterbore", "cbore", "c'bore", "c’bore"}:
+        return "counterbore"
+    if n in {
+        "counterdrill",
+        "cdrill",
+        "c'drill",
+        "c’drill",
+        "centerdrill",
+        "centredrill",
+        "centerdrilling",
+        "centredrilling",
+        "centre",
+        "spot",
+        "spotdrill",
+        "spotdrilling",
+    }:
+        # Treat ALL “spot/center drill” as Counterdrill per the requirement.
+        return "counterdrill"
+    if n in {"jig", "jiggrind", "jiggrinding", "grind", "grinding"}:
+        return "jig-grind"
+    return n
+
+
+def _ops_counts_from_geo_and_locals(
+    geo_map: Mapping[str, Any] | dict[str, Any] | None,
+    *,
+    counterbore_from_groups: int | None = None,
+    chart_lines: Sequence[str] | None = None,
+) -> dict[str, int]:
+    """Robust counts from GEO.feature_counts + fallbacks."""
+
+    counts = {"drill": 0, "tap": 0, "counterbore": 0, "counterdrill": 0, "jig-grind": 0}
+
+    g = _get_core_geo_map(geo_map)
+
+    def _iter_feature_count_maps() -> Iterator[Mapping[str, Any]]:
+        for candidate in (geo_map, g):
+            if not isinstance(candidate, (_MappingABC, dict)):
+                continue
+            try:
+                fc = candidate.get("feature_counts")  # type: ignore[index]
+            except Exception:
+                fc = None
+            if isinstance(fc, (_MappingABC, dict)):
+                yield typing.cast(Mapping[str, Any], fc)
+
+    # 1) feature_counts (preferred, if present)
+    for fc_map in _iter_feature_count_maps():
+        for k, v in fc_map.items():
+            try:
+                if isinstance(v, (int, float)):
+                    qty = int(v)
+                else:
+                    qty = int(float(v))
+            except Exception:
+                continue
+            key = _norm_op_key(str(k))
+            if key in counts:
+                counts[key] += max(qty, 0)
+
+    # 2) If we have hole diameters but no drill count, use that as a floor.
+    if counts["drill"] <= 0:
+        seed_fn = globals().get("_seed_drill_bins_from_geo__local")
+        raw_bins: Mapping[float, Any]
+        if callable(seed_fn):
+            try:
+                raw_bins = typing.cast(Mapping[float, Any], seed_fn(g))
+            except Exception:
+                raw_bins = {}
+        else:
+            raw_bins = _seed_drill_bins_from_geo(g)
+        try:
+            counts["drill"] = max(int(sum(int(v) for v in raw_bins.values())), 0)
+        except Exception:
+            counts["drill"] = 0
+
+    # 3) Merge in our already-parsed counterbores (from cb_groups).
+    if isinstance(counterbore_from_groups, int) and counterbore_from_groups > 0:
+        counts["counterbore"] = max(counts["counterbore"], counterbore_from_groups)
+
+    # 4) (Optional) glean tiny hints from chart lines (just totals)
+    for raw in chart_lines or []:
+        s = str(raw or "").lower()
+        if not s:
+            continue
+        # crude bumpers if feature_counts missing
+        if "tap" in s:
+            counts["tap"] = max(counts["tap"], 1)
+        if "c'bore" in s or "counterbore" in s:
+            counts["counterbore"] = max(counts["counterbore"], 1)
+        if (
+            "c'drill" in s
+            or "counterdrill" in s
+            or "center drill" in s
+            or "centre drill" in s
+        ):
+            counts["counterdrill"] = max(counts["counterdrill"], 1)
+        if "jig" in s:
+            counts["jig-grind"] = max(counts["jig-grind"], 1)
+
+    return counts
+
+
 def _apply_ops_audit_counts(
     ops_counts: MutableMapping[str, int],
     *,
@@ -1860,6 +2849,17 @@ def _append_counterbore_spot_jig_cards(
         *,
         minutes: float | None = None,
     ) -> None:
+        if bucket == "jig-grind":
+            try:
+                qty_val = int(payload.get("qty") or 0)
+            except Exception:
+                qty_val = 0
+            _append_jig_extra(
+                breakdown_mutable,
+                qty_val,
+                rates=rates,
+            )
+            return
         if ebo_local is None:
             return
         _publish_extra_bucket_op(ebo_local, bucket, payload, minutes=minutes)
@@ -4429,6 +5429,7 @@ def _render_milling_removal_card(
 def _compute_drilling_removal_section(
     *,
     breakdown: Mapping[str, Any] | MutableMapping[str, Any],
+    result_context: Mapping[str, Any] | MutableMapping[str, Any] | None = None,
     rates: Mapping[str, Any] | MutableMapping[str, Any],
     result: Mapping[str, Any] | None = None,
     drilling_meta_source: Mapping[str, Any] | None,
@@ -4454,11 +5455,25 @@ def _compute_drilling_removal_section(
         breakdown_mutable = None
 
     # ---- BEGIN SAFE INITIALIZATION ----
-    geo_map: Mapping[str, Any] | dict[str, Any] = (
-        ((result or {}).get("geo") if isinstance(result, dict) else None)
-        or ((breakdown or {}).get("geo") if isinstance(breakdown, dict) else None)
-        or {}
-    )
+    geo_map_candidate: Mapping[str, Any] | MutableMapping[str, Any] | dict[str, Any] | None = None
+
+    if isinstance(result_context, (_MappingABC, dict)):
+        try:
+            geo_map_candidate = result_context.get("geo")  # type: ignore[index]
+        except Exception:
+            geo_map_candidate = None
+
+    if geo_map_candidate is None and isinstance(breakdown, (_MappingABC, dict)):
+        try:
+            geo_map_candidate = breakdown.get("geo")  # type: ignore[index]
+        except Exception:
+            geo_map_candidate = None
+
+    if isinstance(geo_map_candidate, (_MappingABC, dict)):
+        geo_map = geo_map_candidate
+    else:
+        geo_map = {}
+
     if isinstance(geo_map, _MappingABC) and not isinstance(geo_map, dict):
         try:
             geo_map = dict(geo_map)
@@ -4500,79 +5515,6 @@ def _compute_drilling_removal_section(
             derived_ops_owner["derived_ops"] = derived_ops
 
     # ---- END SAFE INITIALIZATION ----
-
-    def _seed_drill_bins_from_geo__local(
-        g: Mapping[str, Any] | None,
-    ) -> dict[float, int]:
-        out: dict[float, int] = {}
-
-        def _log_seed_result(source: str) -> dict[float, int]:
-            try:
-                total = int(sum(out.values()))
-            except Exception:
-                total = 0
-            try:
-                bins = len(out)
-            except Exception:
-                bins = 0
-            _log.info(
-                "[drill_seed] _seed_drill_bins_from_geo__local source=%s bins=%s total=%s",
-                source,
-                bins,
-                total,
-            )
-            return out
-
-        if not isinstance(g, Mapping):
-            return _log_seed_result("no-geo")
-
-        # 1) Families (already grouped)
-        for key in (
-            "hole_diam_families_geom_in",
-            "hole_diam_families_in",
-            "hole_diam_families_geom",
-            "hole_diam_families",
-        ):
-            fam = g.get(key)
-            if isinstance(fam, Mapping) and fam:
-                for k, v in fam.items():
-                    try:
-                        d = float(str(k).replace('"', "").strip())
-                        q = int(v or 0)
-                        if q > 0:
-                            d = round(d, 3)
-                            out[d] = out.get(d, 0) + q
-                    except Exception:
-                        pass
-                if out:
-                    return _log_seed_result(f"family:{key}")
-
-        # 2) Lists (prefer precise), IN then MM
-        for key_in in ("hole_diams_in_precise", "hole_diams_in"):
-            seq = g.get(key_in)
-            if isinstance(seq, (list, tuple)) and seq:
-                for x in seq:
-                    try:
-                        d = round(float(x), 3)
-                        out[d] = out.get(d, 0) + 1
-                    except Exception:
-                        pass
-                if out:
-                    return _log_seed_result(key_in)
-
-        for key_mm in ("hole_diams_mm_precise", "hole_diams_mm"):
-            seq = g.get(key_mm)
-            if isinstance(seq, (list, tuple)) and seq:
-                for x in seq:
-                    try:
-                        d = round(float(x) / 25.4, 3)
-                        out[d] = out.get(d, 0) + 1
-                    except Exception:
-                        pass
-                if out:
-                    return _log_seed_result(key_mm)
-
-        return _log_seed_result("empty")
 
     def _collect_pilot_claims__local(
         g: Mapping[str, Any] | None, cleaned_chart: list[str]
@@ -4933,7 +5875,7 @@ def _compute_drilling_removal_section(
                     except Exception:
                         continue
                     if key > 0.0 and qty_val > 0:
-                        fallback_counts[key] = qty_val
+                        fallback_counts[key] = fallback_counts.get(key, 0) + qty_val
                 if fallback_counts:
                     counts_by_diam_adj_obj = fallback_counts
                     drill_total_adj = _sum_count_values(counts_by_diam_adj_obj)
@@ -5060,31 +6002,27 @@ def _compute_drilling_removal_section(
             drill_actions_from_groups = int(sum(counts_by_diam_adj_obj.values()))
             drill_total_adj = drill_actions_from_groups
 
+            try:
+                derived_ops["pilot_claims"] = list(_pilot_claims)
+            except Exception:
+                derived_ops["pilot_claims"] = []
+
+            derived_ops["drill_bins_raw"] = dict(counts_by_diam_raw_obj)
+            derived_ops["drill_bins_adj"] = dict(counts_by_diam_adj_obj)
+            derived_ops["drill_total"] = drill_actions_from_groups
+
+            _log.info(
+                "[drill_seed] wrote derived_ops drill_bins_raw bins=%s total=%s",
+                len(counts_by_diam_raw_obj),
+                _sum_count_values(counts_by_diam_raw_obj),
+            )
+
             if isinstance(breakdown_mutable, (_MutableMappingABC, dict)):
                 try:
                     mutable_breakdown = typing.cast(
                         MutableMapping[str, Any],
                         breakdown_mutable,
                     )
-                    derived_ops_obj = mutable_breakdown.setdefault("derived_ops", {})
-                    if not isinstance(derived_ops_obj, MutableMapping):
-                        derived_ops_obj = {}
-                        mutable_breakdown["derived_ops"] = derived_ops_obj
-                    derived_ops = typing.cast(MutableMapping[str, Any], derived_ops_obj)
-                    derived_ops["drill_bins_raw"] = dict(counts_by_diam_raw_obj)
-                    derived_ops["drill_bins_adj"] = dict(counts_by_diam_adj_obj)
-                    derived_ops["drill_total"] = drill_actions_from_groups
-
-                    _log.info(
-                        "[drill_seed] wrote derived_ops drill_bins_raw bins=%s total=%s",
-                        len(counts_by_diam_raw_obj),
-                        _sum_count_values(counts_by_diam_raw_obj),
-                    )
-
-                    counts_by_diam_raw_obj = dict(derived_ops["drill_bins_raw"])
-                    counts_by_diam_adj_obj = dict(derived_ops["drill_bins_adj"])
-                    drill_total_adj = int(derived_ops["drill_total"])
-
                     extra_bucket_ops_obj = mutable_breakdown.setdefault(
                         "extra_bucket_ops", {}
                     )
@@ -5106,13 +6044,9 @@ def _compute_drilling_removal_section(
                             "side": None,
                         }
                     )
-                    raw_total_for_log = _sum_count_values(counts_by_diam_raw_obj)
-                    _push(
-                        lines,
-                        f"[DEBUG] DRILL publish raw={raw_total_for_log} adj={int(drill_total_adj)}",
-                    )
                 except Exception:
                     pass
+
             ops_hole_count_from_table = drill_actions_from_groups
 
             remaining_counts = dict(counts_by_diam_adj_obj)
@@ -5146,83 +6080,57 @@ def _compute_drilling_removal_section(
             or {}
         )
 
-        owner_candidate: MutableMapping[str, Any] | dict[str, Any] | Mapping[str, Any] | None
-        if isinstance(breakdown_mutable, (_MutableMappingABC, dict)):
-            owner_candidate = typing.cast(MutableMapping[str, Any], breakdown_mutable)
-        elif isinstance(breakdown, (_MutableMappingABC, dict)):
-            owner_candidate = typing.cast(MutableMapping[str, Any], breakdown)
+        root_state_candidate: Any = breakdown_mutable or breakdown or {}
+        if isinstance(root_state_candidate, (_MutableMappingABC, dict)):
+            root_state = typing.cast(MutableMapping[str, Any], root_state_candidate)
         else:
-            owner_candidate = None
+            root_state = {}
 
-        if isinstance(owner_candidate, dict):
-            derived_obj = owner_candidate.setdefault("derived_ops", derived_ops)
-        elif isinstance(owner_candidate, _MutableMappingABC):
-            derived_obj = owner_candidate.setdefault("derived_ops", derived_ops)
-        else:
-            derived_obj = derived_ops
-
-        if isinstance(derived_obj, Mapping) and not isinstance(derived_obj, dict):
-            try:
+        derived_obj: Any = {}
+        if isinstance(root_state, MutableMapping):
+            derived_obj = root_state.setdefault("derived_ops", {})
+            if isinstance(derived_obj, Mapping) and not isinstance(derived_obj, dict):
                 derived_obj = dict(derived_obj)
-            except Exception:
+                root_state["derived_ops"] = derived_obj  # type: ignore[index]
+            elif not isinstance(derived_obj, dict):
                 derived_obj = {}
+                root_state["derived_ops"] = derived_obj  # type: ignore[index]
 
-        if not isinstance(derived_obj, dict):
-            derived_obj = {}
+        derived_ops = typing.cast(dict[str, Any], derived_obj if isinstance(derived_obj, dict) else {})
 
-        if isinstance(owner_candidate, (_MutableMappingABC, dict)):
-            owner_candidate["derived_ops"] = derived_obj  # type: ignore[index]
-
-        derived_ops = typing.cast(MutableMapping[str, Any] | dict[str, Any], derived_obj)
-
-        raw_counts_existing = derived_ops.get("drill_bins_raw")
-        if isinstance(raw_counts_existing, Mapping):
-            counts_by_diam_raw_obj = dict(raw_counts_existing)
-        else:
-            try:
-                counts_by_diam_raw_obj = dict(raw_counts_existing or {})
-            except Exception:
-                counts_by_diam_raw_obj = {}
-
-        if not counts_by_diam_raw_obj:
-            seed = _seed_drill_bins_from_geo__local(geo_map) or {}
-            counts_by_diam_raw_obj = dict(seed)
-
-        derived_ops["drill_bins_raw"] = dict(counts_by_diam_raw_obj)
-
-        cb_groups = derived_ops.get("cb_groups") or {}
-
-        adj_counts_existing = derived_ops.get("drill_bins_adj")
-        if isinstance(adj_counts_existing, Mapping):
-            counts_by_diam_adj_obj = dict(adj_counts_existing)
-        else:
-            try:
-                counts_by_diam_adj_obj = dict(adj_counts_existing or {})
-            except Exception:
-                counts_by_diam_adj_obj = {}
-
-        if not counts_by_diam_adj_obj:
-            counts_by_diam_adj_obj = dict(
-                _adjust_drill_counts__local(
-                    counts_by_diam_raw_obj,
+        if isinstance(derived_ops, dict):
+            if "drill_bins_raw" not in derived_ops:
+                derived_ops["drill_bins_raw"] = _seed_drill_bins_from_geo__local(geo_map)
+            if "drill_bins_adj" not in derived_ops:
+                derived_ops["drill_bins_adj"] = _adjust_drill_counts__local(
+                    derived_ops.get("drill_bins_raw") or {},
                     derived_ops.get("pilot_claims") or {},
-                    cb_groups,
+                    derived_ops.get("cb_groups") or {},
                 )
-                or {}
+            derived_ops["drill_total"] = int(
+                sum(
+                    int(v or 0)
+                    for v in (derived_ops.get("drill_bins_adj") or {}).values()
+                )
             )
-
-        derived_ops["drill_bins_adj"] = dict(counts_by_diam_adj_obj)
-        drill_total_adj = int(sum(counts_by_diam_adj_obj.values()))
-        derived_ops["drill_total"] = drill_total_adj
+            _push(
+                lines,
+                "[DEBUG] DRILL publish raw="
+                + str(
+                    sum(
+                        int(v or 0)
+                        for v in (derived_ops.get("drill_bins_raw") or {}).values()
+                    )
+                )
+                + " adj="
+                + str(derived_ops.get("drill_total") or 0),
+            )
+        else:
+            derived_ops = {}
 
         counts_by_diam_raw_obj = dict(derived_ops.get("drill_bins_raw") or {})
         counts_by_diam_adj_obj = dict(derived_ops.get("drill_bins_adj") or {})
         drill_total_adj = int(derived_ops.get("drill_total") or drill_total_adj)
-
-        _push(
-            lines,
-            f"[DEBUG] DRILL publish raw={sum(counts_by_diam_raw_obj.values())} adj={drill_total_adj}",
-        )
 
         drill_bins_adj_total = int(sum(counts_by_diam_adj_obj.values()))
 
@@ -10566,6 +11474,11 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
         process_plan_summary_local,
     ) = _compute_drilling_removal_section(
         breakdown=breakdown,
+        result_context=(
+            typing.cast(Mapping[str, Any], result)
+            if isinstance(result, _MappingABC)
+            else None
+        ),
         rates=rates,
         result=typing.cast(Mapping[str, Any], result) if isinstance(result, _MappingABC) else (result if isinstance(result, Mapping) else None),
         drilling_meta_source=drilling_meta_map,
@@ -10836,6 +11749,39 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
         except Exception:
             flags = None
 
+        pending_aliases: set[str] = set()
+        pending_owner: MutableMapping[str, Any] | None = None
+        if isinstance(breakdown_mutable, (_MutableMappingABC, dict)):
+            pending_owner = typing.cast(MutableMapping[str, Any], breakdown_mutable)
+            try:
+                pending_candidate = pending_owner.get("_ops_cards_printed_pending")
+            except Exception:
+                pending_candidate = None
+            if isinstance(pending_candidate, (_MutableSetABC, set)):
+                pending_aliases = set(pending_candidate)
+            elif pending_candidate is not None:
+                try:
+                    pending_aliases = set(typing.cast(Iterable[str], pending_candidate))
+                except Exception:
+                    pending_aliases = set()
+
+        def _clear_pending_ops_flags() -> None:
+            if pending_owner is None:
+                return
+            try:
+                pending_candidate_local = pending_owner.get("_ops_cards_printed_pending")
+            except Exception:
+                pending_candidate_local = None
+            if isinstance(pending_candidate_local, (_MutableSetABC, set)):
+                try:
+                    pending_candidate_local.clear()
+                except Exception:
+                    pass
+            try:
+                pending_owner["_ops_cards_printed_pending"] = set()  # type: ignore[index]
+            except Exception:
+                pass
+
         should_append_extra_ops = not already_counterbore and (
             flags is None
             or all(alias not in flags for alias in ("counterbore", "cbore"))
@@ -10851,11 +11797,21 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
                 extra_ops_lines_appended = 1
                 extra_ops_lines_cache = list(appended_extra_ops_lines)
                 if flags is not None:
-                    for alias in ("counterbore", "cbore"):
+                    aliases_to_mark: Iterable[str]
+                    if pending_aliases:
+                        aliases_to_mark = tuple(pending_aliases)
+                    else:
+                        aliases_to_mark = ("counterbore", "cbore")
+                    for alias in aliases_to_mark:
                         try:
                             flags.add(alias)
                         except Exception:
                             pass
+                _clear_pending_ops_flags()
+            else:
+                _clear_pending_ops_flags()
+        else:
+            _clear_pending_ops_flags()
     if not appended_extra_ops_lines:
         appended_extra_ops_lines = []
     if appended_extra_ops_lines:
@@ -12919,33 +13875,17 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
                 )
             if ops_claims.get("counterdrill", 0) > 0:
                 counterdrill_qty_local = int(ops_claims.get("counterdrill", 0) or 0)
-                per_counterdrill = float(
-                    globals().get("COUNTERDRILL_MIN_PER_SIDE_MIN")
-                    or COUNTERDRILL_MIN_PER_SIDE_MIN
-                    or 0.12
-                )
-                _publish_extra_bucket_op(
-                    ebo,
-                    "counterdrill",
-                    {
-                        "name": "Counterdrill",
-                        "qty": counterdrill_qty_local,
-                        "side": "front",
-                    },
-                    minutes=float(counterdrill_qty_local) * per_counterdrill,
+                _append_counterdrill_extra(
+                    breakdown_mutable,
+                    counterdrill_qty_local,
+                    rates=rates,
                 )
             if ops_claims.get("jig", 0) > 0:
                 jig_qty = int(ops_claims.get("jig", 0) or 0)
-                per_jig = float(globals().get("JIG_GRIND_MIN_PER_FEATURE") or 0.75)
-                _publish_extra_bucket_op(
-                    ebo,
-                    "jig-grind",
-                    {
-                        "name": "Jig-grind",
-                        "qty": jig_qty,
-                        "side": None,
-                    },
-                    minutes=float(jig_qty) * per_jig,
+                _append_jig_extra(
+                    breakdown_mutable,
+                    jig_qty,
+                    rates=rates,
                 )
         except Exception:
             pass
@@ -13281,6 +14221,23 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
     geo_map = _get_geo_map(ctx, locals().get("geo"), ctx_a, ctx_b)
     material_group = _get_material_group(ctx, ctx_a, ctx_b)
 
+    drilling_meta_snapshot: Mapping[str, Any] = {}
+    try:
+        if isinstance(result, (_MappingABC, dict)):
+            drilling_meta_snapshot = (
+                result.get("drilling_meta")
+                or result.get("speeds_feeds_table")
+                or {}
+            )
+        if not drilling_meta_snapshot and isinstance(breakdown, (_MappingABC, dict)):
+            drilling_meta_snapshot = (
+                breakdown.get("drilling_meta")
+                or breakdown.get("speeds_feeds_table")
+                or {}
+            )
+    except Exception:
+        drilling_meta_snapshot = {}
+
     ops_summary_map = None
     ops_rows: list[Any] = []
 
@@ -13464,28 +14421,16 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
                                 minutes=float(spot_qty_local) * 0.05,
                             )
                         if counterdrill_qty > 0:
-                            per_counterdrill = float(
-                                globals().get("COUNTERDRILL_MIN_PER_SIDE_MIN")
-                                or COUNTERDRILL_MIN_PER_SIDE_MIN
-                                or 0.12
-                            )
-                            _publish_extra_bucket_op(
-                                ebo,
-                                "counterdrill",
-                                {
-                                    "name": "Counterdrill",
-                                    "qty": int(counterdrill_qty),
-                                    "side": "front",
-                                },
-                                minutes=float(counterdrill_qty) * per_counterdrill,
+                            _append_counterdrill_extra(
+                                breakdown_mutable,
+                                int(counterdrill_qty),
+                                rates=rates,
                             )
                         if jig_qty > 0:
-                            per_jig = float(globals().get("JIG_GRIND_MIN_PER_FEATURE") or 0.75)
-                            _publish_extra_bucket_op(
-                                ebo,
-                                "jig-grind",
-                                {"name": "Jig-grind", "qty": int(jig_qty), "side": None},
-                                minutes=float(jig_qty) * per_jig,
+                            _append_jig_extra(
+                                breakdown_mutable,
+                                int(jig_qty),
+                                rates=rates,
                             )
                     except Exception:
                         pass
@@ -13836,29 +14781,17 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
             )
         if (ops_claims.get("counterdrill") or 0) > 0:
             counterdrill_qty_local = int(ops_claims.get("counterdrill") or 0)
-            per_counterdrill = float(
-                globals().get("COUNTERDRILL_MIN_PER_SIDE_MIN")
-                or COUNTERDRILL_MIN_PER_SIDE_MIN
-                or 0.12
-            )
-            _publish_extra_bucket_op(
-                extra_bucket_ops,
-                "counterdrill",
-                {
-                    "name": "Counterdrill",
-                    "qty": counterdrill_qty_local,
-                    "side": "front",
-                },
-                minutes=float(counterdrill_qty_local) * per_counterdrill,
+            _append_counterdrill_extra(
+                breakdown_mutable,
+                counterdrill_qty_local,
+                rates=rates,
             )
         if (ops_claims.get("jig") or 0) > 0:
             jig_qty_local = int(ops_claims.get("jig") or 0)
-            per_jig = float(globals().get("JIG_GRIND_MIN_PER_FEATURE") or 0.75)
-            _publish_extra_bucket_op(
-                extra_bucket_ops,
-                "jig-grind",
-                {"name": "Jig-grind", "qty": jig_qty_local, "side": None},
-                minutes=float(jig_qty_local) * per_jig,
+            _append_jig_extra(
+                breakdown_mutable,
+                jig_qty_local,
+                rates=rates,
             )
     except Exception:
         pass
@@ -13966,32 +14899,59 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
     counts_by_diam_final = locals().get("counts_by_diam")
     if not isinstance(counts_by_diam_final, (_MappingABC, dict)):
         counts_by_diam_final = {}
-    def _audit_tallies(breakdown_or_mut: _MappingABC[str, Any] | None) -> dict[str, int]:
-        tallies: dict[str, int] = {
-            "drill": 0,
-            "tap": 0,
-            "counterbore": 0,
-            "counterdrill": 0,
-            "jig-grind": 0,
-            "spot": 0,
-        }
-        if isinstance(breakdown_or_mut, (_MappingABC, dict)):
-            source = breakdown_or_mut
-        else:
-            source = {}
+    def _safe_int(value: Any) -> int:
+        try:
+            numeric = float(value)
+        except Exception:
+            return 0
+        if not math.isfinite(numeric):
+            return 0
+        try:
+            return int(round(numeric))
+        except Exception:
+            return 0
 
+    try:
+        base_state = (breakdown_mutable or breakdown) or {}
+        if isinstance(base_state, (_MappingABC, dict)):
+            derived_payload = base_state.get("derived_ops", {})  # type: ignore[attr-defined]
+        else:
+            source = None
+
+        derived_ops_map: Mapping[str, Any] | None = None
+        derived_ops_mut: MutableMapping[str, Any] | None = None
         if isinstance(source, (_MappingABC, dict)):
-            xbo = source.get("extra_bucket_ops")
-        else:
-            xbo = None
+            try:
+                derived_candidate = source.get("derived_ops")  # type: ignore[index]
+            except Exception:
+                derived_candidate = None
+            if isinstance(derived_candidate, MutableMapping):
+                derived_ops_mut = typing.cast(MutableMapping[str, Any], derived_candidate)
+                derived_ops_map = derived_ops_mut
+            elif isinstance(derived_candidate, dict):
+                derived_ops_map = derived_candidate
+                if isinstance(source, (_MutableMappingABC, dict)):
+                    derived_ops_mut = typing.cast(MutableMapping[str, Any], derived_candidate)
+            elif isinstance(derived_candidate, _MappingABC):
+                derived_ops_map = dict(derived_candidate)
+                if isinstance(source, (_MutableMappingABC, dict)):
+                    source["derived_ops"] = derived_ops_map  # type: ignore[index]
+                    derived_ops_mut = typing.cast(MutableMapping[str, Any], derived_ops_map)
+
+        if isinstance(derived_ops_map, (_MappingABC, dict)):
+            try:
+                tallies["drill"] = int(derived_ops_map.get("drill_total") or 0)
+            except Exception:
+                pass
+
+        xbo = (source or {}).get("extra_bucket_ops") if isinstance(source, (_MappingABC, dict)) else None
         if isinstance(xbo, (_MappingABC, dict)):
-            iterator = xbo.items()
-        else:
-            iterator = []
-        for bucket, entries in iterator:
-            if bucket in tallies:
+            for bucket, entries in xbo.items():
+                if bucket not in tallies:
+                    continue
                 for entry in entries or []:
                     try:
+                        qty_value: Any
                         if isinstance(entry, _MappingABC):
                             qty_value = entry.get("qty")
                         else:
@@ -14000,31 +14960,109 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
                     except Exception:
                         pass
 
-        if isinstance(source, (_MappingABC, dict)):
-            dop = source.get("derived_ops")
-        else:
-            dop = None
-        if isinstance(dop, (_MappingABC, dict)):
+        chart_line_candidates: list[str] = []
+
+        def _extend_chart_lines(candidate: Any) -> None:
+            if not isinstance(candidate, (_MappingABC, dict)):
+                return
             try:
-                tallies["drill"] = int(dop.get("drill_total") or tallies["drill"])
+                raw_lines = candidate.get("chart_lines")  # type: ignore[index]
             except Exception:
-                pass
+                raw_lines = None
+            if isinstance(raw_lines, (list, tuple)):
+                for entry in raw_lines:
+                    text = str(entry or "").strip()
+                    if text:
+                        chart_line_candidates.append(text)
+
+        geo_for_counts: dict[str, Any] = {}
+        if isinstance(source, (_MappingABC, dict)):
+            geo_for_counts = _get_core_geo_map(source)
+
+        _extend_chart_lines(source)
+        _extend_chart_lines(geo_for_counts)
+
+        counterbore_from_groups = None
+        if isinstance(derived_ops_map, (_MappingABC, dict)):
+            try:
+                cb_groups_obj = derived_ops_map.get("cb_groups")  # type: ignore[index]
+            except Exception:
+                cb_groups_obj = None
+            if isinstance(cb_groups_obj, (_MappingABC, dict)):
+                total_cb = 0
+                for qty in cb_groups_obj.values():
+                    try:
+                        total_cb += max(0, int(round(float(qty))))
+                    except Exception:
+                        continue
+                if total_cb > 0:
+                    counterbore_from_groups = total_cb
+
+        aggregated_counts = _ops_counts_from_geo_and_locals(
+            geo_for_counts,
+            counterbore_from_groups=counterbore_from_groups,
+            chart_lines=chart_line_candidates,
+        )
+
+        aggregated_copy: dict[str, int] = {}
+        for key, qty in aggregated_counts.items():
+            try:
+                qty_int = int(qty)
+            except Exception:
+                continue
+            aggregated_copy[key] = qty_int
+            if key in tallies and qty_int > tallies[key]:
+                tallies[key] = qty_int
+
+        if aggregated_copy:
+            if derived_ops_mut is not None:
+                derived_ops_mut["ops_counts"] = dict(aggregated_copy)
+            elif isinstance(source, (_MutableMappingABC, dict)):
+                try:
+                    existing_counts = source.get("ops_counts")  # type: ignore[index]
+                except Exception:
+                    existing_counts = None
+                if isinstance(existing_counts, (_MutableMappingABC, dict)):
+                    typing.cast(MutableMapping[str, Any], existing_counts).update(aggregated_copy)
+                else:
+                    source["ops_counts"] = dict(aggregated_copy)  # type: ignore[index]
 
         return tallies
 
-    breakdown_for_audit: Any
-    if isinstance(breakdown_mutable, (_MappingABC, dict)) and breakdown_mutable:
-        breakdown_for_audit = breakdown_mutable
-    elif isinstance(breakdown, (_MappingABC, dict)):
-        breakdown_for_audit = breakdown
+    if isinstance(derived_payload, (_MappingABC, dict)):
+        dops_map: Mapping[str, Any] = typing.cast(Mapping[str, Any], derived_payload)
     else:
-        breakdown_for_audit = None
+        dops_map = {}
 
-    _tallies = _audit_tallies(breakdown_for_audit)
+    drill_total = _safe_int(dops_map.get("drill"))
+    tap_total = _safe_int(dops_map.get("tap"))
+    cbore_total = _safe_int(dops_map.get("counterbore"))
+    cdrill_total = _safe_int(dops_map.get("counterdrill"))
+    jig_total = _safe_int(dops_map.get("jig-grind"))
+
     _push(
         lines,
-        f"[DEBUG] OPS TALLY (final) {', '.join(f'{k}={v}' for k, v in _tallies.items())}",
+        f"[DEBUG] OPS TALLY (final) drill={drill_total}, tap={tap_total}, counterbore={cbore_total}, counterdrill={cdrill_total}, jig-grind={jig_total}",
     )
+
+    try:
+        spot_total_final = _safe_int(ops_claims.get("spot"))
+    except Exception:
+        spot_total_final = 0
+    if spot_total_final <= 0:
+        try:
+            spot_total_final = _safe_int(locals().get("spot_qty"))
+        except Exception:
+            spot_total_final = 0
+
+    _tallies = {
+        "drill": drill_total,
+        "tap": tap_total,
+        "counterbore": cbore_total,
+        "counterdrill": cdrill_total,
+        "jig-grind": jig_total,
+        "spot": max(0, spot_total_final),
+    }
 
     print(
         f"[ops-audit] drills={ops_counts.get('drills', 0)} "
@@ -15817,6 +16855,115 @@ def _load_speeds_feeds_table_from_path(path: str | None) -> tuple[PandasDataFram
     return table, False
 
 
+def _ensure_drilling_override(
+    drill_hours: Any,
+    *,
+    planner_bucket_view: Mapping[str, Any] | None,
+    canonical_bucket_rollup: _MutableMappingABC[str, Any] | None,
+    process_meta: _MutableMappingABC[str, Any] | None,
+    hour_summary_entries: _MutableMappingABC[str, tuple[float, bool]] | None,
+    label_overrides: Mapping[str, str] | None = None,
+) -> None:
+    """Propagate estimator drilling hours into planner-derived structures."""
+
+    try:
+        hours = float(drill_hours or 0.0)
+    except Exception:
+        hours = 0.0
+    if not math.isfinite(hours):
+        hours = 0.0
+    hours = max(0.0, hours)
+
+    minutes_value = round(hours * 60.0, 2)
+    minutes_for_meta = round(hours * 60.0, 1)
+    hr_for_meta = round(hours, 2)
+    hr_precise = round(hours, 3)
+
+    if isinstance(canonical_bucket_rollup, _MutableMappingABC):
+        existing_rollup = canonical_bucket_rollup.get("drilling")
+        if isinstance(existing_rollup, _MutableMappingABC):
+            try:
+                existing_rollup["minutes"] = minutes_value
+            except Exception:
+                pass
+            try:
+                existing_rollup["hours"] = hr_precise
+            except Exception:
+                pass
+        canonical_bucket_rollup["drilling"] = hours
+
+    if isinstance(process_meta, _MutableMappingABC):
+        drilling_meta = process_meta.get("drilling")
+        if isinstance(drilling_meta, _MutableMappingABC):
+            drilling_meta["hr"] = hr_for_meta
+            drilling_meta["minutes"] = minutes_for_meta
+        elif isinstance(drilling_meta, _MappingABC):
+            new_meta = dict(drilling_meta)
+            new_meta["hr"] = hr_for_meta
+            new_meta["minutes"] = minutes_for_meta
+            process_meta["drilling"] = new_meta
+        else:
+            process_meta["drilling"] = {
+                "hr": hr_for_meta,
+                "minutes": minutes_for_meta,
+            }
+
+    if isinstance(hour_summary_entries, _MutableMappingABC):
+        label = _display_bucket_label("drilling", label_overrides) or "Drilling"
+        include_flag = True
+        existing = hour_summary_entries.get(label)
+        if isinstance(existing, (list, tuple)) and existing:
+            try:
+                include_flag = bool(existing[1])
+            except Exception:
+                include_flag = True
+        hour_summary_entries[label] = (hr_for_meta, include_flag)
+
+    def _update_bucket_map(bucket_map: Mapping[str, Any] | None) -> None:
+        if not isinstance(bucket_map, _MutableMappingABC):
+            return
+        target_key: str | None = None
+        for key in list(bucket_map.keys()):
+            if _canonical_bucket_key(key) == "drilling":
+                target_key = key
+                break
+        if target_key is None:
+            target_key = "Drilling"
+        entry_raw = bucket_map.get(target_key)
+        if isinstance(entry_raw, _MutableMappingABC):
+            entry = entry_raw
+        elif isinstance(entry_raw, _MappingABC):
+            entry = dict(entry_raw)
+        else:
+            entry = {}
+        entry["minutes"] = minutes_value
+        entry["hr"] = hr_precise
+        bucket_map[target_key] = entry
+
+    if isinstance(planner_bucket_view, _MutableMappingABC):
+        buckets_map = planner_bucket_view.get("buckets")
+        if isinstance(buckets_map, _MutableMappingABC):
+            _update_bucket_map(buckets_map)
+        else:
+            _update_bucket_map(planner_bucket_view)
+
+        order = planner_bucket_view.get("order")
+        if isinstance(order, list):
+            canonical_order = {
+                _canonical_bucket_key(item)
+                for item in order
+                if isinstance(item, str)
+            }
+            if "drilling" not in canonical_order:
+                candidate_key: str | None = None
+                if isinstance(buckets_map, _MutableMappingABC):
+                    for key in buckets_map.keys():
+                        if _canonical_bucket_key(key) == "drilling":
+                            candidate_key = key
+                            break
+                order.append(candidate_key or "Drilling")
+
+
 def _ensure_quote_state(state: QuoteState | None) -> QuoteState:
     return state if isinstance(state, QuoteState) else QuoteState()
 
@@ -17193,6 +18340,74 @@ def compute_quote_from_df(  # type: ignore[reportGeneralTypeIssues]
     pm["hr"] = drill_hr
     pm["rate"] = float(rates.get("DrillingRate") or rates.get("MachineRate") or 0.0)
     pm["basis"] = ["minutes_engine"]
+
+    process_meta_map: _MutableMappingABC[str, Any] | None
+    if isinstance(process_meta, _MutableMappingABC):
+        process_meta_map = process_meta
+    elif isinstance(process_meta, dict):
+        process_meta_map = typing.cast(_MutableMappingABC[str, Any], process_meta)
+    else:
+        process_meta_map = None
+
+    hour_summary_for_override = locals().get("hour_summary_entries")
+    if isinstance(hour_summary_for_override, dict):
+        hour_summary_for_override = typing.cast(
+            _MutableMappingABC[str, tuple[float, bool]],
+            hour_summary_for_override,
+        )
+    elif not isinstance(hour_summary_for_override, _MutableMappingABC):
+        hour_summary_for_override = None
+
+    label_overrides_map = locals().get("label_overrides")
+    if not isinstance(label_overrides_map, _MappingABC):
+        label_overrides_map = None
+
+    planner_bucket_view_candidate: Mapping[str, Any] | None = None
+    for candidate_name in (
+        "planner_bucket_view",
+        "bucket_view_obj",
+        "bucket_view_struct",
+        "bucket_state",
+    ):
+        candidate_view = locals().get(candidate_name)
+        if isinstance(candidate_view, _MutableMappingABC):
+            planner_bucket_view_candidate = typing.cast(
+                Mapping[str, Any],
+                candidate_view,
+            )
+            break
+        if isinstance(candidate_view, dict):
+            planner_bucket_view_candidate = typing.cast(Mapping[str, Any], candidate_view)
+            break
+        if isinstance(candidate_view, _MappingABC):
+            planner_bucket_view_candidate = typing.cast(Mapping[str, Any], candidate_view)
+            break
+
+    canonical_bucket_rollup_candidate: _MutableMappingABC[str, Any] | None = None
+    for candidate_name in (
+        "canonical_bucket_rollup",
+        "canonical_bucket_summary",
+        "bucket_rollup_map",
+    ):
+        candidate_rollup = locals().get(candidate_name)
+        if isinstance(candidate_rollup, _MutableMappingABC):
+            canonical_bucket_rollup_candidate = candidate_rollup
+            break
+        if isinstance(candidate_rollup, dict):
+            canonical_bucket_rollup_candidate = typing.cast(
+                _MutableMappingABC[str, Any],
+                candidate_rollup,
+            )
+            break
+
+    _ensure_drilling_override(
+        drill_hr,
+        planner_bucket_view=planner_bucket_view_candidate,
+        canonical_bucket_rollup=canonical_bucket_rollup_candidate,
+        process_meta=process_meta_map,
+        hour_summary_entries=hour_summary_for_override,
+        label_overrides=typing.cast(Mapping[str, str] | None, label_overrides_map),
+    )
 
     drilling_summary["total_minutes_billed"] = float(drill_min)
 

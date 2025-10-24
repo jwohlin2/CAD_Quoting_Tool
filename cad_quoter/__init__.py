@@ -1,7 +1,7 @@
 """Development-time alias for the vendored :mod:`cad_quoter` package."""
 from __future__ import annotations
 
-from importlib import import_module, util as importlib_util
+from importlib import import_module
 from pathlib import Path
 from types import ModuleType
 import sys
@@ -51,41 +51,21 @@ if __spec__ is not None:
 __file__ = getattr(_module, "__file__", None)
 
 
-def _bootstrap_geometry_modules() -> None:
-    """Load geometry helpers when the package installed stub fallbacks."""
+try:
+    _repo_root = Path(__file__).resolve().parent.parent
+except Exception:  # pragma: no cover - defensive guard for exotic environments
+    _EXTRA_PATHS: tuple[Path, ...] = ()
+else:
+    candidate = _repo_root / "cad_quoter_pkg" / "src"
+    _EXTRA_PATHS = (candidate,) if candidate.is_dir() else ()
 
-    geometry_pkg = sys.modules.get("cad_quoter.geometry")
-    if geometry_pkg is None:
-        return
-    if getattr(geometry_pkg, "__path__", None):
-        return
+try:
+    _ensure_geometry_module = _module.ensure_geometry_module
+except AttributeError:  # pragma: no cover - vendored module missing helper
+    _ensure_geometry_module = None
 
-    module_file = Path(getattr(_module, "__file__", ""))
+if callable(_ensure_geometry_module):
     try:
-        geometry_dir = module_file.resolve().parent / "geometry"
-    except Exception:  # pragma: no cover - defensive guard
-        return
-    if not geometry_dir.is_dir():
-        return
-
-    for name in ("dxf_text", "dxf_enrich"):
-        module_name = f"cad_quoter.geometry.{name}"
-        if module_name in sys.modules:
-            continue
-        location = geometry_dir / f"{name}.py"
-        if not location.is_file():
-            continue
-        spec = importlib_util.spec_from_file_location(module_name, location)
-        if not spec or not spec.loader:
-            continue
-        module = importlib_util.module_from_spec(spec)
-        sys.modules[module_name] = module
-        try:
-            spec.loader.exec_module(module)  # type: ignore[attr-defined]
-        except Exception:  # pragma: no cover - import-time failure propagates lazily
-            sys.modules.pop(module_name, None)
-            continue
-        setattr(geometry_pkg, name, module)
-
-
-_bootstrap_geometry_modules()
+        _ensure_geometry_module(extra_search_paths=_EXTRA_PATHS)
+    except Exception:  # pragma: no cover - bootstrap should never block import
+        pass

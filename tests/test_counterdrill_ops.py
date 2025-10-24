@@ -34,10 +34,13 @@ except ModuleNotFoundError:  # pragma: no cover - load shim for tests
 
 from appV5 import (  # noqa: E402  # pylint: disable=wrong-import-position
     _append_counterbore_spot_jig_cards,
+    _append_counterdrill_extra,
     _count_counterdrill,
     _count_jig,
     _count_spot_and_jig,
     _publish_extra_bucket_op,
+    COUNTERDRILL_MIN_PER_SIDE_MIN,
+    JIG_GRIND_MIN_PER_FEATURE,
 )
 from cad_quoter.app.op_parser import (  # noqa: E402  # pylint: disable=wrong-import-position
     _parse_ops_and_claims,
@@ -51,7 +54,7 @@ from cad_quoter.app.chart_lines import (  # noqa: E402  # pylint: disable=wrong-
     "lines, expected",
     [
         (["(3) COUNTERDRILL"], 3),
-        (["(2) C DRILL"], 2),
+        (["(2) C DRILL"], 0),
         (["(4) Center Drill", "(1) Spot Drill"], 0),
         (["COUNTERDRILL"], 1),
         (["(5) COUNTER DRILL", "(2) center drill"], 5),
@@ -60,6 +63,7 @@ from cad_quoter.app.chart_lines import (  # noqa: E402  # pylint: disable=wrong-
         (["(2) CTR DRILL"], 2),
         (["DRILL THRU"], 0),
         (["C DRILL THRU"], 0),
+        (["Counterdrill spot drill"], 0),
     ],
 )
 def test_count_counterdrill(lines: list[str], expected: int) -> None:
@@ -140,7 +144,39 @@ def test_append_cards_publish_jig_minutes() -> None:
     assert isinstance(jig_entries, list)
     jig_entry = jig_entries[-1]
     assert jig_entry["qty"] == 2
-    assert jig_entry["minutes"] > 0
+    assert "minutes" not in jig_entry
+
+    bucket_view = breakdown.get("bucket_view")
+    assert isinstance(bucket_view, dict)
+    buckets = bucket_view.get("buckets") if isinstance(bucket_view, dict) else None
+    assert isinstance(buckets, dict)
+    grinding_bucket = buckets.get("grinding") if isinstance(buckets, dict) else None
+    assert isinstance(grinding_bucket, dict)
+    per_jig = float(JIG_GRIND_MIN_PER_FEATURE or 0.75)
+    assert grinding_bucket.get("minutes") == pytest.approx(2 * per_jig)
+
+
+def test_append_counterdrill_extra_sets_bucket_minutes() -> None:
+    breakdown: dict[str, object] = {}
+    minutes = _append_counterdrill_extra(breakdown, 3, rates={})
+    per_counterdrill = float(COUNTERDRILL_MIN_PER_SIDE_MIN or 0.12)
+    assert minutes == pytest.approx(3 * per_counterdrill)
+
+    extra_bucket_ops = breakdown.get("extra_bucket_ops")
+    assert isinstance(extra_bucket_ops, dict)
+    counterdrill_entries = extra_bucket_ops.get("counterdrill")
+    assert isinstance(counterdrill_entries, list)
+    counterdrill_entry = counterdrill_entries[-1]
+    assert counterdrill_entry["qty"] == 3
+    assert "minutes" not in counterdrill_entry
+
+    bucket_view = breakdown.get("bucket_view")
+    assert isinstance(bucket_view, dict)
+    buckets = bucket_view.get("buckets") if isinstance(bucket_view, dict) else None
+    assert isinstance(buckets, dict)
+    counterdrill_bucket = buckets.get("counterdrill") if isinstance(buckets, dict) else None
+    assert isinstance(counterdrill_bucket, dict)
+    assert counterdrill_bucket.get("minutes") == pytest.approx(minutes)
 
 
 def test_publish_extra_bucket_op_merges_minutes() -> None:
