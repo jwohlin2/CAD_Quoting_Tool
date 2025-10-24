@@ -22546,7 +22546,29 @@ def extract_2d_features_from_dxf_or_dwg(path: str | Path) -> dict[str, Any]:
                 ]
             if rows_for_totals:
                 ops_summary_map = geo.setdefault("ops_summary", {})
-                ops_summary_map["rows"] = rows_for_totals
+                existing_rows_raw = ops_summary_map.get("rows")
+                if isinstance(existing_rows_raw, list):
+                    existing_rows_seq = existing_rows_raw
+                elif isinstance(existing_rows_raw, (_MappingABC, dict)):
+                    try:
+                        existing_rows_seq = list(existing_rows_raw.values())
+                    except Exception:
+                        existing_rows_seq = []
+                elif existing_rows_raw is None:
+                    existing_rows_seq = []
+                else:
+                    try:
+                        existing_rows_seq = list(existing_rows_raw)
+                    except Exception:
+                        existing_rows_seq = []
+                existing_score = (
+                    _score_table({"rows": existing_rows_seq}) if existing_rows_seq else 0
+                )
+                chart_score = _score_table({"rows": rows_for_totals})
+                debug_chart_bucket = ops_summary_map.setdefault("chart_debug", {})
+                if isinstance(debug_chart_bucket, dict):
+                    debug_chart_bucket["rows"] = rows_for_totals
+                    debug_chart_bucket["score"] = chart_score
                 try:
                     totals_map = aggregate_ops(
                         rows_for_totals,
@@ -22554,9 +22576,17 @@ def extract_2d_features_from_dxf_or_dwg(path: str | Path) -> dict[str, Any]:
                     ).get("totals", {})
                 except Exception:
                     totals_map = {}
-                ops_summary_map["totals"] = dict(totals_map) if isinstance(
-                    totals_map, (_MappingABC, dict)
-                ) else {}
+                if isinstance(debug_chart_bucket, dict):
+                    debug_chart_bucket["totals"] = (
+                        dict(totals_map)
+                        if isinstance(totals_map, (_MappingABC, dict))
+                        else {}
+                    )
+                if chart_score > existing_score:
+                    print(
+                        "[EXTRACTOR] chart rows scored higher than canonical table; "
+                        "retaining canonical rows"
+                    )
         except Exception:
             ops_rows = []
         # --- end publish rows ---
