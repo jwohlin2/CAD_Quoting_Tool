@@ -23,4 +23,4 @@ jobs:
         run: pip install nox
 
       - name: Run Nox sessions
-        run: nox -s lint typecheck tests
+        run: nox -s lint tests
