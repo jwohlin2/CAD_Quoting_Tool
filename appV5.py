@@ -4197,6 +4197,9 @@ def _compute_drilling_removal_section(
         return total
 
     drill_bins_adj_total = 0
+    counts_by_diam_adj_obj: Any = None
+    counts_by_diam_raw_obj: Any = None
+    drill_total_adj = 0
 
     pricing_buckets: MutableMapping[str, Any] | dict[str, Any] = {}
     bucket_view_obj: MutableMapping[str, Any] | Mapping[str, Any] | None = None
@@ -4417,6 +4420,23 @@ def _compute_drilling_removal_section(
                 }
             )
         if sanitized_rows:
+            if not (
+                isinstance(counts_by_diam_adj_obj, (_MappingABC, dict))
+                and counts_by_diam_adj_obj
+            ):
+                fallback_counts: dict[float, int] = {}
+                for row in sanitized_rows:
+                    try:
+                        key = round(float(row.get("diameter_in", 0.0) or 0.0), 4)
+                        qty_val = int(row.get("qty", 0))
+                    except Exception:
+                        continue
+                    if key > 0.0 and qty_val > 0:
+                        fallback_counts[key] = qty_val
+                if fallback_counts:
+                    counts_by_diam_adj_obj = fallback_counts
+                    drill_total_adj = _sum_count_values(counts_by_diam_adj_obj)
+
             geo_map_for_drill: Mapping[str, Any] | dict[str, Any]
             if isinstance(geo_map, (_MappingABC, dict)) and geo_map:
                 geo_map_for_drill = geo_map
@@ -4465,8 +4485,14 @@ def _compute_drilling_removal_section(
 
             # ========= DRILL PIPELINE (robust & local) =========
             # 0) GEO map
+            try:
+                _geo_map_result = (
+                    (result or {}).get("geo") if isinstance(result, dict) else None
+                )
+            except NameError:
+                _geo_map_result = None
             _geo_map = (
-                ((result or {}).get("geo") if isinstance(result, dict) else None)
+                _geo_map_result
                 or ((breakdown or {}).get("geo") if isinstance(breakdown, dict) else None)
                 or {}
             )
@@ -4685,7 +4711,15 @@ def _compute_drilling_removal_section(
             _drill_bins_adj = _adjust_drill_counts__local(
                 _drill_bins_raw, _pilot_claims, _cb_groups
             )
+            if _drill_bins_adj:
+                counts_by_diam_adj_obj = dict(_drill_bins_adj)
+            if _drill_bins_raw:
+                counts_by_diam_raw_obj = dict(_drill_bins_raw)
             _adj_total = sum(_drill_bins_adj.values())
+            if _adj_total > 0:
+                drill_total_adj = int(_adj_total)
+            else:
+                drill_total_adj = _sum_count_values(counts_by_diam_adj_obj)
             _push(
                 lines,
                 f"[DEBUG] DRILL bins adjusted total={_adj_total} "
@@ -4693,7 +4727,7 @@ def _compute_drilling_removal_section(
             )
             # ========= END DRILL PIPELINE =========
 
-            drill_actions_from_groups = int(_adj_total)
+            drill_actions_from_groups = int(drill_total_adj)
 
             if isinstance(breakdown_mutable, (_MutableMappingABC, dict)):
                 try:
@@ -4707,8 +4741,11 @@ def _compute_drilling_removal_section(
                         mutable_breakdown["derived_ops"] = derived_ops_obj
                     derived_ops = typing.cast(MutableMapping[str, Any], derived_ops_obj)
                     derived_ops["drill_bins_raw"] = dict(_drill_bins_raw)
-                    derived_ops["drill_bins_adj"] = dict(_drill_bins_adj)
-                    derived_ops["drill_total"] = drill_actions_from_groups
+                    if isinstance(counts_by_diam_adj_obj, (_MappingABC, dict)):
+                        derived_ops["drill_bins_adj"] = dict(counts_by_diam_adj_obj)
+                    else:
+                        derived_ops["drill_bins_adj"] = dict(_drill_bins_adj)
+                    derived_ops["drill_total"] = int(drill_total_adj)
 
                     extra_bucket_ops_obj = mutable_breakdown.setdefault(
                         "extra_bucket_ops", {}
@@ -4731,43 +4768,53 @@ def _compute_drilling_removal_section(
                             "side": None,
                         }
                     )
+                    raw_total_for_log = _sum_count_values(counts_by_diam_raw_obj)
                     _push(
                         lines,
-                        f"[DEBUG] DRILL publish raw={sum(_drill_bins_raw.values())} "
-                        f"adjusted_total={derived_ops['drill_total']}",
+                        f"[DEBUG] DRILL publish raw={raw_total_for_log} adj={int(drill_total_adj)}",
                     )
                 except Exception:
                     pass
             ops_hole_count_from_table = drill_actions_from_groups
 
-            remaining_counts = dict(_drill_bins_adj)
-            adjusted_rows: list[dict[str, Any]] = []
-            for row in sanitized_rows:
-                key = round(float(row.get("diameter_in", 0.0) or 0.0), 4)
-                available = int(remaining_counts.get(key, 0))
-                if available <= 0:
-                    continue
-                orig_qty = int(row.get("qty", 0))
-                use_qty = min(orig_qty, available)
-                if use_qty <= 0:
-                    continue
-                new_row = dict(row)
-                new_row["qty"] = use_qty
-                minutes_per = float(new_row.get("minutes_per_hole", 0.0) or 0.0)
-                new_row["group_minutes"] = minutes_per * float(use_qty)
-                remaining_counts[key] = max(0, available - use_qty)
-                adjusted_rows.append(new_row)
+            if _drill_bins_adj:
+                remaining_counts = dict(_drill_bins_adj)
+                adjusted_rows: list[dict[str, Any]] = []
+                for row in sanitized_rows:
+                    key = round(float(row.get("diameter_in", 0.0) or 0.0), 4)
+                    available = int(remaining_counts.get(key, 0))
+                    if available <= 0:
+                        continue
+                    orig_qty = int(row.get("qty", 0))
+                    use_qty = min(orig_qty, available)
+                    if use_qty <= 0:
+                        continue
+                    new_row = dict(row)
+                    new_row["qty"] = use_qty
+                    minutes_per = float(new_row.get("minutes_per_hole", 0.0) or 0.0)
+                    new_row["group_minutes"] = minutes_per * float(use_qty)
+                    remaining_counts[key] = max(0, available - use_qty)
+                    adjusted_rows.append(new_row)
 
-            sanitized_rows = [row for row in adjusted_rows if int(row.get("qty", 0)) > 0]
-            printed_sum = sum(int(row.get("qty", 0)) for row in sanitized_rows)
-            _push(
-                lines,
-                f"[DEBUG] DRILL printed_sum={printed_sum} audit_drill={drill_actions_from_groups}",
-            )
+                sanitized_rows = [
+                    row for row in adjusted_rows if int(row.get("qty", 0)) > 0
+                ]
+                printed_sum = sum(int(row.get("qty", 0)) for row in sanitized_rows)
+                _push(
+                    lines,
+                    f"[DEBUG] DRILL printed_sum={printed_sum} audit_drill={drill_actions_from_groups}",
+                )
 
         subtotal_minutes = 0.0
 
-        if _drill_bins_adj:
+        adj_items: list[tuple[Any, Any]] = []
+        if isinstance(counts_by_diam_adj_obj, (_MappingABC, dict)):
+            try:
+                adj_items = list(counts_by_diam_adj_obj.items())  # type: ignore[arg-type]
+            except Exception:
+                adj_items = []
+
+        if adj_items:
             lines.append("MATERIAL REMOVAL – DRILLING")
             lines.append("=" * 64)
             lines.append("TIME PER HOLE – DRILL GROUPS")
@@ -4784,9 +4831,21 @@ def _compute_drilling_removal_section(
             drill_group_lines: list[str] = []
             _total_drills = 0
 
-            def _depth_for_diam(d: float) -> float:
+            def _coerce_diameter_value(raw: Any) -> float:
+                value = _as_float(raw, 0.0)
+                if value > 0.0:
+                    return value
+                if isinstance(raw, str):
+                    cleaned = raw.strip().lstrip("Ø⌀").replace('"', "")
+                    cleaned = cleaned.replace("DIA", "").replace("dia", "")
+                    cleaned = cleaned.replace("IN", "").replace("in", "")
+                    cleaned = cleaned.strip()
+                    value = _as_float(cleaned, 0.0)
+                return value
+
+            def _depth_for_diam(d_key: Any) -> float:
                 try:
-                    key = round(float(d), 4)
+                    key = round(_coerce_diameter_value(d_key), 4)
                 except Exception:
                     key = round(0.0, 4)
                 depth_val = depth_lookup.get(key)
@@ -4794,28 +4853,83 @@ def _compute_drilling_removal_section(
                     return 2.0
                 return float(depth_val)
 
-            for d in sorted(_drill_bins_adj.keys()):
-                q = int(_drill_bins_adj[d])
-                if q <= 0:
+            row_lookup: dict[float, dict[str, Any]] = {}
+            for row in sanitized_rows:
+                try:
+                    key = round(float(row.get("diameter_in", 0.0) or 0.0), 4)
+                except Exception:
                     continue
-                _total_drills += q
-                depth = float(_depth_for_diam(d))
-                ld = (depth / d) if d > 0 else 0
+                row_lookup[key] = row
+
+            for dia_in, qty in sorted(adj_items, key=lambda kv: _coerce_diameter_value(kv[0])):
+                qty_int = int(round(_as_float(qty, 0.0)))
+                if qty_int <= 0:
+                    continue
+                dia_val = _coerce_diameter_value(dia_in)
+                if dia_val <= 0.0:
+                    continue
+                _total_drills += qty_int
+                depth = float(_depth_for_diam(dia_in))
+                ld = (depth / dia_val) if dia_val > 0.0 else 0.0
                 sfm, ipr = ((39, 0.0020) if ld >= 3.0 else (80, 0.0060))
-                rpm = (sfm * 3.82) / max(d, 0.001)
-                ipm = rpm * ipr
+                row_info = row_lookup.get(round(dia_val, 4))
+                sfm_display = sfm
+                ipr_display = ipr
+                minutes_per_override: float | None = None
+                group_minutes_override: float | None = None
+                if row_info:
+                    sfm_candidate = _coerce_float_or_none(row_info.get("sfm"))
+                    if sfm_candidate is not None and sfm_candidate > 0.0:
+                        sfm_display = float(sfm_candidate)
+                    ipr_candidate = _coerce_float_or_none(row_info.get("ipr"))
+                    if ipr_candidate is not None and ipr_candidate > 0.0:
+                        ipr_display = float(ipr_candidate)
+                    minutes_candidate = _coerce_float_or_none(
+                        row_info.get("minutes_per_hole")
+                    )
+                    if minutes_candidate is None:
+                        minutes_candidate = _coerce_float_or_none(
+                            row_info.get("t_per_hole_min")
+                        )
+                    if minutes_candidate is not None and minutes_candidate > 0.0:
+                        minutes_per_override = float(minutes_candidate)
+                    group_candidate = _coerce_float_or_none(
+                        row_info.get("group_minutes")
+                    )
+                    if group_candidate is not None and group_candidate > 0.0:
+                        group_minutes_override = float(group_candidate)
+
+                rpm = _safe_rpm_from_sfm_diam(sfm_display, dia_val)
+                ipm = rpm * ipr_display
                 _ = ipm
-                t_hole = _drill_time_model(depth, rpm, ipr)
-                subtotal_minutes += q * t_hole
+                t_hole_model = _drill_time_model(depth, rpm, ipr_display)
+                t_hole_display = (
+                    minutes_per_override
+                    if minutes_per_override is not None
+                    else t_hole_model
+                )
+                group_minutes_display = (
+                    group_minutes_override
+                    if group_minutes_override is not None
+                    else qty_int * t_hole_display
+                )
+                if (
+                    group_minutes_override is not None
+                    and minutes_per_override is None
+                    and qty_int > 0
+                ):
+                    t_hole_display = group_minutes_display / float(qty_int)
+                subtotal_minutes += group_minutes_display
                 drill_group_lines.append(
-                    f'Dia {d:.3f}" × {q}  | depth {depth:.3f}" | {sfm} sfm | {ipr:.4f} ipr | '
-                    f't/hole {t_hole:.2f} min | group {q}×{t_hole:.2f} = {(q * t_hole):.2f} min'
+                    f'Dia {dia_val:.3f}" × {qty_int}  | depth {depth:.3f}" | '
+                    f"{int(round(sfm_display))} sfm | {ipr_display:.4f} ipr | "
+                    f"t/hole {t_hole_display:.2f} min | group {qty_int}×{t_hole_display:.2f} = "
+                    f"{group_minutes_display:.2f} min"
                 )
 
             for ln in drill_group_lines:
                 lines.append(ln)
 
-            _total_drills = sum(_drill_bins_adj.values())
             if isinstance(breakdown_mutable, (_MutableMappingABC, dict)):
                 try:
                     extra_bucket_ops = breakdown_mutable.setdefault("extra_bucket_ops", {})
@@ -4824,8 +4938,9 @@ def _compute_drilling_removal_section(
                     )
                 except Exception:
                     pass
-            _push(lines, f"[DEBUG] OPS DRILL publish={_total_drills}")
+            drill_total_adj = int(_total_drills)
             drill_actions_from_groups = int(_total_drills)
+            _push(lines, f"[DEBUG] OPS DRILL publish={_total_drills}")
             ops_hole_count_from_table = drill_actions_from_groups
 
             lines.append("")
@@ -4900,8 +5015,8 @@ def _compute_drilling_removal_section(
                 f"{drill_minutes_total:.2f} min  ("
                 f"{fmt_hours(minutes_to_hours(drill_minutes_total))})",
             )
-            _printed_sum = sum(int(v) for v in (counts_by_diam or {}).values())
-            _push(lines, f"[DEBUG] DRILL verify printed_sum={_printed_sum}")
+            printed_counts_total = _sum_count_values(counts_by_diam_adj_obj)
+            _push(lines, f"[DEBUG] DRILL verify printed_sum={printed_counts_total}")
             lines.append("")
 
             extras["drill_machine_minutes"] = float(drill_minutes_subtotal)
@@ -12904,7 +13019,9 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
                     except Exception:
                         pass
 
-                counts_by_diam_obj = None
+                counts_by_diam_adj_obj: Any = None
+                counts_by_diam_raw_obj: Any = None
+                drill_total_adj = 0
                 try:
                     candidate_counts = counts_by_diam  # type: ignore[name-defined]
                 except NameError:
@@ -12913,9 +13030,11 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
                 src = derived_ops.get("drill_bins_adj") or {}
                 src_raw = derived_ops.get("drill_bins_raw") or {}
                 if isinstance(candidate_counts, (_MappingABC, dict, Sequence)):
-                    counts_by_diam_obj = candidate_counts
-                if counts_by_diam_obj is None and isinstance(src, (_MappingABC, dict, Sequence)):
-                    counts_by_diam_obj = src
+                    counts_by_diam_adj_obj = candidate_counts
+                if counts_by_diam_adj_obj is None and isinstance(
+                    src, (_MappingABC, dict, Sequence)
+                ):
+                    counts_by_diam_adj_obj = src
                 if counts_by_diam_raw_obj is None and isinstance(
                     src_raw, (_MappingABC, dict, Sequence)
                 ):
@@ -12924,10 +13043,12 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
                     candidate = drilling_meta_snapshot.get("counts_by_diam_raw")
                     if isinstance(candidate, (_MappingABC, dict, Sequence)):
                         counts_by_diam_raw_obj = candidate
-                if counts_by_diam_obj is None and isinstance(drilling_meta_snapshot, _MappingABC):
+                if counts_by_diam_adj_obj is None and isinstance(drilling_meta_snapshot, _MappingABC):
                     candidate = drilling_meta_snapshot.get("counts_by_diam")
                     if isinstance(candidate, (_MappingABC, dict, Sequence)):
-                        counts_by_diam_obj = candidate
+                        counts_by_diam_adj_obj = candidate
+                if isinstance(counts_by_diam_adj_obj, (_MappingABC, dict, Sequence)):
+                    drill_total_adj = _sum_count_values(counts_by_diam_adj_obj)
                 _push(lines, f"[DEBUG] chart_lines_found={len(chart_lines_all)}")
                 _push(
                     lines,
