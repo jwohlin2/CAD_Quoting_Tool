@@ -14143,7 +14143,7 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
         xbo = (source or {}).get("extra_bucket_ops") if isinstance(source, (_MappingABC, dict)) else None
         if isinstance(xbo, (_MappingABC, dict)):
             for bucket, entries in xbo.items():
-                if bucket not in tallies:
+                if bucket not in tallies or bucket == "drill":
                     continue
                 for entry in entries or []:
                     try:
