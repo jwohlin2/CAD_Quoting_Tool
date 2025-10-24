@@ -1308,6 +1308,10 @@ def _build_ops_cards_from_chart_lines(
         pass
 
     try:
+        print(
+            "[APP] geo keys at render:",
+            list((breakdown or {}).get("geo", {}).keys()),
+        )
         geo_map = _get_geo_map(locals().get("result"), breakdown_mutable or breakdown)
         pre_rows = _ops_rows_from_geo(geo_map)
         lines: list[str] = [f"[DEBUG] ops_rows_pre={len(pre_rows)}"]
@@ -21435,6 +21439,10 @@ def extract_2d_features_from_dxf_or_dwg(path: str | Path) -> dict[str, Any]:
         if rows_for_ops:
             ops_summary_map = geo.setdefault("ops_summary", {})
             ops_summary_map["rows"] = rows_for_ops
+            print(
+                "[EXTRACTOR] geo.ops_summary present:",
+                list(geo.get("ops_summary", {}).keys()),
+            )
             agg = aggregate_ops_from_rows(rows_for_ops)
             ops_summary_map["totals"] = agg.get("totals", {})
             ops_summary_map["actions_total"] = agg.get("actions_total", 0)
