@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 from collections.abc import Mapping
 
+from cad_quoter import geo_extractor
 from cad_quoter.geo_extractor import extract_geo_from_path
 
 
@@ -23,7 +24,24 @@ def main() -> None:
     parser.add_argument("path", help="Path to the DXF or DWG file")
     parser.add_argument("--no-oda", dest="use_oda", action="store_false", help="Disable ODA fallback")
     parser.add_argument("--debug", action="store_true", help="Print the first 10 rows for inspection")
+    parser.add_argument(
+        "--show-helpers",
+        action="store_true",
+        help="Print helper resolution diagnostics",
+    )
     args = parser.parse_args()
+
+    if args.show_helpers:
+        acad_helper = geo_extractor._resolve_app_callable("hole_count_from_acad_table")
+        text_helper = geo_extractor._resolve_app_callable("extract_hole_table_from_text")
+        text_alt_helper = geo_extractor._resolve_app_callable("hole_count_from_text_table")
+        print(
+            "helpers: acad={acad} text={text} text_alt={text_alt}".format(
+                acad=geo_extractor._describe_helper(acad_helper),
+                text=geo_extractor._describe_helper(text_helper),
+                text_alt=geo_extractor._describe_helper(text_alt_helper),
+            )
+        )
 
     geo = extract_geo_from_path(args.path, use_oda=args.use_oda)
     ops_summary = geo.get("ops_summary") if isinstance(geo, Mapping) else {}
