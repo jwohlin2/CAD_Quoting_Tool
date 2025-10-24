@@ -288,8 +288,10 @@ def render_drilling_section(
     drill_groups: Sequence[Mapping[str, Any]],
     overheads: Mapping[str, Number],
 ) -> str:
+    counts_by_diam = _aggregate_counts_by_diameter(drill_groups)
     counts_override = _extract_counts_override(drill_groups)
-    counts_by_diam = counts_override or _aggregate_counts_by_diameter(drill_groups)
+    if counts_override:
+        counts_by_diam = {**counts_by_diam, **counts_override}
     per_diam_depth = _per_diameter_depths(drill_groups)
     deep_ct, std_ct = _classify_deep_std(per_diam_depth, counts_by_diam)
     total_ct = deep_ct + std_ct
