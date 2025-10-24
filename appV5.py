@@ -1243,7 +1243,7 @@ def _build_ops_cards_from_chart_lines(
     joined_chart = _join_wrapped_chart_lines(cleaned_chart_lines)
 
     lines.append(
-        f"[DEBUG] ops_cards_inputs: chart_lines={len(joined_chart)} rows={len(ops_rows)}"
+        f"[DEBUG] ops_cards_inputs: chart_lines={len(joined_chart)} rows={len(rows_obj)}"
     )
 
     if not joined_chart and not ops_rows:
