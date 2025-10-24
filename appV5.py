@@ -18413,11 +18413,15 @@ def compute_quote_from_df(  # type: ignore[reportGeneralTypeIssues]
     pm["rate"] = float(rates.get("DrillingRate") or rates.get("MachineRate") or 0.0)
     pm["basis"] = ["minutes_engine"]
 
+    process_meta_local = locals().get("process_meta")
     process_meta_map: _MutableMappingABC[str, Any] | None
-    if isinstance(process_meta, _MutableMappingABC):
-        process_meta_map = process_meta
-    elif isinstance(process_meta, dict):
-        process_meta_map = typing.cast(_MutableMappingABC[str, Any], process_meta)
+    if isinstance(process_meta_local, _MutableMappingABC):
+        process_meta_map = process_meta_local
+    elif isinstance(process_meta_local, dict):
+        process_meta_map = typing.cast(
+            _MutableMappingABC[str, Any],
+            process_meta_local,
+        )
     else:
         process_meta_map = None
 
