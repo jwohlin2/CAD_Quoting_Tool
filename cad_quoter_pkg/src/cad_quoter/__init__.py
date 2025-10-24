@@ -1,6 +1,7 @@
 """Compatibility shim re-exporting :mod:`cad_quoter` under ``cad_quoter_pkg.src``."""
 from __future__ import annotations
 
+import importlib
 import importlib.machinery
 import importlib.util
 import sys
@@ -12,21 +13,27 @@ _ALIAS = __name__
 
 
 def _load_target() -> ModuleType:
-    spec = importlib.machinery.PathFinder.find_spec(
-        _TARGET,
-        [str(Path(__file__).resolve().parents[3] / "src")],
-    )
-    if spec is None or spec.loader is None:
-        raise ModuleNotFoundError(
-            "The cad_quoter package is not available. Install cad-quoter or keep src on the import path."
-        )
+    module = sys.modules.get(_TARGET)
+    if module is not None:
+        sys.modules[_ALIAS] = module
+        return module
 
-    module = importlib.util.module_from_spec(spec)
-    sys.modules[_ALIAS] = module
-    sys.modules.setdefault(_TARGET, module)
-    spec.loader.exec_module(module)
-    module.__name__ = _TARGET
-    module.__package__ = _TARGET
+    repo_src = Path(__file__).resolve().parents[3] / "src"
+    spec = None
+    if repo_src.is_dir():
+        spec = importlib.machinery.PathFinder.find_spec(_TARGET, [str(repo_src)])
+
+    if spec is not None and spec.loader is not None:
+        module = importlib.util.module_from_spec(spec)
+        sys.modules[_TARGET] = module
+        sys.modules[_ALIAS] = module
+        spec.loader.exec_module(module)
+        module.__name__ = _TARGET
+        module.__package__ = _TARGET
+    else:
+        module = importlib.import_module(_TARGET)
+        sys.modules.setdefault(_TARGET, module)
+        sys.modules[_ALIAS] = module
 
     try:
         repo_root = Path(__file__).resolve().parents[3]
