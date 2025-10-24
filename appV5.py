@@ -22365,12 +22365,19 @@ def extract_2d_features_from_dxf_or_dwg(path: str | Path) -> dict[str, Any]:
     candidate = _choose_better(acad2, text2)
 
     have_rows = ((geo.get("ops_summary") or {}).get("rows") or [])
-    if _score_table(candidate) > _score_table({"rows": have_rows}):
+    have_score = _score_table({"rows": have_rows})
+    candidate_score = _score_table(candidate)
+    if candidate_score > have_score:
         best_table_info = candidate
         _persist_rows_and_totals(
             geo,
             candidate,
             src=("acad_table" if candidate is acad2 else "text_table"),
+        )
+    elif have_rows:
+        print(
+            "[EXTRACTOR] kept better table: "
+            f"rows={len(have_rows)} qty_sum={_rows_qty_sum(have_rows)}"
         )
 
     print(
