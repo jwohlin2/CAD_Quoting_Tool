@@ -4423,8 +4423,6 @@ def _compute_drilling_removal_section(
                 or {}
             )
 
-            from typing import Mapping, Any
-
             def _seed_drill_bins_from_geo__local(
                 g: Mapping[str, Any] | None,
             ) -> dict[float, int]:
