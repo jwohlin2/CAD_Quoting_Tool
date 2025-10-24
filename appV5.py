@@ -149,7 +149,7 @@ _MM_DIM_TOKEN = re.compile(
 )
 
 _COUNTERDRILL_RE = re.compile(
-    r"\b(?:C[’']\s*DRILL|C\s*DRILL|COUNTER\s*DRILL|COUNTERDRILL)\b",
+    r"\b(?:C[’']\s*DRILL|C[-\s]*DRILL|COUNTER[-\s]*DRILL)\b",
     re.IGNORECASE,
 )
 _CENTER_OR_SPOT_RE = re.compile(
@@ -1119,6 +1119,8 @@ _NPT_PILOT_IN: dict[str, float] = {
 def _count_counterdrill_from_chart(cleaned: list[str]) -> int:
     tot = 0
     for s in (cleaned or []):
+        if _DRILL_THRU.search(s):  # exclude straight drill-thru rows
+            continue
         if _CENTER_OR_SPOT_RE.search(s):  # exclude “spot”
             continue
         if _COUNTERDRILL_RE.search(s):
