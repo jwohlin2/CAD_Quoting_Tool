@@ -1342,11 +1342,26 @@ def _build_ops_cards_from_chart_lines(
     except Exception:
         geo_map = {}
 
-    pre_rows = _ops_rows_from_geo(geo_map)
-    print(f"[DEBUG] ops_rows_pre={len(pre_rows)}")
-    lines: list[str] = [f"[DEBUG] ops_rows_pre={len(pre_rows)}"]
-    if not pre_rows:
-        built_rows = ensure_ops_rows_in_geo_from_chart(geo=geo_map if isinstance(geo_map, dict) else None)
+    pre_rows_obj: Any = []
+    if isinstance(geo_map, dict):
+        try:
+            pre_rows_obj = ((geo_map.get("ops_summary") or {}).get("rows") or [])
+        except Exception:
+            pre_rows_obj = []
+    rows: list[Any] = []
+    if isinstance(pre_rows_obj, list):
+        rows = pre_rows_obj
+    elif isinstance(pre_rows_obj, (_MappingABC, dict)):
+        try:
+            rows = [value for value in pre_rows_obj.values() if value is not None]
+        except Exception:
+            rows = []
+    print(f"[DEBUG] ops_rows_pre={len(rows)}")
+    lines: list[str] = [f"[DEBUG] ops_rows_pre={len(rows)}"]
+    if not rows:
+        built_rows = ensure_ops_rows_in_geo_from_chart(
+            geo=geo_map if isinstance(geo_map, dict) else None
+        )
         chart_count = 0
         try:
             if isinstance(geo_map, dict):
@@ -1359,8 +1374,32 @@ def _build_ops_cards_from_chart_lines(
         lines.append(
             f"[DEBUG] chart_lines_found={chart_count} built_rows={built_rows}"
         )
+        if not rows:
+            try:
+                refreshed_geo = _get_geo_map(
+                    locals().get("result"),
+                    breakdown_mutable or breakdown,
+                )
+            except Exception:
+                refreshed_geo = {}
+            if isinstance(refreshed_geo, dict):
+                try:
+                    post_rows = (
+                        (refreshed_geo.get("ops_summary") or {}).get("rows") or []
+                    )
+                except Exception:
+                    post_rows = []
+                if isinstance(post_rows, list):
+                    rows = post_rows
+                    geo_map = refreshed_geo
+                elif isinstance(post_rows, (_MappingABC, dict)):
+                    try:
+                        rows = [value for value in post_rows.values() if value is not None]
+                    except Exception:
+                        rows = []
+                    geo_map = refreshed_geo
 
-    rows = _ops_rows_from_geo(geo_map)
+    rows = rows if isinstance(rows, list) else []
 
     extra_bucket_ops: MutableMapping[str, Any] | None = None
     if isinstance(breakdown_mutable, dict):
@@ -1446,25 +1485,36 @@ def _build_ops_cards_from_chart_lines(
                     if "BACK" in side_match.group(0).upper()
                     else "FRONT"
                 )
+            desc_text = desc or ""
             # diameter & depth (prefer explicit CBORE tokens)
             dia_val: float | None = None
-            dia_match = _CB_DIA_RE.search(desc or "")
+            dia_match = _CB_DIA_RE.search(desc_text)
             if dia_match:
                 raw = (dia_match.group("numA") or dia_match.group("numB") or "").strip()
                 dia_val = _to_inch(raw)
             if dia_val is None:
-                dm = RE_DIA.search(desc or "")
+                frac_match = NUM_FRAC_RE.search(desc_text)
+                if frac_match:
+                    dia_val = _to_inch(f"{frac_match.group(1)}/{frac_match.group(2)}")
+            if dia_val is None:
+                dec_match = NUM_DEC_RE.search(desc_text)
+                if dec_match:
+                    dia_val = _to_inch(dec_match.group(0))
+            if dia_val is None:
+                dm = RE_DIA.search(desc_text)
                 if dm:
                     dia_val = _to_inch(dm.group(1)) if dm.lastindex else None
                     if dia_val is None:
                         dia_val = first_inch_value(dm.group(0))
+            if dia_val is None:
+                dia_val = first_inch_value(desc_text)
             dep_val: float | None = None
-            dep_match = _X_DEPTH_RE.search(desc or "")
+            dep_match = _X_DEPTH_RE.search(desc_text)
             if dep_match:
                 depth_token = dep_match.group(1)
                 dep_val = _to_inch(depth_token)
             # must be a counterbore clause
-            if RE_CBORE.search(desc or ""):
+            if RE_CBORE.search(desc_text):
                 key = (dia_val, side_txt, dep_val)
                 cb_groups[key] = cb_groups.get(key, 0) + qty
     # 3b) Parse chart claims (fallback source)
@@ -2046,34 +2096,16 @@ def _build_ops_cards_from_chart_lines(
     lines.extend(out_lines)
 
     try:
-        result_map = locals().get("result") or {}
-    except Exception:
-        result_map = {}
-    if not isinstance(result_map, (_MappingABC, dict)):
-        result_map = {}
-
-    try:
-        breakdown_map = (breakdown_mutable or breakdown or {})
-    except Exception:
-        breakdown_map = {}
-    if not isinstance(breakdown_map, (_MappingABC, dict)):
-        breakdown_map = {}
-
-    try:
         reviewer_lines = _render_table_row_reviewer(
-            result=result_map,
-            breakdown=breakdown_map,
+            result=locals().get("result"),
+            breakdown=breakdown_mutable or breakdown,
             max_rows=10,
         )
     except Exception:
         reviewer_lines = []
 
     if reviewer_lines:
-        for entry in reviewer_lines:
-            try:
-                lines.append(str(entry))
-            except Exception:
-                continue
+        lines.extend(str(entry) for entry in reviewer_lines)
 
     return lines
 
@@ -4571,14 +4603,13 @@ def _render_time_per_hole(
 
 # ---------- HOLE TABLE: Table Row Reviewer ----------
 def _get_geo_map(result=None, breakdown=None):
+    # prefer top-level geo
     if isinstance(result, dict) and isinstance(result.get("geo"), dict):
-        geo = _normalize_geo_map(result["geo"])
-        if isinstance(geo, dict):
-            return geo
+        g = result["geo"]
+        return {**(g.get("geo") or {}), **g} if isinstance(g.get("geo"), dict) else g
     if isinstance(breakdown, dict) and isinstance(breakdown.get("geo"), dict):
-        geo = _normalize_geo_map(breakdown["geo"])
-        if isinstance(geo, dict):
-            return geo
+        g = breakdown["geo"]
+        return {**(g.get("geo") or {}), **g} if isinstance(g.get("geo"), dict) else g
     return {}
 
 
