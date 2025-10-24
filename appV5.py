@@ -149,14 +149,15 @@ _MM_DIM_TOKEN = re.compile(
     re.IGNORECASE,
 )
 
-_COUNTERDRILL_RE = re.compile(
-    r"\b(?:C[’']\s*DRILL|C\s*DRILL|COUNTER[-\s]*DRILL)\b",
+RE_COUNTERDRILL = re.compile(
+    r"\b(?:C[’']?\s*DRILL|COUNTER[-\s]*DRILL|CTR\s*DRILL)\b",
     re.IGNORECASE,
 )
-_CENTER_OR_SPOT_RE = re.compile(
-    r"\b(CENTER\s*DRILL|SPOT\s*DRILL|SPOT)\b",
-    re.IGNORECASE,
-)
+RE_JIG = re.compile(r"\bJIG\s*GRIND\b", re.IGNORECASE)
+RE_SPOT = re.compile(r"\b(?:SPOT|CENTER\s*DRILL)\b", re.IGNORECASE)
+
+_COUNTERDRILL_RE = RE_COUNTERDRILL
+_CENTER_OR_SPOT_RE = RE_SPOT
 _DRILL_REMOVAL_MINUTES_MIN = 0.0
 _DRILL_REMOVAL_MINUTES_MAX = 600.0
 
@@ -320,12 +321,212 @@ def _sum_count_values(candidate: Any) -> int:
     return total
 
 
+def _normalize_extra_bucket_payload(
+    payload: Mapping[str, Any] | Any,
+    *,
+    minutes: float | None = None,
+) -> dict[str, Any] | None:
+    """Normalize an extra bucket payload and enforce canonical fields."""
+
+    if isinstance(payload, _MappingABC):
+        data = dict(payload)
+    else:
+        try:
+            data = dict(payload)  # type: ignore[arg-type]
+        except Exception:
+            return None
+
+    name_text = str(data.get("name") or data.get("op") or "").strip()
+    if not name_text:
+        return None
+
+    normalized: dict[str, Any] = {"name": name_text}
+
+    side_raw = data.get("side")
+    if side_raw is None:
+        side_norm: str | None = None
+    elif isinstance(side_raw, str):
+        side_norm = side_raw.strip().lower() or None
+    else:
+        side_norm = str(side_raw).strip().lower() or None
+    normalized["side"] = side_norm
+
+    qty_raw = data.get("qty")
+    qty_val = 0
+    if qty_raw not in (None, ""):
+        try:
+            qty_val = int(round(float(qty_raw)))
+        except Exception:
+            try:
+                qty_val = int(qty_raw)  # type: ignore[arg-type]
+            except Exception:
+                qty_val = 0
+    normalized["qty"] = max(qty_val, 0)
+
+    if minutes is None:
+        minutes_raw = data.get("minutes")
+        if minutes_raw in (None, ""):
+            minutes_raw = data.get("mins")
+        try:
+            minutes_val = float(minutes_raw)
+        except Exception:
+            minutes_val = 0.0
+    else:
+        minutes_val = float(minutes)
+
+    minutes_val = minutes_val if math.isfinite(minutes_val) else 0.0
+    if minutes_val > 0.0:
+        normalized["minutes"] = round(minutes_val, 3)
+
+    def _extract_cost(*keys: str) -> float:
+        for key in keys:
+            cost_val = _coerce_positive_float(data.get(key))
+            if cost_val is not None:
+                return cost_val
+        return 0.0
+
+    machine_val = _extract_cost("machine", "machine_cost")
+    labor_val = _extract_cost("labor", "labor_cost")
+    total_val = _extract_cost("total", "total_cost")
+
+    if machine_val > 0.0:
+        normalized["machine"] = machine_val
+    if labor_val > 0.0:
+        normalized["labor"] = labor_val
+    if total_val > 0.0:
+        normalized["total"] = total_val
+
+    return normalized
+
+
+def _extra_bucket_entry_key(entry: Mapping[str, Any]) -> tuple[str, str | None]:
+    name_text = str(entry.get("name") or entry.get("op") or "").strip().lower()
+    side_raw = entry.get("side")
+    if side_raw is None:
+        side_norm: str | None = None
+    elif isinstance(side_raw, str):
+        side_norm = side_raw.strip().lower() or None
+    else:
+        side_norm = str(side_raw).strip().lower() or None
+    return name_text, side_norm
+
+
+def _merge_extra_bucket_entries(
+    existing: MutableMapping[str, Any],
+    incoming: Mapping[str, Any],
+) -> None:
+    """Merge ``incoming`` values into ``existing`` without double-counting."""
+
+    def _as_int(value: Any) -> int:
+        try:
+            return int(round(float(value)))
+        except Exception:
+            try:
+                return int(value)  # type: ignore[arg-type]
+            except Exception:
+                return 0
+
+    def _as_float(value: Any) -> float:
+        try:
+            numeric = float(value)
+        except Exception:
+            return 0.0
+        return numeric if math.isfinite(numeric) else 0.0
+
+    existing["name"] = str(incoming.get("name") or existing.get("name") or "").strip()
+
+    incoming_side = incoming.get("side")
+    if incoming_side is not None:
+        existing["side"] = incoming_side
+
+    incoming_qty = _as_int(incoming.get("qty"))
+    if incoming_qty > 0:
+        existing_qty = _as_int(existing.get("qty"))
+        if incoming_qty > existing_qty:
+            existing["qty"] = incoming_qty
+
+    incoming_minutes = _as_float(incoming.get("minutes"))
+    if incoming_minutes > 0.0:
+        existing_minutes = _as_float(existing.get("minutes") or existing.get("mins"))
+        if incoming_minutes > existing_minutes:
+            existing["minutes"] = round(incoming_minutes, 3)
+
+    for field in ("machine", "labor", "total"):
+        incoming_val = _as_float(incoming.get(field))
+        if incoming_val <= 0.0:
+            continue
+        existing_val = _as_float(existing.get(field))
+        if incoming_val > existing_val:
+            existing[field] = incoming_val
+
+    # Remove legacy aliases if present to avoid duplication
+    for alias in ("mins", "machine_cost", "labor_cost", "total_cost"):
+        if alias in existing:
+            try:
+                del existing[alias]
+            except Exception:
+                pass
+
+
+def _publish_extra_bucket_op(
+    extra_bucket_ops: MutableMapping[str, Any] | Mapping[str, Any] | None,
+    bucket: str,
+    payload: Mapping[str, Any] | Any,
+    *,
+    minutes: float | None = None,
+) -> None:
+    """Append or merge an entry in ``extra_bucket_ops`` for ``bucket``."""
+
+    if not isinstance(extra_bucket_ops, (_MutableMappingABC, dict)):
+        return
+
+    try:
+        entries = extra_bucket_ops.setdefault(bucket, [])  # type: ignore[call-arg]
+    except Exception:
+        return
+
+    if not isinstance(entries, list):
+        try:
+            entries = list(entries)  # type: ignore[arg-type]
+        except Exception:
+            entries = []
+        try:
+            extra_bucket_ops[bucket] = entries  # type: ignore[index]
+        except Exception:
+            return
+
+    normalized = _normalize_extra_bucket_payload(payload, minutes=minutes)
+    if not normalized:
+        return
+
+    new_key = _extra_bucket_entry_key(normalized)
+    for idx, existing in enumerate(entries):
+        if isinstance(existing, _MutableMappingABC):
+            existing_map = typing.cast(MutableMapping[str, Any], existing)
+        elif isinstance(existing, dict):
+            existing_map = typing.cast(MutableMapping[str, Any], existing)
+        elif isinstance(existing, _MappingABC):
+            try:
+                existing_map = dict(existing)
+                entries[idx] = existing_map
+            except Exception:
+                continue
+        else:
+            continue
+
+        if _extra_bucket_entry_key(existing_map) == new_key:
+            _merge_extra_bucket_entries(existing_map, normalized)
+            return
+
+    entries.append(normalized)
+
 from cad_quoter.app.chart_lines import (
     collect_chart_lines_context as _collect_chart_lines_context,
 )
 from ops_audit import audit_operations
 from cad_quoter.app.hole_ops import (
     CBORE_MIN_PER_SIDE_MIN,
+    COUNTERDRILL_MIN_PER_SIDE_MIN,
     CSK_MIN_PER_SIDE_MIN,
     RE_CBORE,
     RE_CSK,
@@ -796,7 +997,7 @@ def _build_ops_cards_from_chart_lines(
         except Exception:
             bucket_view_obj = None
 
-    extra_bucket_ops: MutableMapping[str, Any] | None = None
+    extra_bucket_ops: MutableMapping[str, Any] | Mapping[str, Any] | None = None
     if isinstance(target_breakdown, dict):
         extra_bucket_ops = target_breakdown.setdefault("extra_bucket_ops", {})
     elif isinstance(target_breakdown, _MutableMappingABC):
@@ -808,26 +1009,27 @@ def _build_ops_cards_from_chart_lines(
         except Exception:
             extra_bucket_ops = None
 
-    def _ebo_append(bucket: str, payload: Mapping[str, Any]) -> None:
+    def _ebo_append(
+        bucket: str,
+        payload: Mapping[str, Any],
+        *,
+        minutes: float | None = None,
+    ) -> None:
         nonlocal extra_bucket_ops
         if extra_bucket_ops is None:
-            return
-        try:
-            entries = extra_bucket_ops.setdefault(bucket, [])
-        except Exception:
-            return
-        if isinstance(entries, list):
-            entries.append(dict(payload))
-        else:
-            try:
-                fallback_list = list(entries)  # type: ignore[arg-type]
-            except Exception:
-                fallback_list = []
-            fallback_list.append(dict(payload))
-            try:
-                extra_bucket_ops[bucket] = fallback_list  # type: ignore[index]
-            except Exception:
-                pass
+            if isinstance(target_breakdown, dict):
+                extra_bucket_ops = target_breakdown.setdefault("extra_bucket_ops", {})
+            elif isinstance(target_breakdown, _MutableMappingABC):
+                try:
+                    extra_bucket_ops = typing.cast(
+                        MutableMapping[str, Any],
+                        target_breakdown.setdefault("extra_bucket_ops", {}),
+                    )
+                except Exception:
+                    extra_bucket_ops = None
+            if extra_bucket_ops is None:
+                return
+        _publish_extra_bucket_op(extra_bucket_ops, bucket, payload, minutes=minutes)
 
     out_lines: list[str] = []
 
@@ -940,11 +1142,13 @@ def _build_ops_cards_from_chart_lines(
             _ebo_append(
                 "counterbore",
                 {"name": "Counterbore", "qty": int(front_cb), "side": "front"},
+                minutes=float(front_cb) * per,
             )
         if back_cb > 0:
             _ebo_append(
                 "counterbore",
                 {"name": "Counterbore", "qty": int(back_cb), "side": "back"},
+                minutes=float(back_cb) * per,
             )
 
         cb_mrate = (
@@ -1001,6 +1205,7 @@ def _build_ops_cards_from_chart_lines(
         _ebo_append(
             "spot",
             {"name": "Spot drill", "qty": int(spot_qty), "side": "front"},
+            minutes=t_group,
         )
 
     if jig_qty > 0:
@@ -1028,6 +1233,7 @@ def _build_ops_cards_from_chart_lines(
         _ebo_append(
             "jig-grind",
             {"name": "Jig-grind", "qty": int(jig_qty), "side": None},
+            minutes=t_group,
         )
 
     if out_lines:
@@ -1127,9 +1333,9 @@ def _count_counterdrill_from_chart(cleaned: list[str]) -> int:
         upper = text.upper()
         if "DRILL THRU" in upper:
             continue
-        if _CENTER_OR_SPOT_RE.search(text):
+        if RE_SPOT.search(upper):
             continue
-        if _COUNTERDRILL_RE.search(text):
+        if RE_COUNTERDRILL.search(upper):
             m = re.match(r"\s*\((\d+)\)", text)
             tot += int(m.group(1)) if m else 1
     return tot
@@ -1141,7 +1347,7 @@ def _count_jig_from_chart(cleaned: list[str]) -> int:
         text = str(raw or "")
         if not text.strip():
             continue
-        if re.search(r"\bJIG\s*GRIND\b", text, re.IGNORECASE):
+        if RE_JIG.search(text or ""):
             m = re.match(r"\s*\((\d+)\)", text)
             tot += int(m.group(1)) if m else 1
     return tot
@@ -1587,27 +1793,56 @@ def _append_counterbore_spot_jig_cards(
         else 0
     )
 
-    try:
-        ebo = breakdown_mutable.setdefault("extra_bucket_ops", {})
-        if total_cb > 0:
-            if front_cb > 0:
-                ebo.setdefault("counterbore", []).append(
-                    {"name": "Counterbore", "qty": int(front_cb), "side": "front"}
-                )
-            if back_cb > 0:
-                ebo.setdefault("counterbore", []).append(
-                    {"name": "Counterbore", "qty": int(back_cb), "side": "back"}
-                )
-        if spot_qty > 0:
-            ebo.setdefault("spot", []).append(
-                {"name": "Spot drill", "qty": int(spot_qty), "side": "front"}
+    per_cb = float(globals().get("CBORE_MIN_PER_SIDE_MIN") or 0.15)
+    ebo_local: MutableMapping[str, Any] | Mapping[str, Any] | None = None
+    if isinstance(breakdown_mutable, dict):
+        ebo_local = breakdown_mutable.setdefault("extra_bucket_ops", {})
+    elif isinstance(breakdown_mutable, _MutableMappingABC):
+        try:
+            ebo_local = typing.cast(
+                MutableMapping[str, Any],
+                breakdown_mutable.setdefault("extra_bucket_ops", {}),
             )
-        if jig_qty > 0:
-            ebo.setdefault("jig-grind", []).append(
-                {"name": "Jig-grind", "qty": int(jig_qty), "side": None}
+        except Exception:
+            ebo_local = None
+
+    def _ebo_append_local(
+        bucket: str,
+        payload: Mapping[str, Any],
+        *,
+        minutes: float | None = None,
+    ) -> None:
+        if ebo_local is None:
+            return
+        _publish_extra_bucket_op(ebo_local, bucket, payload, minutes=minutes)
+
+    if total_cb > 0:
+        if front_cb > 0:
+            _ebo_append_local(
+                "counterbore",
+                {"name": "Counterbore", "qty": int(front_cb), "side": "front"},
+                minutes=float(front_cb) * per_cb,
             )
-    except Exception:
-        pass
+        if back_cb > 0:
+            _ebo_append_local(
+                "counterbore",
+                {"name": "Counterbore", "qty": int(back_cb), "side": "back"},
+                minutes=float(back_cb) * per_cb,
+            )
+    if spot_qty > 0:
+        per_spot = 0.05
+        _ebo_append_local(
+            "spot",
+            {"name": "Spot drill", "qty": int(spot_qty), "side": "front"},
+            minutes=float(spot_qty) * per_spot,
+        )
+    if jig_qty > 0:
+        per_jig = float(globals().get("JIG_GRIND_MIN_PER_FEATURE") or 0.75)
+        _ebo_append_local(
+            "jig-grind",
+            {"name": "Jig-grind", "qty": int(jig_qty), "side": None},
+            minutes=float(jig_qty) * per_jig,
+        )
 
     # ---------- Emit COUNTERBORE card ----------
     if cb_groups:
@@ -12335,68 +12570,91 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
         nonlocal actions_summary_ready
         try:
             ebo = breakdown_mutable.setdefault("extra_bucket_ops", {})
+            per_cb = float(
+                globals().get("CBORE_MIN_PER_SIDE_MIN")
+                or CBORE_MIN_PER_SIDE_MIN
+                or 0.15
+            )
             if ops_claims.get("cb_front", 0) > 0:
                 cb_front_qty = int(ops_claims.get("cb_front", 0) or 0)
-                ebo.setdefault("counterbore", []).append(
+                _publish_extra_bucket_op(
+                    ebo,
+                    "counterbore",
                     {
                         "name": "Counterbore",
                         "qty": cb_front_qty,
                         "side": "front",
-                    }
+                    },
+                    minutes=float(cb_front_qty) * per_cb,
                 )
             if ops_claims.get("cb_back", 0) > 0:
                 cb_back_qty = int(ops_claims.get("cb_back", 0) or 0)
-                ebo.setdefault("counterbore", []).append(
+                _publish_extra_bucket_op(
+                    ebo,
+                    "counterbore",
                     {
                         "name": "Counterbore",
                         "qty": cb_back_qty,
                         "side": "back",
-                    }
+                    },
+                    minutes=float(cb_back_qty) * per_cb,
                 )
             if ops_claims.get("tap", 0) > 0:
                 tap_qty = int(ops_claims.get("tap", 0) or 0)
-                ebo.setdefault("tap", []).append(
-                    {
-                        "name": "Tap",
-                        "qty": tap_qty,
-                        "side": "front",
-                    }
+                _publish_extra_bucket_op(
+                    ebo,
+                    "tap",
+                    {"name": "Tap", "qty": tap_qty, "side": "front"},
                 )
             if ops_claims.get("npt", 0) > 0:
                 npt_qty = int(ops_claims.get("npt", 0) or 0)
-                ebo.setdefault("tap", []).append(
-                    {
-                        "name": "NPT tap",
-                        "qty": npt_qty,
-                        "side": "front",
-                    }
+                _publish_extra_bucket_op(
+                    ebo,
+                    "tap",
+                    {"name": "NPT tap", "qty": npt_qty, "side": "front"},
                 )
             if ops_claims.get("spot", 0) > 0:
                 spot_qty = int(ops_claims.get("spot", 0) or 0)
-                ebo.setdefault("spot", []).append(
+                per_spot = 0.05
+                _publish_extra_bucket_op(
+                    ebo,
+                    "spot",
                     {
                         "name": "Spot drill",
                         "qty": spot_qty,
                         "side": "front",
-                    }
+                    },
+                    minutes=float(spot_qty) * per_spot,
                 )
             if ops_claims.get("counterdrill", 0) > 0:
                 counterdrill_qty_local = int(ops_claims.get("counterdrill", 0) or 0)
-                ebo.setdefault("counterdrill", []).append(
+                per_counterdrill = float(
+                    globals().get("COUNTERDRILL_MIN_PER_SIDE_MIN")
+                    or COUNTERDRILL_MIN_PER_SIDE_MIN
+                    or 0.12
+                )
+                _publish_extra_bucket_op(
+                    ebo,
+                    "counterdrill",
                     {
                         "name": "Counterdrill",
                         "qty": counterdrill_qty_local,
                         "side": "front",
-                    }
+                    },
+                    minutes=float(counterdrill_qty_local) * per_counterdrill,
                 )
             if ops_claims.get("jig", 0) > 0:
                 jig_qty = int(ops_claims.get("jig", 0) or 0)
-                ebo.setdefault("jig-grind", []).append(
+                per_jig = float(globals().get("JIG_GRIND_MIN_PER_FEATURE") or 0.75)
+                _publish_extra_bucket_op(
+                    ebo,
+                    "jig-grind",
                     {
                         "name": "Jig-grind",
                         "qty": jig_qty,
                         "side": None,
-                    }
+                    },
+                    minutes=float(jig_qty) * per_jig,
                 )
         except Exception:
             pass
@@ -12869,37 +13127,74 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
                     # Publish structured ops for planner_ops_summary
                     try:
                         ebo = breakdown_mutable.setdefault("extra_bucket_ops", {})
+                        per_cb = float(
+                            globals().get("CBORE_MIN_PER_SIDE_MIN")
+                            or CBORE_MIN_PER_SIDE_MIN
+                            or 0.15
+                        )
                         if ops_claims["cb_front"] > 0:
-                            ebo.setdefault("counterbore", []).append(
-                                {"name": "Counterbore", "qty": int(ops_claims["cb_front"]), "side": "front"}
+                            front_qty = int(ops_claims["cb_front"])
+                            _publish_extra_bucket_op(
+                                ebo,
+                                "counterbore",
+                                {"name": "Counterbore", "qty": front_qty, "side": "front"},
+                                minutes=float(front_qty) * per_cb,
                             )
                         if ops_claims["cb_back"] > 0:
-                            ebo.setdefault("counterbore", []).append(
-                                {"name": "Counterbore", "qty": int(ops_claims["cb_back"]), "side": "back"}
+                            back_qty = int(ops_claims["cb_back"])
+                            _publish_extra_bucket_op(
+                                ebo,
+                                "counterbore",
+                                {"name": "Counterbore", "qty": back_qty, "side": "back"},
+                                minutes=float(back_qty) * per_cb,
                             )
                         if ops_claims["tap"] > 0:
-                            ebo.setdefault("tap", []).append(
-                                {"name": "Tap", "qty": int(ops_claims["tap"]), "side": "front"}
+                            _publish_extra_bucket_op(
+                                ebo,
+                                "tap",
+                                {"name": "Tap", "qty": int(ops_claims["tap"]), "side": "front"},
                             )
                         if ops_claims["npt"] > 0:
-                            ebo.setdefault("tap", []).append(
-                                {"name": "NPT tap", "qty": int(ops_claims["npt"]), "side": "front"}
+                            _publish_extra_bucket_op(
+                                ebo,
+                                "tap",
+                                {"name": "NPT tap", "qty": int(ops_claims["npt"]), "side": "front"},
                             )
                         if ops_claims["spot"] > 0:
-                            ebo.setdefault("spot", []).append(
-                                {"name": "Spot drill", "qty": int(ops_claims["spot"]), "side": "front"}
+                            spot_qty_local = int(ops_claims["spot"])
+                            _publish_extra_bucket_op(
+                                ebo,
+                                "spot",
+                                {
+                                    "name": "Spot drill",
+                                    "qty": spot_qty_local,
+                                    "side": "front",
+                                },
+                                minutes=float(spot_qty_local) * 0.05,
                             )
                         if counterdrill_qty > 0:
-                            ebo.setdefault("counterdrill", []).append(
+                            per_counterdrill = float(
+                                globals().get("COUNTERDRILL_MIN_PER_SIDE_MIN")
+                                or COUNTERDRILL_MIN_PER_SIDE_MIN
+                                or 0.12
+                            )
+                            _publish_extra_bucket_op(
+                                ebo,
+                                "counterdrill",
                                 {
                                     "name": "Counterdrill",
                                     "qty": int(counterdrill_qty),
                                     "side": "front",
-                                }
+                                },
+                                minutes=float(counterdrill_qty) * per_counterdrill,
                             )
                         if jig_qty > 0:
-                            ebo.setdefault("jig-grind", []).append(
-                                {"name": "Jig-grind", "qty": int(jig_qty), "side": None}
+                            per_jig = float(globals().get("JIG_GRIND_MIN_PER_FEATURE") or 0.75)
+                            _publish_extra_bucket_op(
+                                ebo,
+                                "jig-grind",
+                                {"name": "Jig-grind", "qty": int(jig_qty), "side": None},
+                                minutes=float(jig_qty) * per_jig,
                             )
                     except Exception:
                         pass
@@ -13203,37 +13498,72 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
                 drill_entries.append(
                     {"name": "Drill", "qty": drill_actions, "side": None}
                 )
+        per_cb = float(
+            globals().get("CBORE_MIN_PER_SIDE_MIN")
+            or CBORE_MIN_PER_SIDE_MIN
+            or 0.15
+        )
         if (ops_claims.get("tap") or 0) > 0:
-            extra_bucket_ops.setdefault("tap", []).append(
-                {"name": "Tap", "qty": int(ops_claims["tap"]), "side": "front"}
+            _publish_extra_bucket_op(
+                extra_bucket_ops,
+                "tap",
+                {"name": "Tap", "qty": int(ops_claims["tap"]), "side": "front"},
             )
         if (ops_claims.get("npt") or 0) > 0:
-            extra_bucket_ops.setdefault("tap", []).append(
-                {"name": "NPT tap", "qty": int(ops_claims["npt"]), "side": "front"}
+            _publish_extra_bucket_op(
+                extra_bucket_ops,
+                "tap",
+                {"name": "NPT tap", "qty": int(ops_claims["npt"]), "side": "front"},
             )
         if (ops_claims.get("cb_front") or 0) > 0:
-            extra_bucket_ops.setdefault("counterbore", []).append(
-                {"name": "Counterbore", "qty": int(ops_claims["cb_front"]), "side": "front"}
+            cb_front_qty = int(ops_claims.get("cb_front") or 0)
+            _publish_extra_bucket_op(
+                extra_bucket_ops,
+                "counterbore",
+                {"name": "Counterbore", "qty": cb_front_qty, "side": "front"},
+                minutes=float(cb_front_qty) * per_cb,
             )
         if (ops_claims.get("cb_back") or 0) > 0:
-            extra_bucket_ops.setdefault("counterbore", []).append(
-                {"name": "Counterbore", "qty": int(ops_claims["cb_back"]), "side": "back"}
+            cb_back_qty = int(ops_claims.get("cb_back") or 0)
+            _publish_extra_bucket_op(
+                extra_bucket_ops,
+                "counterbore",
+                {"name": "Counterbore", "qty": cb_back_qty, "side": "back"},
+                minutes=float(cb_back_qty) * per_cb,
             )
         if (ops_claims.get("spot") or 0) > 0:
-            extra_bucket_ops.setdefault("spot", []).append(
-                {"name": "Spot drill", "qty": int(ops_claims["spot"]), "side": "front"}
+            spot_qty_local = int(ops_claims.get("spot") or 0)
+            _publish_extra_bucket_op(
+                extra_bucket_ops,
+                "spot",
+                {"name": "Spot drill", "qty": spot_qty_local, "side": "front"},
+                minutes=float(spot_qty_local) * 0.05,
             )
         if (ops_claims.get("counterdrill") or 0) > 0:
-            extra_bucket_ops.setdefault("counterdrill", []).append(
+            counterdrill_qty_local = int(ops_claims.get("counterdrill") or 0)
+            per_counterdrill = float(
+                globals().get("COUNTERDRILL_MIN_PER_SIDE_MIN")
+                or COUNTERDRILL_MIN_PER_SIDE_MIN
+                or 0.12
+            )
+            _publish_extra_bucket_op(
+                extra_bucket_ops,
+                "counterdrill",
                 {
                     "name": "Counterdrill",
-                    "qty": int(ops_claims["counterdrill"]),
+                    "qty": counterdrill_qty_local,
                     "side": "front",
-                }
+                },
+                minutes=float(counterdrill_qty_local) * per_counterdrill,
             )
         if (ops_claims.get("jig") or 0) > 0:
-            extra_bucket_ops.setdefault("jig-grind", []).append(
-                {"name": "Jig-grind", "qty": int(ops_claims["jig"]), "side": None}
+            jig_qty_local = int(ops_claims.get("jig") or 0)
+            per_jig = float(globals().get("JIG_GRIND_MIN_PER_FEATURE") or 0.75)
+            _publish_extra_bucket_op(
+                extra_bucket_ops,
+                "jig-grind",
+                {"name": "Jig-grind", "qty": jig_qty_local, "side": None},
+                minutes=float(jig_qty_local) * per_jig,
             )
     except Exception:
         pass
