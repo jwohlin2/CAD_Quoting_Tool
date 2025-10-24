@@ -1447,24 +1447,31 @@ def _build_ops_cards_from_chart_lines(
                     else "FRONT"
                 )
             # diameter & depth (prefer explicit CBORE tokens)
+            desc_text = desc or ""
             dia_val: float | None = None
-            dia_match = _CB_DIA_RE.search(desc or "")
+            dia_match = _CB_DIA_RE.search(desc_text)
             if dia_match:
                 raw = (dia_match.group("numA") or dia_match.group("numB") or "").strip()
                 dia_val = _to_inch(raw)
             if dia_val is None:
-                dm = RE_DIA.search(desc or "")
+                dm = RE_DIA.search(desc_text)
                 if dm:
-                    dia_val = _to_inch(dm.group(1)) if dm.lastindex else None
-                    if dia_val is None:
-                        dia_val = first_inch_value(dm.group(0))
+                    token = dm.group(1) if dm.lastindex else dm.group(0)
+                    dia_val = _to_inch(token)
+                    if dia_val is None and token:
+                        fallback = NUM_FRAC_RE.search(token) or NUM_DEC_RE.search(token)
+                        dia_val = _to_inch(fallback.group(0)) if fallback else first_inch_value(token)
+            if dia_val is None:
+                fallback = NUM_FRAC_RE.search(desc_text) or NUM_DEC_RE.search(desc_text)
+                if fallback:
+                    dia_val = _to_inch(fallback.group(0))
             dep_val: float | None = None
-            dep_match = _X_DEPTH_RE.search(desc or "")
+            dep_match = _X_DEPTH_RE.search(desc_text)
             if dep_match:
                 depth_token = dep_match.group(1)
                 dep_val = _to_inch(depth_token)
             # must be a counterbore clause
-            if RE_CBORE.search(desc or ""):
+            if RE_CBORE.search(desc_text):
                 key = (dia_val, side_txt, dep_val)
                 cb_groups[key] = cb_groups.get(key, 0) + qty
     # 3b) Parse chart claims (fallback source)
@@ -3820,14 +3827,9 @@ def _cbore_dia_from_text(txt: str) -> float | None:
             candidate = first_inch_value(m.group(0))
         if candidate is not None and candidate > 0:
             return candidate
-    frac = NUM_FRAC_RE.search(text)
-    if frac:
-        val = _to_inch(f"{frac.group(1)}/{frac.group(2)}")
-        if val is not None and val > 0:
-            return val
-    dec = NUM_DEC_RE.search(text)
-    if dec:
-        val = _to_inch(dec.group(0))
+    fallback = NUM_FRAC_RE.search(text) or NUM_DEC_RE.search(text)
+    if fallback:
+        val = _to_inch(fallback.group(0))
         if val is not None and val > 0:
             return val
     return None
