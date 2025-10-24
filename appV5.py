@@ -21480,26 +21480,82 @@ def extract_2d_features_from_dxf_or_dwg(path: str | Path) -> dict[str, Any]:
 
     geo = _build_geo_from_ezdxf_doc(doc)
 
-    if isinstance(table_info.get("ops_summary"), dict):
-        geo["ops_summary"] = dict(table_info["ops_summary"])
-    elif table_info.get("ops_summary"):
-        geo["ops_summary"] = table_info["ops_summary"]
+    table_ops_summary = table_info.get("ops_summary") if table_info else None
 
-    if table_info:
-        rows_for_ops = table_info.get("rows") or []
-        if rows_for_ops:
-            ops_summary_map = geo.setdefault("ops_summary", {})
+    rows_for_ops = (table_info or {}).get("rows") or []
+    if rows_for_ops:
+        agg_from_rows = aggregate_ops_from_rows(rows_for_ops)
+        agg_totals = (
+            agg_from_rows.get("totals")
+            if isinstance(agg_from_rows, Mapping)
+            else None
+        )
+
+        def _ensure_ops_summary(G):
+            if not isinstance(G, dict):
+                return
+
+            existing_summary = G.get("ops_summary")
+            if isinstance(existing_summary, Mapping):
+                ops_summary_map: dict[str, Any] = dict(existing_summary)
+            else:
+                ops_summary_map = {}
+
+            if isinstance(table_ops_summary, Mapping):
+                for key, value in table_ops_summary.items():
+                    if key in {"rows", "totals"}:
+                        continue
+                    ops_summary_map.setdefault(key, value)
+
             ops_summary_map["rows"] = rows_for_ops
-            print(
-                "[EXTRACTOR] geo.ops_summary present:",
-                list(geo.get("ops_summary", {}).keys()),
+
+            totals_map: dict[str, Any] = {}
+            if isinstance(existing_summary, Mapping):
+                existing_totals = existing_summary.get("totals")
+                if isinstance(existing_totals, Mapping):
+                    totals_map.update(existing_totals)
+            if isinstance(table_ops_summary, Mapping):
+                table_totals = table_ops_summary.get("totals")
+                if isinstance(table_totals, Mapping):
+                    totals_map.update(table_totals)
+            if isinstance(ops_summary_map.get("totals"), Mapping):
+                totals_map.update(dict(ops_summary_map["totals"]))
+            if isinstance(agg_totals, Mapping):
+                totals_map.update(agg_totals)
+            ops_summary_map["totals"] = totals_map
+
+            if isinstance(agg_from_rows, Mapping):
+                for key in ("actions_total", "back_ops_total", "flip_required"):
+                    if key in agg_from_rows and key not in ops_summary_map:
+                        ops_summary_map[key] = agg_from_rows[key]
+
+            G["ops_summary"] = ops_summary_map
+
+        _ensure_ops_summary(geo)
+        nested_geo = geo.get("geo") if isinstance(geo, dict) else None
+        if isinstance(nested_geo, dict):
+            _ensure_ops_summary(nested_geo)
+
+        try:
+            geo["hole_count"] = int(
+                table_info.get("hole_count")
+                or (geo.get("hole_count") if isinstance(geo, dict) else 0)
+                or 0
             )
-            agg = aggregate_ops_from_rows(rows_for_ops)
-            ops_summary_map["totals"] = agg.get("totals", {})
-            ops_summary_map["actions_total"] = agg.get("actions_total", 0)
-            ops_summary_map["back_ops_total"] = agg.get("back_ops_total", 0)
-            ops_summary_map["flip_required"] = agg.get("flip_required", False)
-            geo["hole_count"] = int(table_info.get("hole_count") or 0)
+        except Exception:
+            pass
+
+        try:
+            qty_sum = sum(int(r.get("qty") or 0) for r in rows_for_ops)
+        except Exception:
+            qty_sum = 0
+        print(
+            f"[EXTRACTOR] wrote ops rows: {len(rows_for_ops)} (qty_sum={qty_sum})"
+        )
+    elif isinstance(table_ops_summary, Mapping):
+        geo["ops_summary"] = dict(table_ops_summary)
+    elif table_ops_summary:
+        geo["ops_summary"] = table_ops_summary
 
     hole_source: str | None = None
     provenance_entry = geo.get("provenance")
