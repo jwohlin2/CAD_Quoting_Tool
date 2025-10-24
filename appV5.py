@@ -3320,23 +3320,25 @@ def _append_counterbore_spot_jig_cards(
         """Return a numeric counterbore diameter from ``text`` if present."""
 
         mcb = _CB_DIA_RE.search(text)
-        if not mcb:
+        raw = ""
+        if mcb:
+            raw = (mcb.group("numA") or mcb.group("numB") or "").replace(" ", "")
+        else:
             mcb = re.search(
                 r"(?:Ø|%%[Cc])?\s*(\d+(?:\.\d+)?|\.\d+)\s*C[’']?\s*BORE",
                 text,
                 re.IGNORECASE,
             )
-            if not mcb:
-                return None
-            raw = mcb.group(1)
-        else:
-            raw = (mcb.group("numA") or mcb.group("numB") or "").replace(" ", "")
-        if not raw:
-            return None
-        try:
-            return float(Fraction(raw)) if "/" in raw else float(raw)
-        except Exception:
-            return None
+            if mcb:
+                raw = mcb.group(1)
+        if raw:
+            val = _to_inch(raw)
+            if val is not None:
+                return val
+        mf = NUM_FRAC_RE.search(text)
+        md = NUM_DEC_RE.search(text)
+        token = mf.group(0) if mf else (md.group(0) if md else "")
+        return _to_inch(token.replace(" ", "")) if token else None
 
     # ---------- PASS A: parse ROWS when available ----------
     if isinstance(rows, list) and rows:
@@ -3350,7 +3352,7 @@ def _append_counterbore_spot_jig_cards(
             dia = _extract_counterbore_dia(s)
             if dia is not None:
                 mdepth = _X_DEPTH_RE.search(s)
-                depth = float(mdepth.group(1)) if mdepth else None
+                depth = _to_inch(mdepth.group(1)) if mdepth else None
                 if side == "BOTH":
                     for sd in ("FRONT","BACK"):
                         cb_groups[(dia, sd, depth)] = cb_groups.get((dia, sd, depth), 0) + qty
@@ -3383,7 +3385,7 @@ def _append_counterbore_spot_jig_cards(
                 dia = _extract_counterbore_dia(s)
                 if dia is not None:
                     mdepth = _X_DEPTH_RE.search(s)
-                    depth = float(mdepth.group(1)) if mdepth else None
+                    depth = _to_inch(mdepth.group(1)) if mdepth else None
                     if side == "BOTH":
                         for sd in ("FRONT", "BACK"):
                             cb_groups[(dia, sd, depth)] = cb_groups.get((dia, sd, depth), 0) + qty
