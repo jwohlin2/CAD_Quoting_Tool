@@ -19934,6 +19934,56 @@ def _looks_like_hole_header(s: str) -> bool:
     )
 
 
+_RE_TEXT_ROW_START = re.compile(r"^\(\s*(\d+)\s*\)")
+
+
+def _merge_wrapped_text_rows(
+    rows: Sequence[Mapping[str, str]] | None,
+) -> list[dict[str, str]]:
+    """Merge wrapped HOLE TABLE rows captured from text entities.
+
+    A row is considered to start when the first non-empty field begins with
+    ``(n)``. Subsequent rows without that marker are appended to the most recent
+    starter, preserving column assignments (hole/ref/qty/desc) while collapsing
+    whitespace. ``qty`` is backfilled from the ``(n)`` token when missing.
+    """
+
+    merged: list[dict[str, str]] = []
+    if not rows:
+        return merged
+
+    for raw in rows:
+        base = {key: " ".join(str(raw.get(key, "")).split()) for key in ("hole", "ref", "qty", "desc")}
+        lead = next((base[key] for key in ("hole", "ref", "qty", "desc") if base[key]), "")
+        starts_new = bool(_RE_TEXT_ROW_START.match(lead))
+        if starts_new or not merged:
+            if not base.get("qty"):
+                m_hint = _RE_TEXT_ROW_START.match(lead)
+                if m_hint:
+                    base["qty"] = m_hint.group(1)
+            merged.append(base)
+            continue
+        prev = merged[-1]
+        for key, value in base.items():
+            if not value:
+                continue
+            if prev.get(key):
+                prev[key] = f"{prev[key]} {value}".strip()
+            else:
+                prev[key] = value
+
+    for row in merged:
+        if row.get("qty"):
+            continue
+        for key in ("hole", "ref", "desc"):
+            m_qty = _RE_TEXT_ROW_START.match(row.get(key, ""))
+            if m_qty:
+                row["qty"] = m_qty.group(1)
+                break
+
+    return merged
+
+
 def extract_hole_table_from_text(doc, y_tol: float = 0.04, min_rows: int = 5):
     """
     Returns dict like:
@@ -20018,6 +20068,8 @@ def extract_hole_table_from_text(doc, y_tol: float = 0.04, min_rows: int = 5):
         if _looks_like_hole_header(joined):
             break
         rows.append({"hole": hole, "ref": ref, "qty": qtys, "desc": desc})
+
+    rows = _merge_wrapped_text_rows(rows)
 
     if len(rows) < min_rows:
         return {}
