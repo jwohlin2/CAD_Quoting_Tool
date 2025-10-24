@@ -10,6 +10,7 @@ from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence
 
 from cad_quoter.utils.number_parse import (
     NUM_DEC_RE,
+    NUM_FRAC_RE,
     VALUE_PATTERN,
     _to_inch,
     first_inch_value,
@@ -284,7 +285,10 @@ def _parse_description(desc: str) -> List[Dict[str, Any]]:
     if cbore_depth:
         depth_in = _to_inch(cbore_depth.group(1))
         dia_match = re.search(rf"({VALUE_PATTERN})\s*[Ø⌀\u00D8]?\s*C['’]?BORE", text)
-        dia_in = _to_inch(dia_match.group(1)) if dia_match else first_inch_value(text)
+        dia_in = _to_inch(dia_match.group(1)) if dia_match else None
+        if dia_in is None:
+            fallback = NUM_FRAC_RE.search(text) or NUM_DEC_RE.search(text)
+            dia_in = _to_inch(fallback.group(0)) if fallback else first_inch_value(text)
         depth_val = depth_in * INCH_TO_MM if depth_in is not None else None
         dia_val = dia_in * INCH_TO_MM if dia_in is not None else None
         tokens.append({"type": "cbore", "dia_mm": dia_val, "depth_mm": depth_val, "source": "desc"})

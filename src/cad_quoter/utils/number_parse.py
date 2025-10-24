@@ -3,8 +3,6 @@
 from __future__ import annotations
 
 import re
-from fractions import Fraction
-from typing import Optional
 
 __all__ = [
     "NUM_DEC_RE",
@@ -20,7 +18,7 @@ _NUM_FRAC_PATTERN = r"(?<!\d)(?:\d+\s*/\s*\d+)(?!\d)"
 VALUE_PATTERN = rf"(?:{_NUM_FRAC_PATTERN}|{NUM_DEC_RE.pattern})"
 
 
-def _to_inch(num_text: str) -> Optional[float]:
+def _to_inch(num_text: str) -> float | None:
     """Convert a numeric token to an inch float, normalising leading dots."""
 
     s = (num_text or "").strip()
@@ -28,6 +26,8 @@ def _to_inch(num_text: str) -> Optional[float]:
         return None
     if "/" in s:
         try:
+            from fractions import Fraction
+
             return float(Fraction(s))
         except Exception:
             return None
@@ -39,7 +39,7 @@ def _to_inch(num_text: str) -> Optional[float]:
         return None
 
 
-def first_inch_value(text: str | None) -> Optional[float]:
+def first_inch_value(text: str | None) -> float | None:
     """Return the first recognised inch value from text, if any."""
 
     if not text:
