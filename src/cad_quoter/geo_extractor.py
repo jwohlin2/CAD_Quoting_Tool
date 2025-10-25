@@ -23,6 +23,8 @@ _HAS_ODAFC = bool(getattr(geometry, "HAS_ODAFC", False))
 _DEFAULT_LAYER_ALLOWLIST = frozenset({"BALLOON"})
 _PREFERRED_BLOCK_NAME_RE = re.compile(r"HOLE.*(?:CHART|TABLE)", re.IGNORECASE)
 
+_LAST_ACAD_TABLE_SCAN: dict[str, Any] | None = None
+
 
 def _normalize_block_allowlist(
     block_allowlist: Iterable[str] | None,
@@ -325,23 +327,24 @@ def read_acad_table(
         return {}
 
     allowlist = _normalize_layer_allowlist(layer_allowlist)
-    allowlist_display = (
-        "None"
-        if allowlist is None
-        else "{" + ",".join(sorted(allowlist) or []) + "}"
-    )
-
-    if doc is None:
-        print(
-            "[ACAD-TABLE] scanned layouts=0 blocks=0 tables_found=0"
-        )
-        return {}
+    global _LAST_ACAD_TABLE_SCAN
 
     layouts_scanned: set[str] = set()
     blocks_scanned: set[str] = set()
     seen_table_handles: set[str] = set()
     tables_found = 0
     table_candidates: list[dict[str, Any]] = []
+    scan_tables: list[dict[str, Any]] = []
+
+    if doc is None:
+        print("[ACAD-TABLE] scanned layouts=0 blocks=0 tables_found=0")
+        _LAST_ACAD_TABLE_SCAN = {
+            "layouts": [],
+            "blocks": [],
+            "tables_found": 0,
+            "tables": [],
+        }
+        return {}
 
     def _iter_layout_containers() -> Iterable[tuple[str, Any, bool]]:
         seen_layouts: set[int] = set()
@@ -553,7 +556,13 @@ def read_acad_table(
                     if text_value:
                         break
         if not text_value:
-            for method_name in ("get_cell_text", "get_text", "cell_text"):
+            for method_name in (
+                "get_cell_text",
+                "get_display_text",
+                "get_text_with_formatting",
+                "get_text",
+                "cell_text",
+            ):
                 method = getattr(entity, method_name, None)
                 if not callable(method):
                     continue
@@ -641,7 +650,9 @@ def read_acad_table(
     for layout_name, layout_obj, is_block in _iter_layout_containers():
         if layout_obj is None:
             continue
+        owner_label = layout_name
         if is_block:
+            owner_label = f"BLOCK:{layout_name}"
             blocks_scanned.add(layout_name)
         else:
             layouts_scanned.add(layout_name)
@@ -661,9 +672,23 @@ def read_acad_table(
                 layer_name = str(getattr(dxf_obj, "layer", "") or "").strip()
             n_rows = _table_dimension(table_entity, ("n_rows", "row_count", "rows"))
             n_cols = _table_dimension(table_entity, ("n_cols", "column_count", "cols"))
+            table_entry: dict[str, Any] = {
+                "owner": owner_label,
+                "layer": layer_name,
+                "handle": handle_str,
+                "rows": int(n_rows or 0),
+                "cols": int(n_cols or 0),
+                "header_tokens": False,
+            }
+            scan_tables.append(table_entry)
             print(
-                f"[ACAD-TABLE] table handle={handle_str} layer={layer_name or '-'} "
-                f"owner={layout_name} rows={n_rows or 0} cols={n_cols or 0}"
+                "[ACAD-TABLE] hit owner={owner} layer={layer} handle={handle} rows={rows} cols={cols}".format(
+                    owner=owner_label,
+                    layer=layer_name or "-",
+                    handle=handle_str,
+                    rows=int(n_rows or 0),
+                    cols=int(n_cols or 0),
+                )
             )
             if not n_rows or not n_cols:
                 continue
@@ -687,13 +712,20 @@ def read_acad_table(
                 continue
 
             header_map: dict[str, int] = {}
-            for row_cells in table_cells:
+            header_row_idx: int | None = None
+            header_tokens_hit = False
+            for idx, row_cells in enumerate(table_cells):
                 hits = _detect_header_hits(row_cells)
                 if not hits:
                     continue
-                if "qty" in hits or len(hits) >= 2:
-                    for key, value in hits.items():
-                        header_map.setdefault(key, value)
+                header_map = dict(hits)
+                header_row_idx = idx
+                combined_upper = " ".join(cell.upper() for cell in row_cells if cell)
+                for token in ("QTY", "Ø", "⌀", "DIA", "DIAM", "HOLE", "DESCRIPTION", "DESC"):
+                    if token in combined_upper:
+                        header_tokens_hit = True
+                        break
+                break
             if "desc" not in header_map and table_cells:
                 candidate_indices = list(range(len(table_cells[0])))
                 for used in header_map.values():
@@ -701,10 +733,17 @@ def read_acad_table(
                         candidate_indices.remove(used)
                 if candidate_indices:
                     header_map["desc"] = max(candidate_indices)
+            if header_tokens_hit:
+                table_entry["header_tokens"] = True
 
             table_rows: list[dict[str, Any]] = []
             families: dict[str, int] = {}
-            for row_cells in table_cells:
+            for idx, row_cells in enumerate(table_cells):
+                if header_row_idx is not None and idx <= header_row_idx:
+                    continue
+                hits = _detect_header_hits(row_cells)
+                if hits:
+                    continue
                 combined_text = " ".join(cell.strip() for cell in row_cells if cell).strip()
                 if not combined_text:
                     continue
@@ -808,25 +847,38 @@ def read_acad_table(
                     "median_height": median_height,
                 }
 
+            sum_qty = _sum_qty(table_rows)
+            table_entry["row_count"] = len(table_rows)
+            table_entry["sum_qty"] = sum_qty
+
             candidate = {
                 "rows": table_rows,
                 "families": families,
                 "layer": layer_name,
                 "layer_upper": layer_name.upper() if layer_name else "",
-                "owner": layout_name,
+                "owner": owner_label,
                 "handle": handle_str,
                 "n_rows": int(n_rows),
                 "n_cols": int(n_cols),
                 "row_count": len(table_rows),
-                "sum_qty": _sum_qty(table_rows),
+                "sum_qty": sum_qty,
                 "roi_hint": roi_hint,
                 "median_height": median_height,
+                "header_tokens": header_tokens_hit,
             }
             table_candidates.append(candidate)
 
+    _LAST_ACAD_TABLE_SCAN = {
+        "layouts": sorted(layouts_scanned),
+        "blocks": sorted(blocks_scanned),
+        "tables_found": tables_found,
+        "tables": scan_tables,
+        "allow_layers": None if allowlist is None else sorted(allowlist),
+    }
+
     print(
         f"[ACAD-TABLE] scanned layouts={len(layouts_scanned)} blocks={len(blocks_scanned)} "
-        f"tables_found={tables_found} allow_layers={allowlist_display}"
+        f"tables_found={tables_found}"
     )
 
     if not table_candidates:
@@ -842,13 +894,15 @@ def read_acad_table(
     if not preferred_candidates:
         preferred_candidates = table_candidates
 
-    def _priority(candidate: Mapping[str, Any]) -> tuple[int, int, int, int, int]:
+    def _priority(candidate: Mapping[str, Any]) -> tuple[int, int, int, int, int, int]:
         layer_upper = str(candidate.get("layer_upper") or "")
         allow_hit = 1
         if allowlist:
             allow_hit = 1 if layer_upper in allowlist else 0
+        header_bonus = 1 if candidate.get("header_tokens") else 0
         return (
             allow_hit,
+            header_bonus,
             int(candidate.get("n_rows") or 0),
             int(candidate.get("n_cols") or 0),
             int(candidate.get("sum_qty") or 0),
@@ -3839,7 +3893,7 @@ def extract_geometry(doc) -> dict[str, Any]:
     return {}
 
 
-def _load_doc_for_path(path: Path, *, use_oda: bool) -> Any:
+def _load_doc_for_path(path: Path, *, use_oda: bool, out_ver: str | None = None) -> Any:
     ezdxf_mod = geometry.require_ezdxf()
     readfile = getattr(ezdxf_mod, "readfile", None)
     if not callable(readfile):
@@ -3856,7 +3910,10 @@ def _load_doc_for_path(path: Path, *, use_oda: bool) -> Any:
                 odaread = getattr(odafc_mod, "readfile", None)
                 if callable(odaread):
                     return odaread(str(path))
-        dxf_path = convert_dwg_to_dxf(str(path))
+        if out_ver:
+            dxf_path = convert_dwg_to_dxf(str(path), out_ver=out_ver)
+        else:
+            dxf_path = convert_dwg_to_dxf(str(path))
         return readfile(dxf_path)
     return readfile(str(path))
 
@@ -4075,8 +4132,8 @@ def read_geo(
     return result_payload
 
 
-def extract_geo_from_path(
-    path: str,
+def _read_geo_payload_from_path(
+    path_obj: Path,
     *,
     prefer_table: bool = True,
     use_oda: bool = True,
@@ -4085,9 +4142,6 @@ def extract_geo_from_path(
     block_name_allowlist: Iterable[str] | None = None,
     block_name_regex: Iterable[str] | str | None = None,
 ) -> dict[str, Any]:
-    """Load DWG/DXF at ``path`` and return a GEO dictionary."""
-
-    path_obj = Path(path)
     try:
         doc = _load_doc_for_path(path_obj, use_oda=use_oda)
     except Exception as exc:  # pragma: no cover - defensive logging
@@ -4102,6 +4156,55 @@ def extract_geo_from_path(
         block_name_allowlist=block_name_allowlist,
         block_name_regex=block_name_regex,
     )
+
+    scan_info = get_last_acad_table_scan() or {}
+    tables_found = 0
+    try:
+        tables_found = int(scan_info.get("tables_found", 0))  # type: ignore[arg-type]
+    except Exception:
+        tables_found = 0
+    if tables_found == 0 and path_obj.suffix.lower() == ".dwg":
+        print("[ACAD-TABLE] none found; trying DXF2000 fallback conversion")
+        try:
+            fallback_doc = _load_doc_for_path(path_obj, use_oda=use_oda, out_ver="ACAD2000")
+        except Exception as exc:
+            print(f"[ACAD-TABLE] DXF2000 fallback failed: {exc}")
+        else:
+            payload = read_geo(
+                fallback_doc,
+                prefer_table=prefer_table,
+                feature_flags=feature_flags,
+                layer_allowlist=layer_allowlist,
+                block_name_allowlist=block_name_allowlist,
+                block_name_regex=block_name_regex,
+            )
+    return payload
+
+
+def extract_geo_from_path(
+    path: str,
+    *,
+    prefer_table: bool = True,
+    use_oda: bool = True,
+    feature_flags: Mapping[str, Any] | None = None,
+    layer_allowlist: Iterable[str] | None = _DEFAULT_LAYER_ALLOWLIST,
+    block_name_allowlist: Iterable[str] | None = None,
+    block_name_regex: Iterable[str] | str | None = None,
+) -> dict[str, Any]:
+    """Load DWG/DXF at ``path`` and return a GEO dictionary."""
+
+    path_obj = Path(path)
+    payload = _read_geo_payload_from_path(
+        path_obj,
+        prefer_table=prefer_table,
+        use_oda=use_oda,
+        feature_flags=feature_flags,
+        layer_allowlist=layer_allowlist,
+        block_name_allowlist=block_name_allowlist,
+        block_name_regex=block_name_regex,
+    )
+    if "error" in payload:
+        return {"error": payload["error"]}
     geo = payload.get("geo")
     if isinstance(geo, dict):
         return geo
@@ -4121,15 +4224,10 @@ def extract_geo_from_path(
     """Load DWG/DXF at ``path`` and return a GEO dictionary."""
 
     path_obj = Path(path)
-    try:
-        doc = _load_doc_for_path(path_obj, use_oda=use_oda)
-    except Exception as exc:  # pragma: no cover - defensive logging
-        print(f"[EXTRACT] failed to load document: {exc}")
-        return {"error": str(exc)}
-
-    return read_geo(
-        doc,
+    return _read_geo_payload_from_path(
+        path_obj,
         prefer_table=prefer_table,
+        use_oda=use_oda,
         feature_flags=feature_flags,
         layer_allowlist=layer_allowlist,
         block_name_allowlist=block_name_allowlist,
@@ -4140,6 +4238,22 @@ def extract_geo_from_path(
 def get_last_text_table_debug() -> dict[str, Any] | None:
     if isinstance(_LAST_TEXT_TABLE_DEBUG, dict):
         return _LAST_TEXT_TABLE_DEBUG
+    return None
+
+
+def get_last_acad_table_scan() -> dict[str, Any] | None:
+    if isinstance(_LAST_ACAD_TABLE_SCAN, Mapping):
+        scan: dict[str, Any] = dict(_LAST_ACAD_TABLE_SCAN)
+        tables = scan.get("tables")
+        if isinstance(tables, list):
+            normalized: list[dict[str, Any]] = []
+            for entry in tables:
+                if isinstance(entry, Mapping):
+                    normalized.append(dict(entry))
+                else:
+                    normalized.append({"value": entry})
+            scan["tables"] = normalized
+        return scan
     return None
 
 
@@ -4155,4 +4269,5 @@ __all__ = [
     "extract_geometry",
     "read_geo",
     "get_last_text_table_debug",
+    "get_last_acad_table_scan",
 ]
