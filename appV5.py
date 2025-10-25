@@ -308,7 +308,7 @@ from cad_quoter.app.op_parser import (
     _parse_qty as _shared_parse_qty,
     _side as _shared_side,
 )
-from typing import Any as _AnyForCoerce
+from cad_quoter.utils.numeric import coerce_positive_float
 
 try:
     from cad_quoter.geometry.dxf_text import (
@@ -323,27 +323,6 @@ except Exception:
         re.IGNORECASE,
     )
     _harvest_dxf_text_lines = None
-
-
-def _coerce_positive_float(value: _AnyForCoerce) -> float | None:
-    """Best-effort positive finite float coercion without importing utils early.
-
-    Avoids a circular import between utils.numeric and domain_models.values at
-    app startup by providing a local fallback.
-    """
-
-    try:
-        number = float(value)
-    except Exception:
-        return None
-    try:
-        if not math.isfinite(number):
-            return None
-    except Exception:
-        pass
-    return number if number > 0 else None
-
-
 # --- GEO helpers -------------------------------------------------------------
 
 
@@ -656,7 +635,7 @@ def _normalize_extra_bucket_payload(
 
     def _extract_cost(*keys: str) -> float:
         for key in keys:
-            cost_val = _coerce_positive_float(data.get(key))
+            cost_val = coerce_positive_float(data.get(key))
             if cost_val is not None:
                 return cost_val
         return 0.0
@@ -5052,7 +5031,7 @@ def _resolve_part_thickness_in(
     def _maybe_t(container: Mapping[str, Any] | MutableMapping[str, Any] | None) -> float | None:
         if not isinstance(container, _MappingABC):
             return None
-        t_val = _coerce_positive_float(container.get("t"))
+        t_val = coerce_positive_float(container.get("t"))
         return float(t_val) if t_val else None
 
     for ctx in contexts:
@@ -5064,7 +5043,7 @@ def _resolve_part_thickness_in(
             if t_guess:
                 return t_guess
         for key in ("thickness_in", "thk_in", "thickness", "t"):
-            t_guess = _coerce_positive_float(ctx.get(key))
+            t_guess = coerce_positive_float(ctx.get(key))
             if t_guess:
                 return float(t_guess)
     return float(default)
@@ -10453,9 +10432,9 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
     blank_sources.append(_lookup_blank(pricing_geom if isinstance(pricing_geom, _MappingABC) else None))
 
     req_map: Mapping[str, Any] | None = next((entry for entry in blank_sources if entry), None)
-    w_val = _coerce_positive_float(req_map.get("w")) if req_map else None
-    h_val = _coerce_positive_float(req_map.get("h")) if req_map else None
-    t_val = _coerce_positive_float(req_map.get("t")) if req_map else None
+    w_val = coerce_positive_float(req_map.get("w")) if req_map else None
+    h_val = coerce_positive_float(req_map.get("h")) if req_map else None
+    t_val = coerce_positive_float(req_map.get("t")) if req_map else None
     w = float(w_val) if w_val else 0.0
     h = float(h_val) if h_val else 0.0
     t = float(t_val) if t_val else 0.0
@@ -10492,8 +10471,8 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
         if not isinstance(candidate, _MappingABC):
             return False
         return bool(
-            _coerce_positive_float(candidate.get("w"))
-            and _coerce_positive_float(candidate.get("h"))
+            coerce_positive_float(candidate.get("w"))
+            and coerce_positive_float(candidate.get("h"))
         )
 
     def _apply_blank_hint(container: Mapping[str, Any] | None) -> None:
@@ -10529,11 +10508,11 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
         _apply_blank_hint(container)
 
     if blank_len > 0 and isinstance(material_stock_block, _MutableMappingABC):
-        if _coerce_positive_float(material_stock_block.get("required_blank_len_in")) is None:
+        if coerce_positive_float(material_stock_block.get("required_blank_len_in")) is None:
             material_stock_block["required_blank_len_in"] = float(blank_len)
-        if _coerce_positive_float(material_stock_block.get("required_blank_wid_in")) is None:
+        if coerce_positive_float(material_stock_block.get("required_blank_wid_in")) is None:
             material_stock_block["required_blank_wid_in"] = float(blank_wid)
-        if required_blank[2] > 0 and _coerce_positive_float(
+        if required_blank[2] > 0 and coerce_positive_float(
             material_stock_block.get("required_blank_thk_in")
         ) is None:
             material_stock_block["required_blank_thk_in"] = float(required_blank[2])
@@ -16740,11 +16719,11 @@ def build_geometry_context(
             geom.setdefault("material", material_text)
             geom.setdefault("material_name", material_text)
 
-        thickness_mm_ui = _coerce_positive_float(resolved_map.get("Thickness (mm)"))
+        thickness_mm_ui = coerce_positive_float(resolved_map.get("Thickness (mm)"))
         if thickness_mm_ui is not None:
             geom.setdefault("thickness_mm", thickness_mm_ui)
 
-        thickness_in_ui = _coerce_positive_float(resolved_map.get("Thickness (in)"))
+        thickness_in_ui = coerce_positive_float(resolved_map.get("Thickness (in)"))
         if thickness_in_ui is not None:
             geom.setdefault("thickness_in", thickness_in_ui)
 
@@ -21721,11 +21700,11 @@ def _build_geo_from_ezdxf_doc(doc) -> dict[str, Any]:
         geo["hole_cloud_bbox_in"] = hole_bbox_in
         derived_entries["hole_cloud_bbox_in"] = hole_bbox_in
 
-    thickness_hint = _coerce_positive_float(thickness_guess)
+    thickness_hint = coerce_positive_float(thickness_guess)
     if stock_plan:
-        need_len_in = _coerce_positive_float(stock_plan.get("need_len_in"))
-        need_wid_in = _coerce_positive_float(stock_plan.get("need_wid_in"))
-        need_thk_in = _coerce_positive_float(
+        need_len_in = coerce_positive_float(stock_plan.get("need_len_in"))
+        need_wid_in = coerce_positive_float(stock_plan.get("need_wid_in"))
+        need_thk_in = coerce_positive_float(
             stock_plan.get("need_thk_in") or stock_plan.get("stock_thk_in")
         )
         if need_thk_in:
@@ -21744,8 +21723,8 @@ def _build_geo_from_ezdxf_doc(doc) -> dict[str, Any]:
             derived_entries["required_blank_in"] = blank_dict
 
     if "required_blank_in" not in geo and hole_bbox_in:
-        hole_w = _coerce_positive_float(hole_bbox_in.get("w"))
-        hole_h = _coerce_positive_float(hole_bbox_in.get("h"))
+        hole_w = coerce_positive_float(hole_bbox_in.get("w"))
+        hole_h = coerce_positive_float(hole_bbox_in.get("h"))
         if hole_w and hole_h:
             dims_sorted = sorted([float(hole_h), float(hole_w)], reverse=True)
             blank_dict = {
@@ -21757,11 +21736,11 @@ def _build_geo_from_ezdxf_doc(doc) -> dict[str, Any]:
             geo["required_blank_in"] = blank_dict
             derived_entries.setdefault("required_blank_in", blank_dict)
 
-    len_hint = _coerce_positive_float(geo.get("plate_len_in"))
-    wid_hint = _coerce_positive_float(geo.get("plate_wid_in"))
+    len_hint = coerce_positive_float(geo.get("plate_len_in"))
+    wid_hint = coerce_positive_float(geo.get("plate_wid_in"))
     if (len_hint is None or wid_hint is None) and hole_bbox_in:
-        span_h = _coerce_positive_float(hole_bbox_in.get("span_h"))
-        span_w = _coerce_positive_float(hole_bbox_in.get("span_w"))
+        span_h = coerce_positive_float(hole_bbox_in.get("span_h"))
+        span_w = coerce_positive_float(hole_bbox_in.get("span_w"))
         if len_hint is None and span_h:
             len_hint = float(span_h)
         if wid_hint is None and span_w:
