@@ -569,6 +569,32 @@ def read_step_or_iges_or_brep(path: str) -> TopoDS_Shape:
         return _brep_read(str(p))
     raise RuntimeError(f"Unsupported OCC format: {ext}")
 
+def _normalize_oda_out_ver(out_ver: object | None) -> str:
+    """Normalize an AutoCAD version enum/value to ODA's expected string."""
+
+    default = "ACAD2018"
+    if out_ver is None:
+        return default
+    try:
+        text = str(out_ver).strip().upper()
+    except Exception:
+        return default
+
+    mapping = {
+        "ACAD2000": "ACAD2000",
+        "2000": "ACAD2000",
+        "ACAD2004": "ACAD2004",
+        "2004": "ACAD2004",
+        "ACAD2007": "ACAD2007",
+        "2007": "ACAD2007",
+        "ACAD2013": "ACAD2013",
+        "2013": "ACAD2013",
+        "ACAD2018": "ACAD2018",
+        "2018": "ACAD2018",
+    }
+    return mapping.get(text, text or default)
+
+
 def convert_dwg_to_dxf(dwg_path: str, *, out_ver="ACAD2018") -> str:
     """
     Robust DWG?DXF wrapper.
@@ -597,20 +623,56 @@ def convert_dwg_to_dxf(dwg_path: str, *, out_ver="ACAD2018") -> str:
     out_dxf = out_dir / (dwg.stem + ".dxf")
 
     exe_lower = Path(exe).name.lower()
+    resolved_out_ver = _normalize_oda_out_ver(out_ver)
     try:
         if exe_lower.endswith(".bat") or exe_lower.endswith(".cmd"):
             # ? run batch via cmd.exe so it actually executes
             cmd = ["cmd", "/c", exe, str(dwg), str(out_dxf)]
-            proc = subprocess.run(cmd, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+            print(f"[ODAFileConverter] Running converter: {cmd}")
+            subprocess.run(
+                cmd,
+                check=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+            )
         elif "odafileconverter" in exe_lower:
             # ? official ODAFileConverter CLI
-            cmd = [exe, str(dwg.parent), str(out_dir), out_ver, "DXF", "0", "0", dwg.name]
-            proc = subprocess.run(cmd, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+            cmd = [
+                exe,
+                str(dwg.parent),
+                str(out_dir),
+                resolved_out_ver,
+                "DXF",
+                "0",
+                "0",
+                dwg.name,
+            ]
+            print(f"[ODAFileConverter] Running ODAFileConverter: {cmd}")
+            subprocess.run(
+                cmd,
+                check=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+            )
         else:
             # ? generic exe that accepts <in> <out>
             cmd = [exe, str(dwg), str(out_dxf)]
-            proc = subprocess.run(cmd, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+            print(f"[ODAFileConverter] Running converter: {cmd}")
+            subprocess.run(
+                cmd,
+                check=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+            )
     except subprocess.CalledProcessError as e:
+        print(
+            "[ODAFileConverter] conversion failed",
+            f"returncode={e.returncode}",
+            f"argv={cmd}",
+        )
         raise RuntimeError(
             "DWG?DXF conversion failed.\n"
             f"cmd: {' '.join(cmd)}\n"
@@ -626,6 +688,7 @@ def convert_dwg_to_dxf(dwg_path: str, *, out_ver="ACAD2018") -> str:
             f"cmd: {' '.join(cmd)}\n"
             f"checked: {out_dxf} | {produced}"
         )
+    print(f"[ODAFileConverter] produced DXF: {produced}")
     return str(produced)
 
 
