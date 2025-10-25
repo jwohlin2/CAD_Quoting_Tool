@@ -32,10 +32,12 @@ except ModuleNotFoundError:  # pragma: no cover - load shim for tests
 
 from appV5 import (  # noqa: E402  # pylint: disable=wrong-import-position
     _append_counterbore_spot_jig_cards,
-    _append_counterdrill_extra,
     _count_counterdrill,
     _count_jig,
     _count_spot_and_jig,
+)
+from cad_quoter.ui.bucket_ops import (  # noqa: E402  # pylint: disable=wrong-import-position
+    _append_counterdrill_extra,
     _publish_extra_bucket_op,
     COUNTERDRILL_MIN_PER_SIDE_MIN,
     JIG_GRIND_MIN_PER_FEATURE,

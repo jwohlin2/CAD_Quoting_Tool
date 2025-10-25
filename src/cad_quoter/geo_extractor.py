@@ -51,6 +51,86 @@ def _print_helper_debug(tag: str, helper: Any) -> None:
     print(f"[EXTRACT] {tag} helper: {helper_desc}")
 
 
+def _safe_file_size(path: Path) -> int | None:
+    try:
+        return path.stat().st_size
+    except OSError:
+        return None
+
+
+def _doc_auditor_status(doc: Any) -> str | None:
+    audit = getattr(doc, "audit", None)
+    if not callable(audit):
+        return None
+    try:
+        auditor = audit()
+    except Exception as exc:  # pragma: no cover - defensive logging
+        return f"error={exc}"
+    errors = len(getattr(auditor, "errors", []) or [])
+    warnings = len(getattr(auditor, "warnings", []) or [])
+    fixes = len(getattr(auditor, "fixes", []) or [])
+    return f"errors={errors} warnings={warnings} fixes={fixes}"
+
+
+def _layout_entity_counts(doc: Any) -> dict[str, int]:
+    totals: dict[str, int] = {"TABLE": 0, "MTEXT": 0, "TEXT": 0, "INSERT": 0}
+    layouts = getattr(doc, "layouts", None)
+    if layouts is None:
+        return totals
+    try:
+        layout_iterable = list(layouts)
+    except Exception:  # pragma: no cover - defensive logging
+        try:
+            layout_iterable = list(iter(layouts))
+        except Exception:
+            return totals
+    if not layout_iterable:
+        return totals
+    for layout in layout_iterable:
+        layout_name = getattr(layout, "name", None)
+        if not layout_name:
+            dxf_obj = getattr(layout, "dxf", None)
+            layout_name = getattr(dxf_obj, "name", None)
+        if not layout_name:
+            layout_name = str(layout)
+        counts: list[str] = []
+        for entity_type in ("TABLE", "MTEXT", "TEXT", "INSERT"):
+            query = getattr(layout, "query", None)
+            count = 0
+            if callable(query):
+                try:
+                    results = query(entity_type)
+                except Exception:
+                    results = []
+                try:
+                    count = len(results)
+                except TypeError:
+                    try:
+                        count = sum(1 for _ in results)
+                    except Exception:
+                        count = 0
+            totals[entity_type] = totals.get(entity_type, 0) + count
+            counts.append(f"{entity_type}={count}")
+        print(f"[LAYOUT] {layout_name}: {' '.join(counts)}")
+    return totals
+
+
+def _print_doc_open_diagnostics(doc: Any, path: Path) -> dict[str, int]:
+    size = _safe_file_size(path)
+    line = f"[OPEN] file={path} size={size if size is not None else 'unknown'}"
+    auditor_status = _doc_auditor_status(doc)
+    if auditor_status:
+        line += f" auditor={auditor_status}"
+    print(line)
+    return _layout_entity_counts(doc)
+
+
+def _should_attempt_dwg_conversion(counts: Mapping[str, int] | None) -> bool:
+    if not isinstance(counts, Mapping):
+        return False
+    return sum(int(counts.get(key, 0)) for key in ("TABLE", "MTEXT", "TEXT")) == 0
+
+
 _ROW_START_RE = re.compile(r"\(\s*\d+\s*\)")
 _DIAMETER_PREFIX_RE = re.compile(
     r"(?:Ø|⌀|DIA(?:\.\b|\b))\s*(\d+\s*/\s*\d+|\d*\.\d+|\.\d+|\d+)",
@@ -89,6 +169,136 @@ def _sum_qty(rows: Iterable[Mapping[str, Any]] | None) -> int:
 def read_acad_table(doc) -> dict[str, Any]:
     helper = _resolve_app_callable("hole_count_from_acad_table")
     _print_helper_debug("acad", helper)
+    total_tables = 0
+    total_tables_in_blocks = 0
+
+    if doc is not None:
+        layouts: list[tuple[str, Any]] = []
+
+        def _layout_label(layout: Any, fallback: str) -> str:
+            name = getattr(layout, "name", None) or getattr(layout, "layout_key", None)
+            if not name:
+                dxf_obj = getattr(layout, "dxf", None)
+                name = getattr(dxf_obj, "name", None)
+            if isinstance(name, str) and name:
+                return name
+            return fallback
+
+        # Model space
+        modelspace = getattr(doc, "modelspace", None)
+        if callable(modelspace):
+            try:
+                model_layout = modelspace()
+            except Exception:
+                model_layout = None
+            if model_layout is not None:
+                layouts.append((_layout_label(model_layout, "Model"), model_layout))
+
+        layout_manager = getattr(doc, "layouts", None)
+        layout_names: list[str] = []
+        if layout_manager is not None:
+            name_sources = [
+                getattr(layout_manager, "names", None),
+                getattr(layout_manager, "get_layout_names", None),
+            ]
+            for source in name_sources:
+                if source is None:
+                    continue
+                try:
+                    names = source() if callable(source) else source
+                except Exception:
+                    continue
+                if names:
+                    try:
+                        layout_names = list(names)
+                    except Exception:
+                        layout_names = [str(names)]
+                    break
+        get_layout = getattr(layout_manager, "get", None)
+        for name in layout_names:
+            if isinstance(name, str) and name.lower() == "model":
+                continue
+            layout_obj = None
+            if callable(get_layout):
+                try:
+                    layout_obj = get_layout(name)
+                except Exception:
+                    layout_obj = None
+            if layout_obj is None and layout_manager is not None:
+                try:
+                    layout_obj = layout_manager[name]
+                except Exception:
+                    layout_obj = None
+            if layout_obj is not None:
+                layouts.append((_layout_label(layout_obj, str(name)), layout_obj))
+
+        blocks = getattr(doc, "blocks", None)
+
+        def resolve_block(block_name: Any) -> Any:
+            if not block_name or blocks is None:
+                return None
+            name_str = str(block_name)
+            for attr_name in ("get", "get_block"):
+                getter = getattr(blocks, attr_name, None)
+                if callable(getter):
+                    try:
+                        return getter(name_str)
+                    except Exception:
+                        continue
+            try:
+                return blocks[name_str]
+            except Exception:
+                return None
+
+        block_table_cache: dict[str, int] = {}
+
+        for layout_name, layout in layouts:
+            table_count = 0
+            layout_block_tables = 0
+            query = getattr(layout, "query", None)
+            inserts: list[Any] = []
+            if callable(query):
+                try:
+                    table_count = len(list(query("TABLE")))
+                except Exception:
+                    table_count = 0
+                try:
+                    inserts = list(query("INSERT"))
+                except Exception:
+                    inserts = []
+            for insert in inserts:
+                block_name = None
+                dxf_obj = getattr(insert, "dxf", None)
+                if dxf_obj is not None:
+                    block_name = getattr(dxf_obj, "name", None)
+                if not block_name:
+                    block_name = getattr(insert, "name", None)
+                if not block_name:
+                    continue
+                block_name_str = str(block_name)
+                if block_name_str in block_table_cache:
+                    block_tables = block_table_cache[block_name_str]
+                else:
+                    block = resolve_block(block_name_str)
+                    block_tables = 0
+                    if block is not None:
+                        block_query = getattr(block, "query", None)
+                        if callable(block_query):
+                            try:
+                                block_tables = len(list(block_query("TABLE")))
+                            except Exception:
+                                block_tables = 0
+                    block_table_cache[block_name_str] = block_tables
+                layout_block_tables += block_tables
+            print(
+                f"[ACAD-SCAN] layout={layout_name} tables={table_count} tables_in_blocks={layout_block_tables}"
+            )
+            total_tables += table_count
+            total_tables_in_blocks += layout_block_tables
+
+    if total_tables == 0 and total_tables_in_blocks == 0:
+        print("[ACAD-SCAN] no tables found in any layout or block.")
+
     if callable(helper):
         try:
             result = helper(doc) or {}
@@ -96,9 +306,29 @@ def read_acad_table(doc) -> dict[str, Any]:
             print(f"[EXTRACT] acad helper error: {exc}")
             raise
         if isinstance(result, Mapping):
-            return dict(result)
-        return {}
-    return {}
+            result_map = dict(result)
+        else:
+            result_map = {}
+    else:
+        result_map = {}
+
+    rows = result_map.get("rows")
+    row_count = 0
+    if isinstance(rows, (list, tuple)):
+        row_count = len(rows)
+    elif isinstance(rows, Iterable) and not isinstance(rows, (str, bytes)):
+        try:
+            row_count = len(rows)  # type: ignore[arg-type]
+        except Exception:
+            row_count = 0
+    hole_value = result_map.get("hole_count")
+    if isinstance(hole_value, (int, float)):
+        hole_display = int(hole_value)
+    else:
+        hole_display = hole_value if hole_value is not None else 0
+    print(f"[ACAD] rows={row_count} hole_count={hole_display}")
+
+    return result_map
 
 
 def _collect_table_text_lines(doc: Any) -> list[str]:
@@ -360,14 +590,39 @@ def promote_table_to_geo(geo: dict[str, Any], table_info: Mapping[str, Any], sou
             pass
     if not isinstance(table_info, Mapping):
         return
+    new_rows = table_info.get("rows") or []
+    if isinstance(new_rows, Iterable) and not isinstance(new_rows, list):
+        new_rows = list(new_rows)
+    elif not isinstance(new_rows, list):
+        new_rows = list(new_rows) if isinstance(new_rows, Iterable) else []
 
-    raw_rows = table_info.get("rows")
-    if not isinstance(raw_rows, Iterable):
+    existing_ops_summary = geo.get("ops_summary")
+    if isinstance(existing_ops_summary, Mapping):
+        existing_rows = existing_ops_summary.get("rows") or []
+    else:
+        existing_rows = []
+    if isinstance(existing_rows, Iterable) and not isinstance(existing_rows, list):
+        existing_rows = list(existing_rows)
+    elif not isinstance(existing_rows, list):
+        existing_rows = list(existing_rows) if isinstance(existing_rows, Iterable) else []
+
+    new_qty_sum = _sum_qty(new_rows)
+    current_qty_sum = _sum_qty(existing_rows)
+    new_score = (new_qty_sum, len(new_rows))
+    current_score = (current_qty_sum, len(existing_rows))
+
+    if new_score <= current_score:
+        print(
+            f"[EXTRACT] kept existing table rows={len(existing_rows)} qty_sum={current_qty_sum}"
+        )
         return
 
-    normalized_rows: list[dict[str, Any]] = []
-    for entry in raw_rows:
-        if not isinstance(entry, Mapping):
+    ops_summary = _ensure_ops_summary_map(existing_ops_summary)
+    ops_summary["rows"] = list(new_rows)
+    ops_summary["source"] = source_tag
+    totals = defaultdict(int)
+    for row in new_rows:
+        if not isinstance(row, Mapping):
             continue
         normalized = dict(entry)
         normalized["hole"] = str(entry.get("hole") or "")
@@ -477,40 +732,23 @@ def promote_table_to_geo(geo: dict[str, Any], table_info: Mapping[str, Any], sou
             totals["jig_grind"] += qty
 
     if totals:
-        totals["tap_total"] = totals.get("tap_front", 0) + totals.get("tap_back", 0)
-        totals["cbore_total"] = totals.get("cbore_front", 0) + totals.get("cbore_back", 0)
-        totals["csk_total"] = totals.get("csk_front", 0) + totals.get("csk_back", 0)
-        totals["spot_total"] = totals.get("spot_front", 0) + totals.get("spot_back", 0)
-        totals["counterdrill_total"] = (
-            totals.get("counterdrill_front", 0) + totals.get("counterdrill_back", 0)
-        )
-        totals_dict = {key: value for key, value in totals.items() if value > 0}
+        ops_summary["totals"] = dict(totals)
     else:
-        totals_dict = {}
-
-    ops_summary = geo.setdefault("ops_summary", {})
-    ops_summary["rows"] = normalized_rows
-    source_normalized = "acad_table" if source_tag == "acad_table" else "text_table"
-    ops_summary["source"] = source_normalized
-    if totals_dict:
-        ops_summary["totals"] = totals_dict
-
-    hole_candidates = (
-        table_info.get("table_total"),
-        table_info.get("hole_count"),
-        _sum_qty(normalized_rows),
-    )
-    for candidate in hole_candidates:
-        try:
-            hole_count = int(float(candidate))
-        except Exception:
-            continue
-        if hole_count > 0:
-            geo["hole_count"] = hole_count
-            break
-
+        ops_summary.pop("totals", None)
+    hole_count = table_info.get("hole_count")
+    if hole_count is None:
+        hole_count = new_qty_sum
+    try:
+        geo["hole_count"] = int(hole_count)
+    except Exception:
+        pass
     provenance = geo.setdefault("provenance", {})
     provenance["holes"] = "HOLE TABLE"
+    geo["ops_summary"] = ops_summary
+    print(
+        f"[EXTRACT] promoted table rows={len(new_rows)} qty_sum={new_qty_sum} "
+        f"source={source_tag}"
+    )
 
 
 def extract_geometry(doc) -> dict[str, Any]:
@@ -532,6 +770,8 @@ def _load_doc_for_path(path: Path, *, use_oda: bool) -> Any:
         raise AttributeError("ezdxf module does not expose a callable readfile")
     lower_suffix = path.suffix.lower()
     if lower_suffix == ".dwg":
+        doc = None
+        counts: Mapping[str, int] | None = None
         if use_oda and _HAS_ODAFC:
             odafc_mod = None
             try:
@@ -541,10 +781,19 @@ def _load_doc_for_path(path: Path, *, use_oda: bool) -> Any:
             if odafc_mod is not None:
                 odaread = getattr(odafc_mod, "readfile", None)
                 if callable(odaread):
-                    return odaread(str(path))
-        dxf_path = convert_dwg_to_dxf(str(path))
-        return readfile(dxf_path)
-    return readfile(str(path))
+                    doc = odaread(str(path))
+                    counts = _print_doc_open_diagnostics(doc, path)
+                    if _should_attempt_dwg_conversion(counts):
+                        print("[OPEN] No entities in DWG via ezdxf; attempting DWG→DXF conversion")
+                        doc = None
+        if doc is None:
+            dxf_path = Path(convert_dwg_to_dxf(str(path)))
+            doc = readfile(str(dxf_path))
+            _print_doc_open_diagnostics(doc, dxf_path)
+        return doc
+    doc = readfile(str(path))
+    _print_doc_open_diagnostics(doc, path)
+    return doc
 
 
 def _ensure_ops_summary_map(candidate: Any) -> dict[str, Any]:
