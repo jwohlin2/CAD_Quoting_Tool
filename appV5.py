@@ -16892,6 +16892,7 @@ def compute_quote_from_df(  # type: ignore[reportGeneralTypeIssues]
         geo_context = dict(geo_context)
     elif not isinstance(geo_context, dict):
         geo_context = {}
+    _ensure_geo_context_fields(geo_context, value_map, cfg=cfg)
     planner_inputs = dict(ui_vars or {})
     rates = dict(rates or {})
     geo_payload: dict[str, Any] = geo_context
@@ -16951,7 +16952,15 @@ def compute_quote_from_df(  # type: ignore[reportGeneralTypeIssues]
     if speeds_feeds_csv_path:
         planner_inputs.setdefault("speeds_feeds_loaded", bool(speeds_feeds_loaded))
 
-    qty = _coerce_float_or_none(value_map.get("Qty")) or 1.0
+    qty = _coerce_float_or_none(geo_context.get("qty"))
+    if qty is None:
+        qty = _coerce_float_or_none(value_map.get("Qty"))
+    qty = qty or 1.0
+    try:
+        if "qty" not in geo_context and qty is not None:
+            geo_context["qty"] = int(round(float(qty)))
+    except Exception:
+        pass
     material_text = material_display
 
     scrap_value = value_map.get("Scrap Percent (%)")
@@ -17460,67 +17469,19 @@ def compute_quote_from_df(  # type: ignore[reportGeneralTypeIssues]
                 if coerced:
                     hole_diams.append(float(coerced))
 
-    ops_claims_map: Mapping[str, Any] | None = None
-    if isinstance(geo_payload, _MappingABC):
-        claims_candidate = geo_payload.get("ops_claims")
-        if isinstance(claims_candidate, _MappingABC):
-            ops_claims_map = claims_candidate
-        else:
-            summary_candidate = geo_payload.get("ops_summary")
-            if isinstance(summary_candidate, _MappingABC):
-                claims_candidate = summary_candidate.get("claims")
-                if isinstance(claims_candidate, _MappingABC):
-                    ops_claims_map = claims_candidate
-
-    fallback_groups: list[dict[str, Any]] = []
-
-    def _normalize_drill_groups(
-        groups: Sequence[Mapping[str, Any]] | None,
-    ) -> list[dict[str, Any]]:
-        normalized: list[dict[str, Any]] = []
-        if isinstance(groups, Sequence) and not isinstance(groups, (str, bytes, bytearray)):
-            for group in groups:
-                if not isinstance(group, _MappingABC):
-                    continue
-                entry = dict(group)
-                op_value = str(entry.get("op") or "drill").strip() or "drill"
-                entry["op"] = op_value
-                entry.setdefault("op_name", op_value)
-                qty_val = _coerce_float_or_none(entry.get("qty"))
-                if qty_val is not None:
-                    entry["qty"] = int(round(qty_val))
-                normalized.append(entry)
-        return normalized
-
-    def _publish_fallback_groups(
-        groups: Sequence[Mapping[str, Any]] | None,
-    ) -> list[dict[str, Any]]:
-        normalized_groups = _normalize_drill_groups(groups)
-        if normalized_groups:
-            normalized_groups.sort(
-                key=lambda item: (
-                    0
-                    if str(item.get("op") or "").strip().lower().startswith("deep")
-                    else 1,
-                    _safe_float(item.get("diameter_in"), 0.0),
-                )
-            )
-            fallback_deep, fallback_std = _apply_drilling_meta_fallback(
-                drilling_meta_container,
-                normalized_groups,
-            )
-            drilling_meta_container["bins_list"] = normalized_groups
-            drilling_meta_container["holes_deep"] = fallback_deep
-            drilling_meta_container["holes_std"] = fallback_std
-        return normalized_groups
-
-    thickness_in = _coerce_float_or_none(value_map.get("Thickness (in)"))
+    thickness_in = _coerce_float_or_none(geo_payload.get("thickness_in")) if isinstance(
+        geo_payload, _MappingABC
+    ) else None
     if thickness_in is None and isinstance(geo_payload, _MappingABC):
-        thickness_in = _coerce_float_or_none(geo_payload.get("thickness_in"))
+        thickness_mm = _coerce_float_or_none(geo_payload.get("thickness_mm"))
+        if thickness_mm:
+            thickness_in = float(thickness_mm) / 25.4
+    if thickness_in is None:
+        thickness_in = _coerce_float_or_none(value_map.get("Thickness (in)"))
         if thickness_in is None:
-            thickness_mm = _coerce_float_or_none(geo_payload.get("thickness_mm"))
-            if thickness_mm:
-                thickness_in = float(thickness_mm) / 25.4
+            thickness_mm_value = _coerce_float_or_none(value_map.get("Thickness (mm)"))
+            if thickness_mm_value:
+                thickness_in = float(thickness_mm_value) / 25.4
 
     drilling_rate = _lookup_rate("DrillingRate", rates, params, default_rates, fallback=75.0)
     drill_total_minutes: float | None = None
