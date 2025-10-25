@@ -54,6 +54,12 @@ def main(argv: Sequence[str] | None = None) -> int:
         action="store_true",
         help="Print reconstructed [TABLE-X] band previews (first 30)",
     )
+    parser.add_argument(
+        "--layer-allow",
+        dest="layer_allow",
+        action="append",
+        help="Restrict table/text scans to the specified layer (repeatable; use ALL to disable filtering)",
+    )
     args = parser.parse_args(argv)
 
     path = (args.path or os.environ.get("GEO_DUMP_PATH") or "").strip()
@@ -89,7 +95,31 @@ def main(argv: Sequence[str] | None = None) -> int:
         print(f"[geo_dump] failed to load document: {exc}")
         return 1
 
-    payload = read_geo(doc)
+    read_kwargs: dict[str, object] = {}
+    layer_allow_args = args.layer_allow or []
+    if layer_allow_args:
+        normalized_layers: list[str] = []
+        allow_all = False
+        for value in layer_allow_args:
+            if value is None:
+                continue
+            text = value.strip()
+            if not text:
+                continue
+            upper = text.upper()
+            if upper in {"ALL", "*", "<ALL>"}:
+                allow_all = True
+                break
+            normalized_layers.append(text)
+        if allow_all:
+            read_kwargs["layer_allowlist"] = None
+            print("[geo_dump] layer_allow=ALL")
+        else:
+            allowlist_set = {layer.strip() for layer in normalized_layers if layer.strip()}
+            if allowlist_set:
+                read_kwargs["layer_allowlist"] = allowlist_set
+                print(f"[geo_dump] layer_allow={sorted(allowlist_set)}")
+    payload = read_geo(doc, **read_kwargs)
     if not isinstance(payload, Mapping):
         payload = {}
     else:

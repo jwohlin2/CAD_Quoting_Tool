@@ -20,6 +20,30 @@ from cad_quoter.vendors import ezdxf as _ezdxf_vendor
 
 _HAS_ODAFC = bool(getattr(geometry, "HAS_ODAFC", False))
 
+_DEFAULT_LAYER_ALLOWLIST = frozenset({"BALLOON"})
+
+
+def _normalize_layer_allowlist(
+    layer_allowlist: Iterable[str] | None,
+) -> set[str] | None:
+    if layer_allowlist is None:
+        return None
+    special_tokens = {"ALL", "*", "<ALL>"}
+    normalized: set[str] = set()
+    for value in layer_allowlist:
+        if value is None:
+            continue
+        text = str(value).strip()
+        if not text:
+            continue
+        upper = text.upper()
+        if upper in special_tokens:
+            return None
+        normalized.add(upper)
+    if not normalized:
+        return set()
+    return normalized
+
 
 @lru_cache(maxsize=1)
 def _load_app_module():
@@ -175,7 +199,9 @@ def _sum_qty(rows: Iterable[Mapping[str, Any]] | None) -> int:
     return total
 
 
-def read_acad_table(doc) -> dict[str, Any]:
+def read_acad_table(
+    doc, layer_allowlist: Iterable[str] | None = _DEFAULT_LAYER_ALLOWLIST
+) -> dict[str, Any]:
     helper = _resolve_app_callable("hole_count_from_acad_table")
     _print_helper_debug("acad", helper)
     if callable(helper):
@@ -188,16 +214,24 @@ def read_acad_table(doc) -> dict[str, Any]:
             return dict(result)
         return {}
 
-    layouts_scanned = 0
-    tables_found = 0
-    built_rows: list[dict[str, Any]] = []
-    families: dict[str, int] = {}
+    allowlist = _normalize_layer_allowlist(layer_allowlist)
+    allowlist_display = (
+        "None"
+        if allowlist is None
+        else "{" + ",".join(sorted(allowlist) or []) + "}"
+    )
 
     if doc is None:
-        print("[ACAD-TABLE] layouts_scanned=0 tables=0 rows_built=0")
+        print(
+            "[ACAD-TABLE] scanned layouts=0 blocks=0 tables_found=0"
+        )
         return {}
 
+    layouts_scanned: set[str] = set()
+    blocks_scanned: set[str] = set()
     seen_table_handles: set[str] = set()
+    tables_found = 0
+    table_candidates: list[dict[str, Any]] = []
 
     def _iter_layout_containers() -> Iterable[tuple[str, Any, bool]]:
         seen_layouts: set[int] = set()
@@ -448,22 +482,128 @@ def read_acad_table(doc) -> dict[str, Any]:
                 return {}
         return hits
 
-    for _layout_name, layout_obj, _ in _iter_layout_containers():
+    def _gather_points(entity: Any) -> list[tuple[float, float]]:
+        points: list[tuple[float, float]] = []
+
+        def _append_value(value: Any) -> None:
+            if value is None:
+                return
+            if hasattr(value, "x") and hasattr(value, "y"):
+                try:
+                    points.append((float(value.x), float(value.y)))
+                except Exception:
+                    return
+                return
+            if isinstance(value, (tuple, list)):
+                if len(value) >= 2:
+                    try:
+                        points.append((float(value[0]), float(value[1])))
+                    except Exception:
+                        pass
+                for item in value:
+                    _append_value(item)
+
+        for source in (getattr(entity, "dxf", None), entity):
+            if source is None:
+                continue
+            for attr in (
+                "insert",
+                "alignment_point",
+                "start",
+                "end",
+                "center",
+                "defpoint",
+                "base_point",
+                "location",
+            ):
+                _append_value(getattr(source, attr, None))
+        try:
+            iterator = iter(entity)
+        except Exception:
+            iterator = None
+        if iterator is not None:
+            for item in iterator:
+                _append_value(getattr(item, "dxf", None))
+                _append_value(item)
+        return points
+
+    def _compute_table_bbox(entity: Any) -> tuple[float, float, float, float] | None:
+        try:
+            virtual_entities = list(entity.virtual_entities())
+        except Exception:
+            virtual_entities = []
+        all_points: list[tuple[float, float]] = []
+        for child in virtual_entities:
+            all_points.extend(_gather_points(child))
+        all_points.extend(_gather_points(entity))
+        if not all_points:
+            return None
+        xs = [pt[0] for pt in all_points]
+        ys = [pt[1] for pt in all_points]
+        return (min(xs), max(xs), min(ys), max(ys))
+
+    def _estimate_text_height(entity: Any, n_rows: int) -> float:
+        heights: list[float] = []
+        dxf_obj = getattr(entity, "dxf", None)
+        if dxf_obj is not None:
+            for attr in ("text_height", "char_height", "height"):
+                value = getattr(dxf_obj, attr, None)
+                if value is None:
+                    continue
+                try:
+                    height_val = float(value)
+                except Exception:
+                    continue
+                if height_val > 0:
+                    heights.append(height_val)
+        get_row_height = getattr(entity, "get_row_height", None)
+        if callable(get_row_height):
+            sample_rows = min(max(int(n_rows or 0), 0), 20)
+            for idx in range(sample_rows):
+                try:
+                    row_height = get_row_height(idx)
+                except Exception:
+                    continue
+                try:
+                    height_val = float(row_height)
+                except Exception:
+                    continue
+                if height_val > 0:
+                    heights.append(height_val)
+        if heights:
+            try:
+                return float(statistics.median(heights))
+            except Exception:
+                pass
+        return 0.0
+
+    for layout_name, layout_obj, is_block in _iter_layout_containers():
         if layout_obj is None:
             continue
-        layouts_scanned += 1
+        if is_block:
+            blocks_scanned.add(layout_name)
+        else:
+            layouts_scanned.add(layout_name)
         for table_entity in _iter_tables(layout_obj):
             if table_entity is None:
                 continue
             dxf_obj = getattr(table_entity, "dxf", None)
             handle = getattr(dxf_obj, "handle", None) if dxf_obj is not None else None
-            marker = str(handle or id(table_entity))
+            handle_str = str(handle or "") or hex(id(table_entity))
+            marker = handle_str
             if marker in seen_table_handles:
                 continue
             seen_table_handles.add(marker)
             tables_found += 1
+            layer_name = ""
+            if dxf_obj is not None:
+                layer_name = str(getattr(dxf_obj, "layer", "") or "").strip()
             n_rows = _table_dimension(table_entity, ("n_rows", "row_count", "rows"))
             n_cols = _table_dimension(table_entity, ("n_cols", "column_count", "cols"))
+            print(
+                f"[ACAD-TABLE] table handle={handle_str} layer={layer_name or '-'} "
+                f"owner={layout_name} rows={n_rows or 0} cols={n_cols or 0}"
+            )
             if not n_rows or not n_cols:
                 continue
             try:
@@ -486,7 +626,7 @@ def read_acad_table(doc) -> dict[str, Any]:
                 continue
 
             header_map: dict[str, int] = {}
-            for row_idx, row_cells in enumerate(table_cells):
+            for row_cells in table_cells:
                 hits = _detect_header_hits(row_cells)
                 if not hits:
                     continue
@@ -501,7 +641,9 @@ def read_acad_table(doc) -> dict[str, Any]:
                 if candidate_indices:
                     header_map["desc"] = max(candidate_indices)
 
-            for row_idx, row_cells in enumerate(table_cells):
+            table_rows: list[dict[str, Any]] = []
+            families: dict[str, int] = {}
+            for row_cells in table_cells:
                 combined_text = " ".join(cell.strip() for cell in row_cells if cell).strip()
                 if not combined_text:
                     continue
@@ -582,26 +724,111 @@ def read_acad_table(doc) -> dict[str, Any]:
                     }
                     if side_value:
                         row_entry["side"] = side_value
-                    built_rows.append(row_entry)
+                    table_rows.append(row_entry)
                     if ref_value is not None:
                         key = f"{ref_value:.4f}".rstrip("0").rstrip(".")
                         families[key] = families.get(key, 0) + qty_val
 
+            if not table_rows:
+                continue
+
+            bbox = _compute_table_bbox(table_entity)
+            median_height = _estimate_text_height(table_entity, n_rows)
+            pad = 2.0 * median_height if median_height > 0 else 6.0
+            roi_hint = None
+            if bbox is not None:
+                xmin, xmax, ymin, ymax = bbox
+                roi_hint = {
+                    "source": "ACAD_TABLE",
+                    "handle": handle_str,
+                    "layer": layer_name,
+                    "bbox": [xmin, xmax, ymin, ymax],
+                    "pad": pad,
+                    "median_height": median_height,
+                }
+
+            candidate = {
+                "rows": table_rows,
+                "families": families,
+                "layer": layer_name,
+                "layer_upper": layer_name.upper() if layer_name else "",
+                "owner": layout_name,
+                "handle": handle_str,
+                "n_rows": int(n_rows),
+                "n_cols": int(n_cols),
+                "row_count": len(table_rows),
+                "sum_qty": _sum_qty(table_rows),
+                "roi_hint": roi_hint,
+                "median_height": median_height,
+            }
+            table_candidates.append(candidate)
+
     print(
-        f"[ACAD-TABLE] layouts_scanned={layouts_scanned} tables={tables_found} rows_built={len(built_rows)}"
+        f"[ACAD-TABLE] scanned layouts={len(layouts_scanned)} blocks={len(blocks_scanned)} "
+        f"tables_found={tables_found} allow_layers={allowlist_display}"
     )
 
-    if not built_rows:
+    if not table_candidates:
         return {}
 
-    hole_count = _sum_qty(built_rows)
+    preferred_candidates = []
+    if allowlist is not None:
+        preferred_candidates = [
+            cand for cand in table_candidates if cand.get("layer_upper") in allowlist
+        ]
+    else:
+        preferred_candidates = list(table_candidates)
+    if not preferred_candidates:
+        preferred_candidates = table_candidates
+
+    def _priority(candidate: Mapping[str, Any]) -> tuple[int, int, int, int, int]:
+        layer_upper = str(candidate.get("layer_upper") or "")
+        allow_hit = 1
+        if allowlist:
+            allow_hit = 1 if layer_upper in allowlist else 0
+        return (
+            allow_hit,
+            int(candidate.get("n_rows") or 0),
+            int(candidate.get("n_cols") or 0),
+            int(candidate.get("sum_qty") or 0),
+            int(candidate.get("row_count") or 0),
+        )
+
+    best_candidate = max(preferred_candidates, key=_priority)
+    if int(best_candidate.get("row_count") or 0) < 5:
+        return {}
+
+    best_rows = list(best_candidate.get("rows") or [])
+    if not best_rows:
+        return {}
+    hole_count = _sum_qty(best_rows)
     result: dict[str, Any] = {
-        "rows": built_rows,
+        "rows": best_rows,
         "hole_count": hole_count,
         "provenance_holes": "HOLE TABLE (ACAD_TABLE)",
+        "layer": best_candidate.get("layer"),
+        "owner": best_candidate.get("owner"),
+        "handle": best_candidate.get("handle"),
+        "n_rows": best_candidate.get("n_rows"),
+        "n_cols": best_candidate.get("n_cols"),
     }
-    if families:
-        result["hole_diam_families_in"] = families
+    families_map = best_candidate.get("families")
+    if isinstance(families_map, Mapping) and families_map:
+        result["hole_diam_families_in"] = dict(families_map)
+    roi_hint = best_candidate.get("roi_hint")
+    if isinstance(roi_hint, Mapping):
+        result["roi_hint"] = dict(roi_hint)
+
+    print(
+        "[ACAD-TABLE] chosen handle={handle} layer={layer} owner={owner} rows={rows} qty_sum={qty}".format(
+            handle=result.get("handle"),
+            layer=result.get("layer") or "-",
+            owner=result.get("owner") or "-",
+            rows=len(best_rows),
+            qty=hole_count,
+        )
+    )
+
     return result
 
 
@@ -935,7 +1162,9 @@ def _cell_has_ref_marker(text: str) -> bool:
 
 
 def _build_columnar_table_from_entries(
-    entries: list[dict[str, Any]]
+    entries: list[dict[str, Any]],
+    *,
+    roi_hint: Mapping[str, Any] | None = None,
 ) -> tuple[dict[str, Any] | None, dict[str, Any]]:
     def _percentile(values: list[float], fraction: float) -> float:
         if not values:
@@ -977,10 +1206,88 @@ def _build_columnar_table_from_entries(
     if not records:
         return (
             None,
-            {"bands": [], "band_cells": [], "rows_txt_fallback": [], "qty_col": None, "ref_col": None, "desc_col": None},
+            {
+                "bands": [],
+                "band_cells": [],
+                "rows_txt_fallback": [],
+                "qty_col": None,
+                "ref_col": None,
+                "desc_col": None,
+                "roi": None,
+            },
         )
 
-    records_all = list(records)
+    base_records = list(records)
+    records_all = list(base_records)
+    roi_bounds: dict[str, float] | None = None
+    roi_info: dict[str, Any] | None = None
+    roi_median_height = 0.0
+
+    if isinstance(roi_hint, Mapping):
+        bbox = roi_hint.get("bbox")
+        if isinstance(bbox, (list, tuple)) and len(bbox) == 4:
+            try:
+                xmin = float(bbox[0])
+                xmax = float(bbox[1])
+                ymin = float(bbox[2])
+                ymax = float(bbox[3])
+            except Exception:
+                xmin = xmax = ymin = ymax = 0.0
+            else:
+                pad = 0.0
+                try:
+                    pad = float(roi_hint.get("pad") or 0.0)
+                except Exception:
+                    pad = 0.0
+                expanded_xmin = xmin - pad
+                expanded_xmax = xmax + pad
+                expanded_ymin = ymin - pad
+                expanded_ymax = ymax + pad
+                filtered = [
+                    rec
+                    for rec in base_records
+                    if expanded_xmin <= rec["x"] <= expanded_xmax
+                    and expanded_ymin <= rec["y"] <= expanded_ymax
+                ]
+                if filtered:
+                    records_all = filtered
+                roi_bounds = {
+                    "xmin": xmin,
+                    "xmax": xmax,
+                    "ymin": ymin,
+                    "ymax": ymax,
+                    "dx": pad,
+                    "dy": pad,
+                    "clusters": 1,
+                    "anchors": 0,
+                }
+                kept_count = len(filtered)
+                source = str(roi_hint.get("source") or "ACAD_TABLE")
+                roi_info = {
+                    "source": source,
+                    "bbox": [xmin, xmax, ymin, ymax],
+                    "pad": pad,
+                    "kept": kept_count,
+                }
+                try:
+                    roi_median_height = float(roi_hint.get("median_height") or 0.0)
+                except Exception:
+                    roi_median_height = 0.0
+                handle = roi_hint.get("handle")
+                layer = roi_hint.get("layer")
+                print(
+                    "[ROI] seeded_from={src} handle={handle} layer={layer} "
+                    "box=[{xmin:.1f}..{xmax:.1f}, {ymin:.1f}..{ymax:.1f}]".format(
+                        src=source,
+                        handle=handle,
+                        layer=layer or "-",
+                        xmin=xmin,
+                        xmax=xmax,
+                        ymin=ymin,
+                        ymax=ymax,
+                    )
+                )
+
     all_height_values = [
         float(rec["height"])
         for rec in records_all
@@ -989,11 +1296,11 @@ def _build_columnar_table_from_entries(
     median_height_all = (
         statistics.median(all_height_values) if all_height_values else 0.0
     )
-    roi_median_height = median_height_all
-    roi_info: dict[str, Any] | None = None
+    if roi_median_height <= 0:
+        roi_median_height = median_height_all
     anchor_lines = [rec for rec in records_all if _ROI_ANCHOR_RE.search(rec["text"])]
     filtered_records = records_all
-    if anchor_lines:
+    if roi_bounds is None and anchor_lines:
         anchor_count = len(anchor_lines)
         sorted_anchors = sorted(anchor_lines, key=lambda rec: -rec["y"])
         clusters: list[list[dict[str, Any]]] = []
@@ -1363,7 +1670,16 @@ def _build_columnar_table_from_entries(
     if not bands:
         return (
             None,
-            {"bands": [], "band_cells": [], "rows_txt_fallback": [], "qty_col": None, "ref_col": None, "desc_col": None, "y_eps": y_eps},
+            {
+                "bands": [],
+                "band_cells": [],
+                "rows_txt_fallback": [],
+                "qty_col": None,
+                "ref_col": None,
+                "desc_col": None,
+                "y_eps": y_eps,
+                "roi": roi_info,
+            },
         )
 
     for idx, band in enumerate(bands[:10]):
@@ -1478,7 +1794,16 @@ def _build_columnar_table_from_entries(
     if not band_results:
         return (
             None,
-            {"bands": band_summaries, "band_cells": band_cells_dump, "rows_txt_fallback": [], "qty_col": None, "ref_col": None, "desc_col": None, "y_eps": y_eps},
+            {
+                "bands": band_summaries,
+                "band_cells": band_cells_dump,
+                "rows_txt_fallback": [],
+                "qty_col": None,
+                "ref_col": None,
+                "desc_col": None,
+                "y_eps": y_eps,
+                "roi": roi_info,
+            },
         )
 
     header_field_info: dict[str, dict[str, Any]] = {}
@@ -1851,22 +2176,25 @@ def _build_columnar_table_from_entries(
         combined_row_text = " ".join(
             cell.strip() for cell in cells if cell.strip()
         )
-        need_row_parse = (qty_val is None or qty_val <= 0 or qty_groups_count == 0)
-        if need_row_parse and combined_row_text:
-            qty_candidate, remainder = _extract_band_quantity(combined_row_text)
-            if (qty_candidate is None or qty_candidate <= 0) and (
-                qty_val is None or qty_val <= 0
-            ):
-                qty_candidate, remainder = _extract_row_quantity_and_remainder(
+        fallback_qty: int | None = None
+        fallback_remainder = combined_row_text
+        if combined_row_text:
+            fallback_qty, fallback_remainder = _extract_band_quantity(
+                combined_row_text
+            )
+            if fallback_qty is None or fallback_qty <= 0:
+                fallback_qty, fallback_remainder = _extract_row_quantity_and_remainder(
                     combined_row_text
                 )
-            if qty_candidate is not None and qty_candidate > 0:
-                qty_val = qty_candidate
-                fallback_desc = remainder.strip()
-                used_qty_fallback = True
-                print(
-                    f"[QTY-FALLBACK] band#{band_index} used desc-parse qty={qty_val}"
-                )
+        if (
+            fallback_qty is not None
+            and fallback_qty > 0
+            and (qty_groups_count == 0 or qty_val is None or qty_val <= 0)
+        ):
+            qty_val = fallback_qty
+            fallback_desc = fallback_remainder.strip()
+            used_qty_fallback = True
+            print(f"[QTY-FALLBACK] band#{band_index} qty={qty_val}")
         if qty_val is None or qty_val <= 0:
             continue
         desc_idx = _resolved_index(desc_col, "desc")
@@ -2074,7 +2402,12 @@ def _fallback_text_table(lines: Iterable[str]) -> dict[str, Any]:
     return result
 
 
-def read_text_table(doc) -> dict[str, Any]:
+def read_text_table(
+    doc,
+    *,
+    layer_allowlist: Iterable[str] | None = _DEFAULT_LAYER_ALLOWLIST,
+    roi_hint: Mapping[str, Any] | None = None,
+) -> dict[str, Any]:
     helper = _resolve_app_callable("extract_hole_table_from_text")
     _print_helper_debug("text", helper)
     global _LAST_TEXT_TABLE_DEBUG
@@ -2084,7 +2417,15 @@ def read_text_table(doc) -> dict[str, Any]:
         "bands": [],
         "rows": [],
         "raw_lines": [],
+        "roi_hint": roi_hint,
+        "roi": None,
     }
+    resolved_allowlist = _normalize_layer_allowlist(layer_allowlist)
+    allowlist_display = (
+        "None"
+        if resolved_allowlist is None
+        else "{" + ",".join(sorted(resolved_allowlist) or []) + "}"
+    )
     table_lines: list[str] | None = None
     fallback_candidate: Mapping[str, Any] | None = None
     best_candidate: Mapping[str, Any] | None = None
@@ -2230,6 +2571,23 @@ def read_text_table(doc) -> dict[str, Any]:
                     return value
             return None
 
+        def _extract_layer(entity: Any) -> str:
+            dxf_obj = getattr(entity, "dxf", None)
+            candidates: list[Any] = []
+            if dxf_obj is not None:
+                candidates.append(getattr(dxf_obj, "layer", None))
+            candidates.append(getattr(entity, "layer", None))
+            for candidate in candidates:
+                if candidate is None:
+                    continue
+                try:
+                    text = str(candidate).strip()
+                except Exception:
+                    continue
+                if text:
+                    return text
+            return ""
+
         debug_enabled = _debug_entities_enabled()
 
         for layout_index, (layout_name, layout_obj) in enumerate(_iter_layouts()):
@@ -2305,6 +2663,7 @@ def read_text_table(doc) -> dict[str, Any]:
                 if kind in {"TEXT", "MTEXT", "ATTRIB", "ATTDEF"}:
                     coords = _extract_coords(entity)
                     text_height = _extract_text_height(entity)
+                    layer_name = _extract_layer(entity)
                     for fragment, is_mtext in _iter_entity_text_fragments(entity):
                         normalized = _normalize_table_fragment(fragment)
                         if not normalized:
@@ -2328,6 +2687,8 @@ def read_text_table(doc) -> dict[str, Any]:
                             "order": counter,
                             "from_block": from_block,
                             "height": text_height,
+                            "layer": layer_name,
+                            "layer_upper": layer_name.upper() if layer_name else "",
                         }
                         counter += 1
                         collected_entries.append(entry)
@@ -2388,8 +2749,32 @@ def read_text_table(doc) -> dict[str, Any]:
             )
 
         print(
-            f"[TEXT-SCAN] attrib_lines={attrib_count} depth_max={_MAX_INSERT_DEPTH}"
+            f"[TEXT-SCAN] attrib_lines={attrib_count} depth_max={_MAX_INSERT_DEPTH} "
+            f"allow_layers={allowlist_display}"
         )
+
+        if resolved_allowlist is not None:
+            filtered_entries = [
+                entry
+                for entry in collected_entries
+                if not (entry.get("layer_upper") or "")
+                or (entry.get("layer_upper") or "") in resolved_allowlist
+            ]
+        else:
+            filtered_entries = list(collected_entries)
+
+        layer_counts: dict[str, int] = defaultdict(int)
+        for entry in filtered_entries:
+            layer_key = str(entry.get("layer") or "").strip()
+            layer_counts[layer_key] += 1
+        top_layers = sorted(layer_counts.items(), key=lambda item: (-item[1], item[0]))[:5]
+        if top_layers:
+            summary = "{" + ", ".join(f"{name or '-'}:{count}" for name, count in top_layers) + "}"
+        else:
+            summary = "{}"
+        print(f"[TEXT-SCAN] kept_by_layer={summary}")
+
+        collected_entries = filtered_entries
 
         if not collected_entries:
             table_lines = []
@@ -2706,7 +3091,9 @@ def read_text_table(doc) -> dict[str, Any]:
                 )
             )
             if raw_lines:
-                table_candidate, debug_payload = _build_columnar_table_from_entries(raw_lines)
+                table_candidate, debug_payload = _build_columnar_table_from_entries(
+                    raw_lines, roi_hint=roi_hint
+                )
                 columnar_table_info = table_candidate
                 columnar_debug_info = debug_payload
                 if isinstance(debug_payload, Mapping):
@@ -2719,6 +3106,8 @@ def read_text_table(doc) -> dict[str, Any]:
                     _LAST_TEXT_TABLE_DEBUG["rows"] = list(
                         debug_payload.get("rows_txt_fallback", [])
                     )
+                    if "roi" in debug_payload:
+                        _LAST_TEXT_TABLE_DEBUG["roi"] = debug_payload.get("roi")
 
         print(f"[TEXT-SCAN] parsed rows: {len(parsed_rows)}")
         for idx, row in enumerate(parsed_rows[:20]):
@@ -3204,9 +3593,10 @@ def promote_table_to_geo(geo: dict[str, Any], table_info: Mapping[str, Any], sou
             totals["spot"] += qty
     if totals:
         ops_summary["totals"] = dict(totals)
+    preferred_hole_count = _sum_qty(rows)
     hole_count = table_info.get("hole_count")
-    if hole_count is None:
-        hole_count = _sum_qty(rows)
+    if preferred_hole_count > 0:
+        hole_count = preferred_hole_count
     try:
         geo["hole_count"] = int(hole_count)
     except Exception:
@@ -3272,6 +3662,7 @@ def read_geo(
     *,
     prefer_table: bool = True,
     feature_flags: Mapping[str, Any] | None = None,
+    layer_allowlist: Iterable[str] | None = _DEFAULT_LAYER_ALLOWLIST,
 ) -> dict[str, Any]:
     """Process a loaded DXF/DWG document into GEO payload details."""
 
@@ -3306,11 +3697,35 @@ def read_geo(
         current_table_info = {}
 
     try:
-        acad_info = read_acad_table(doc) or {}
+        acad_info = read_acad_table(doc, layer_allowlist=layer_allowlist) or {}
+    except TypeError as exc:
+        if "layer_allowlist" in str(exc):
+            try:
+                acad_info = read_acad_table(doc) or {}
+            except Exception:
+                acad_info = {}
+        else:
+            raise
     except Exception:
         acad_info = {}
+    acad_roi_hint: Mapping[str, Any] | None = None
+    if isinstance(acad_info, Mapping):
+        roi_candidate = acad_info.get("roi_hint")
+        acad_roi_hint = roi_candidate if isinstance(roi_candidate, Mapping) else None
     try:
-        text_info = read_text_table(doc) or {}
+        text_info = read_text_table(
+            doc,
+            layer_allowlist=layer_allowlist,
+            roi_hint=acad_roi_hint,
+        ) or {}
+    except TypeError as exc:
+        if "layer_allowlist" in str(exc) or "roi_hint" in str(exc):
+            try:
+                text_info = read_text_table(doc) or {}
+            except Exception:
+                text_info = {}
+        else:
+            raise
     except Exception:
         text_info = {}
 
@@ -3440,6 +3855,7 @@ def extract_geo_from_path(
     prefer_table: bool = True,
     use_oda: bool = True,
     feature_flags: Mapping[str, Any] | None = None,
+    layer_allowlist: Iterable[str] | None = _DEFAULT_LAYER_ALLOWLIST,
 ) -> dict[str, Any]:
     """Load DWG/DXF at ``path`` and return a GEO dictionary."""
 
@@ -3450,7 +3866,12 @@ def extract_geo_from_path(
         print(f"[EXTRACT] failed to load document: {exc}")
         return {"error": str(exc)}
 
-    payload = read_geo(doc, prefer_table=prefer_table, feature_flags=feature_flags)
+    payload = read_geo(
+        doc,
+        prefer_table=prefer_table,
+        feature_flags=feature_flags,
+        layer_allowlist=layer_allowlist,
+    )
     geo = payload.get("geo")
     if isinstance(geo, dict):
         return geo
@@ -3463,6 +3884,7 @@ def extract_geo_from_path(
     prefer_table: bool = True,
     use_oda: bool = True,
     feature_flags: Mapping[str, Any] | None = None,
+    layer_allowlist: Iterable[str] | None = _DEFAULT_LAYER_ALLOWLIST,
 ) -> dict[str, Any]:
     """Load DWG/DXF at ``path`` and return a GEO dictionary."""
 
@@ -3477,6 +3899,7 @@ def extract_geo_from_path(
         doc,
         prefer_table=prefer_table,
         feature_flags=feature_flags,
+        layer_allowlist=layer_allowlist,
     )
 
 
