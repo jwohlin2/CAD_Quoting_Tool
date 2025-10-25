@@ -77,6 +77,12 @@ def main(argv: Sequence[str] | None = None) -> int:
         action="store_true",
         help="Print ACAD_TABLE inventory details",
     )
+    parser.add_argument(
+        "--show-rows",
+        type=int,
+        metavar="N",
+        help="Print the first N rows as qty | ref | side | desc",
+    )
     args = parser.parse_args(argv)
 
     path = (args.path or os.environ.get("GEO_DUMP_PATH") or "").strip()
@@ -172,13 +178,14 @@ def main(argv: Sequence[str] | None = None) -> int:
             "ACAD2018",
         ]
         for version in fallback_versions:
-            print(f"[ACAD-TABLE] trying DXF fallback version={version}")
+            normalized_version = geo_extractor._normalize_oda_version(version) or version
+            print(f"[ACAD-TABLE] trying DXF fallback version={normalized_version}")
             try:
                 fallback_doc = geo_extractor._load_doc_for_path(
-                    Path(path), use_oda=args.use_oda, out_ver=version
+                    Path(path), use_oda=args.use_oda, out_ver=normalized_version
                 )
             except Exception as exc:
-                print(f"[ACAD-TABLE] DXF fallback {version} failed: {exc}")
+                print(f"[ACAD-TABLE] DXF fallback {normalized_version} failed: {exc}")
                 continue
             payload = read_geo(fallback_doc, **read_kwargs)
             scan_info = geo_extractor.get_last_acad_table_scan() or {}
@@ -196,39 +203,42 @@ def main(argv: Sequence[str] | None = None) -> int:
     final_scan = geo_extractor.get_last_acad_table_scan() or scan_info
     if args.scan_acad_tables:
         tables: list[Mapping[str, object]] = []
+        tables_found_display = 0
         if isinstance(final_scan, Mapping):
+            try:
+                tables_found_display = int(final_scan.get("tables_found", 0))
+            except Exception:
+                tables_found_display = 0
             raw_tables = final_scan.get("tables")
             if isinstance(raw_tables, list):
                 tables = [entry for entry in raw_tables if isinstance(entry, Mapping)]
+        print(f"[ACAD-TABLE] tables_found={tables_found_display}")
         if tables:
             for entry in tables:
                 owner = str(entry.get("owner") or "-")
                 layer = str(entry.get("layer") or "-")
                 handle = str(entry.get("handle") or "-")
+                dxftype = str(entry.get("type") or entry.get("dxftype") or "-")
                 try:
-                    rows_val = int(entry.get("rows") or 0)
+                    rows_val = int(entry.get("rows") or entry.get("row_count") or 0)
                 except Exception:
                     rows_val = 0
                 try:
-                    cols_val = int(entry.get("cols") or 0)
+                    cols_val = int(entry.get("cols") or entry.get("n_cols") or 0)
                 except Exception:
                     cols_val = 0
-                try:
-                    qty_val = int(entry.get("sum_qty") or entry.get("row_count") or 0)
-                except Exception:
-                    qty_val = 0
                 print(
-                    "[ACAD-TABLE] owner={owner} layer={layer} rows={rows} cols={cols} qty_sum={qty} handle={handle}".format(
+                    "[ACAD-TABLE] hit owner={owner} layer={layer} handle={handle} rows={rows} cols={cols} type={typ}".format(
                         owner=owner,
                         layer=layer,
+                        handle=handle,
                         rows=rows_val,
                         cols=cols_val,
-                        qty=qty_val,
-                        handle=handle,
+                        typ=dxftype,
                     )
                 )
         else:
-            print("[ACAD-TABLE] owner=<none> layer=- rows=0 cols=0 handle=-")
+            print("[ACAD-TABLE] hit owner=<none> layer=- handle=- rows=0 cols=0 type=-")
 
     geo = payload.get("geo")
     if not isinstance(geo, Mapping):
@@ -282,6 +292,25 @@ def main(argv: Sequence[str] | None = None) -> int:
             prov=holes_source,
         )
     )
+    if args.show_rows and rows:
+        limit = max(args.show_rows, 0)
+        if limit > 0:
+            count = min(limit, len(rows))
+            print(f"[ROWS] preview_count={count}")
+            for idx, row in enumerate(rows[:count]):
+                qty_display = row.get("qty") if isinstance(row, Mapping) else None
+                ref_display = row.get("ref") if isinstance(row, Mapping) else None
+                side_display = row.get("side") if isinstance(row, Mapping) else None
+                desc_display = row.get("desc") if isinstance(row, Mapping) else None
+                print(
+                    "[ROW {idx:02d}] {qty} | {ref} | {side} | {desc}".format(
+                        idx=idx,
+                        qty=qty_display if qty_display not in (None, "") else "-",
+                        ref=ref_display if ref_display not in (None, "") else "-",
+                        side=side_display if side_display not in (None, "") else "-",
+                        desc=desc_display if desc_display not in (None, "") else "",
+                    )
+                )
     if args.debug and rows:
         print("first_rows:")
         for idx, row in enumerate(rows[:10]):
