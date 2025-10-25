@@ -61,6 +61,11 @@ def main(argv: Sequence[str] | None = None) -> int:
         help="Restrict table/text scans to the specified layer (repeatable; use ALL to disable filtering)",
     )
     parser.add_argument(
+        "--allow-layers",
+        dest="allow_layers",
+        help="Comma-separated glob patterns of layers to allow (use ALL to disable filtering)",
+    )
+    parser.add_argument(
         "--block-allow",
         dest="block_allow",
         action="append",
@@ -119,7 +124,10 @@ def main(argv: Sequence[str] | None = None) -> int:
         return 1
 
     read_kwargs: dict[str, object] = {}
-    layer_allow_args = args.layer_allow or []
+    layer_allow_args = list(args.layer_allow or [])
+    allow_layers_arg = getattr(args, "allow_layers", None)
+    if allow_layers_arg:
+        layer_allow_args.extend(part.strip() for part in allow_layers_arg.split(","))
     if layer_allow_args:
         normalized_layers: list[str] = []
         allow_all = False

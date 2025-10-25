@@ -14,6 +14,7 @@ from pathlib import Path
 import re
 import statistics
 from typing import Any, Callable
+from fnmatch import fnmatchcase
 
 from cad_quoter import geometry
 from cad_quoter.geometry import convert_dwg_to_dxf
@@ -934,26 +935,63 @@ def _compute_entity_bbox(
     return (min(xs), max(xs), min(ys), max(ys))
 
 
+class _LayerAllowlist(Iterable[str]):
+    __slots__ = ("_patterns",)
+
+    def __init__(self, patterns: Iterable[str]):
+        unique: list[str] = []
+        seen: set[str] = set()
+        for pattern in patterns:
+            upper = pattern.upper()
+            if upper in seen:
+                continue
+            seen.add(upper)
+            unique.append(upper)
+        self._patterns = tuple(unique)
+
+    def __iter__(self):
+        return iter(self._patterns)
+
+    def __contains__(self, value: object) -> bool:  # pragma: no cover - exercised via iteration
+        if not self._patterns:
+            return False
+        text = "" if value is None else str(value)
+        candidate = text.upper()
+        for pattern in self._patterns:
+            if fnmatchcase(candidate, pattern):
+                return True
+        return False
+
+    def __len__(self) -> int:
+        return len(self._patterns)
+
+    def __repr__(self) -> str:  # pragma: no cover - debugging helper
+        return f"_LayerAllowlist(patterns={self._patterns!r})"
+
+
 def _normalize_layer_allowlist(
     layer_allowlist: Iterable[str] | None,
-) -> set[str] | None:
+) -> _LayerAllowlist | None:
     if layer_allowlist is None:
         return None
     special_tokens = {"ALL", "*", "<ALL>"}
-    normalized: set[str] = set()
+    normalized: list[str] = []
     for value in layer_allowlist:
         if value is None:
             continue
-        text = str(value).strip()
-        if not text:
-            continue
-        upper = text.upper()
-        if upper in special_tokens:
-            return None
-        normalized.add(upper)
-    if not normalized:
-        return set()
-    return normalized
+        if isinstance(value, str):
+            raw_values = value.split(",")
+        else:
+            raw_values = [value]
+        for item in raw_values:
+            text = str(item).strip()
+            if not text:
+                continue
+            upper = text.upper()
+            if upper in special_tokens:
+                return None
+            normalized.append(upper)
+    return _LayerAllowlist(normalized)
 
 
 @lru_cache(maxsize=1)
@@ -3328,6 +3366,9 @@ def read_text_table(
             return table_lines
 
         collected_entries: list[dict[str, Any]] = []
+        entries_by_layout: defaultdict[int, list[dict[str, Any]]] = defaultdict(list)
+        layout_names: dict[int, str] = {}
+        layout_order: list[int] = []
         merged_rows = []
         parsed_rows = []
         text_rows_info = None
@@ -3452,6 +3493,9 @@ def read_text_table(
         debug_enabled = _debug_entities_enabled()
 
         for layout_index, (layout_name, layout_obj) in enumerate(_iter_layouts()):
+            layout_names[layout_index] = layout_name
+            if layout_index not in layout_order:
+                layout_order.append(layout_index)
             query = getattr(layout_obj, "query", None)
             base_entities: list[Any] = []
             if callable(query):
@@ -3572,6 +3616,7 @@ def read_text_table(
                         }
                         counter += 1
                         collected_entries.append(entry)
+                        entries_by_layout[layout_index].append(entry)
                         kept_count += 1
                         if (
                             active_block
@@ -3734,21 +3779,38 @@ def read_text_table(
         print(f"[TEXT-SCAN] kept_by_layer(pre)={_format_layer_summary(layer_counts_pre)}")
 
         if resolved_allowlist is not None:
-            filtered_entries = [
-                entry
-                for entry in collected_entries
-                if not (entry.get("effective_layer_upper") or "")
-                or (entry.get("effective_layer_upper") or "") in resolved_allowlist
-            ]
+            filtered_entries: list[dict[str, Any]] = []
+            for layout_index in layout_order:
+                layout_entries = entries_by_layout.get(layout_index)
+                if not layout_entries:
+                    continue
+                layout_name = layout_names.get(layout_index, str(layout_index))
+                kept_for_layout = [
+                    entry
+                    for entry in layout_entries
+                    if not (entry.get("effective_layer_upper") or "")
+                    or (entry.get("effective_layer_upper") or "")
+                    in resolved_allowlist
+                ]
+                kept_count = len(kept_for_layout)
+                if kept_count == 0:
+                    print(
+                        "[LAYER] layout={layout} allow={allow} kept=0 → fallback=no-filter".format(
+                            layout=layout_name,
+                            allow=allowlist_display,
+                        )
+                    )
+                    filtered_entries.extend(layout_entries)
+                else:
+                    print(
+                        "[LAYER] layout={layout} allow={allow} kept={count}".format(
+                            layout=layout_name,
+                            allow=allowlist_display,
+                            count=kept_count,
+                        )
+                    )
+                    filtered_entries.extend(kept_for_layout)
         else:
-            filtered_entries = list(collected_entries)
-
-        if (
-            resolved_allowlist is not None
-            and not filtered_entries
-            and collected_entries
-        ):
-            print("[TEXT-SCAN] layer-allowlist emptied set; falling back to no layer filter")
             filtered_entries = list(collected_entries)
 
         layer_counts_post: dict[str, int] = defaultdict(int)
