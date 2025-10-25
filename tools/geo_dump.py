@@ -83,6 +83,11 @@ def main(argv: Sequence[str] | None = None) -> int:
         help="Print ACAD_TABLE inventory details",
     )
     parser.add_argument(
+        "--trace-acad",
+        action="store_true",
+        help="Enable detailed AutoCAD table tracing diagnostics",
+    )
+    parser.add_argument(
         "--show-rows",
         type=int,
         metavar="N",
@@ -97,6 +102,8 @@ def main(argv: Sequence[str] | None = None) -> int:
     if not path:
         path = str(DEFAULT_SAMPLE_PATH)
         print(f"[geo_dump] Using default sample: {path}")
+
+    geo_extractor.set_trace_acad(bool(args.trace_acad))
 
     if args.show_helpers:
         try:
@@ -180,6 +187,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         tables_found = int(scan_info.get("tables_found", 0))  # type: ignore[arg-type]
     except Exception:
         tables_found = 0
+    geo_extractor.log_last_dxf_fallback(tables_found)
     if tables_found == 0 and Path(path).suffix.lower() == ".dwg":
         fallback_versions = [
             "ACAD2000",
@@ -204,6 +212,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 tables_found = int(scan_info.get("tables_found", 0))  # type: ignore[arg-type]
             except Exception:
                 tables_found = 0
+            geo_extractor.log_last_dxf_fallback(tables_found)
             if tables_found:
                 break
     if not isinstance(payload, Mapping):
