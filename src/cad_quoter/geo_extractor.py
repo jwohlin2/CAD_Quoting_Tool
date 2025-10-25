@@ -1354,6 +1354,37 @@ def _iter_entity_text_fragments(entity: Any) -> Iterable[tuple[str, bool]]:
         for piece in base.splitlines():
             if piece.strip():
                 yield (piece, False)
+    elif kind == "MLEADER":
+        context = getattr(entity, "context", None)
+        if context is None:
+            return
+        mtext = getattr(context, "mtext", None)
+        if mtext is None:
+            raw_text = getattr(context, "text", "")
+            try:
+                base = str(raw_text)
+            except Exception:
+                base = raw_text if isinstance(raw_text, str) else ""
+            for piece in base.splitlines():
+                if piece.strip():
+                    yield (piece, True)
+            return
+        plain_text = getattr(mtext, "plain_text", None)
+        content = None
+        if callable(plain_text):
+            try:
+                content = plain_text()
+            except Exception:
+                content = None
+        if content is None:
+            content = getattr(mtext, "text", "")
+        try:
+            base = str(content)
+        except Exception:
+            base = content if isinstance(content, str) else ""
+        for piece in base.splitlines():
+            if piece.strip():
+                yield (piece, True)
     else:
         raw_text = getattr(entity, "text", "")
         if not raw_text:
@@ -3303,6 +3334,7 @@ def read_text_table(
         rows_txt_initial = 0
         hint_logged = False
         attrib_count = 0
+        mleader_count = 0
         preferred_block_names: list[str] = []
         preferred_block_rois: list[dict[str, Any]] = []
         block_height_samples: defaultdict[str, list[float]] = defaultdict(list)
@@ -3424,11 +3456,11 @@ def read_text_table(
             base_entities: list[Any] = []
             if callable(query):
                 try:
-                    base_entities = list(query("TEXT, MTEXT, INSERT"))
+                    base_entities = list(query("TEXT, MTEXT, MLEADER, INSERT"))
                 except Exception:
                     base_entities = []
                 if not base_entities:
-                    for spec in ("TEXT", "MTEXT", "INSERT"):
+                    for spec in ("TEXT", "MTEXT", "MLEADER", "INSERT"):
                         try:
                             base_entities.extend(list(query(spec)))
                         except Exception:
@@ -3486,7 +3518,7 @@ def read_text_table(
                 active_block: str | None,
             ) -> None:
                 nonlocal text_fragments, mtext_fragments, kept_count, from_blocks_count, counter
-                nonlocal attrib_count
+                nonlocal attrib_count, mleader_count
                 nonlocal hint_logged
                 if depth > _MAX_INSERT_DEPTH:
                     return
@@ -3504,7 +3536,7 @@ def read_text_table(
                     candidate = parent_effective_layer or layer_name or ""
                     effective_layer = candidate
                     effective_layer_upper = candidate.upper() if candidate else ""
-                if kind in {"TEXT", "MTEXT", "ATTRIB", "ATTDEF"}:
+                if kind in {"TEXT", "MTEXT", "ATTRIB", "ATTDEF", "MLEADER"}:
                     coords = _extract_coords(entity)
                     text_height = _extract_text_height(entity)
                     for fragment, is_mtext in _iter_entity_text_fragments(entity):
@@ -3513,6 +3545,8 @@ def read_text_table(
                             continue
                         if kind in {"ATTRIB", "ATTDEF"}:
                             attrib_count += 1
+                        elif kind == "MLEADER":
+                            mleader_count += 1
                         if (
                             not hint_logged
                             and "SEE SHEET 2 FOR HOLE CHART" in normalized.upper()
@@ -3552,6 +3586,8 @@ def read_text_table(
                         if from_block:
                             from_blocks_count += 1
                 elif kind == "INSERT" and depth < _MAX_INSERT_DEPTH:
+                    attrib_before = attrib_count
+                    mleader_before = mleader_count
                     block_name = None
                     dxf_obj = getattr(entity, "dxf", None)
                     if dxf_obj is not None:
@@ -3641,6 +3677,17 @@ def read_text_table(
                         )
                     if name_str:
                         visited_blocks.discard(name_str)
+                    attrib_delta = attrib_count - attrib_before
+                    mleader_delta = mleader_count - mleader_before
+                    if attrib_delta or mleader_delta:
+                        print(
+                            "[INSERT] name={name} depth={depth} attrib={attrib} mleader={mleader}".format(
+                                name=name_str or "-",
+                                depth=depth,
+                                attrib=attrib_delta,
+                                mleader=mleader_delta,
+                            )
+                        )
 
             for entity in base_entities:
                 marker = id(entity)
@@ -3663,9 +3710,11 @@ def read_text_table(
         if preferred_block_names:
             print(f"[TEXT-SCAN] preferred_blocks={preferred_block_names}")
         _LAST_TEXT_TABLE_DEBUG["preferred_blocks"] = list(preferred_block_names)
+        _LAST_TEXT_TABLE_DEBUG["attrib_lines"] = attrib_count
+        _LAST_TEXT_TABLE_DEBUG["mleader_lines"] = mleader_count
         print(
-            f"[TEXT-SCAN] attrib_lines={attrib_count} depth_max={_MAX_INSERT_DEPTH} "
-            f"allow_layers={allowlist_display}"
+            f"[TEXT-SCAN] attrib_lines={attrib_count} mleader_lines={mleader_count} "
+            f"depth_max={_MAX_INSERT_DEPTH} allow_layers={allowlist_display}"
         )
 
         def _format_layer_summary(counts: Mapping[str, int]) -> str:
@@ -3835,8 +3884,10 @@ def read_text_table(
                     y_display = f"{float(y_val):.3f}"
                 else:
                     y_display = "-"
+                block_display = entry.get("block_name") or "-"
                 print(
-                    f"  [{idx:02d}] (x={x_display} y={y_display}) text=\"{entry.get('text', '')}\""
+                    f"  [{idx:02d}] (x={x_display} y={y_display}) block={block_display} "
+                    f"text=\"{entry.get('text', '')}\""
                 )
 
         normalized_entries: list[dict[str, Any]] = []
@@ -3871,6 +3922,7 @@ def read_text_table(
                 {
                     "layout": entry.get("layout_name"),
                     "in_block": bool(entry.get("from_block")),
+                    "block": entry.get("block_name"),
                     "x": entry.get("x"),
                     "y": entry.get("y"),
                     "text": entry.get("normalized_text")
@@ -3913,23 +3965,38 @@ def read_text_table(
                 if not text_value:
                     continue
                 qty_val, remainder = _extract_row_quantity_and_remainder(text_value)
+                remainder_clean = remainder.strip()
+                remainder_normalized = " ".join(remainder_clean.split())
+                qty_prefix: str | None = None
+                if text_value:
+                    match = _match_row_quantity(text_value)
+                    if match:
+                        qty_prefix = match.group(0).strip()
                 if qty_val is None or qty_val <= 0:
                     continue
                 side_hint = _detect_row_side(text_value)
                 fragments = [frag.strip() for frag in remainder.split(";") if frag.strip()]
                 if not fragments:
-                    base_fragment = remainder.strip() or text_value
+                    base_fragment = remainder_clean or text_value
                     fragments = [base_fragment]
                 for fragment in fragments:
                     fragment_clean = " ".join(fragment.split())
                     if not fragment_clean:
                         continue
+                    display_fragment = fragment_clean
+                    if len(fragments) == 1 and fragment_clean == remainder_normalized:
+                        display_fragment = text_value
+                    elif qty_prefix:
+                        prefix = qty_prefix
+                        qty_prefix = None
+                        if not display_fragment.startswith(prefix):
+                            display_fragment = f"{prefix} {display_fragment}".strip()
                     ref_text, ref_value = _extract_row_reference(fragment_clean)
                     side = _detect_row_side(fragment_clean) or side_hint
                     row_dict: dict[str, Any] = {
                         "hole": "",
                         "qty": qty_val,
-                        "desc": fragment_clean,
+                        "desc": display_fragment,
                         "ref": ref_text,
                     }
                     if side:
@@ -4048,6 +4115,7 @@ def read_text_table(
                 record = {
                     "layout_name": entry.get("layout_name"),
                     "from_block": bool(entry.get("from_block")),
+                    "block_name": entry.get("block_name"),
                     "x": entry.get("x"),
                     "y": entry.get("y"),
                     "height": entry.get("height"),
@@ -4071,6 +4139,7 @@ def read_text_table(
                 {
                     "layout": item.get("layout_name"),
                     "in_block": bool(item.get("from_block")),
+                    "block": item.get("block_name"),
                     "x": item.get("x"),
                     "y": item.get("y"),
                     "text": item.get("text"),
