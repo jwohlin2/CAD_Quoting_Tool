@@ -16,6 +16,12 @@ from .materials import (
     resolve_material_unit_price,
     usdkg_to_usdlb,
 )
+from .math_helpers import (
+    _compute_direct_costs,
+    _compute_pricing_ladder,
+    _wieland_scrap_usd_per_lb,
+    roughly_equal,
+)
 from .metals_api import MetalsAPI
 from .process_cost_renderer import (
     ORDER,
@@ -189,6 +195,10 @@ def create_default_registry() -> ProviderRegistry:
 __all__ = [
     "BACKUP_CSV_NAME",
     "LB_PER_KG",
+    "_compute_direct_costs",
+    "_compute_pricing_ladder",
+    "_wieland_scrap_usd_per_lb",
+    "roughly_equal",
     "get_mcmaster_unit_price",
     "PriceProvider",
     "ProviderFactory",
