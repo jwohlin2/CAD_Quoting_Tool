@@ -2067,6 +2067,151 @@ def read_text_table(doc) -> dict[str, Any]:
     return primary_result
 
 
+def _normalize_table_rows(rows_value: Any) -> list[dict[str, Any]]:
+    if isinstance(rows_value, list):
+        source = rows_value
+    elif isinstance(rows_value, Iterable) and not isinstance(rows_value, (str, bytes, bytearray)):
+        source = list(rows_value)
+    else:
+        return []
+    normalized: list[dict[str, Any]] = []
+    for row in source:
+        if isinstance(row, Mapping):
+            normalized.append(dict(row))
+    return normalized
+
+
+def _qty_to_text(value: Any) -> str | None:
+    if value is None:
+        return None
+    if isinstance(value, Fraction):
+        if value.denominator == 1:
+            return str(value.numerator)
+        return str(value)
+    if isinstance(value, (int,)):
+        return str(int(value))
+    if isinstance(value, float):
+        if not math.isfinite(value):
+            return None
+        rounded = int(round(value))
+        if abs(rounded - value) < 1e-6:
+            return str(rounded)
+        return str(value)
+    text = str(value).strip()
+    return text or None
+
+
+def _format_chart_lines_from_rows(rows: Iterable[Mapping[str, Any]]) -> list[str]:
+    chart_lines: list[str] = []
+    for row in rows:
+        if not isinstance(row, Mapping):
+            continue
+        desc = str(row.get("desc") or "").strip()
+        if desc:
+            cleaned_desc = " ".join(desc.split())
+        else:
+            cleaned_desc = ""
+        qty_text = _qty_to_text(row.get("qty"))
+        if cleaned_desc:
+            if not cleaned_desc.startswith("(") and qty_text:
+                line = f"({qty_text}) {cleaned_desc}"
+            else:
+                line = cleaned_desc
+        else:
+            parts: list[str] = []
+            if qty_text:
+                parts.append(f"({qty_text})")
+            hole_val = str(row.get("hole") or "").strip()
+            if hole_val:
+                parts.append(hole_val)
+            ref_val = str(row.get("ref") or "").strip()
+            if ref_val:
+                parts.append(ref_val)
+            side_val = str(row.get("side") or "").strip()
+            if side_val:
+                parts.append(side_val)
+            extra_desc = str(row.get("desc") or "").strip()
+            if extra_desc:
+                parts.append(extra_desc)
+            line = " ".join(part for part in parts if part)
+        line = " ".join(line.split())
+        if line:
+            chart_lines.append(line)
+    return chart_lines
+
+
+def read_geo(doc) -> dict[str, Any]:
+    acad_info_raw = read_acad_table(doc) or {}
+    acad_info = dict(acad_info_raw) if isinstance(acad_info_raw, Mapping) else {}
+    acad_rows = _normalize_table_rows(acad_info.get("rows"))
+    if acad_rows:
+        acad_info["rows"] = acad_rows
+
+    best_info: dict[str, Any] = dict(acad_info) if acad_rows else {}
+    text_info: dict[str, Any] = {}
+
+    if acad_rows:
+        text_info_raw = read_text_table(doc) or {}
+        if isinstance(text_info_raw, Mapping):
+            text_info = dict(text_info_raw)
+            text_rows = _normalize_table_rows(text_info.get("rows"))
+            if text_rows:
+                text_info["rows"] = text_rows
+            chosen = choose_better_table(acad_info, text_info)
+            if isinstance(chosen, Mapping):
+                best_info = dict(chosen)
+    else:
+        text_info_raw = read_text_table(doc) or {}
+        if isinstance(text_info_raw, Mapping):
+            text_info = dict(text_info_raw)
+            text_rows = _normalize_table_rows(text_info.get("rows"))
+            if text_rows:
+                text_info["rows"] = text_rows
+            best_info = dict(text_info)
+
+    rows = _normalize_table_rows(best_info.get("rows"))
+    if not rows and text_info:
+        rows = _normalize_table_rows(text_info.get("rows"))
+        if rows:
+            best_info = dict(text_info)
+
+    if rows:
+        best_info["rows"] = rows
+
+    hole_count_val: Any = best_info.get("hole_count")
+    if hole_count_val is None:
+        hole_count = _sum_qty(rows)
+    else:
+        try:
+            hole_count = int(float(hole_count_val))
+        except Exception:
+            hole_count = _sum_qty(rows)
+
+    provenance = best_info.get("provenance_holes")
+    if not provenance and text_info:
+        provenance = text_info.get("provenance_holes")
+    if not provenance:
+        provenance = "HOLE TABLE" if rows else "HOLE TABLE (TEXT_FALLBACK)"
+
+    families_val = best_info.get("hole_diam_families_in")
+    if not isinstance(families_val, Mapping) and text_info:
+        families_val = text_info.get("hole_diam_families_in")
+    families = dict(families_val) if isinstance(families_val, Mapping) else None
+
+    chart_lines = _format_chart_lines_from_rows(rows)
+
+    result: dict[str, Any] = {
+        "rows": rows,
+        "hole_count": hole_count,
+        "provenance_holes": provenance,
+        "chart_lines": chart_lines,
+    }
+    if families is not None:
+        result["hole_diam_families_in"] = families
+
+    return result
+
+
 def choose_better_table(a: Mapping[str, Any] | None, b: Mapping[str, Any] | None) -> Mapping[str, Any]:
     helper = _resolve_app_callable("_choose_better")
     if callable(helper):
@@ -2330,6 +2475,7 @@ __all__ = [
     "extract_geo_from_path",
     "read_acad_table",
     "read_text_table",
+    "read_geo",
     "choose_better_table",
     "promote_table_to_geo",
     "extract_geometry",
