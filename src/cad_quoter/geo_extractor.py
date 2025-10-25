@@ -121,10 +121,13 @@ _ROI_ANCHOR_RE = re.compile(
     r"(TAP|DRILL|THRU|C['’]?BORE|CBORE|COUNTER\s*BORE|N\.?P\.?T|NPT|JIG\s*GRIND|Ø)",
     re.IGNORECASE,
 )
-_TITLE_KEYWORD_RE = re.compile(
+_TITLE_AXIS_DROP_RE = re.compile(
     r"(GENTITLE|TITLE|DRAWING|SHEET|SCALE|REV|DWG|DATE)",
     re.IGNORECASE,
 )
+_SEE_SHEET_DROP_RE = re.compile(r"(SEE\s+SHEET|SEE\s+DETAIL)", re.IGNORECASE)
+_AXIS_ZERO_PAIR_RE = re.compile(r"^[A-Z]\s+[A-Z]\s+0\.0{3,}\b")
+_AXIS_ZERO_SINGLE_RE = re.compile(r"^0\.0{3,}\s+[XY]\b", re.IGNORECASE)
 _SMALL_INT_TOKEN_RE = re.compile(r"\b\d+\b")
 _FRACTION_RE = re.compile(r"\b\d+\s*/\s*\d+\b")
 _DECIMAL_RE = re.compile(r"\b(?:\d+\.\d+|\.\d+)\b")
@@ -529,30 +532,93 @@ def _build_columnar_table_from_entries(
     anchor_lines = [rec for rec in records_all if _ROI_ANCHOR_RE.search(rec["text"])]
     filtered_records = records_all
     if anchor_lines:
-        xmin = min(rec["x"] for rec in anchor_lines)
-        xmax = max(rec["x"] for rec in anchor_lines)
-        ymin = min(rec["y"] for rec in anchor_lines)
-        ymax = max(rec["y"] for rec in anchor_lines)
-        dx = 200.0
-        dy = 300.0
-        expanded_box = [xmin - dx, xmax + dx, ymin - dy, ymax + dy]
+        anchor_count = len(anchor_lines)
+        sorted_anchors = sorted(anchor_lines, key=lambda rec: -rec["y"])
+        clusters: list[list[dict[str, Any]]] = []
+        if sorted_anchors:
+            if anchor_count >= 4:
+                height_values = [
+                    float(rec["height"])
+                    for rec in sorted_anchors
+                    if isinstance(rec.get("height"), (int, float))
+                    and float(rec["height"]) > 0
+                ]
+                anchor_y_diffs = [
+                    abs(sorted_anchors[idx]["y"] - sorted_anchors[idx - 1]["y"])
+                    for idx in range(1, len(sorted_anchors))
+                    if abs(sorted_anchors[idx]["y"] - sorted_anchors[idx - 1]["y"]) > 0
+                ]
+                if height_values:
+                    median_height = statistics.median(height_values)
+                    y_anchor_eps = 1.8 * median_height if median_height > 0 else 0.0
+                elif anchor_y_diffs:
+                    median_diff = statistics.median(anchor_y_diffs)
+                    y_anchor_eps = 1.8 * median_diff if median_diff > 0 else 0.0
+                else:
+                    y_anchor_eps = 0.0
+                y_anchor_eps = max(8.0, y_anchor_eps)
+                current_cluster: list[dict[str, Any]] | None = None
+                prev_anchor: dict[str, Any] | None = None
+                for anchor in sorted_anchors:
+                    if current_cluster is None:
+                        current_cluster = [anchor]
+                        clusters.append(current_cluster)
+                        prev_anchor = anchor
+                        continue
+                    prev_y = prev_anchor["y"] if prev_anchor is not None else None
+                    if prev_y is not None and abs(anchor["y"] - prev_y) <= y_anchor_eps:
+                        current_cluster.append(anchor)
+                    else:
+                        current_cluster = [anchor]
+                        clusters.append(current_cluster)
+                    prev_anchor = anchor
+            if not clusters:
+                clusters = [sorted_anchors]
+
+        def _cluster_span(cluster: list[dict[str, Any]]) -> float:
+            if not cluster:
+                return 0.0
+            y_vals = [rec["y"] for rec in cluster]
+            return max(y_vals) - min(y_vals) if len(y_vals) > 1 else 0.0
+
+        chosen_cluster = clusters[0] if clusters else []
+        best_size = len(chosen_cluster)
+        best_span = _cluster_span(chosen_cluster)
+        for cluster in clusters[1:]:
+            size = len(cluster)
+            span = _cluster_span(cluster)
+            if size > best_size or (size == best_size and span < best_span):
+                chosen_cluster = cluster
+                best_size = size
+                best_span = span
+
+        if not chosen_cluster:
+            chosen_cluster = sorted_anchors
+        cluster_xmin = min(rec["x"] for rec in chosen_cluster)
+        cluster_xmax = max(rec["x"] for rec in chosen_cluster)
+        cluster_ymin = min(rec["y"] for rec in chosen_cluster)
+        cluster_ymax = max(rec["y"] for rec in chosen_cluster)
+        dx = 60.0
+        dy = 80.0
+        expanded_box = [cluster_xmin - dx, cluster_xmax + dx, cluster_ymin - dy, cluster_ymax + dy]
         roi_records = [
             rec
             for rec in records_all
             if expanded_box[0] <= rec["x"] <= expanded_box[1]
             and expanded_box[2] <= rec["y"] <= expanded_box[3]
         ]
+        cluster_count = len(clusters)
         print(
-            "[ROI] anchors={count} bbox=[{xmin:.1f},{xmax:.1f},{ymin:.1f},{ymax:.1f}] expanded=[{ex0:.1f},{ex1:.1f},{ey0:.1f},{ey1:.1f}]".format(
-                count=len(anchor_lines),
-                xmin=xmin,
-                xmax=xmax,
-                ymin=ymin,
-                ymax=ymax,
-                ex0=expanded_box[0],
-                ex1=expanded_box[1],
-                ey0=expanded_box[2],
-                ey1=expanded_box[3],
+            "[ROI] anchors={count} clusters={clusters} chosen_span=[{ymax:.1f}..{ymin:.1f}] "
+            "expanded=[{xmin:.1f}..{xmax:.1f}, {eymin:.1f}..{eymax:.1f}]".format(
+                count=anchor_count,
+                clusters=cluster_count,
+                ymax=cluster_ymax,
+                ymin=cluster_ymin,
+                xmin=expanded_box[0],
+                xmax=expanded_box[1],
+                eymin=expanded_box[2],
+                eymax=expanded_box[3],
             )
         )
         if roi_records:
@@ -561,8 +627,9 @@ def _build_columnar_table_from_entries(
             f"[ROI] raw_lines -> roi_lines: {len(records_all)} -> {len(filtered_records)}"
         )
         roi_info = {
-            "anchors": len(anchor_lines),
-            "bbox": [xmin, xmax, ymin, ymax],
+            "anchors": anchor_count,
+            "clusters": cluster_count,
+            "bbox": [cluster_xmin, cluster_xmax, cluster_ymin, cluster_ymax],
             "expanded": expanded_box,
             "total": len(records_all),
             "kept": len(filtered_records),
@@ -614,8 +681,20 @@ def _build_columnar_table_from_entries(
             continue
         drop_band = False
         combined_upper = combined.upper()
-        if _TITLE_KEYWORD_RE.search(combined_upper):
+        drop_reason = ""
+        trimmed = combined.strip()
+        if _TITLE_AXIS_DROP_RE.search(combined_upper):
             drop_band = True
+            drop_reason = "title/axis"
+        elif _SEE_SHEET_DROP_RE.search(combined_upper):
+            drop_band = True
+            drop_reason = "title/axis"
+        elif _AXIS_ZERO_PAIR_RE.match(trimmed):
+            drop_band = True
+            drop_reason = "title/axis"
+        elif _AXIS_ZERO_SINGLE_RE.match(trimmed):
+            drop_band = True
+            drop_reason = "title/axis"
         else:
             small_ints = []
             for token in _SMALL_INT_TOKEN_RE.findall(combined):
@@ -627,11 +706,14 @@ def _build_columnar_table_from_entries(
                     small_ints.append(value)
             if len(small_ints) >= 10:
                 drop_band = True
+                drop_reason = "title/axis"
             elif len(small_ints) >= 12 and len(set(small_ints)) <= 16:
                 drop_band = True
+                drop_reason = "title/axis"
         if drop_band:
+            preview = _truncate_cell_preview(trimmed or combined, 80).replace("\"", "\\\"")
             print(
-                f"[TABLE-Y] drop band#{raw_index} reason=title-block lines={len(band)}"
+                f"[TABLE-Y] drop band#{raw_index} reason={drop_reason} lines={len(band)} text=\"{preview}\""
             )
             continue
         bands.append(band)
@@ -812,8 +894,16 @@ def _build_columnar_table_from_entries(
         ]
         if relaxed_candidates:
             qty_col = min(relaxed_candidates)
-        elif column_count > 0:
-            qty_col = 0
+        else:
+            numericish_candidates = [
+                idx
+                for idx, info in enumerate(metrics)
+                if info["numeric_hits"] > 0 or info["numeric_ratio"] > 0
+            ]
+            if numericish_candidates:
+                qty_col = min(numericish_candidates)
+            elif column_count > 0:
+                qty_col = 0
 
     ref_candidates = [
         idx
@@ -855,8 +945,11 @@ def _build_columnar_table_from_entries(
         qty_text = _cell_at(cells, qty_col)
         if not qty_text:
             continue
+        qty_match = re.match(r"^\s*(\d{1,3})\b", qty_text)
+        if not qty_match:
+            continue
         try:
-            qty_val = int(qty_text)
+            qty_val = int(qty_match.group(1))
         except Exception:
             continue
         if qty_val <= 0:
@@ -1240,7 +1333,7 @@ def read_text_table(doc) -> dict[str, Any]:
                             and "SEE SHEET 2 FOR HOLE CHART" in normalized.upper()
                         ):
                             print(
-                                "[HINT] Found \"SEE SHEET 2 FOR HOLE CHART\" — ensure the target sheet/insert is present in this DWG/XREF."
+                                "[HINT] Chart may live on an alternate sheet/block; ensure its INSERT is present and not on a frozen/off layer."
                             )
                             hint_logged = True
                         entry = {
