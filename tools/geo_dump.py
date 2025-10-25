@@ -90,6 +90,9 @@ def main(argv: Sequence[str] | None = None) -> int:
     )
     args = parser.parse_args(argv)
 
+    if args.show_rows is not None:
+        os.environ["CAD_QUOTER_SHOW_ROWS"] = str(args.show_rows)
+
     path = (args.path or os.environ.get("GEO_DUMP_PATH") or "").strip()
     if not path:
         path = str(DEFAULT_SAMPLE_PATH)
