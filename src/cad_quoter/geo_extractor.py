@@ -136,7 +136,7 @@ _AXIS_ZERO_SINGLE_RE = re.compile(r"^0\.0{3,}\s+[XY]\b", re.IGNORECASE)
 _SMALL_INT_TOKEN_RE = re.compile(r"\b\d+\b")
 _FRACTION_RE = re.compile(r"\b\d+\s*/\s*\d+\b")
 _DECIMAL_RE = re.compile(r"\b(?:\d+\.\d+|\.\d+)\b")
-_MAX_INSERT_DEPTH = 2
+_MAX_INSERT_DEPTH = 3
 
 _LAST_TEXT_TABLE_DEBUG: dict[str, Any] | None = None
 
@@ -533,6 +533,14 @@ def _build_columnar_table_from_entries(
         )
 
     records_all = list(records)
+    all_height_values = [
+        float(rec["height"])
+        for rec in records_all
+        if isinstance(rec.get("height"), (int, float)) and float(rec["height"]) > 0
+    ]
+    median_height_all = (
+        statistics.median(all_height_values) if all_height_values else 0.0
+    )
     roi_info: dict[str, Any] | None = None
     anchor_lines = [rec for rec in records_all if _ROI_ANCHOR_RE.search(rec["text"])]
     filtered_records = records_all
@@ -603,8 +611,10 @@ def _build_columnar_table_from_entries(
         cluster_xmax = max(rec["x"] for rec in chosen_cluster)
         cluster_ymin = min(rec["y"] for rec in chosen_cluster)
         cluster_ymax = max(rec["y"] for rec in chosen_cluster)
-        dx = 40.0
-        dy = 50.0
+        base_dx = 18.0 * median_height_all if median_height_all > 0 else 0.0
+        base_dy = 24.0 * median_height_all if median_height_all > 0 else 0.0
+        dx = max(40.0, base_dx)
+        dy = max(50.0, base_dy)
         expanded_xmin = cluster_xmin - dx
         expanded_xmax = cluster_xmax + dx
         expanded_ymin = cluster_ymin - dy
@@ -691,6 +701,7 @@ def _build_columnar_table_from_entries(
         combined_upper = combined.upper()
         drop_reason = ""
         trimmed = combined.strip()
+        contains_hole_token = bool(_HOLE_ACTION_TOKEN_RE.search(combined))
         if _TITLE_AXIS_DROP_RE.search(combined_upper):
             drop_band = True
             drop_reason = "title/axis"
@@ -718,6 +729,9 @@ def _build_columnar_table_from_entries(
             elif len(small_ints) >= 12 and len(set(small_ints)) <= 16:
                 drop_band = True
                 drop_reason = "title/axis"
+        if drop_band and contains_hole_token:
+            drop_band = False
+            drop_reason = ""
         if drop_band:
             preview = _truncate_cell_preview(trimmed or combined, 80).replace("\"", "\\\"")
             print(
@@ -923,7 +937,36 @@ def _build_columnar_table_from_entries(
         )
 
     column_count = max(len(band["cells"]) for band in band_results)
-    integer_re = re.compile(r"^\d{1,3}$")
+    qty_digit_re = re.compile(r"^\d{1,3}$")
+    qty_suffix_re = re.compile(r"\b(REQD|REQUIRED|RE'?D|EA|EACH|HOLES?)\b$", re.IGNORECASE)
+
+    def _normalize_qty_cell(text: str) -> str:
+        candidate = (text or "").strip()
+        if not candidate:
+            return ""
+        normalized = candidate.upper()
+        normalized = re.sub(r"^QTY[:.]?", "", normalized).strip()
+        normalized = normalized.strip("() ")
+        normalized = re.sub(r"[X×]+$", "", normalized).strip()
+        while True:
+            cleaned = qty_suffix_re.sub("", normalized).strip()
+            if cleaned == normalized:
+                break
+            normalized = cleaned
+        return normalized
+
+    def _parse_qty_cell_value(cell_text: str) -> int | None:
+        normalized = _normalize_qty_cell(cell_text)
+        if not normalized:
+            return None
+        if qty_digit_re.match(normalized):
+            try:
+                value = int(normalized)
+            except Exception:
+                return None
+            if 0 < value <= 999:
+                return value
+        return None
     qty_header_re = re.compile(r"^QTY[:.]?$", re.IGNORECASE)
     ref_value_re = re.compile(r"(Ø|⌀|\"|\d+\s*/\s*\d+|(?<!\d)\.\d+|\d+\.\d+)")
     ref_header_re = re.compile(r"^REF\b", re.IGNORECASE)
@@ -953,13 +996,9 @@ def _build_columnar_table_from_entries(
                 header_hit = True
             if ref_header_re.match(upper_text):
                 ref_header_hit = True
-            if integer_re.match(cell_text):
-                try:
-                    value = int(cell_text)
-                except Exception:
-                    value = None
-                if value is not None and 0 < value <= 999:
-                    numeric_hits += 1
+            qty_candidate = _parse_qty_cell_value(cell_text)
+            if qty_candidate is not None:
+                numeric_hits += 1
             if ref_value_re.search(cell_text):
                 ref_hits += 1
             if _HOLE_ACTION_TOKEN_RE.search(cell_text):
@@ -1033,13 +1072,13 @@ def _build_columnar_table_from_entries(
                 qty_idx = closest_index
                 if qty_idx < len(cells):
                     qty_cell_text = cells[qty_idx].strip()
-                if not integer_re.match(qty_cell_text):
+                if _parse_qty_cell_value(qty_cell_text) is None:
                     within_eps: list[tuple[int, float]] = []
                     for col_index, center_value in center_pairs:
                         if abs(center_value - qty_x) <= x_eps_band + 1e-6:
                             if col_index < len(cells):
                                 candidate_text = cells[col_index].strip()
-                                if integer_re.match(candidate_text):
+                                if _parse_qty_cell_value(candidate_text) is not None:
                                     within_eps.append(
                                         (col_index, abs(center_value - qty_x))
                                     )
@@ -1056,7 +1095,10 @@ def _build_columnar_table_from_entries(
         band["qty_index"] = qty_idx
         if qty_idx is not None:
             qty_index_counts[qty_idx] += 1
-            if band_idx < len(bands_for_stats) and integer_re.match(qty_cell_text or ""):
+            if (
+                band_idx < len(bands_for_stats)
+                and _parse_qty_cell_value(qty_cell_text or "") is not None
+            ):
                 qty_votes[qty_idx] += 1
 
     qty_col: int | None = None
@@ -1109,23 +1151,32 @@ def _build_columnar_table_from_entries(
         if qty_idx is None:
             qty_idx = qty_col
         qty_text = _cell_at(cells, qty_idx)
-        if not qty_text:
-            continue
-        qty_clean = qty_text.strip().upper()
-        if not qty_clean:
-            continue
-        qty_clean = re.sub(r"^QTY[:.]?", "", qty_clean).strip()
-        qty_clean = qty_clean.strip("()")
-        qty_clean = qty_clean.rstrip("X×").strip()
-        if not qty_clean or not integer_re.match(qty_clean):
-            continue
-        try:
-            qty_val = int(qty_clean)
-        except Exception:
-            continue
-        if qty_val <= 0:
+        qty_val = None
+        if qty_text:
+            qty_val = _parse_qty_cell_value(qty_text)
+        used_qty_fallback = False
+        fallback_desc = ""
+        if qty_val is None or qty_val <= 0:
+            combined_row_text = " ".join(
+                cell.strip() for cell in cells if cell.strip()
+            )
+            qty_candidate, remainder = _extract_row_quantity_and_remainder(
+                combined_row_text
+            )
+            if qty_candidate is not None and qty_candidate > 0:
+                qty_val = qty_candidate
+                fallback_desc = remainder.strip()
+                used_qty_fallback = True
+                print(
+                    f"[QTY-FALLBACK] band#{band_index} used desc-parse qty={qty_val}"
+                )
+            else:
+                continue
+        if qty_val is None or qty_val <= 0:
             continue
         desc_text = _cell_at(cells, desc_col)
+        if used_qty_fallback:
+            desc_text = fallback_desc or desc_text
         if not desc_text:
             exclude_index = qty_idx if qty_idx is not None else qty_col
             fallback_parts = [
@@ -1483,6 +1534,34 @@ def read_text_table(doc) -> dict[str, Any]:
             counter = 0
             visited_blocks: set[str] = set()
 
+            def _iter_insert_attributes(entity: Any) -> Iterable[Any]:
+                attr_seen: set[int] = set()
+                for attr_name in ("attribs", "attribs_raw"):
+                    attr_value = getattr(entity, attr_name, None)
+                    if attr_value is None:
+                        continue
+                    if callable(attr_value):
+                        try:
+                            attr_iterable = attr_value()
+                        except Exception:
+                            continue
+                    else:
+                        attr_iterable = attr_value
+                    if attr_iterable is None:
+                        continue
+                    try:
+                        iterator = list(attr_iterable)
+                    except Exception:
+                        iterator = [attr_iterable]
+                    for attr_entity in iterator:
+                        if attr_entity is None:
+                            continue
+                        marker = id(attr_entity)
+                        if marker in attr_seen:
+                            continue
+                        attr_seen.add(marker)
+                        yield attr_entity
+
             def _process_entity(entity: Any, *, depth: int, from_block: bool) -> None:
                 nonlocal text_fragments, mtext_fragments, kept_count, from_blocks_count, counter
                 nonlocal hint_logged
@@ -1494,7 +1573,7 @@ def read_text_table(doc) -> dict[str, Any]:
                 except Exception:
                     dxftype = None
                 kind = str(dxftype or "").upper()
-                if kind in {"TEXT", "MTEXT"}:
+                if kind in {"TEXT", "MTEXT", "ATTRIB", "ATTDEF"}:
                     coords = _extract_coords(entity)
                     text_height = _extract_text_height(entity)
                     for fragment, is_mtext in _iter_entity_text_fragments(entity):
@@ -1560,6 +1639,8 @@ def read_text_table(doc) -> dict[str, Any]:
                         if block_layout is not None and depth + 1 <= _MAX_INSERT_DEPTH:
                             for child in block_layout:
                                 _process_entity(child, depth=depth + 1, from_block=True)
+                    for attribute in _iter_insert_attributes(entity):
+                        _process_entity(attribute, depth=depth + 1, from_block=True)
                     if name_str:
                         visited_blocks.discard(name_str)
 
@@ -2579,7 +2660,27 @@ def read_geo(
     elif isinstance(rows_for_log, Iterable):
         payload_rows = list(rows_for_log)
 
-    return {
+    families_map: dict[str, int] | None = None
+    for candidate in (best_table, text_info, acad_info, current_table_info):
+        if not isinstance(candidate, Mapping):
+            continue
+        families_val = candidate.get("hole_diam_families_in")
+        if isinstance(families_val, Mapping) and families_val:
+            normalized_families: dict[str, int] = {}
+            for key, value in families_val.items():
+                try:
+                    normalized_families[str(key)] = int(value)
+                except Exception:
+                    continue
+            if normalized_families:
+                families_map = normalized_families
+                break
+
+    chart_lines = [
+        _format_chart_line(row) for row in payload_rows if isinstance(row, Mapping)
+    ]
+
+    result_payload = {
         "geo": geo,
         "ops_summary": ops_summary,
         "rows": payload_rows,
@@ -2589,7 +2690,13 @@ def read_geo(
         "table_used": table_used,
         "source": ops_summary.get("source") if isinstance(ops_summary, Mapping) else None,
         "debug_payload": debug_payload,
+        "chart_lines": chart_lines,
     }
+
+    if families_map is not None:
+        result_payload["hole_diam_families_in"] = families_map
+
+    return result_payload
 
 
 def extract_geo_from_path(
