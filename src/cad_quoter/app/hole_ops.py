@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import math
 import re
-from collections import Counter
+from collections import Counter, defaultdict
 from collections.abc import Iterable, Mapping, MutableMapping
 from fractions import Fraction
 from typing import Any, Callable
@@ -294,33 +294,57 @@ def build_ops_summary_rows_from_hole_rows(
         if row is None:
             continue
 
-        try:
-            qty = int(getattr(row, "qty", 0) or 0)
-        except Exception:
-            qty = 0
-
-        ref = (
-            getattr(row, "ref", None)
-            or getattr(row, "drill_ref", None)
-            or getattr(row, "pilot", None)
-            or ""
-        )
-
-        desc = (
-            getattr(row, "description", None)
-            or getattr(row, "desc", None)
-            or ""
-        )
-
-        if not desc:
-            parts: list[str] = []
+        if isinstance(row, Mapping):
+            qty_raw = row.get("qty")
+            ref = (
+                row.get("ref")
+                or row.get("drill_ref")
+                or row.get("pilot")
+                or ""
+            )
+            desc = row.get("description") or row.get("desc") or ""
+            features = row.get("features")
+        else:
+            qty_raw = getattr(row, "qty", 0)
+            ref = (
+                getattr(row, "ref", None)
+                or getattr(row, "drill_ref", None)
+                or getattr(row, "pilot", None)
+                or ""
+            )
+            desc = (
+                getattr(row, "description", None)
+                or getattr(row, "desc", None)
+                or ""
+            )
             try:
                 features = list(getattr(row, "features", []) or [])
             except Exception:
                 features = []
-            for feature in features:
-                if not isinstance(feature, dict):
-                    continue
+
+        try:
+            qty = int(qty_raw or 0)
+        except Exception:
+            qty = 0
+
+        if not desc:
+            parts: list[str] = []
+            feature_iterable: Iterable[Any] | None = None
+            if isinstance(features, Mapping):
+                feature_iterable = features.values()
+            elif isinstance(features, Iterable) and not isinstance(features, (str, bytes)):
+                feature_iterable = features
+            features_list: list[Mapping[str, Any]] = []
+            if feature_iterable is not None:
+                try:
+                    features_list = [
+                        feature
+                        for feature in feature_iterable
+                        if isinstance(feature, Mapping)
+                    ]
+                except Exception:
+                    features_list = []
+            for feature in features_list:
                 feature_type = str(feature.get("type", "")).lower()
                 side = str(feature.get("side", "")).upper()
                 if feature_type == "tap":
@@ -375,6 +399,7 @@ def build_ops_summary_rows_from_hole_rows(
                 "hole": str(
                     getattr(row, "hole_id", "")
                     or getattr(row, "letter", "")
+                    or (row.get("hole") if isinstance(row, Mapping) else None)
                     or ""
                 ),
                 "ref": str(ref or ""),
@@ -386,22 +411,137 @@ def build_ops_summary_rows_from_hole_rows(
     return summary_rows
 
 
+def _summary_row_side(desc: str) -> str | None:
+    text = (desc or "").upper()
+    if "FRONT & BACK" in text or "BOTH SIDES" in text:
+        return "BOTH"
+    if "FROM BACK" in text:
+        return "BACK"
+    if "FROM FRONT" in text:
+        return "FRONT"
+    if "BACK" in text and "FRONT" in text:
+        return "BOTH"
+    if "BACK" in text:
+        return "BACK"
+    if "FRONT" in text:
+        return "FRONT"
+    return None
+
+
+def _aggregate_summary_rows(
+    rows: Iterable[Mapping[str, Any]] | None,
+) -> dict[str, Any]:
+    totals: defaultdict[str, int] = defaultdict(int)
+    actions: defaultdict[str, int] = defaultdict(int)
+
+    if rows is None:
+        rows = []
+
+    for row in rows:
+        try:
+            qty = int(float(row.get("qty") or 0))
+        except Exception:
+            qty = 0
+        if qty <= 0:
+            continue
+
+        desc = str(row.get("desc") or row.get("description") or "")
+        side = _summary_row_side(desc)
+        U = desc.upper()
+
+        if "TAP" in U:
+            totals["tap"] += qty
+            totals["drill"] += qty
+            actions["drill"] += qty
+            if side == "BACK":
+                totals["tap_back"] += qty
+                actions["tap_back"] += qty
+            elif side == "BOTH":
+                totals["tap_front"] += qty
+                totals["tap_back"] += qty
+                actions["tap_front"] += qty
+                actions["tap_back"] += qty
+            else:
+                totals["tap_front"] += qty
+                actions["tap_front"] += qty
+
+        if (
+            "CBORE" in U
+            or "C'BORE" in U
+            or "COUNTERBORE" in U
+            or "COUNTER BORE" in U
+        ):
+            totals["counterbore"] += qty
+            if side == "BACK":
+                totals["counterbore_back"] += qty
+                actions["counterbore_back"] += qty
+            elif side == "BOTH":
+                totals["counterbore_front"] += qty
+                totals["counterbore_back"] += qty
+                actions["counterbore_front"] += qty
+                actions["counterbore_back"] += qty
+            else:
+                totals["counterbore_front"] += qty
+                actions["counterbore_front"] += qty
+
+        if (
+            "C DRILL" in U
+            or "C’DRILL" in U
+            or "CENTER DRILL" in U
+            or "SPOT DRILL" in U
+            or "SPOT" in U
+        ) and ("THRU" not in U and "TAP" not in U):
+            totals["spot"] += qty
+            actions["spot"] += qty
+
+        if "JIG GRIND" in U:
+            totals["jig_grind"] += qty
+            actions["jig_grind"] += qty
+
+    back_ops_total = int(
+        totals.get("counterbore_back", 0) + totals.get("tap_back", 0)
+    )
+    actions_total = int(sum(actions.values()))
+
+    return {
+        "totals": dict(totals),
+        "actions_total": actions_total,
+        "back_ops_total": back_ops_total,
+        "flip_required": bool(back_ops_total > 0),
+    }
+
+
 def update_geo_ops_summary_from_hole_rows(
     geo: MutableMapping[str, Any],
     *,
     hole_rows: Iterable[Any] | None = None,
+    summary_rows: Iterable[Mapping[str, Any]] | None = None,
     chart_lines: Iterable[str] | None = None,
     chart_source: str | None = None,
+    ops_source: str | None = None,
     chart_summary: Mapping[str, Any] | None = None,
     apply_built_rows: Callable[[
         MutableMapping[str, Any] | Mapping[str, Any] | None,
         Iterable[Mapping[str, Any]] | None,
     ], int]
     | None = None,
+    summary_metadata: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Populate geo["ops_summary"] with rows and totals derived from hole data."""
 
-    ops_rows = build_ops_summary_rows_from_hole_rows(hole_rows)
+    ops_rows: list[dict[str, Any]] = []
+    if summary_rows is not None:
+        for row in summary_rows:
+            if not isinstance(row, Mapping):
+                continue
+            entry = dict(row)
+            if "hole" not in entry:
+                entry.setdefault("hole", entry.get("id") or "")
+            if "desc" not in entry and "description" in entry:
+                entry["desc"] = entry.get("description")
+            ops_rows.append(entry)
+    else:
+        ops_rows = build_ops_summary_rows_from_hole_rows(hole_rows)
     if not ops_rows and chart_lines:
         ops_rows = _chart_build_ops_rows_from_lines_fallback(chart_lines)
 
@@ -410,13 +550,28 @@ def update_geo_ops_summary_from_hole_rows(
 
     ops_summary_map = geo.setdefault("ops_summary", {})
     ops_summary_map["rows"] = ops_rows
-    ops_summary_map["source"] = chart_source or "chart_lines"
+    source_value = ops_source or chart_source or "chart_lines"
+    ops_summary_map["source"] = source_value
     rows = ops_rows
     try:
         qty_sum = sum(int(r.get("qty") or 0) for r in rows)
     except Exception:
         qty_sum = 0
     print(f"[EXTRACTOR] wrote ops rows: {len(rows)} (qty_sum={qty_sum})")
+
+    aggregates = _aggregate_summary_rows(ops_rows)
+    totals_map = dict(aggregates.get("totals", {}))
+    existing_totals = ops_summary_map.get("totals")
+    if isinstance(existing_totals, Mapping):
+        merged_totals = dict(existing_totals)
+        merged_totals.update(totals_map)
+        totals_map = merged_totals
+    if totals_map:
+        ops_summary_map["totals"] = totals_map
+
+    for key in ("actions_total", "back_ops_total", "flip_required"):
+        if key not in ops_summary_map and key in aggregates:
+            ops_summary_map[key] = aggregates[key]
 
     totals_from_summary: dict[str, int] = {}
 
@@ -457,6 +612,12 @@ def update_geo_ops_summary_from_hole_rows(
         # Maintain legacy top-level keys for downstream compatibility.
         for key, value in totals_from_summary.items():
             ops_summary_map[key] = value
+
+    if summary_metadata and isinstance(summary_metadata, Mapping):
+        for key, value in summary_metadata.items():
+            if key in {"rows", "totals"}:
+                continue
+            ops_summary_map.setdefault(key, value)
 
     return {
         "rows": ops_rows,
