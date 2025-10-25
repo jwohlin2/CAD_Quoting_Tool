@@ -36,6 +36,11 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument("--no-oda", dest="use_oda", action="store_false", help="Disable ODA fallback")
     parser.add_argument("--debug", action="store_true", help="Print the first 10 rows for inspection")
     parser.add_argument(
+        "--debug-entities",
+        action="store_true",
+        help="Print raw text table candidates from the DXF/DWG",
+    )
+    parser.add_argument(
         "--show-helpers",
         action="store_true",
         help="Print helper resolution diagnostics",
@@ -65,6 +70,9 @@ def main(argv: Sequence[str] | None = None) -> int:
                 text_alt=geo_extractor._describe_helper(text_alt_helper),
             )
         )
+
+    if args.debug_entities:
+        os.environ["CAD_QUOTER_DEBUG_ENTITIES"] = "1"
 
     geo = extract_geo_from_path(path, use_oda=args.use_oda)
     ops_summary = geo.get("ops_summary") if isinstance(geo, Mapping) else {}

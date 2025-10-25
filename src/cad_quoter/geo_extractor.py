@@ -7,6 +7,7 @@ from collections.abc import Iterable, Mapping
 from fractions import Fraction
 import inspect
 from functools import lru_cache
+import os
 from pathlib import Path
 import re
 from typing import Any, Callable
@@ -51,6 +52,32 @@ def _print_helper_debug(tag: str, helper: Any) -> None:
     print(f"[EXTRACT] {tag} helper: {helper_desc}")
 
 
+def _debug_entities_enabled() -> bool:
+    value = os.environ.get("CAD_QUOTER_DEBUG_ENTITIES", "").strip().lower()
+    if not value:
+        return False
+    return value not in {"0", "false", "no"}
+
+
+def _split_mtext_plain_text(text: Any) -> list[str]:
+    if text is None:
+        return []
+    try:
+        raw = str(text)
+    except Exception:
+        raw = text if isinstance(text, str) else ""
+    if not raw:
+        return []
+    candidate = raw.replace("\r\n", "\n").replace("\r", "\n")
+    candidate = _MTEXT_BREAK_RE.sub("\n", candidate)
+    parts = []
+    for piece in candidate.split("\n"):
+        cleaned = piece.strip()
+        if cleaned:
+            parts.append(cleaned)
+    return parts
+
+
 _ROW_START_RE = re.compile(r"\(\s*\d+\s*\)")
 _DIAMETER_PREFIX_RE = re.compile(
     r"(?:Ø|⌀|DIA(?:\.\b|\b))\s*(\d+\s*/\s*\d+|\d*\.\d+|\.\d+|\d+)",
@@ -62,6 +89,14 @@ _DIAMETER_SUFFIX_RE = re.compile(
 )
 _MTEXT_ALIGN_RE = re.compile(r"\\A\d;", re.IGNORECASE)
 _MTEXT_BREAK_RE = re.compile(r"\\P", re.IGNORECASE)
+_CANDIDATE_TOKEN_RE = re.compile(
+    r"(TAP\b|DRILL\b|THRU\b|N\.P\.T\b|NPT\b|C['’]?BORE\b|COUNTER\s*BORE\b|"
+    r"JIG\s+GRIND\b|AS\s+SHOWN\b|FROM\s+BACK\b|FROM\s+FRONT\b|BOTH\s+SIDES\b)",
+    re.IGNORECASE,
+)
+_FRACTION_RE = re.compile(r"\b\d+\s*/\s*\d+\b")
+_DECIMAL_RE = re.compile(r"\b(?:\d+\.\d+|\.\d+)\b")
+_MAX_INSERT_DEPTH = 2
 
 
 def _score_table(info: Mapping[str, Any] | None) -> tuple[int, int]:
@@ -125,31 +160,9 @@ def _collect_table_text_lines(doc: Any) -> list[str]:
         except Exception:
             continue
         for entity in entities:
-            raw_text = ""
-            dxftype = None
-            try:
-                dxftype = entity.dxftype()
-            except Exception:
-                dxftype = None
-            if dxftype == "MTEXT":
-                plain_text = getattr(entity, "plain_text", None)
-                if callable(plain_text):
-                    try:
-                        raw_text = plain_text()
-                    except Exception:
-                        raw_text = ""
-                if not raw_text:
-                    raw_text = getattr(entity, "text", "")
-            elif dxftype == "TEXT":
-                dxf_obj = getattr(entity, "dxf", None)
-                raw_text = getattr(dxf_obj, "text", "") if dxf_obj is not None else ""
-            else:
-                raw_text = getattr(entity, "text", "")
-
-            if not raw_text:
-                continue
-            for line in str(raw_text).splitlines():
-                normalized = _normalize_table_fragment(line)
+            fragments = list(_iter_entity_text_fragments(entity))
+            for fragment, _ in fragments:
+                normalized = _normalize_table_fragment(fragment)
                 if normalized:
                     lines.append(normalized)
     return lines
@@ -168,6 +181,50 @@ def _normalize_table_fragment(fragment: str) -> str:
     return " ".join(cleaned.split())
 
 
+def _iter_entity_text_fragments(entity: Any) -> Iterable[tuple[str, bool]]:
+    dxftype = None
+    try:
+        dxftype = entity.dxftype()
+    except Exception:
+        dxftype = None
+    kind = str(dxftype or "").upper()
+    if kind == "MTEXT":
+        plain_text = getattr(entity, "plain_text", None)
+        content = None
+        if callable(plain_text):
+            try:
+                content = plain_text()
+            except Exception:
+                content = None
+        if content is None:
+            content = getattr(entity, "text", "")
+        for piece in _split_mtext_plain_text(content):
+            yield (piece, True)
+    elif kind == "TEXT":
+        dxf_obj = getattr(entity, "dxf", None)
+        raw_text = getattr(dxf_obj, "text", "") if dxf_obj is not None else ""
+        if not raw_text:
+            raw_text = getattr(entity, "text", "")
+        try:
+            base = str(raw_text)
+        except Exception:
+            base = raw_text if isinstance(raw_text, str) else ""
+        for piece in base.splitlines():
+            if piece.strip():
+                yield (piece, False)
+    else:
+        raw_text = getattr(entity, "text", "")
+        if not raw_text:
+            return
+        try:
+            base = str(raw_text)
+        except Exception:
+            base = raw_text if isinstance(raw_text, str) else ""
+        for piece in base.splitlines():
+            if piece.strip():
+                yield (piece, False)
+
+
 def _parse_number_token(token: str) -> float | None:
     text = (token or "").strip()
     if not text:
@@ -183,6 +240,53 @@ def _parse_number_token(token: str) -> float | None:
         return float(text)
     except Exception:
         return None
+
+
+def _format_ref_value(value: float) -> str:
+    return f"{value:.4f}\""
+
+
+def _has_candidate_token(text: str) -> bool:
+    if not text:
+        return False
+    if _CANDIDATE_TOKEN_RE.search(text):
+        return True
+    if "Ø" in text or "⌀" in text:
+        return True
+    if '"' in text:
+        return True
+    if _FRACTION_RE.search(text):
+        return True
+    if _DECIMAL_RE.search(text):
+        return True
+    return False
+
+
+def _extract_row_reference(desc: str) -> tuple[str, float | None]:
+    diameter = _extract_diameter(desc)
+    if diameter is not None and diameter > 0 and diameter <= 10:
+        return (_format_ref_value(diameter), diameter)
+    search_space = desc or ""
+    for match in _FRACTION_RE.finditer(search_space):
+        value = _parse_number_token(match.group(0))
+        if value is not None and 0 < value <= 10:
+            return (_format_ref_value(value), value)
+    for match in _DECIMAL_RE.finditer(search_space):
+        value = _parse_number_token(match.group(0))
+        if value is not None and 0 < value <= 10:
+            return (_format_ref_value(value), value)
+    return ("", None)
+
+
+def _detect_row_side(desc: str) -> str:
+    upper = (desc or "").upper()
+    if "BOTH SIDES" in upper or ("FRONT" in upper and "BACK" in upper):
+        return "both"
+    if "FROM BACK" in upper:
+        return "back"
+    if "FROM FRONT" in upper:
+        return "front"
+    return ""
 
 
 def _merge_table_lines(lines: Iterable[str]) -> list[str]:
@@ -261,6 +365,9 @@ def read_text_table(doc) -> dict[str, Any]:
     fallback_candidate: Mapping[str, Any] | None = None
     best_candidate: Mapping[str, Any] | None = None
     best_score: tuple[int, int] = (0, 0)
+    text_rows_info: dict[str, Any] | None = None
+    merged_rows: list[str] = []
+    parsed_rows: list[dict[str, Any]] = []
 
     def _analyze_helper_signature(func: Callable[..., Any]) -> tuple[bool, bool]:
         needs_lines = False
@@ -291,13 +398,17 @@ def read_text_table(doc) -> dict[str, Any]:
         return (needs_lines, allows_lines)
 
     def ensure_lines() -> list[str]:
-        nonlocal table_lines
+        nonlocal table_lines, text_rows_info, merged_rows, parsed_rows
         if table_lines is not None:
             return table_lines
 
-        collected: list[str] = []
+        collected_entries: list[dict[str, Any]] = []
+        merged_rows = []
+        parsed_rows = []
+        text_rows_info = None
+
         if doc is None:
-            table_lines = collected
+            table_lines = []
             return table_lines
 
         def _iter_layouts() -> list[tuple[str, Any]]:
@@ -371,135 +482,282 @@ def read_text_table(doc) -> dict[str, Any]:
                 y_float = None
             return (x_float, y_float)
 
-        token_candidates = (
-            "TAP",
-            "C'BORE",
-            "CBORE",
-            "COUNTERBORE",
-            "DRILL",
-            "N.P.T",
-            "NPT",
-            "QTY",
-        )
+        debug_enabled = _debug_entities_enabled()
 
         for layout_index, (layout_name, layout_obj) in enumerate(_iter_layouts()):
             query = getattr(layout_obj, "query", None)
-            if not callable(query):
-                continue
-            combined_entities: list[Any]
-            try:
-                combined_entities = list(query("TEXT, MTEXT"))
-            except Exception:
-                combined_entities = []
-            if not combined_entities:
-                combined_entities = []
+            base_entities: list[Any] = []
+            if callable(query):
                 try:
-                    combined_entities.extend(list(query("TEXT")))
+                    base_entities = list(query("TEXT, MTEXT, INSERT"))
                 except Exception:
-                    pass
+                    base_entities = []
+                if not base_entities:
+                    for spec in ("TEXT", "MTEXT", "INSERT"):
+                        try:
+                            base_entities.extend(list(query(spec)))
+                        except Exception:
+                            continue
+            if not base_entities:
                 try:
-                    combined_entities.extend(list(query("MTEXT")))
+                    base_entities = list(layout_obj)
                 except Exception:
-                    pass
-            if not combined_entities:
+                    base_entities = []
+            if not base_entities:
                 continue
 
             seen_entities: set[int] = set()
-            ordered_entities: list[Any] = []
-            for entity in combined_entities:
-                marker = id(entity)
-                if marker in seen_entities:
-                    continue
-                seen_entities.add(marker)
-                ordered_entities.append(entity)
-            if not ordered_entities:
-                continue
-
-            entries: list[tuple[tuple[int, float, float, int], str]] = []
             text_fragments = 0
             mtext_fragments = 0
+            kept_count = 0
+            from_blocks_count = 0
             counter = 0
+            visited_blocks: set[str] = set()
 
-            def _add_fragment(fragment: Any, coords: tuple[float | None, float | None], *, is_mtext: bool) -> None:
-                nonlocal counter, text_fragments, mtext_fragments
-                normalized = _normalize_table_fragment(fragment)
-                if not normalized:
+            def _process_entity(entity: Any, *, depth: int, from_block: bool) -> None:
+                nonlocal text_fragments, mtext_fragments, kept_count, from_blocks_count, counter
+                if depth > _MAX_INSERT_DEPTH:
                     return
-                x_coord, y_coord = coords
-                try:
-                    y_key = -float(y_coord) if y_coord is not None else float("inf")
-                except Exception:
-                    y_key = float("inf")
-                try:
-                    x_key = float(x_coord) if x_coord is not None else float("inf")
-                except Exception:
-                    x_key = float("inf")
-                entries.append(((layout_index, y_key, x_key, counter), normalized))
-                counter += 1
-                if is_mtext:
-                    mtext_fragments += 1
-                else:
-                    text_fragments += 1
-
-            for entity in ordered_entities:
                 dxftype = None
                 try:
                     dxftype = entity.dxftype()
                 except Exception:
                     dxftype = None
                 kind = str(dxftype or "").upper()
-                if kind not in {"TEXT", "MTEXT"}:
-                    continue
-                coords = _extract_coords(entity)
-                if kind == "MTEXT":
-                    raw_text = ""
-                    plain_text = getattr(entity, "plain_text", None)
-                    if callable(plain_text):
-                        try:
-                            raw_text = plain_text()
-                        except Exception:
-                            raw_text = ""
-                    if not raw_text:
-                        raw_text = getattr(entity, "text", "")
-                else:
+                if kind in {"TEXT", "MTEXT"}:
+                    coords = _extract_coords(entity)
+                    for fragment, is_mtext in _iter_entity_text_fragments(entity):
+                        normalized = _normalize_table_fragment(fragment)
+                        if not normalized:
+                            continue
+                        entry = {
+                            "layout_index": layout_index,
+                            "layout_name": layout_name,
+                            "text": normalized,
+                            "x": coords[0],
+                            "y": coords[1],
+                            "order": counter,
+                            "from_block": from_block,
+                        }
+                        counter += 1
+                        collected_entries.append(entry)
+                        kept_count += 1
+                        if is_mtext:
+                            mtext_fragments += 1
+                        else:
+                            text_fragments += 1
+                        if from_block:
+                            from_blocks_count += 1
+                elif kind == "INSERT" and depth < _MAX_INSERT_DEPTH:
+                    block_name = None
                     dxf_obj = getattr(entity, "dxf", None)
-                    raw_text = getattr(dxf_obj, "text", "") if dxf_obj is not None else ""
-                    if not raw_text:
-                        raw_text = getattr(entity, "text", "")
-                for fragment in str(raw_text).splitlines():
-                    _add_fragment(fragment, coords, is_mtext=(kind == "MTEXT"))
+                    if dxf_obj is not None:
+                        block_name = getattr(dxf_obj, "name", None)
+                    if block_name is None:
+                        block_name = getattr(entity, "name", None)
+                    name_str = block_name if isinstance(block_name, str) else None
+                    if name_str and name_str in visited_blocks:
+                        return
+                    if name_str:
+                        visited_blocks.add(name_str)
+                    try:
+                        virtual_entities = list(entity.virtual_entities())
+                    except Exception:
+                        virtual_entities = []
+                    if virtual_entities:
+                        for child in virtual_entities:
+                            _process_entity(child, depth=depth + 1, from_block=True)
+                    else:
+                        blocks = getattr(doc, "blocks", None)
+                        block_layout = None
+                        if blocks is not None and name_str:
+                            get_block = getattr(blocks, "get", None)
+                            if callable(get_block):
+                                try:
+                                    block_layout = get_block(name_str)
+                                except Exception:
+                                    block_layout = None
+                        if block_layout is not None and depth + 1 <= _MAX_INSERT_DEPTH:
+                            for child in block_layout:
+                                _process_entity(child, depth=depth + 1, from_block=True)
+                    if name_str:
+                        visited_blocks.discard(name_str)
 
-            if not entries:
-                continue
-
-            entries.sort(key=lambda item: item[0])
-            kept_lines: list[str] = []
-            row_context_active = False
-            for _, text_line in entries:
-                if not text_line:
-                    row_context_active = False
+            for entity in base_entities:
+                marker = id(entity)
+                if marker in seen_entities:
                     continue
-                upper_line = text_line.upper()
-                row_start = bool(_ROW_START_RE.match(text_line))
-                has_token = any(token in upper_line for token in token_candidates)
-                keep_line = row_start or has_token or (row_context_active and text_line)
-                if keep_line:
-                    kept_lines.append(text_line)
-                if row_start:
-                    row_context_active = True
-                elif not text_line.strip():
-                    row_context_active = False
-                elif row_context_active and keep_line:
-                    row_context_active = True
-                else:
-                    row_context_active = False
+                seen_entities.add(marker)
+                _process_entity(entity, depth=0, from_block=False)
+
             print(
                 f"[TEXT-SCAN] layout={layout_name} text={text_fragments} "
-                f"mtext={mtext_fragments} kept={len(kept_lines)}"
+                f"mtext={mtext_fragments} kept={kept_count} from_blocks={from_blocks_count}"
             )
-            collected.extend(kept_lines)
 
-        table_lines = collected
+        if not collected_entries:
+            table_lines = []
+            print("[TEXT-SCAN] rows_txt count=0")
+            print("[TEXT-SCAN] parsed rows: 0")
+            return table_lines
+
+        def _entry_sort_key(entry: dict[str, Any]) -> tuple[float, float, int, int]:
+            x_val = entry.get("x")
+            y_val = entry.get("y")
+            try:
+                y_key = -float(y_val) if y_val is not None else float("inf")
+            except Exception:
+                y_key = float("inf")
+            try:
+                x_key = float(x_val) if x_val is not None else float("inf")
+            except Exception:
+                x_key = float("inf")
+            return (y_key, x_key, int(entry.get("layout_index", 0)), int(entry.get("order", 0)))
+
+        collected_entries.sort(key=_entry_sort_key)
+
+        candidate_entries: list[dict[str, Any]] = []
+        row_active = False
+        continuation_budget = 0
+        for entry in collected_entries:
+            stripped = entry.get("text", "").strip()
+            if not stripped:
+                row_active = False
+                continuation_budget = 0
+                continue
+            row_start_match = _ROW_START_RE.search(stripped)
+            row_start = bool(row_start_match)
+            token_hit = _has_candidate_token(stripped)
+            keep_line = False
+            if row_start:
+                row_active = True
+                continuation_budget = 3
+                keep_line = True
+            elif token_hit:
+                keep_line = True
+                if row_active:
+                    continuation_budget = max(continuation_budget, 1)
+                row_active = row_active or token_hit
+            elif row_active and continuation_budget > 0:
+                keep_line = True
+                continuation_budget -= 1
+            else:
+                row_active = False
+                continuation_budget = 0
+            if keep_line:
+                candidate_entries.append(entry)
+
+        if debug_enabled and candidate_entries:
+            limit = min(40, len(candidate_entries))
+            print(f"[TEXT-SCAN] candidates[0..{limit - 1}]:")
+            for idx, entry in enumerate(candidate_entries[:40]):
+                x_val = entry.get("x")
+                y_val = entry.get("y")
+                if isinstance(x_val, (int, float)):
+                    x_display = f"{float(x_val):.3f}"
+                else:
+                    x_display = "-"
+                if isinstance(y_val, (int, float)):
+                    y_display = f"{float(y_val):.3f}"
+                else:
+                    y_display = "-"
+                print(
+                    f"  [{idx:02d}] (x={x_display} y={y_display}) text=\"{entry.get('text', '')}\""
+                )
+
+        normalized_entries: list[dict[str, Any]] = []
+        normalized_lines: list[str] = []
+        for entry in candidate_entries:
+            raw_line = str(entry.get("text", ""))
+            match = _ROW_START_RE.search(raw_line)
+            if match:
+                prefix = raw_line[: match.start()].strip(" |")
+                suffix = raw_line[match.end() :].strip()
+                row_token = match.group(0).strip()
+                parts = [row_token]
+                if prefix:
+                    parts.append(prefix)
+                if suffix:
+                    parts.append(suffix)
+                normalized_line = " ".join(parts)
+            else:
+                normalized_line = raw_line
+            normalized_line = " ".join(normalized_line.split())
+            entry_copy = dict(entry)
+            entry_copy["normalized_text"] = normalized_line
+            normalized_entries.append(entry_copy)
+            normalized_lines.append(normalized_line)
+
+        candidate_entries = normalized_entries
+        table_lines = normalized_lines
+
+        current_row: list[str] = []
+        for entry in candidate_entries:
+            line = entry.get("normalized_text", "").strip()
+            if not line:
+                continue
+            if _ROW_START_RE.search(line):
+                if current_row:
+                    merged_rows.append(" ".join(current_row))
+                current_row = [line]
+            elif current_row:
+                current_row.append(line)
+        if current_row:
+            merged_rows.append(" ".join(current_row))
+
+        print(f"[TEXT-SCAN] rows_txt count={len(merged_rows)}")
+        for idx, row_text in enumerate(merged_rows[:10]):
+            print(f"  [{idx:02d}] {row_text}")
+
+        families: dict[str, int] = {}
+        total_qty = 0
+        parsed_rows = []
+        for row_text in merged_rows:
+            qty_match = _ROW_START_RE.match(row_text)
+            if not qty_match:
+                continue
+            qty_text = qty_match.group(0).strip("() ")
+            try:
+                qty = int(qty_text)
+            except Exception:
+                continue
+            remainder = row_text[qty_match.end() :].strip()
+            if not remainder:
+                continue
+            ref_text, ref_value = _extract_row_reference(remainder)
+            side = _detect_row_side(remainder)
+            row_dict: dict[str, Any] = {"hole": "", "qty": qty, "desc": remainder, "ref": ref_text}
+            if side:
+                row_dict["side"] = side
+            parsed_rows.append(row_dict)
+            total_qty += qty
+            if ref_value is not None:
+                key = f"{ref_value:.4f}".rstrip("0").rstrip(".")
+                families[key] = families.get(key, 0) + qty
+
+        print(f"[TEXT-SCAN] parsed rows: {len(parsed_rows)}")
+        for idx, row in enumerate(parsed_rows[:20]):
+            ref_val = row.get("ref") or ""
+            side_val = row.get("side") or ""
+            desc_val = row.get("desc") or ""
+            if len(desc_val) > 80:
+                desc_val = desc_val[:77] + "..."
+            print(
+                f"  [{idx:02d}] qty={row.get('qty')} ref={ref_val or '-'} "
+                f"side={side_val or '-'} desc={desc_val}"
+            )
+
+        if parsed_rows:
+            text_rows_info = {
+                "rows": parsed_rows,
+                "hole_count": total_qty,
+                "provenance_holes": "HOLE TABLE",
+            }
+            if families:
+                text_rows_info["hole_diam_families_in"] = families
+        else:
+            text_rows_info = None
+
         return table_lines
 
     def _log_and_normalize(label: str, result: Any) -> tuple[dict[str, Any] | None, tuple[int, int]]:
@@ -524,6 +782,13 @@ def read_text_table(doc) -> dict[str, Any]:
         return candidate_map, (qty_total, row_count)
 
     lines = ensure_lines()
+
+    if isinstance(text_rows_info, Mapping):
+        fallback_candidate = text_rows_info
+        scan_score = _score_table(text_rows_info)
+        if scan_score[1] > 0 and scan_score > best_score:
+            best_candidate = text_rows_info
+            best_score = scan_score
 
     if callable(helper):
         needs_lines, allows_lines = _analyze_helper_signature(helper)
@@ -594,12 +859,16 @@ def read_text_table(doc) -> dict[str, Any]:
     if isinstance(best_candidate, Mapping):
         return dict(best_candidate)
 
+    if isinstance(text_rows_info, Mapping):
+        return dict(text_rows_info)
+
+    if isinstance(fallback_candidate, Mapping):
+        return dict(fallback_candidate)
+
     fallback = _fallback_text_table(lines)
     if fallback:
         return fallback
 
-    if isinstance(fallback_candidate, Mapping):
-        return dict(fallback_candidate)
     return {}
 
 
