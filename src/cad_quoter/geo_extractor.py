@@ -89,6 +89,136 @@ def _sum_qty(rows: Iterable[Mapping[str, Any]] | None) -> int:
 def read_acad_table(doc) -> dict[str, Any]:
     helper = _resolve_app_callable("hole_count_from_acad_table")
     _print_helper_debug("acad", helper)
+    total_tables = 0
+    total_tables_in_blocks = 0
+
+    if doc is not None:
+        layouts: list[tuple[str, Any]] = []
+
+        def _layout_label(layout: Any, fallback: str) -> str:
+            name = getattr(layout, "name", None) or getattr(layout, "layout_key", None)
+            if not name:
+                dxf_obj = getattr(layout, "dxf", None)
+                name = getattr(dxf_obj, "name", None)
+            if isinstance(name, str) and name:
+                return name
+            return fallback
+
+        # Model space
+        modelspace = getattr(doc, "modelspace", None)
+        if callable(modelspace):
+            try:
+                model_layout = modelspace()
+            except Exception:
+                model_layout = None
+            if model_layout is not None:
+                layouts.append((_layout_label(model_layout, "Model"), model_layout))
+
+        layout_manager = getattr(doc, "layouts", None)
+        layout_names: list[str] = []
+        if layout_manager is not None:
+            name_sources = [
+                getattr(layout_manager, "names", None),
+                getattr(layout_manager, "get_layout_names", None),
+            ]
+            for source in name_sources:
+                if source is None:
+                    continue
+                try:
+                    names = source() if callable(source) else source
+                except Exception:
+                    continue
+                if names:
+                    try:
+                        layout_names = list(names)
+                    except Exception:
+                        layout_names = [str(names)]
+                    break
+        get_layout = getattr(layout_manager, "get", None)
+        for name in layout_names:
+            if isinstance(name, str) and name.lower() == "model":
+                continue
+            layout_obj = None
+            if callable(get_layout):
+                try:
+                    layout_obj = get_layout(name)
+                except Exception:
+                    layout_obj = None
+            if layout_obj is None and layout_manager is not None:
+                try:
+                    layout_obj = layout_manager[name]
+                except Exception:
+                    layout_obj = None
+            if layout_obj is not None:
+                layouts.append((_layout_label(layout_obj, str(name)), layout_obj))
+
+        blocks = getattr(doc, "blocks", None)
+
+        def resolve_block(block_name: Any) -> Any:
+            if not block_name or blocks is None:
+                return None
+            name_str = str(block_name)
+            for attr_name in ("get", "get_block"):
+                getter = getattr(blocks, attr_name, None)
+                if callable(getter):
+                    try:
+                        return getter(name_str)
+                    except Exception:
+                        continue
+            try:
+                return blocks[name_str]
+            except Exception:
+                return None
+
+        block_table_cache: dict[str, int] = {}
+
+        for layout_name, layout in layouts:
+            table_count = 0
+            layout_block_tables = 0
+            query = getattr(layout, "query", None)
+            inserts: list[Any] = []
+            if callable(query):
+                try:
+                    table_count = len(list(query("TABLE")))
+                except Exception:
+                    table_count = 0
+                try:
+                    inserts = list(query("INSERT"))
+                except Exception:
+                    inserts = []
+            for insert in inserts:
+                block_name = None
+                dxf_obj = getattr(insert, "dxf", None)
+                if dxf_obj is not None:
+                    block_name = getattr(dxf_obj, "name", None)
+                if not block_name:
+                    block_name = getattr(insert, "name", None)
+                if not block_name:
+                    continue
+                block_name_str = str(block_name)
+                if block_name_str in block_table_cache:
+                    block_tables = block_table_cache[block_name_str]
+                else:
+                    block = resolve_block(block_name_str)
+                    block_tables = 0
+                    if block is not None:
+                        block_query = getattr(block, "query", None)
+                        if callable(block_query):
+                            try:
+                                block_tables = len(list(block_query("TABLE")))
+                            except Exception:
+                                block_tables = 0
+                    block_table_cache[block_name_str] = block_tables
+                layout_block_tables += block_tables
+            print(
+                f"[ACAD-SCAN] layout={layout_name} tables={table_count} tables_in_blocks={layout_block_tables}"
+            )
+            total_tables += table_count
+            total_tables_in_blocks += layout_block_tables
+
+    if total_tables == 0 and total_tables_in_blocks == 0:
+        print("[ACAD-SCAN] no tables found in any layout or block.")
+
     if callable(helper):
         try:
             result = helper(doc) or {}
@@ -96,9 +226,29 @@ def read_acad_table(doc) -> dict[str, Any]:
             print(f"[EXTRACT] acad helper error: {exc}")
             raise
         if isinstance(result, Mapping):
-            return dict(result)
-        return {}
-    return {}
+            result_map = dict(result)
+        else:
+            result_map = {}
+    else:
+        result_map = {}
+
+    rows = result_map.get("rows")
+    row_count = 0
+    if isinstance(rows, (list, tuple)):
+        row_count = len(rows)
+    elif isinstance(rows, Iterable) and not isinstance(rows, (str, bytes)):
+        try:
+            row_count = len(rows)  # type: ignore[arg-type]
+        except Exception:
+            row_count = 0
+    hole_value = result_map.get("hole_count")
+    if isinstance(hole_value, (int, float)):
+        hole_display = int(hole_value)
+    else:
+        hole_display = hole_value if hole_value is not None else 0
+    print(f"[ACAD] rows={row_count} hole_count={hole_display}")
+
+    return result_map
 
 
 def _collect_table_text_lines(doc: Any) -> list[str]:
