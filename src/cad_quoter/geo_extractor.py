@@ -187,7 +187,422 @@ def read_acad_table(doc) -> dict[str, Any]:
         if isinstance(result, Mapping):
             return dict(result)
         return {}
-    return {}
+
+    layouts_scanned = 0
+    tables_found = 0
+    built_rows: list[dict[str, Any]] = []
+    families: dict[str, int] = {}
+
+    if doc is None:
+        print("[ACAD-TABLE] layouts_scanned=0 tables=0 rows_built=0")
+        return {}
+
+    seen_table_handles: set[str] = set()
+
+    def _iter_layout_containers() -> Iterable[tuple[str, Any, bool]]:
+        seen_layouts: set[int] = set()
+        modelspace = getattr(doc, "modelspace", None)
+        if callable(modelspace):
+            try:
+                layout_obj = modelspace()
+            except Exception:
+                layout_obj = None
+            if layout_obj is not None:
+                marker = id(layout_obj)
+                if marker not in seen_layouts:
+                    seen_layouts.add(marker)
+                    yield ("Model", layout_obj, False)
+
+        layouts_manager = getattr(doc, "layouts", None)
+        if layouts_manager is not None:
+            try:
+                raw_names = getattr(layouts_manager, "names", None)
+                if callable(raw_names):
+                    names_iter = raw_names()
+                else:
+                    names_iter = raw_names
+                layout_names = list(names_iter or [])
+            except Exception:
+                layout_names = []
+            get_layout = getattr(layouts_manager, "get", None)
+            for raw_name in layout_names:
+                if not isinstance(raw_name, str):
+                    continue
+                name = raw_name.strip() or raw_name
+                if name.lower() == "model":
+                    continue
+                layout_obj = None
+                if callable(get_layout):
+                    try:
+                        layout_obj = get_layout(raw_name)
+                    except Exception:
+                        layout_obj = None
+                if layout_obj is None:
+                    continue
+                marker = id(layout_obj)
+                if marker in seen_layouts:
+                    continue
+                seen_layouts.add(marker)
+                yield (name, layout_obj, False)
+
+        blocks = getattr(doc, "blocks", None)
+        if blocks is None:
+            return
+        try:
+            keys = getattr(blocks, "keys", None)
+            if callable(keys):
+                block_names = list(keys())
+            else:
+                block_names = list(keys or [])
+        except Exception:
+            block_names = []
+        if not block_names:
+            try:
+                block_names = [block.name for block in blocks]  # type: ignore[attr-defined]
+            except Exception:
+                block_names = []
+        get_block = getattr(blocks, "get", None)
+        for raw_name in block_names:
+            if not isinstance(raw_name, str):
+                continue
+            name = raw_name.strip()
+            if not name:
+                continue
+            upper = name.upper()
+            if name.startswith("*") or name.startswith("|") or upper.startswith("AC$"):
+                continue
+            block_layout = None
+            if callable(get_block):
+                try:
+                    block_layout = get_block(raw_name)
+                except Exception:
+                    block_layout = None
+            if block_layout is None:
+                block_layout = getattr(blocks, name, None)
+            if block_layout is None:
+                continue
+            marker = id(block_layout)
+            if marker in seen_layouts:
+                continue
+            seen_layouts.add(marker)
+            yield (name, block_layout, True)
+
+    def _iter_tables(container: Any) -> Iterable[Any]:
+        seen_entities: set[int] = set()
+        query = getattr(container, "query", None)
+        if callable(query):
+            for spec in ("ACAD_TABLE", "TABLE"):
+                try:
+                    candidates = list(query(spec))
+                except Exception:
+                    candidates = []
+                for entity in candidates:
+                    if entity is None:
+                        continue
+                    marker = id(entity)
+                    if marker in seen_entities:
+                        continue
+                    seen_entities.add(marker)
+                    yield entity
+        try:
+            iterator = iter(container)
+        except Exception:
+            iterator = None
+        if iterator is not None:
+            for entity in iterator:
+                if entity is None:
+                    continue
+                try:
+                    dxftype = entity.dxftype()
+                except Exception:
+                    dxftype = None
+                if str(dxftype or "").upper() not in {"ACAD_TABLE", "TABLE"}:
+                    continue
+                marker = id(entity)
+                if marker in seen_entities:
+                    continue
+                seen_entities.add(marker)
+                yield entity
+
+    qty_digit_re = re.compile(r"^\d{1,3}$")
+    qty_decimal_re = re.compile(r"\d+\.\d+")
+
+    def _parse_qty_cell_text(text: str) -> int | None:
+        candidate = (text or "").strip()
+        if not candidate:
+            return None
+        for pattern in _BAND_QTY_FALLBACK_PATTERNS:
+            match = pattern.search(candidate)
+            if not match:
+                continue
+            groupdict = match.groupdict()
+            qty_text = groupdict.get("qty") if groupdict else None
+            if not qty_text and match.groups():
+                qty_text = match.group(1)
+            if not qty_text:
+                continue
+            try:
+                return int(qty_text)
+            except Exception:
+                continue
+        stripped = re.sub(r"^\s*(?:QTY[:.=]?\s*)", "", candidate, flags=re.IGNORECASE)
+        stripped = re.sub(r"[()\[\]]", "", stripped)
+        stripped = re.sub(r"\b(?:EA|EACH|HOLES?|REQD|REQUIRED)\b", "", stripped, flags=re.IGNORECASE)
+        stripped = re.sub(r"[X×]\s*$", "", stripped, flags=re.IGNORECASE).strip()
+        if qty_digit_re.match(stripped):
+            try:
+                value = int(stripped)
+            except Exception:
+                value = None
+            if value is not None and value > 0:
+                return value
+        if qty_decimal_re.search(candidate):
+            return None
+        loose_match = re.search(r"(?<!\d)(\d{1,3})(?!\d)", candidate)
+        if loose_match:
+            try:
+                return int(loose_match.group(1))
+            except Exception:
+                return None
+        return None
+
+    def _table_dimension(entity: Any, names: tuple[str, ...]) -> int | None:
+        dxf_obj = getattr(entity, "dxf", None)
+        for name in names:
+            for source in (entity, dxf_obj):
+                if source is None:
+                    continue
+                value = getattr(source, name, None)
+                if value is None:
+                    continue
+                try:
+                    return int(float(value))
+                except Exception:
+                    continue
+        return None
+
+    def _cell_text(entity: Any, row: int, col: int) -> str:
+        text_value = ""
+        get_cell = getattr(entity, "get_cell", None)
+        cell_obj = None
+        if callable(get_cell):
+            try:
+                cell_obj = get_cell(row, col)
+            except Exception:
+                cell_obj = None
+        if cell_obj is not None:
+            get_text = getattr(cell_obj, "get_text", None)
+            if callable(get_text):
+                try:
+                    text_value = get_text() or ""
+                except Exception:
+                    text_value = ""
+            if not text_value:
+                for attr in ("text", "plain_text", "value", "content"):
+                    raw = getattr(cell_obj, attr, None)
+                    if raw is None:
+                        continue
+                    try:
+                        text_value = str(raw)
+                    except Exception:
+                        text_value = raw if isinstance(raw, str) else ""
+                    if text_value:
+                        break
+        if not text_value:
+            for method_name in ("get_cell_text", "get_text", "cell_text"):
+                method = getattr(entity, method_name, None)
+                if not callable(method):
+                    continue
+                try:
+                    text_value = method(row, col) or ""
+                except Exception:
+                    continue
+                if text_value:
+                    break
+        return _normalize_table_fragment(text_value)
+
+    header_token_re = re.compile(
+        r"(QTY|QUANTITY|DESC|DESCRIPTION|REF|DIA|Ø|⌀|HOLE|ID|SIDE)",
+        re.IGNORECASE,
+    )
+
+    def _detect_header_hits(cells: list[str]) -> dict[str, int]:
+        hits: dict[str, int] = {}
+        for idx, cell in enumerate(cells):
+            if not cell:
+                continue
+            upper = cell.upper()
+            if "QTY" in upper or "QUANTITY" in upper:
+                hits.setdefault("qty", idx)
+            if "DESC" in upper or "DESCRIPTION" in upper:
+                hits.setdefault("desc", idx)
+            if any(token in upper for token in ("Ø", "⌀", "DIA", "REF")):
+                hits.setdefault("ref", idx)
+            if "HOLE" in upper or re.search(r"\bID\b", upper):
+                hits.setdefault("hole", idx)
+            if "SIDE" in upper or "FACE" in upper:
+                hits.setdefault("side", idx)
+        if not hits:
+            combined = " ".join(cells)
+            if not header_token_re.search(combined):
+                return {}
+        return hits
+
+    for _layout_name, layout_obj, _ in _iter_layout_containers():
+        if layout_obj is None:
+            continue
+        layouts_scanned += 1
+        for table_entity in _iter_tables(layout_obj):
+            if table_entity is None:
+                continue
+            dxf_obj = getattr(table_entity, "dxf", None)
+            handle = getattr(dxf_obj, "handle", None) if dxf_obj is not None else None
+            marker = str(handle or id(table_entity))
+            if marker in seen_table_handles:
+                continue
+            seen_table_handles.add(marker)
+            tables_found += 1
+            n_rows = _table_dimension(table_entity, ("n_rows", "row_count", "rows"))
+            n_cols = _table_dimension(table_entity, ("n_cols", "column_count", "cols"))
+            if not n_rows or not n_cols:
+                continue
+            try:
+                if n_rows <= 0 or n_cols <= 0:
+                    continue
+            except Exception:
+                continue
+            table_cells: list[list[str]] = []
+            for row_idx in range(n_rows):
+                row_cells: list[str] = []
+                for col_idx in range(n_cols):
+                    try:
+                        text_value = _cell_text(table_entity, row_idx, col_idx)
+                    except Exception:
+                        text_value = ""
+                    row_cells.append(text_value)
+                if any(cell.strip() for cell in row_cells):
+                    table_cells.append(row_cells)
+            if not table_cells:
+                continue
+
+            header_map: dict[str, int] = {}
+            for row_idx, row_cells in enumerate(table_cells):
+                hits = _detect_header_hits(row_cells)
+                if not hits:
+                    continue
+                if "qty" in hits or len(hits) >= 2:
+                    for key, value in hits.items():
+                        header_map.setdefault(key, value)
+            if "desc" not in header_map and table_cells:
+                candidate_indices = list(range(len(table_cells[0])))
+                for used in header_map.values():
+                    if used in candidate_indices:
+                        candidate_indices.remove(used)
+                if candidate_indices:
+                    header_map["desc"] = max(candidate_indices)
+
+            for row_idx, row_cells in enumerate(table_cells):
+                combined_text = " ".join(cell.strip() for cell in row_cells if cell).strip()
+                if not combined_text:
+                    continue
+                fallback_desc = ""
+                qty_val = None
+                qty_idx = header_map.get("qty")
+                if qty_idx is not None and qty_idx < len(row_cells):
+                    qty_val = _parse_qty_cell_text(row_cells[qty_idx])
+                combined_qty, combined_remainder = _extract_row_quantity_and_remainder(
+                    combined_text
+                )
+                if qty_val is None and combined_qty is not None and combined_qty > 0:
+                    qty_val = combined_qty
+                    fallback_desc = combined_remainder.strip()
+                elif qty_val is not None and combined_qty is not None and qty_val == combined_qty:
+                    fallback_desc = combined_remainder.strip()
+                if qty_val is None or qty_val <= 0:
+                    continue
+
+                desc_idx = header_map.get("desc")
+                desc_text = ""
+                if desc_idx is not None and desc_idx < len(row_cells):
+                    desc_text = row_cells[desc_idx]
+                if not desc_text:
+                    desc_text = fallback_desc
+                if not desc_text:
+                    excluded = {idx for idx in header_map.values() if idx is not None}
+                    desc_parts = [
+                        row_cells[col].strip()
+                        for col in range(len(row_cells))
+                        if col not in excluded and row_cells[col].strip()
+                    ]
+                    desc_text = " ".join(desc_parts)
+                desc_text = " ".join((desc_text or "").split())
+                if not desc_text:
+                    continue
+
+                ref_idx = header_map.get("ref")
+                ref_cell_text = (
+                    row_cells[ref_idx] if ref_idx is not None and ref_idx < len(row_cells) else ""
+                )
+                ref_cell_ref = _extract_row_reference(ref_cell_text) if ref_cell_text else ("", None)
+                hole_idx = header_map.get("hole")
+                hole_text = (
+                    row_cells[hole_idx].strip()
+                    if hole_idx is not None and hole_idx < len(row_cells)
+                    else ""
+                )
+                side_idx = header_map.get("side")
+                side_cell_text = (
+                    row_cells[side_idx]
+                    if side_idx is not None and side_idx < len(row_cells)
+                    else ""
+                )
+                base_side = _detect_row_side(" ".join([side_cell_text, desc_text]))
+
+                fragments = [frag.strip() for frag in desc_text.split(";") if frag.strip()]
+                if not fragments:
+                    fragments = [desc_text]
+                for fragment in fragments:
+                    fragment_desc = " ".join(fragment.split())
+                    if not fragment_desc:
+                        continue
+                    ref_text, ref_value = _extract_row_reference(fragment_desc)
+                    if not ref_text and ref_cell_ref[0]:
+                        ref_text, ref_value = ref_cell_ref
+                    elif not ref_text and ref_cell_text:
+                        ref_text = " ".join(ref_cell_text.split())
+                        ref_value = None
+                    side_value = _detect_row_side(" ".join([fragment_desc, side_cell_text]))
+                    if not side_value:
+                        side_value = base_side
+                    row_entry: dict[str, Any] = {
+                        "hole": hole_text,
+                        "qty": qty_val,
+                        "desc": fragment_desc,
+                        "ref": ref_text,
+                    }
+                    if side_value:
+                        row_entry["side"] = side_value
+                    built_rows.append(row_entry)
+                    if ref_value is not None:
+                        key = f"{ref_value:.4f}".rstrip("0").rstrip(".")
+                        families[key] = families.get(key, 0) + qty_val
+
+    print(
+        f"[ACAD-TABLE] layouts_scanned={layouts_scanned} tables={tables_found} rows_built={len(built_rows)}"
+    )
+
+    if not built_rows:
+        return {}
+
+    hole_count = _sum_qty(built_rows)
+    result: dict[str, Any] = {
+        "rows": built_rows,
+        "hole_count": hole_count,
+        "provenance_holes": "HOLE TABLE (ACAD_TABLE)",
+    }
+    if families:
+        result["hole_diam_families_in"] = families
+    return result
 
 
 def _collect_table_text_lines(doc: Any) -> list[str]:
@@ -664,15 +1079,92 @@ def _build_columnar_table_from_entries(
             and expanded_ymin <= rec["y"] <= expanded_ymax
         ]
         clusters_count = len(clusters) or 1
+        roi_bounds = {
+            "xmin": cluster_xmin,
+            "xmax": cluster_xmax,
+            "ymin": cluster_ymin,
+            "ymax": cluster_ymax,
+            "dx": dx,
+            "dy": dy,
+            "clusters": clusters_count,
+            "anchors": anchor_count,
+        }
+        roi_info = {
+            "anchors": anchor_count,
+            "clusters": clusters_count,
+            "bbox": [cluster_xmin, cluster_xmax, cluster_ymin, cluster_ymax],
+            "total": len(records_all),
+        }
+    records = list(filtered_records)
+
+    def _prepare_records(values: list[dict[str, Any]]) -> tuple[list[dict[str, Any]], float]:
+        ordered = list(values)
+        ordered.sort(key=lambda item: (-item["y"], item["x"]))
+        height_vals = [
+            float(rec["height"])
+            for rec in ordered
+            if isinstance(rec.get("height"), (int, float)) and float(rec["height"]) > 0
+        ]
+        y_offsets = [
+            abs(ordered[idx]["y"] - ordered[idx - 1]["y"])
+            for idx in range(1, len(ordered))
+            if abs(ordered[idx]["y"] - ordered[idx - 1]["y"]) > 0
+        ]
+        median_val = statistics.median(height_vals) if height_vals else 0.0
+        if (median_val is None or median_val <= 0) and roi_median_height > 0:
+            median_val = roi_median_height
+        if (median_val is None or median_val <= 0) and median_height_all > 0:
+            median_val = median_height_all
+        if (median_val is None or median_val <= 0) and y_offsets:
+            median_val = statistics.median(y_offsets)
+        if median_val is None or median_val <= 0:
+            median_val = 4.0
+        return ordered, median_val
+
+    records, median_h = _prepare_records(records)
+
+    if roi_bounds is not None:
+        desired_dx = max(roi_bounds["dx"], 18.0 * median_h)
+        desired_dy = max(roi_bounds["dy"], 24.0 * median_h)
+        if desired_dx > roi_bounds["dx"] + 1e-6 or desired_dy > roi_bounds["dy"] + 1e-6:
+            expanded_xmin = roi_bounds["xmin"] - desired_dx
+            expanded_xmax = roi_bounds["xmax"] + desired_dx
+            expanded_ymin = roi_bounds["ymin"] - desired_dy
+            expanded_ymax = roi_bounds["ymax"] + desired_dy
+            filtered_records = [
+                rec
+                for rec in records_all
+                if expanded_xmin <= rec["x"] <= expanded_xmax
+                and expanded_ymin <= rec["y"] <= expanded_ymax
+            ]
+            roi_bounds["dx"] = desired_dx
+            roi_bounds["dy"] = desired_dy
+            records, median_h = _prepare_records(filtered_records)
+        expanded_xmin = roi_bounds["xmin"] - roi_bounds["dx"]
+        expanded_xmax = roi_bounds["xmax"] + roi_bounds["dx"]
+        expanded_ymin = roi_bounds["ymin"] - roi_bounds["dy"]
+        expanded_ymax = roi_bounds["ymax"] + roi_bounds["dy"]
+        kept_count = len(records)
+        if roi_info is None:
+            roi_info = {}
+        roi_info.update(
+            {
+                "expanded": [expanded_xmin, expanded_xmax, expanded_ymin, expanded_ymax],
+                "kept": kept_count,
+                "median_h": median_h,
+                "anchors": int(roi_bounds.get("anchors", 0.0)),
+                "clusters": int(roi_bounds.get("clusters", 0.0)) or 1,
+            }
+        )
         print(
             "[ROI] anchors={count} clusters={clusters} chosen_span=[{ymax:.1f}..{ymin:.1f}] "
             "bbox=[{xmin:.1f}..{xmax:.1f}] expanded=[{xmin_exp:.1f}..{xmax_exp:.1f},{ymin_exp:.1f}..{ymax_exp:.1f}]".format(
-                count=anchor_count,
-                clusters=clusters_count,
-                ymax=cluster_ymax,
-                ymin=cluster_ymin,
-                xmin=cluster_xmin,
-                xmax=cluster_xmax,
+                count=int(roi_bounds.get("anchors", 0.0)),
+                clusters=int(roi_bounds.get("clusters", 0.0)) or 1,
+                ymax=roi_bounds["ymax"],
+                ymin=roi_bounds["ymin"],
+                xmin=roi_bounds["xmin"],
+                xmax=roi_bounds["xmax"],
                 xmin_exp=expanded_xmin,
                 xmax_exp=expanded_xmax,
                 ymin_exp=expanded_ymin,
@@ -680,44 +1172,11 @@ def _build_columnar_table_from_entries(
             )
         )
         print(
-            f"[ROI] median_h={roi_median_height:.2f} expand=({dx:.1f},{dy:.1f})"
+            f"[ROI] median_h={median_h:.2f} expand=({roi_bounds['dx']:.1f},{roi_bounds['dy']:.1f})"
         )
         print(
-            f"[ROI] raw_lines -> roi_lines: {len(records_all)} -> {len(filtered_records)}"
+            f"[ROI] raw_lines -> roi_lines: {len(records_all)} -> {kept_count}"
         )
-        roi_info = {
-            "anchors": anchor_count,
-            "clusters": clusters_count,
-            "bbox": [cluster_xmin, cluster_xmax, cluster_ymin, cluster_ymax],
-            "expanded": [expanded_xmin, expanded_xmax, expanded_ymin, expanded_ymax],
-            "total": len(records_all),
-            "kept": len(filtered_records),
-            "median_h": roi_median_height,
-        }
-    records = list(filtered_records)
-
-    records.sort(key=lambda item: (-item["y"], item["x"]))
-
-    height_values = [
-        float(rec["height"])
-        for rec in records
-        if isinstance(rec.get("height"), (int, float)) and float(rec["height"]) > 0
-    ]
-    y_diffs = [
-        abs(records[idx]["y"] - records[idx - 1]["y"])
-        for idx in range(1, len(records))
-        if abs(records[idx]["y"] - records[idx - 1]["y"]) > 0
-    ]
-
-    median_h = statistics.median(height_values) if height_values else 0.0
-    if (median_h is None or median_h <= 0) and roi_median_height > 0:
-        median_h = roi_median_height
-    if (median_h is None or median_h <= 0) and median_height_all > 0:
-        median_h = median_height_all
-    if (median_h is None or median_h <= 0) and y_diffs:
-        median_h = statistics.median(y_diffs)
-    if median_h is None or median_h <= 0:
-        median_h = 4.0
 
     y_gap_limit = 0.75 * median_h if median_h > 0 else 3.0
     if y_gap_limit <= 0:
@@ -735,12 +1194,19 @@ def _build_columnar_table_from_entries(
             prev_y = y_val
             continue
         band_center = current_sum_y / len(current_band)
-        if (
-            abs(y_val - prev_y) <= y_gap_limit
-            and abs(y_val - band_center) <= y_gap_limit
-        ):
-            current_band.append(record)
-            current_sum_y += y_val
+        within_prev = abs(y_val - prev_y) <= y_gap_limit if prev_y is not None else True
+        within_center = abs(y_val - band_center) <= y_gap_limit
+        if within_prev and within_center:
+            proposed_sum = current_sum_y + y_val
+            proposed_count = len(current_band) + 1
+            proposed_center = proposed_sum / proposed_count
+            if abs(proposed_center - band_center) <= y_gap_limit:
+                current_band.append(record)
+                current_sum_y = proposed_sum
+            else:
+                raw_bands.append(current_band)
+                current_band = [record]
+                current_sum_y = y_val
         else:
             raw_bands.append(current_band)
             current_band = [record]
@@ -940,6 +1406,8 @@ def _build_columnar_table_from_entries(
                         "count": 1,
                         "center_x": x_pos,
                         "center_y": item["y"],
+                        "min_x": x_pos,
+                        "max_x": x_pos,
                     }
                 )
                 continue
@@ -951,6 +1419,8 @@ def _build_columnar_table_from_entries(
                 column["count"] += 1
                 column["center_x"] = column["sum_x"] / column["count"]
                 column["center_y"] = column["sum_y"] / column["count"]
+                column["min_x"] = min(column.get("min_x", x_pos), x_pos)
+                column["max_x"] = max(column.get("max_x", x_pos), x_pos)
                 continue
             columns.append(
                 {
@@ -960,6 +1430,8 @@ def _build_columnar_table_from_entries(
                     "count": 1,
                     "center_x": x_pos,
                     "center_y": item["y"],
+                    "min_x": x_pos,
+                    "max_x": x_pos,
                 }
             )
 
@@ -993,6 +1465,13 @@ def _build_columnar_table_from_entries(
                 "line_count": len(band),
                 "centers": [column["center_x"] for column in columns],
                 "x_eps": x_eps,
+                "spans": [
+                    (
+                        float(column.get("min_x", column["center_x"])),
+                        float(column.get("max_x", column["center_x"])),
+                    )
+                    for column in columns
+                ],
             }
         )
 
@@ -1002,7 +1481,132 @@ def _build_columnar_table_from_entries(
             {"bands": band_summaries, "band_cells": band_cells_dump, "rows_txt_fallback": [], "qty_col": None, "ref_col": None, "desc_col": None, "y_eps": y_eps},
         )
 
+    header_field_info: dict[str, dict[str, Any]] = {}
+    header_band_indices: set[int] = set()
+
+    def _header_hits(cells: list[str]) -> dict[str, int]:
+        hits: dict[str, int] = {}
+        for idx, cell_text in enumerate(cells):
+            upper = cell_text.upper()
+            if not upper:
+                continue
+            if "QTY" in upper or "QUANTITY" in upper:
+                hits.setdefault("qty", idx)
+            if "DESC" in upper or "DESCRIPTION" in upper:
+                hits.setdefault("desc", idx)
+            if "SIDE" in upper or "FACE" in upper:
+                hits.setdefault("side", idx)
+            if any(token in upper for token in ("Ø", "⌀", "DIA", "REF")):
+                hits.setdefault("ref", idx)
+            if "HOLE" in upper or re.search(r"\bID\b", upper):
+                hits.setdefault("hole", idx)
+        return hits
+
+    for band_index, band in enumerate(band_results):
+        cells = band.get("cells", [])
+        if not cells:
+            continue
+        hits = _header_hits(cells)
+        if not hits:
+            continue
+        if "qty" not in hits and len(hits) < 2:
+            continue
+        header_band_indices.add(band_index)
+        centers = band.get("centers") or []
+        spans = band.get("spans") or []
+        for field, col_idx in hits.items():
+            if field in header_field_info:
+                continue
+            span_value = spans[col_idx] if col_idx < len(spans) else None
+            center_value = centers[col_idx] if col_idx < len(centers) else None
+            header_field_info[field] = {
+                "band": band_index,
+                "col": col_idx,
+                "center": center_value,
+                "span": span_value,
+            }
+
+    if header_field_info and "desc" not in header_field_info and header_band_indices:
+        header_idx = min(header_band_indices)
+        sample_band = band_results[header_idx]
+        cells = sample_band.get("cells", [])
+        centers = sample_band.get("centers") or []
+        spans = sample_band.get("spans") or []
+        used_cols = {info.get("col") for info in header_field_info.values() if isinstance(info.get("col"), int)}
+        candidates = [idx for idx in range(len(cells)) if idx not in used_cols]
+        if candidates:
+            best_idx = max(candidates, key=lambda idx: len(cells[idx]))
+            header_field_info["desc"] = {
+                "band": header_idx,
+                "col": best_idx,
+                "center": centers[best_idx] if best_idx < len(centers) else None,
+                "span": spans[best_idx] if best_idx < len(spans) else None,
+            }
+
+    def _match_header_index(field: str, band: dict[str, Any]) -> int | None:
+        info = header_field_info.get(field)
+        if not info:
+            return None
+        centers = band.get("centers") or []
+        spans = band.get("spans") or []
+        if not centers:
+            return None
+        target_center = info.get("center")
+        header_col = info.get("col")
+        span_hint = info.get("span")
+        width = None
+        if isinstance(span_hint, tuple) and len(span_hint) == 2:
+            try:
+                span_min = float(span_hint[0])
+                span_max = float(span_hint[1])
+                width = abs(span_max - span_min)
+            except Exception:
+                span_min = span_max = None
+        else:
+            span_min = span_max = None
+        tolerance = max(6.0, (width or 0.0) * 0.6)
+        best_idx: int | None = None
+        best_score: tuple[float, float] | None = None
+        for idx, center in enumerate(centers):
+            if not isinstance(center, (int, float)):
+                continue
+            if span_min is not None and center < span_min - tolerance:
+                continue
+            if span_max is not None and center > span_max + tolerance:
+                continue
+            if isinstance(target_center, (int, float)):
+                distance = abs(center - float(target_center))
+            else:
+                distance = 0.0
+            if isinstance(header_col, int):
+                column_delta = abs(idx - header_col)
+            else:
+                column_delta = float("inf")
+            score = (distance, column_delta)
+            if best_score is None or score < best_score:
+                best_score = score
+                best_idx = idx
+        if best_idx is None and isinstance(header_col, int) and header_col < len(centers):
+            best_idx = header_col
+        return best_idx
+
+    if header_field_info:
+        for band in band_results:
+            header_indices: dict[str, int] = {}
+            for field in header_field_info:
+                idx = _match_header_index(field, band)
+                if idx is not None:
+                    header_indices[field] = idx
+            if header_indices:
+                band["header_indices"] = header_indices
+
     column_count = max(len(band["cells"]) for band in band_results)
+    header_cols: dict[str, int] = {}
+    if header_field_info:
+        for key in ("qty", "ref", "desc", "side", "hole"):
+            value = header_field_info.get(key, {}).get("col")
+            if isinstance(value, int) and 0 <= value < column_count:
+                header_cols[key] = value
     qty_digit_re = re.compile(r"^\d{1,3}$")
     qty_suffix_re = re.compile(r"\b(REQD|REQUIRED|RE'?D|EA|EACH|HOLES?)\b$", re.IGNORECASE)
 
@@ -1088,13 +1692,13 @@ def _build_columnar_table_from_entries(
             }
         )
 
-    fallback_qty_col: int | None = None
+    fallback_qty_col: int | None = header_cols.get("qty") if header_cols else None
     qty_candidates = [
         idx
         for idx, info in enumerate(metrics)
         if info["header_qty"] or (info["non_empty"] > 0 and info["numeric_ratio"] >= 0.6)
     ]
-    if qty_candidates:
+    if qty_candidates and fallback_qty_col is None:
         fallback_qty_col = min(qty_candidates)
 
     if fallback_qty_col is None:
@@ -1124,7 +1728,12 @@ def _build_columnar_table_from_entries(
         x_eps_band = float(band.get("x_eps") or 0.0)
         qty_idx: int | None = None
         qty_cell_text = ""
-        if qty_x is not None and centers:
+        header_indices = band.get("header_indices") or {}
+        header_qty_idx = header_indices.get("qty")
+        if isinstance(header_qty_idx, int) and header_qty_idx < len(cells):
+            qty_idx = header_qty_idx
+            qty_cell_text = cells[header_qty_idx].strip()
+        if qty_idx is None and qty_x is not None and centers:
             center_pairs = [
                 (col_index, float(center))
                 for col_index, center in enumerate(centers)
@@ -1174,6 +1783,8 @@ def _build_columnar_table_from_entries(
         qty_col = max(qty_index_counts.items(), key=lambda item: (item[1], -item[0]))[0]
     else:
         qty_col = fallback_qty_col
+    if "qty" in header_cols:
+        qty_col = header_cols["qty"]
 
     ref_candidates = [
         idx
@@ -1181,6 +1792,8 @@ def _build_columnar_table_from_entries(
         if info["header_ref"] or (info["non_empty"] > 0 and info["ref_ratio"] >= 0.4)
     ]
     ref_col = max(ref_candidates) if ref_candidates else None
+    if "ref" in header_cols:
+        ref_col = header_cols["ref"]
 
     desc_candidates = [idx for idx in range(column_count) if idx != qty_col and idx != ref_col]
     if not desc_candidates:
@@ -1191,6 +1804,8 @@ def _build_columnar_table_from_entries(
         return (float(data["action_ratio"]), float(data["avg_len"]), -index)
 
     desc_col = max(desc_candidates, key=_desc_score)
+    if "desc" in header_cols:
+        desc_col = header_cols["desc"]
 
     print(
         "[TABLE-ID] qty_x≈{qx} qty_col={qty} ref_col={ref} desc_col={desc} bands_checked={bands}".format(
@@ -1213,7 +1828,18 @@ def _build_columnar_table_from_entries(
     families: dict[str, int] = {}
     for band_index, band in enumerate(band_results):
         cells = band.get("cells", [])
-        qty_idx = band.get("qty_index")
+        header_indices = band.get("header_indices") or {}
+
+        def _resolved_index(default_idx: int | None, field: str) -> int | None:
+            idx_val = header_indices.get(field)
+            if isinstance(idx_val, int):
+                return idx_val
+            idx_val = header_cols.get(field)
+            if isinstance(idx_val, int):
+                return idx_val
+            return default_idx
+
+        qty_idx = _resolved_index(band.get("qty_index"), "qty")
         if qty_idx is None:
             qty_idx = qty_col
         qty_text = _cell_at(cells, qty_idx)
@@ -1243,7 +1869,8 @@ def _build_columnar_table_from_entries(
                 )
         if qty_val is None or qty_val <= 0:
             continue
-        desc_text = _cell_at(cells, desc_col)
+        desc_idx = _resolved_index(desc_col, "desc")
+        desc_text = _cell_at(cells, desc_idx)
         if used_qty_fallback:
             desc_text = fallback_desc or desc_text
         if not desc_text:
@@ -1255,10 +1882,15 @@ def _build_columnar_table_from_entries(
             ]
             desc_text = " ".join(fallback_parts)
         desc_text = " ".join((desc_text or "").split())
-        ref_text_candidate = _cell_at(cells, ref_col)
+        ref_idx_resolved = _resolved_index(ref_col, "ref")
+        ref_text_candidate = _cell_at(cells, ref_idx_resolved)
         ref_cell_ref = ("", None)
         if ref_text_candidate:
             ref_cell_ref = _extract_row_reference(ref_text_candidate)
+        hole_idx = _resolved_index(None, "hole")
+        hole_text = _cell_at(cells, hole_idx)
+        side_idx = _resolved_index(header_cols.get("side"), "side")
+        side_cell_text = _cell_at(cells, side_idx)
         fragments = [frag.strip() for frag in desc_text.split(";") if frag.strip()]
         if not fragments:
             fragments = [desc_text]
@@ -1269,9 +1901,22 @@ def _build_columnar_table_from_entries(
             ref_text, ref_value = _extract_row_reference(fragment_desc)
             if not ref_text and ref_cell_ref[0]:
                 ref_text, ref_value = ref_cell_ref
-            side = _detect_row_side(fragment_desc)
+            combined_side_text = " ".join(
+                part for part in (side_cell_text, fragment_desc) if part
+            )
+            side = _detect_row_side(combined_side_text)
+            if not side:
+                side = _detect_row_side(fragment_desc)
+            if not side and side_cell_text:
+                upper_side = side_cell_text.upper()
+                if "BOTH" in upper_side:
+                    side = "both"
+                elif "BACK" in upper_side and "FRONT" not in upper_side:
+                    side = "back"
+                elif "FRONT" in upper_side and "BACK" not in upper_side:
+                    side = "front"
             row_dict: dict[str, Any] = {
-                "hole": "",
+                "hole": hole_text or "",
                 "qty": qty_val,
                 "desc": fragment_desc,
                 "ref": ref_text,
