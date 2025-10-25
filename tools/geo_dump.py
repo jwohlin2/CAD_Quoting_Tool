@@ -45,6 +45,10 @@ def main(argv: Sequence[str] | None = None) -> int:
         action="store_true",
         help="Print helper resolution diagnostics",
     )
+    parser.add_argument(
+        "--dump-lines",
+        help="Write text-line debug dump to this path (banded cells use *_bands.tsv)",
+    )
     args = parser.parse_args(argv)
 
     path = (args.path or os.environ.get("GEO_DUMP_PATH") or "").strip()
@@ -105,6 +109,60 @@ def main(argv: Sequence[str] | None = None) -> int:
             print(
                 f"  [{idx:02d}] QTY={qty} REF={ref} SIDE={row.get('side') if isinstance(row, Mapping) else ''} DESC={desc} HOLE={hole}"
             )
+
+    debug_payload = geo_extractor.get_last_text_table_debug() or {}
+
+    dump_base = args.dump_lines
+    if args.debug_entities and len(rows) < 8 and not dump_base:
+        base_name = Path(path).stem or "geo_dump"
+        dump_base = str(Path.cwd() / f"{base_name}_lines.tsv")
+
+    if dump_base:
+        lines_path = Path(dump_base)
+        bands_path = lines_path.with_name(f"{lines_path.stem}_bands.tsv")
+        candidates = debug_payload.get("candidates", [])
+        band_cells = debug_payload.get("band_cells", [])
+
+        def _format_float(value: object) -> str:
+            if isinstance(value, (int, float)):
+                return f"{float(value):.3f}"
+            try:
+                return f"{float(value):.3f}"
+            except Exception:
+                return ""
+
+        def _write_lines(path_obj: Path, header: str, rows_iter: list[dict[str, object]]) -> None:
+            path_obj.parent.mkdir(parents=True, exist_ok=True)
+            with path_obj.open("w", encoding="utf-8") as handle:
+                handle.write(header + "\n")
+                for item in rows_iter:
+                    if header.startswith("layout\t"):
+                        layout = str(item.get("layout") or "")
+                        in_block = "1" if item.get("in_block") else "0"
+                        fields = [
+                            layout,
+                            in_block,
+                            _format_float(item.get("x")),
+                            _format_float(item.get("y")),
+                            str(item.get("text") or ""),
+                        ]
+                    else:
+                        fields = [
+                            str(item.get("band", "")),
+                            str(item.get("col", "")),
+                            _format_float(item.get("x_center")),
+                            _format_float(item.get("y_center")),
+                            str(item.get("text") or ""),
+                        ]
+                    handle.write("\t".join(fields) + "\n")
+
+        try:
+            _write_lines(lines_path, "layout\tin_block\tx\ty\ttext", list(candidates))
+            _write_lines(bands_path, "band\tcol\tx_center\ty_center\ttext", list(band_cells))
+        except OSError as exc:  # pragma: no cover - filesystem issues
+            print(f"[geo_dump] failed to write dumps: {exc}")
+        else:
+            print(f"[geo_dump] wrote debug dumps to {lines_path} and {bands_path}")
 
     return 0
 
