@@ -1123,98 +1123,6 @@ def minutes_to_hours(m: Any) -> float:
     return _minutes_to_hours(m)
 
 
-def _set_bucket_minutes_cost(
-    bvo: MutableMapping[str, Any] | Mapping[str, Any] | None,
-    key: str,
-    minutes: float,
-    machine_rate: float,
-    labor_rate: float,
-) -> None:
-    minutes_val = _as_float(minutes, 0.0)
-    if not (0.0 <= minutes_val <= 10_000.0):
-        logging.warning(f"[bucket] ignoring {key} minutes out of range: {minutes}")
-        minutes_val = 0.0
-
-    machine_rate_val = _as_float(machine_rate, 0.0)
-    labor_rate_val = _as_float(labor_rate, 0.0)
-
-    buckets_obj: MutableMapping[str, Any] | None = None
-    if isinstance(bvo, dict):
-        buckets_obj = bvo.setdefault("buckets", {})
-    elif isinstance(bvo, _MutableMappingABC):
-        buckets_obj = typing.cast(MutableMapping[str, Any], bvo.setdefault("buckets", {}))
-    else:
-        return
-
-    if buckets_obj is None:
-        return
-
-    machine_cost = (minutes_val / 60.0) * machine_rate_val
-    labor_cost = (minutes_val / 60.0) * labor_rate_val
-
-    buckets_obj[key] = {
-        "minutes": minutes_val,
-        "machine$": round(machine_cost, 2),
-        "labor$": round(labor_cost, 2),
-        "total$": round(machine_cost + labor_cost, 2),
-    }
-
-
-def _normalize_buckets(bucket_view_obj: MutableMapping[str, Any] | Mapping[str, Any] | None) -> None:
-    if not isinstance(bucket_view_obj, (_MutableMappingABC, dict)):
-        return
-
-    alias = {
-        "programming_amortized": "programming",
-        "spotdrill": "spot_drill",
-        "spot-drill": "spot_drill",
-        "jiggrind": "jig_grind",
-        "jig-grind": "jig_grind",
-    }
-
-    try:
-        buckets_obj = bucket_view_obj.get("buckets")
-    except Exception:
-        buckets_obj = None
-
-    if isinstance(buckets_obj, dict):
-        source_items = buckets_obj.items()
-    elif isinstance(buckets_obj, _MappingABC):
-        source_items = buckets_obj.items()
-    else:
-        source_items = ()
-
-    norm: dict[str, dict[str, float]] = {}
-    for raw_key, entry in source_items:
-        try:
-            key = str(raw_key or "")
-        except Exception:
-            key = ""
-        if not key or not isinstance(entry, _MappingABC):
-            continue
-        nk = alias.get(key, key)
-        dst = norm.setdefault(
-            nk,
-            {"minutes": 0.0, "machine$": 0.0, "labor$": 0.0, "total$": 0.0},
-        )
-        dst["minutes"] += _as_float(entry.get("minutes"), 0.0)
-        dst["machine$"] += _as_float(entry.get("machine$"), 0.0)
-        dst["labor$"] += _as_float(entry.get("labor$"), 0.0)
-        dst["total$"] = round(dst["machine$"] + dst["labor$"], 2)
-
-    bucket_view_obj["buckets"] = norm
-
-    try:
-        buckets_snapshot = (
-            bucket_view_obj.get("buckets")
-            if isinstance(bucket_view_obj, (_MappingABC, dict))
-            else None
-        )
-    except Exception:
-        buckets_snapshot = None
-    logging.debug(f"[buckets-final] {buckets_snapshot or {}}")
-
-
 def _get_chart_lines_for_ops(
     breakdown: Mapping[str, Any] | None,
     result: Mapping[str, Any] | None,
@@ -4623,6 +4531,7 @@ from cad_quoter.ui.planner_render import (
     _process_label,
     _seed_bucket_minutes as _planner_seed_bucket_minutes,
     _normalize_buckets,
+    _set_bucket_minutes_cost,
     _split_hours_for_bucket,
     _purge_legacy_drill_sync,
     _build_planner_bucket_render_state,
