@@ -10,6 +10,7 @@ from functools import lru_cache
 import os
 from pathlib import Path
 import re
+import statistics
 from typing import Any, Callable
 
 from cad_quoter import geometry
@@ -78,7 +79,24 @@ def _split_mtext_plain_text(text: Any) -> list[str]:
     return parts
 
 
-_ROW_START_RE = re.compile(r"\(\s*\d+\s*\)")
+_HOLE_ACTION_TOKEN_PATTERN = (
+    r"(Ø|⌀|C['’]?BORE|COUNTER\s*BORE|DRILL|TAP|N\.?P\.?T|NPT|THRU|JIG\s*GRIND)"
+)
+_ROW_QUANTITY_PATTERNS = [
+    re.compile(r"^\(\s*(\d+)\s*\)", re.IGNORECASE),
+    re.compile(r"^\s*(\d+)\s*[x×]\b", re.IGNORECASE),
+    re.compile(r"^\s*(?:QTY|QTY\.|QTY:)\s*(\d+)\b", re.IGNORECASE),
+    re.compile(r"^\s*(\d+)\s*(?:REQD|REQUIRED|RE'?D)\b", re.IGNORECASE),
+    re.compile(rf"^\s*(\d+)\b(?=.*{_HOLE_ACTION_TOKEN_PATTERN})", re.IGNORECASE),
+]
+_ROW_QUANTITY_FLEX_PATTERNS = [
+    re.compile(r"\b(\d+)\s*[x×]\b", re.IGNORECASE),
+    re.compile(r"\b(?:QTY|QTY\.|QTY:)\s*(\d+)\b", re.IGNORECASE),
+    re.compile(r"\b(\d+)\s*(?:REQD|REQUIRED|RE'?D)\b", re.IGNORECASE),
+    re.compile(r"\(\s*(\d+)\s*\)"),
+]
+_LETTER_CODE_ROW_RE = re.compile(r"^\s*[A-Z]\s*(?:[-.:|]|$)")
+_HOLE_ACTION_TOKEN_RE = re.compile(_HOLE_ACTION_TOKEN_PATTERN, re.IGNORECASE)
 _DIAMETER_PREFIX_RE = re.compile(
     r"(?:Ø|⌀|DIA(?:\.\b|\b))\s*(\d+\s*/\s*\d+|\d*\.\d+|\.\d+|\d+)",
     re.IGNORECASE,
@@ -262,6 +280,108 @@ def _has_candidate_token(text: str) -> bool:
     return False
 
 
+def _match_row_quantity(text: str) -> re.Match[str] | None:
+    candidate = text or ""
+    for pattern in _ROW_QUANTITY_PATTERNS:
+        match = pattern.search(candidate)
+        if match:
+            return match
+    return None
+
+
+def _search_flexible_quantity(text: str) -> re.Match[str] | None:
+    candidate = text or ""
+    for pattern in _ROW_QUANTITY_FLEX_PATTERNS:
+        match = pattern.search(candidate)
+        if match:
+            return match
+    return None
+
+
+def _is_letter_code_row_start(text: str, next_text: str | None = None) -> bool:
+    if not text:
+        return False
+    match = _LETTER_CODE_ROW_RE.match(text)
+    if not match:
+        return False
+    remainder = text[match.end() :]
+    if _HOLE_ACTION_TOKEN_RE.search(remainder):
+        return True
+    if next_text and _HOLE_ACTION_TOKEN_RE.search(next_text):
+        return True
+    return False
+
+
+def _is_row_start(text: str, *, next_text: str | None = None) -> bool:
+    if _match_row_quantity(text):
+        return True
+    return _is_letter_code_row_start(text, next_text)
+
+
+def _extract_row_quantity_and_remainder(text: str) -> tuple[int | None, str]:
+    base = (text or "").strip()
+    if not base:
+        return (None, "")
+
+    def _strip_span(source: str, span: tuple[int, int]) -> str:
+        start, end = span
+        return (source[:start] + " " + source[end:]).strip()
+
+    primary_match = _match_row_quantity(base)
+    if primary_match:
+        qty_text = primary_match.group(1)
+        try:
+            qty_val = int(qty_text)
+        except Exception:
+            qty_val = None
+        remainder = base[primary_match.end() :].strip()
+        return (qty_val, remainder)
+
+    letter_match = _LETTER_CODE_ROW_RE.match(base)
+    if letter_match:
+        remainder_body = base[letter_match.end() :].lstrip(" -.:|")
+        remainder_match = _match_row_quantity(remainder_body)
+        if remainder_match:
+            qty_text = remainder_match.group(1)
+            try:
+                qty_val = int(qty_text)
+            except Exception:
+                qty_val = None
+            remainder = remainder_body[remainder_match.end() :].strip()
+            return (qty_val, remainder)
+        flexible = _search_flexible_quantity(remainder_body)
+        if flexible:
+            qty_text = flexible.group(1)
+            try:
+                qty_val = int(qty_text)
+            except Exception:
+                qty_val = None
+            remainder = _strip_span(remainder_body, flexible.span())
+            return (qty_val, remainder)
+
+    flexible_match = _search_flexible_quantity(base)
+    if flexible_match:
+        qty_text = flexible_match.group(1)
+        try:
+            qty_val = int(qty_text)
+        except Exception:
+            qty_val = None
+        remainder = _strip_span(base, flexible_match.span())
+        return (qty_val, remainder)
+
+    bare_match = re.match(r"^\s*(\d+)\b", base)
+    if bare_match and _HOLE_ACTION_TOKEN_RE.search(base):
+        qty_text = bare_match.group(1)
+        try:
+            qty_val = int(qty_text)
+        except Exception:
+            qty_val = None
+        remainder = base[bare_match.end() :].strip()
+        return (qty_val, remainder)
+
+    return (None, base)
+
+
 def _extract_row_reference(desc: str) -> tuple[str, float | None]:
     diameter = _extract_diameter(desc)
     if diameter is not None and diameter > 0 and diameter <= 10:
@@ -292,12 +412,14 @@ def _detect_row_side(desc: str) -> str:
 def _merge_table_lines(lines: Iterable[str]) -> list[str]:
     merged: list[str] = []
     current: list[str] | None = None
+    buffer: list[str] = []
     for raw_line in lines:
-        line = raw_line.strip()
-        if not line:
-            continue
-        has_row_start = bool(_ROW_START_RE.search(line))
-        if has_row_start:
+        candidate = (raw_line or "").strip()
+        if candidate:
+            buffer.append(candidate)
+    for index, line in enumerate(buffer):
+        next_line = buffer[index + 1] if index + 1 < len(buffer) else None
+        if _is_row_start(line, next_text=next_line):
             if current:
                 merged.append(" ".join(current))
             current = [line]
@@ -325,28 +447,24 @@ def _fallback_text_table(lines: Iterable[str]) -> dict[str, Any]:
     total_qty = 0
 
     for entry in merged:
-        qty_match = _ROW_START_RE.search(entry)
-        if not qty_match:
+        qty_val, remainder = _extract_row_quantity_and_remainder(entry)
+        if qty_val is None or qty_val <= 0:
             continue
-        qty_text = qty_match.group(0).strip("() ")
-        try:
-            qty = int(qty_text)
-        except Exception:
+        normalized_desc = " ".join(entry.split())
+        if not normalized_desc:
             continue
-        prefix = entry[: qty_match.start()].strip()
-        suffix = entry[qty_match.end() :].strip()
-        combined = " ".join(part for part in (prefix, suffix) if part)
-        combined = combined.replace("|", " ")
-        desc = " ".join(combined.split())
-        if not desc:
-            continue
-        rows.append({"hole": "", "ref": "", "qty": qty, "desc": desc})
-        total_qty += qty
+        rows.append({"hole": "", "ref": "", "qty": qty_val, "desc": normalized_desc})
+        total_qty += qty_val
 
-        diameter = _extract_diameter(prefix + " " + suffix)
-        if diameter is not None:
-            key = f"{diameter:.4f}".rstrip("0").rstrip(".")
-            families[key] = families.get(key, 0) + qty
+        ref_text, ref_value = _extract_row_reference(remainder)
+        if ref_text:
+            rows[-1]["ref"] = ref_text
+        side = _detect_row_side(normalized_desc)
+        if side:
+            rows[-1]["side"] = side
+        if ref_value is not None:
+            key = f"{ref_value:.4f}".rstrip("0").rstrip(".")
+            families[key] = families.get(key, 0) + qty_val
 
     if not rows:
         return {}
@@ -619,14 +737,18 @@ def read_text_table(doc) -> dict[str, Any]:
         candidate_entries: list[dict[str, Any]] = []
         row_active = False
         continuation_budget = 0
-        for entry in collected_entries:
+        for idx, entry in enumerate(collected_entries):
             stripped = entry.get("text", "").strip()
             if not stripped:
                 row_active = False
                 continuation_budget = 0
                 continue
-            row_start_match = _ROW_START_RE.search(stripped)
-            row_start = bool(row_start_match)
+            next_text = (
+                collected_entries[idx + 1].get("text", "")
+                if idx + 1 < len(collected_entries)
+                else None
+            )
+            row_start = _is_row_start(stripped, next_text=next_text)
             token_hit = _has_candidate_token(stripped)
             keep_line = False
             if row_start:
@@ -669,7 +791,7 @@ def read_text_table(doc) -> dict[str, Any]:
         normalized_lines: list[str] = []
         for entry in candidate_entries:
             raw_line = str(entry.get("text", ""))
-            match = _ROW_START_RE.search(raw_line)
+            match = _match_row_quantity(raw_line)
             if match:
                 prefix = raw_line[: match.start()].strip(" |")
                 suffix = raw_line[match.end() :].strip()
@@ -692,11 +814,16 @@ def read_text_table(doc) -> dict[str, Any]:
         table_lines = normalized_lines
 
         current_row: list[str] = []
-        for entry in candidate_entries:
+        for idx, entry in enumerate(candidate_entries):
             line = entry.get("normalized_text", "").strip()
             if not line:
                 continue
-            if _ROW_START_RE.search(line):
+            next_line = (
+                candidate_entries[idx + 1].get("normalized_text", "")
+                if idx + 1 < len(candidate_entries)
+                else None
+            )
+            if _is_row_start(line, next_text=next_line):
                 if current_row:
                     merged_rows.append(" ".join(current_row))
                 current_row = [line]
@@ -709,31 +836,128 @@ def read_text_table(doc) -> dict[str, Any]:
         for idx, row_text in enumerate(merged_rows[:10]):
             print(f"  [{idx:02d}] {row_text}")
 
-        families: dict[str, int] = {}
-        total_qty = 0
-        parsed_rows = []
-        for row_text in merged_rows:
-            qty_match = _ROW_START_RE.match(row_text)
-            if not qty_match:
-                continue
-            qty_text = qty_match.group(0).strip("() ")
-            try:
-                qty = int(qty_text)
-            except Exception:
-                continue
-            remainder = row_text[qty_match.end() :].strip()
-            if not remainder:
-                continue
-            ref_text, ref_value = _extract_row_reference(remainder)
-            side = _detect_row_side(remainder)
-            row_dict: dict[str, Any] = {"hole": "", "qty": qty, "desc": remainder, "ref": ref_text}
-            if side:
-                row_dict["side"] = side
-            parsed_rows.append(row_dict)
-            total_qty += qty
-            if ref_value is not None:
-                key = f"{ref_value:.4f}".rstrip("0").rstrip(".")
-                families[key] = families.get(key, 0) + qty
+        def _parse_rows(row_texts: list[str]) -> tuple[list[dict[str, Any]], dict[str, int], int]:
+            families: dict[str, int] = {}
+            parsed: list[dict[str, Any]] = []
+            total = 0
+            for row_text in row_texts:
+                text_value = " ".join((row_text or "").split()).strip()
+                if not text_value:
+                    continue
+                qty_val, remainder = _extract_row_quantity_and_remainder(text_value)
+                if qty_val is None or qty_val <= 0:
+                    continue
+                ref_text, ref_value = _extract_row_reference(remainder)
+                side = _detect_row_side(text_value)
+                row_dict: dict[str, Any] = {
+                    "hole": "",
+                    "qty": qty_val,
+                    "desc": text_value,
+                    "ref": ref_text,
+                }
+                if side:
+                    row_dict["side"] = side
+                parsed.append(row_dict)
+                total += qty_val
+                if ref_value is not None:
+                    key = f"{ref_value:.4f}".rstrip("0").rstrip(".")
+                    families[key] = families.get(key, 0) + qty_val
+            return (parsed, families, total)
+
+        parsed_rows, families, total_qty = _parse_rows(merged_rows)
+
+        def _cluster_entries_by_y(
+            entries: list[dict[str, Any]]
+        ) -> list[list[dict[str, Any]]]:
+            valid = [entry for entry in entries if entry.get("normalized_text")]
+            if not valid:
+                return []
+
+            def _estimate_eps(values: list[dict[str, Any]]) -> float:
+                y_values: list[float] = []
+                for item in values:
+                    y_val = item.get("y")
+                    if isinstance(y_val, (int, float)):
+                        y_values.append(float(y_val))
+                if len(y_values) >= 2:
+                    diffs = [abs(y_values[i] - y_values[i + 1]) for i in range(len(y_values) - 1)]
+                    diffs = [diff for diff in diffs if diff > 0]
+                    if diffs:
+                        median_diff = statistics.median(diffs)
+                        if median_diff > 0:
+                            return max(4.0, median_diff * 0.75)
+                return 8.0
+
+            eps = _estimate_eps(valid)
+            for _ in range(3):
+                clusters: list[list[dict[str, Any]]] = []
+                current: list[dict[str, Any]] | None = None
+                prev_y: float | None = None
+                for entry in valid:
+                    y_val = entry.get("y")
+                    y_float = float(y_val) if isinstance(y_val, (int, float)) else None
+                    if current is None:
+                        current = [entry]
+                        clusters.append(current)
+                        prev_y = y_float
+                        continue
+                    if y_float is None or prev_y is None or abs(y_float - prev_y) > eps:
+                        current = [entry]
+                        clusters.append(current)
+                    else:
+                        current.append(entry)
+                    prev_y = y_float if y_float is not None else prev_y
+                if not clusters:
+                    return []
+                avg_cluster_size = len(valid) / len(clusters)
+                if avg_cluster_size >= 1.5 or eps >= 24.0:
+                    return clusters
+                eps *= 1.5
+            return clusters
+
+        def _clusters_to_rows(clusters: list[list[dict[str, Any]]]) -> list[str]:
+            rows: list[str] = []
+            for cluster in clusters:
+                def _x_key(value: Any) -> float:
+                    try:
+                        return float(value)
+                    except Exception:
+                        return float("inf")
+
+                ordered = sorted(
+                    cluster,
+                    key=lambda item: (
+                        _x_key(item.get("x")),
+                        int(item.get("order", 0)),
+                    ),
+                )
+                parts = [str(item.get("normalized_text", "")).strip() for item in ordered]
+                row_text = " ".join(part for part in parts if part)
+                row_text = " ".join(row_text.split())
+                if not row_text:
+                    continue
+                if not _HOLE_ACTION_TOKEN_RE.search(row_text):
+                    continue
+                rows.append(row_text)
+            return rows
+
+        if len(parsed_rows) < 8:
+            clusters = _cluster_entries_by_y(candidate_entries)
+            fallback_rows = _clusters_to_rows(clusters)
+            fallback_rows = [row for row in fallback_rows if row]
+            fallback_parsed, fallback_families, fallback_qty = _parse_rows(fallback_rows)
+            print(
+                f"[TEXT-SCAN] fallback clusters={len(clusters)} "
+                f"chosen_rows={len(fallback_parsed)} qty_sum={fallback_qty}"
+            )
+            if fallback_parsed and (
+                (fallback_qty, len(fallback_parsed))
+                > (total_qty, len(parsed_rows))
+            ):
+                merged_rows = fallback_rows
+                parsed_rows = fallback_parsed
+                families = fallback_families
+                total_qty = fallback_qty
 
         print(f"[TEXT-SCAN] parsed rows: {len(parsed_rows)}")
         for idx, row in enumerate(parsed_rows[:20]):

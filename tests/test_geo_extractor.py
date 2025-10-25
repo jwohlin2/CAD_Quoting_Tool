@@ -70,9 +70,11 @@ def test_read_text_table_uses_internal_fallback(monkeypatch: pytest.MonkeyPatch,
     rows = info["rows"]
     assert len(rows) == 2
     assert rows[0]["qty"] == 3
-    assert rows[0]["desc"] == "Ø0.375 THRU FROM BACK"
+    assert rows[0]["desc"] == "(3) Ø0.375 THRU FROM BACK"
     assert rows[0]["ref"] == '0.3750"'
     assert rows[0].get("side") == "back"
+    assert rows[1]["qty"] == 2
+    assert rows[1]["desc"] == "A | Ø0.500 | 2 | (2) DRILL THRU"
     assert rows[1]["ref"] == '0.5000"'
     families = info.get("hole_diam_families_in")
     assert families == {"0.375": 3, "0.5": 2}
