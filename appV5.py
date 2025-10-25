@@ -17486,6 +17486,60 @@ def compute_quote_from_df(  # type: ignore[reportGeneralTypeIssues]
     drilling_rate = _lookup_rate("DrillingRate", rates, params, default_rates, fallback=75.0)
     drill_total_minutes: float | None = None
     fallback_groups: list[dict[str, Any]] | None = None
+
+    def _normalize_drill_groups(
+        groups: Sequence[Mapping[str, Any]] | None,
+    ) -> list[dict[str, Any]]:
+        normalized: list[dict[str, Any]] = []
+        if isinstance(groups, Sequence) and not isinstance(groups, (str, bytes, bytearray)):
+            for group in groups:
+                if not isinstance(group, _MappingABC):
+                    continue
+                entry = dict(group)
+                op_value = str(entry.get("op") or entry.get("op_name") or "drill").strip() or "drill"
+                entry["op"] = op_value
+                entry.setdefault("op_name", op_value)
+                qty_val = _coerce_float_or_none(entry.get("qty"))
+                if qty_val is not None:
+                    try:
+                        entry["qty"] = int(round(float(qty_val)))
+                    except Exception:
+                        entry["qty"] = 0
+                dia_val = _coerce_float_or_none(entry.get("diameter_in"))
+                if dia_val is not None:
+                    try:
+                        entry["diameter_in"] = float(dia_val)
+                    except Exception:
+                        entry.pop("diameter_in", None)
+                normalized.append(entry)
+        return normalized
+
+    def _publish_fallback_groups(
+        groups: Sequence[Mapping[str, Any]] | None,
+    ) -> list[dict[str, Any]]:
+        normalized_groups = _normalize_drill_groups(groups)
+        if normalized_groups:
+            normalized_groups.sort(
+                key=lambda item: (
+                    0
+                    if str(item.get("op") or "").strip().lower().startswith("deep")
+                    else 1,
+                    _safe_float(item.get("diameter_in"), 0.0),
+                )
+            )
+        return normalized_groups
+
+    ops_claims_map: Mapping[str, Any] | None = None
+    if isinstance(geo_payload, _MappingABC):
+        claims_candidate = geo_payload.get("ops_claims")
+        if isinstance(claims_candidate, _MappingABC):
+            ops_claims_map = claims_candidate
+        else:
+            summary_candidate = geo_payload.get("ops_summary")
+            if isinstance(summary_candidate, _MappingABC):
+                claims_candidate = summary_candidate.get("claims")
+                if isinstance(claims_candidate, _MappingABC):
+                    ops_claims_map = claims_candidate
     drilling_meta_container = breakdown.setdefault("drilling_meta", {})
     if isinstance(drilling_meta_container, dict):
         if material_display:
