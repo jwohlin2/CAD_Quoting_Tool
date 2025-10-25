@@ -49,6 +49,11 @@ def main(argv: Sequence[str] | None = None) -> int:
         "--dump-lines",
         help="Write text-line debug dump to this path (banded cells use *_bands.tsv)",
     )
+    parser.add_argument(
+        "--dump-bands",
+        action="store_true",
+        help="Print reconstructed [TABLE-X] band previews (first 30)",
+    )
     args = parser.parse_args(argv)
 
     path = (args.path or os.environ.get("GEO_DUMP_PATH") or "").strip()
@@ -158,6 +163,43 @@ def main(argv: Sequence[str] | None = None) -> int:
         debug_payload = dict(debug_payload)
     else:
         debug_payload = geo_extractor.get_last_text_table_debug() or {}
+
+    if args.dump_bands:
+        band_cells = debug_payload.get("band_cells") or []
+        band_map: dict[int, dict[int, list[str]]] = {}
+        if isinstance(band_cells, list):
+            for cell in band_cells:
+                if not isinstance(cell, Mapping):
+                    continue
+                band_raw = cell.get("band")
+                col_raw = cell.get("col")
+                try:
+                    band_idx = int(band_raw)
+                except Exception:
+                    continue
+                try:
+                    col_idx = int(col_raw)
+                except Exception:
+                    continue
+                text_val = str(cell.get("text") or "")
+                column_map = band_map.setdefault(band_idx, {})
+                column_map.setdefault(col_idx, []).append(text_val)
+        band_indices = sorted(band_map.keys())
+        if band_indices:
+            print(f"[TABLE-Y] dump bands_total={len(band_indices)}")
+            for band_idx in band_indices[:30]:
+                column_map = band_map.get(band_idx, {})
+                parts = []
+                for col_idx in sorted(column_map.keys()):
+                    cell_text = " ".join(part.strip() for part in column_map[col_idx] if part).strip()
+                    preview = geo_extractor._truncate_cell_preview(cell_text)
+                    parts.append(f'C{col_idx}="{preview}"')
+                preview_body = " | ".join(parts)
+                print(
+                    f"[TABLE-X] band#{band_idx} cols={len(column_map)} | {preview_body}"
+                )
+        else:
+            print("[TABLE-X] dump bands: no band_cells in debug payload")
 
     dump_base = args.dump_lines
     if args.debug_entities and len(rows) < 8 and not dump_base:

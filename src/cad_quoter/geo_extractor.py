@@ -136,7 +136,19 @@ _AXIS_ZERO_SINGLE_RE = re.compile(r"^0\.0{3,}\s+[XY]\b", re.IGNORECASE)
 _SMALL_INT_TOKEN_RE = re.compile(r"\b\d+\b")
 _FRACTION_RE = re.compile(r"\b\d+\s*/\s*\d+\b")
 _DECIMAL_RE = re.compile(r"\b(?:\d+\.\d+|\.\d+)\b")
+_DECIMAL_3PLUS_RE = re.compile(r"\b\d+\.\d{3,}\b")
+_BAND_KEEP_TOKEN_RE = re.compile(
+    r"(Ø|⌀|TAP|DRILL|C['’]?BORE|COUNTER\s*BORE|CSINK|N\.?P\.?T|THREAD|#\d+-\d+|\d/\d|\d\.\d{3,})",
+    re.IGNORECASE,
+)
 _MAX_INSERT_DEPTH = 3
+
+_BAND_QTY_FALLBACK_PATTERNS = [
+    re.compile(r"^\(\s*(?P<qty>\d+)\s*\)"),
+    re.compile(r"(^|\s)(?P<qty>\d+)\s*(?:X|×)(\s|$)", re.IGNORECASE),
+    re.compile(r"(^|\s)QTY[:=\s]*(?P<qty>\d+)(\s|$)", re.IGNORECASE),
+    re.compile(r"(\s|^)RE(?:Q'D|QD|QUIRED)[:=\s]*(?P<qty>\d+)(\s|$)", re.IGNORECASE),
+]
 
 _LAST_TEXT_TABLE_DEBUG: dict[str, Any] | None = None
 
@@ -406,6 +418,27 @@ def _extract_row_quantity_and_remainder(text: str) -> tuple[int | None, str]:
     return (None, base)
 
 
+def _extract_band_quantity(text: str) -> tuple[int | None, str]:
+    candidate = " ".join((text or "").split())
+    if not candidate:
+        return (None, "")
+    for pattern in _BAND_QTY_FALLBACK_PATTERNS:
+        match = pattern.search(candidate)
+        if not match:
+            continue
+        qty_text = match.group("qty") if "qty" in match.groupdict() else None
+        if not qty_text:
+            continue
+        try:
+            qty_val = int(qty_text)
+        except Exception:
+            continue
+        start, end = match.span()
+        remainder = (candidate[:start] + " " + candidate[end:]).strip()
+        return (qty_val, remainder)
+    return (None, candidate)
+
+
 def _extract_row_reference(desc: str) -> tuple[str, float | None]:
     diameter = _extract_diameter(desc)
     if diameter is not None and diameter > 0 and diameter <= 10:
@@ -541,6 +574,7 @@ def _build_columnar_table_from_entries(
     median_height_all = (
         statistics.median(all_height_values) if all_height_values else 0.0
     )
+    roi_median_height = median_height_all
     roi_info: dict[str, Any] | None = None
     anchor_lines = [rec for rec in records_all if _ROI_ANCHOR_RE.search(rec["text"])]
     filtered_records = records_all
@@ -564,6 +598,7 @@ def _build_columnar_table_from_entries(
                 if height_values:
                     median_height = statistics.median(height_values)
                     y_anchor_eps = 1.8 * median_height if median_height > 0 else 0.0
+                    roi_median_height = median_height
                 elif anchor_y_diffs:
                     median_diff = statistics.median(anchor_y_diffs)
                     y_anchor_eps = 0.5 * median_diff if median_diff > 0 else 0.0
@@ -615,6 +650,9 @@ def _build_columnar_table_from_entries(
         base_dy = 24.0 * median_height_all if median_height_all > 0 else 0.0
         dx = max(40.0, base_dx)
         dy = max(50.0, base_dy)
+        if roi_median_height and roi_median_height > 0:
+            dx = max(dx, 18.0 * roi_median_height)
+            dy = max(dy, 24.0 * roi_median_height)
         expanded_xmin = cluster_xmin - dx
         expanded_xmax = cluster_xmax + dx
         expanded_ymin = cluster_ymin - dy
@@ -642,6 +680,9 @@ def _build_columnar_table_from_entries(
             )
         )
         print(
+            f"[ROI] median_h={roi_median_height:.2f} expand=({dx:.1f},{dy:.1f})"
+        )
+        print(
             f"[ROI] raw_lines -> roi_lines: {len(records_all)} -> {len(filtered_records)}"
         )
         roi_info = {
@@ -651,6 +692,7 @@ def _build_columnar_table_from_entries(
             "expanded": [expanded_xmin, expanded_xmax, expanded_ymin, expanded_ymax],
             "total": len(records_all),
             "kept": len(filtered_records),
+            "median_h": roi_median_height,
         }
     records = list(filtered_records)
 
@@ -667,26 +709,43 @@ def _build_columnar_table_from_entries(
         if abs(records[idx]["y"] - records[idx - 1]["y"]) > 0
     ]
 
-    if height_values:
-        median_height = statistics.median(height_values)
-        y_eps = median_height * 1.6 if median_height > 0 else 0.0
-    else:
-        median_diff = statistics.median(y_diffs) if y_diffs else 0.0
-        y_eps = max(4.0, median_diff * 0.5 if median_diff > 0 else 0.0)
-    if y_eps <= 0:
-        y_eps = 4.0
+    median_h = statistics.median(height_values) if height_values else 0.0
+    if (median_h is None or median_h <= 0) and roi_median_height > 0:
+        median_h = roi_median_height
+    if (median_h is None or median_h <= 0) and median_height_all > 0:
+        median_h = median_height_all
+    if (median_h is None or median_h <= 0) and y_diffs:
+        median_h = statistics.median(y_diffs)
+    if median_h is None or median_h <= 0:
+        median_h = 4.0
+
+    y_gap_limit = 0.75 * median_h if median_h > 0 else 3.0
+    if y_gap_limit <= 0:
+        y_gap_limit = 3.0
 
     raw_bands: list[list[dict[str, Any]]] = []
     current_band: list[dict[str, Any]] = []
+    current_sum_y = 0.0
     prev_y: float | None = None
     for record in records:
-        if prev_y is None or abs(record["y"] - prev_y) <= y_eps:
-            current_band.append(record)
-        else:
-            if current_band:
-                raw_bands.append(current_band)
+        y_val = record["y"]
+        if not current_band:
             current_band = [record]
-        prev_y = record["y"]
+            current_sum_y = y_val
+            prev_y = y_val
+            continue
+        band_center = current_sum_y / len(current_band)
+        if (
+            abs(y_val - prev_y) <= y_gap_limit
+            and abs(y_val - band_center) <= y_gap_limit
+        ):
+            current_band.append(record)
+            current_sum_y += y_val
+        else:
+            raw_bands.append(current_band)
+            current_band = [record]
+            current_sum_y = y_val
+        prev_y = y_val
     if current_band:
         raw_bands.append(current_band)
 
@@ -702,18 +761,22 @@ def _build_columnar_table_from_entries(
         drop_reason = ""
         trimmed = combined.strip()
         contains_hole_token = bool(_HOLE_ACTION_TOKEN_RE.search(combined))
+        keep_marker = bool(_BAND_KEEP_TOKEN_RE.search(combined_upper))
+        decimal_hits = len(_DECIMAL_RE.findall(combined))
+        fraction_hits = len(_FRACTION_RE.findall(combined))
+        numeric_guard = (decimal_hits + fraction_hits) >= 2
         if _TITLE_AXIS_DROP_RE.search(combined_upper):
-            drop_band = True
-            drop_reason = "title/axis"
+            drop_band = not (keep_marker or numeric_guard)
+            drop_reason = "title/axis" if drop_band else ""
         elif _SEE_SHEET_DROP_RE.search(combined_upper):
-            drop_band = True
-            drop_reason = "title/axis"
+            drop_band = not (keep_marker or numeric_guard)
+            drop_reason = "title/axis" if drop_band else ""
         elif _AXIS_ZERO_PAIR_RE.match(trimmed):
-            drop_band = True
-            drop_reason = "title/axis"
+            drop_band = not (keep_marker or numeric_guard)
+            drop_reason = "title/axis" if drop_band else ""
         elif _AXIS_ZERO_SINGLE_RE.match(trimmed):
-            drop_band = True
-            drop_reason = "title/axis"
+            drop_band = not (keep_marker or numeric_guard)
+            drop_reason = "title/axis" if drop_band else ""
         else:
             small_ints = []
             for token in _SMALL_INT_TOKEN_RE.findall(combined):
@@ -724,11 +787,11 @@ def _build_columnar_table_from_entries(
                 if 1 <= value <= 16:
                     small_ints.append(value)
             if len(small_ints) >= 10:
-                drop_band = True
-                drop_reason = "title/axis"
+                drop_band = not (keep_marker or numeric_guard)
+                drop_reason = "title/axis" if drop_band else ""
             elif len(small_ints) >= 12 and len(set(small_ints)) <= 16:
-                drop_band = True
-                drop_reason = "title/axis"
+                drop_band = not (keep_marker or numeric_guard)
+                drop_reason = "title/axis" if drop_band else ""
         if drop_band and contains_hole_token:
             drop_band = False
             drop_reason = ""
@@ -739,6 +802,9 @@ def _build_columnar_table_from_entries(
             )
             continue
         bands.append(band)
+
+    print(f"[TABLE-Y] bands_total={len(bands)} median_h={median_h:.2f}")
+    y_eps = y_gap_limit
 
     qty_x: float | None = None
     qty_groups: list[dict[str, Any]] = []
@@ -1156,13 +1222,18 @@ def _build_columnar_table_from_entries(
             qty_val = _parse_qty_cell_value(qty_text)
         used_qty_fallback = False
         fallback_desc = ""
-        if qty_val is None or qty_val <= 0:
-            combined_row_text = " ".join(
-                cell.strip() for cell in cells if cell.strip()
-            )
-            qty_candidate, remainder = _extract_row_quantity_and_remainder(
-                combined_row_text
-            )
+        combined_row_text = " ".join(
+            cell.strip() for cell in cells if cell.strip()
+        )
+        need_row_parse = (qty_val is None or qty_val <= 0 or qty_groups_count == 0)
+        if need_row_parse and combined_row_text:
+            qty_candidate, remainder = _extract_band_quantity(combined_row_text)
+            if (qty_candidate is None or qty_candidate <= 0) and (
+                qty_val is None or qty_val <= 0
+            ):
+                qty_candidate, remainder = _extract_row_quantity_and_remainder(
+                    combined_row_text
+                )
             if qty_candidate is not None and qty_candidate > 0:
                 qty_val = qty_candidate
                 fallback_desc = remainder.strip()
@@ -1170,8 +1241,6 @@ def _build_columnar_table_from_entries(
                 print(
                     f"[QTY-FALLBACK] band#{band_index} used desc-parse qty={qty_val}"
                 )
-            else:
-                continue
         if qty_val is None or qty_val <= 0:
             continue
         desc_text = _cell_at(cells, desc_col)
@@ -1187,33 +1256,43 @@ def _build_columnar_table_from_entries(
             desc_text = " ".join(fallback_parts)
         desc_text = " ".join((desc_text or "").split())
         ref_text_candidate = _cell_at(cells, ref_col)
-        ref_text = ""
-        ref_value = None
+        ref_cell_ref = ("", None)
         if ref_text_candidate:
-            ref_text, ref_value = _extract_row_reference(ref_text_candidate)
-        if not ref_text:
-            ref_text, ref_value = _extract_row_reference(desc_text)
-        side = _detect_row_side(desc_text)
-        row_dict: dict[str, Any] = {
-            "hole": "",
-            "qty": qty_val,
-            "desc": desc_text or "",
-            "ref": ref_text,
-        }
-        if side:
-            row_dict["side"] = side
-        rows.append(row_dict)
-        if ref_value is not None:
-            key = f"{ref_value:.4f}".rstrip("0").rstrip(".")
-            families[key] = families.get(key, 0) + qty_val
-        if band_index < 10:
-            ref_display = ref_text or "-"
-            side_display = side or "-"
-            desc_display = _truncate_cell_preview(desc_text or "", 80)
-            print(
-                f"[TABLE-R] band#{band_index} qty={qty_val} ref={ref_display} "
-                f'side={side_display} desc="{desc_display}"'
-            )
+            ref_cell_ref = _extract_row_reference(ref_text_candidate)
+        fragments = [frag.strip() for frag in desc_text.split(";") if frag.strip()]
+        if not fragments:
+            fragments = [desc_text]
+        for frag_index, fragment in enumerate(fragments):
+            fragment_desc = " ".join(fragment.split())
+            if not fragment_desc:
+                continue
+            ref_text, ref_value = _extract_row_reference(fragment_desc)
+            if not ref_text and ref_cell_ref[0]:
+                ref_text, ref_value = ref_cell_ref
+            side = _detect_row_side(fragment_desc)
+            row_dict: dict[str, Any] = {
+                "hole": "",
+                "qty": qty_val,
+                "desc": fragment_desc,
+                "ref": ref_text,
+            }
+            if side:
+                row_dict["side"] = side
+            rows.append(row_dict)
+            if ref_value is not None:
+                key = f"{ref_value:.4f}".rstrip("0").rstrip(".")
+                families[key] = families.get(key, 0) + qty_val
+            if band_index < 10:
+                band_label = (
+                    f"{band_index}.{frag_index}" if len(fragments) > 1 else str(band_index)
+                )
+                ref_display = ref_text or "-"
+                side_display = side or "-"
+                desc_display = _truncate_cell_preview(fragment_desc or "", 80)
+                print(
+                    f"[TABLE-R] band#{band_label} qty={qty_val} ref={ref_display} "
+                    f'side={side_display} desc="{desc_display}"'
+                )
 
     if len(rows) < 8:
         try:
@@ -1274,6 +1353,7 @@ def _build_columnar_table_from_entries(
                 "ref_col": ref_col,
                 "desc_col": desc_col,
                 "y_eps": y_eps,
+                "median_h": median_h,
                 "roi": roi_info,
             },
         )
@@ -1295,6 +1375,7 @@ def _build_columnar_table_from_entries(
         "ref_col": ref_col,
         "desc_col": desc_col,
         "y_eps": y_eps,
+        "median_h": median_h,
         "bands_checked": len(bands_for_stats),
         "qty_x": qty_x,
     }
@@ -1307,6 +1388,7 @@ def _build_columnar_table_from_entries(
             "expanded": None,
             "total": len(records_all),
             "kept": len(records),
+            "median_h": median_h,
         }
     return (table_info, debug_info)
 
@@ -1408,6 +1490,7 @@ def read_text_table(doc) -> dict[str, Any]:
         text_rows_info = None
         rows_txt_initial = 0
         hint_logged = False
+        attrib_count = 0
 
         if doc is None:
             table_lines = []
@@ -1564,6 +1647,7 @@ def read_text_table(doc) -> dict[str, Any]:
 
             def _process_entity(entity: Any, *, depth: int, from_block: bool) -> None:
                 nonlocal text_fragments, mtext_fragments, kept_count, from_blocks_count, counter
+                nonlocal attrib_count
                 nonlocal hint_logged
                 if depth > _MAX_INSERT_DEPTH:
                     return
@@ -1580,6 +1664,8 @@ def read_text_table(doc) -> dict[str, Any]:
                         normalized = _normalize_table_fragment(fragment)
                         if not normalized:
                             continue
+                        if kind in {"ATTRIB", "ATTDEF"}:
+                            attrib_count += 1
                         if (
                             not hint_logged
                             and "SEE SHEET 2 FOR HOLE CHART" in normalized.upper()
@@ -1655,6 +1741,10 @@ def read_text_table(doc) -> dict[str, Any]:
                 f"[TEXT-SCAN] layout={layout_name} text={text_fragments} "
                 f"mtext={mtext_fragments} kept={kept_count} from_blocks={from_blocks_count}"
             )
+
+        print(
+            f"[TEXT-SCAN] attrib_lines={attrib_count} depth_max={_MAX_INSERT_DEPTH}"
+        )
 
         if not collected_entries:
             table_lines = []
