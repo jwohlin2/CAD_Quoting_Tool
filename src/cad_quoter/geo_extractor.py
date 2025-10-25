@@ -2231,6 +2231,106 @@ def choose_better_table(a: Mapping[str, Any] | None, b: Mapping[str, Any] | None
     return {}
 
 
+def _format_chart_line(row: Mapping[str, Any]) -> str:
+    qty_val = row.get("qty") if isinstance(row, Mapping) else None
+    try:
+        qty = int(float(qty_val or 0))
+    except Exception:
+        qty = 0
+    ref_raw = row.get("ref") if isinstance(row, Mapping) else None
+    ref_text = str(ref_raw) if ref_raw not in (None, "") else "-"
+    side_raw = row.get("side") if isinstance(row, Mapping) else None
+    if isinstance(side_raw, str) and side_raw.strip():
+        side_text = side_raw.strip().upper()
+    else:
+        side_text = "-"
+    desc_source = None
+    if isinstance(row, Mapping):
+        for key in ("desc", "description", "text", "hole"):
+            value = row.get(key)
+            if value:
+                desc_source = value
+                break
+    desc_text = "-"
+    if desc_source is not None:
+        desc_text = " ".join(str(desc_source).split()) or "-"
+    return f"qty={qty} ref={ref_text} side={side_text} desc={desc_text}"
+
+
+def _normalize_table_info(info: Mapping[str, Any] | None) -> dict[str, Any]:
+    if not isinstance(info, Mapping):
+        return {}
+    normalized: dict[str, Any] = dict(info)
+    rows_raw = normalized.get("rows")
+    if isinstance(rows_raw, list):
+        rows_list = [dict(row) if isinstance(row, Mapping) else row for row in rows_raw]
+    elif isinstance(rows_raw, Iterable) and not isinstance(rows_raw, (str, bytes, bytearray)):
+        rows_list = [dict(row) if isinstance(row, Mapping) else row for row in rows_raw]
+    else:
+        rows_list = []
+    normalized["rows"] = rows_list
+
+    hole_count_raw = normalized.get("hole_count")
+    try:
+        hole_count = int(float(hole_count_raw))
+    except Exception:
+        hole_count = 0
+    if hole_count <= 0:
+        hole_count = _sum_qty(row for row in rows_list if isinstance(row, Mapping))
+    normalized["hole_count"] = hole_count
+
+    families = normalized.get("hole_diam_families_in")
+    if isinstance(families, Mapping):
+        normalized["hole_diam_families_in"] = dict(families)
+    else:
+        normalized["hole_diam_families_in"] = {}
+
+    provenance = normalized.get("provenance_holes")
+    if hole_count and not provenance:
+        normalized["provenance_holes"] = "HOLE TABLE"
+
+    chart_lines_raw = normalized.get("chart_lines")
+    chart_lines: list[str] = []
+    if isinstance(chart_lines_raw, Iterable) and not isinstance(
+        chart_lines_raw, (str, bytes, bytearray)
+    ):
+        for entry in chart_lines_raw:
+            text = str(entry).strip()
+            if text:
+                chart_lines.append(text)
+    if not chart_lines:
+        chart_lines = [
+            _format_chart_line(row)
+            for row in rows_list
+            if isinstance(row, Mapping)
+        ]
+    normalized["chart_lines"] = chart_lines
+
+    return normalized
+
+
+def read_geo(doc) -> dict[str, Any]:
+    acad_info = read_acad_table(doc) or {}
+    text_info = read_text_table(doc) or {}
+    best_info = choose_better_table(acad_info, text_info)
+
+    candidates: list[Mapping[str, Any]] = []
+    seen_ids: set[int] = set()
+    for candidate in (best_info, text_info, acad_info):
+        if isinstance(candidate, Mapping):
+            key = id(candidate)
+            if key not in seen_ids:
+                seen_ids.add(key)
+                candidates.append(candidate)
+
+    for candidate in candidates:
+        normalized = _normalize_table_info(candidate)
+        if normalized.get("rows"):
+            return normalized
+
+    return {}
+
+
 def promote_table_to_geo(geo: dict[str, Any], table_info: Mapping[str, Any], source_tag: str) -> None:
     helper = _resolve_app_callable("_persist_rows_and_totals")
     if callable(helper):
@@ -2546,6 +2646,7 @@ __all__ = [
     "read_geo",
     "extract_geo_from_path",
     "read_acad_table",
+    "read_geo",
     "read_text_table",
     "read_geo",
     "choose_better_table",
