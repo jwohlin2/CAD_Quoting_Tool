@@ -6,6 +6,7 @@ from collections import defaultdict
 from collections.abc import Iterable, Mapping
 from fractions import Fraction
 import inspect
+import math
 from functools import lru_cache
 import os
 from pathlib import Path
@@ -110,6 +111,10 @@ _MTEXT_BREAK_RE = re.compile(r"\\P", re.IGNORECASE)
 _CANDIDATE_TOKEN_RE = re.compile(
     r"(TAP\b|DRILL\b|THRU\b|N\.P\.T\b|NPT\b|C['’]?BORE\b|COUNTER\s*BORE\b|"
     r"JIG\s+GRIND\b|AS\s+SHOWN\b|FROM\s+BACK\b|FROM\s+FRONT\b|BOTH\s+SIDES\b)",
+    re.IGNORECASE,
+)
+_COLUMN_TOKEN_RE = re.compile(
+    r"(TAP|DRILL|THRU|C['’]?BORE|COUNTER\s*BORE|N\.?P\.?T|NPT|Ø|JIG)",
     re.IGNORECASE,
 )
 _FRACTION_RE = re.compile(r"\b\d+\s*/\s*\d+\b")
@@ -467,6 +472,21 @@ def _cell_has_ref_marker(text: str) -> bool:
 def _build_columnar_table_from_entries(
     entries: list[dict[str, Any]]
 ) -> tuple[dict[str, Any] | None, dict[str, Any]]:
+    def _percentile(values: list[float], fraction: float) -> float:
+        if not values:
+            return 0.0
+        ordered = sorted(values)
+        if len(ordered) == 1:
+            return ordered[0]
+        position = (len(ordered) - 1) * fraction
+        lower = math.floor(position)
+        upper = math.ceil(position)
+        if lower == upper:
+            return ordered[int(position)]
+        lower_val = ordered[lower]
+        upper_val = ordered[upper]
+        return lower_val + (upper_val - lower_val) * (position - lower)
+
     records: list[dict[str, Any]] = []
     for entry in entries:
         text_value = (entry.get("normalized_text") or entry.get("text") or "").strip()
@@ -490,7 +510,10 @@ def _build_columnar_table_from_entries(
         records.append(record)
 
     if not records:
-        return (None, {"bands": [], "band_cells": [], "rows_txt_fallback": []})
+        return (
+            None,
+            {"bands": [], "band_cells": [], "rows_txt_fallback": [], "qty_col": None, "ref_col": None, "desc_col": None},
+        )
 
     records.sort(key=lambda item: (-item["y"], item["x"]))
 
@@ -507,35 +530,41 @@ def _build_columnar_table_from_entries(
 
     if height_values:
         median_height = statistics.median(height_values)
-        y_eps = median_height * 1.5 if median_height > 0 else 0.0
+        y_eps = median_height * 1.6 if median_height > 0 else 0.0
     else:
         median_diff = statistics.median(y_diffs) if y_diffs else 0.0
-        y_eps = max(6.0, median_diff * 0.5 if median_diff > 0 else 0.0)
+        y_eps = max(4.0, median_diff * 0.5 if median_diff > 0 else 0.0)
     if y_eps <= 0:
-        y_eps = 6.0
+        y_eps = 4.0
 
     raw_bands: list[list[dict[str, Any]]] = []
     current_band: list[dict[str, Any]] = []
     prev_y: float | None = None
     for record in records:
-        if prev_y is None:
-            current_band = [record]
-            prev_y = record["y"]
-            continue
-        if abs(record["y"] - prev_y) > y_eps:
+        if prev_y is None or abs(record["y"] - prev_y) <= y_eps:
+            current_band.append(record)
+        else:
             if current_band:
                 raw_bands.append(current_band)
             current_band = [record]
-        else:
-            current_band.append(record)
         prev_y = record["y"]
     if current_band:
         raw_bands.append(current_band)
 
-    bands = [band for band in raw_bands if len(band) >= 2]
+    bands: list[list[dict[str, Any]]] = []
+    for band in raw_bands:
+        if len(band) < 2:
+            continue
+        combined = " ".join(item["text"] for item in band)
+        if not any(char.isdigit() for char in combined) and not _COLUMN_TOKEN_RE.search(combined):
+            continue
+        bands.append(band)
 
     if not bands:
-        return (None, {"bands": [], "band_cells": [], "rows_txt_fallback": []})
+        return (
+            None,
+            {"bands": [], "band_cells": [], "rows_txt_fallback": [], "qty_col": None, "ref_col": None, "desc_col": None, "y_eps": y_eps},
+        )
 
     for idx, band in enumerate(bands[:10]):
         mean_y = sum(item["y"] for item in band) / len(band)
@@ -557,13 +586,13 @@ def _build_columnar_table_from_entries(
             for pos in range(len(x_values) - 1)
             if abs(x_values[pos + 1] - x_values[pos]) > 0
         ]
-        if len(x_gaps) >= 2:
-            median_gap = statistics.median(x_gaps)
-            x_eps = median_gap * 0.6 if median_gap > 0 else 0.0
-        else:
-            x_eps = 10.0
+        gap_med = statistics.median(x_gaps) if x_gaps else 0.0
+        gap_p75 = _percentile(x_gaps, 0.75) if x_gaps else gap_med
+        if gap_p75 <= 0:
+            gap_p75 = gap_med
+        x_eps = max(6.0, 0.8 * gap_p75 if gap_p75 > 0 else 0.0)
         if x_eps <= 0:
-            x_eps = 10.0
+            x_eps = 6.0
 
         columns: list[dict[str, Any]] = []
         for item in sorted_band:
@@ -588,17 +617,17 @@ def _build_columnar_table_from_entries(
                 column["count"] += 1
                 column["center_x"] = column["sum_x"] / column["count"]
                 column["center_y"] = column["sum_y"] / column["count"]
-            else:
-                columns.append(
-                    {
-                        "items": [item],
-                        "sum_x": x_pos,
-                        "sum_y": item["y"],
-                        "count": 1,
-                        "center_x": x_pos,
-                        "center_y": item["y"],
-                    }
-                )
+                continue
+            columns.append(
+                {
+                    "items": [item],
+                    "sum_x": x_pos,
+                    "sum_y": item["y"],
+                    "count": 1,
+                    "center_x": x_pos,
+                    "center_y": item["y"],
+                }
+            )
 
         cell_texts: list[str] = []
         preview_parts: list[str] = []
@@ -623,25 +652,33 @@ def _build_columnar_table_from_entries(
             preview_body = " | ".join(preview_parts)
             print(f"[TABLE-X] band#{band_index} cols={len(columns)} | {preview_body}")
 
-        band_results.append({"cells": cell_texts, "y_mean": mean_y})
+        band_results.append({"cells": cell_texts, "y_mean": mean_y, "line_count": len(band)})
 
     if not band_results:
         return (
             None,
-            {"bands": band_summaries, "band_cells": band_cells_dump, "rows_txt_fallback": []},
+            {"bands": band_summaries, "band_cells": band_cells_dump, "rows_txt_fallback": [], "qty_col": None, "ref_col": None, "desc_col": None, "y_eps": y_eps},
         )
 
     column_count = max(len(band["cells"]) for band in band_results)
     integer_re = re.compile(r"^\d{1,3}$")
+    qty_header_values = {"QTY", "QTY.", "QTY:"}
+
+    bands_for_stats = sorted(
+        band_results, key=lambda item: int(item.get("line_count", 0)), reverse=True
+    )
+    if len(bands_for_stats) > 5:
+        bands_for_stats = bands_for_stats[:5]
+
     metrics: list[dict[str, Any]] = []
     for col_index in range(column_count):
-        qty_hits = 0
-        qty_total = 0
+        non_empty = 0
+        numeric_hits = 0
         ref_hits = 0
         token_hits = 0
         total_len = 0
-        non_empty = 0
-        for band in band_results:
+        header_hit = False
+        for band in bands_for_stats:
             cells = band.get("cells", [])
             if col_index >= len(cells):
                 continue
@@ -650,14 +687,16 @@ def _build_columnar_table_from_entries(
                 continue
             non_empty += 1
             total_len += len(cell_text)
-            qty_total += 1
+            upper_text = cell_text.upper()
+            if upper_text in qty_header_values:
+                header_hit = True
             if integer_re.match(cell_text):
                 try:
                     value = int(cell_text)
                 except Exception:
                     value = None
                 if value is not None and 0 < value <= 999:
-                    qty_hits += 1
+                    numeric_hits += 1
             if _cell_has_ref_marker(cell_text):
                 ref_hits += 1
             if _HOLE_ACTION_TOKEN_RE.search(cell_text):
@@ -665,34 +704,41 @@ def _build_columnar_table_from_entries(
         avg_len = (total_len / non_empty) if non_empty else 0.0
         metrics.append(
             {
-                "qty_hits": qty_hits,
-                "qty_total": qty_total,
-                "ref_hits": ref_hits,
                 "non_empty": non_empty,
-                "avg_len": avg_len,
+                "numeric_hits": numeric_hits,
+                "ref_hits": ref_hits,
                 "token_hits": token_hits,
+                "avg_len": avg_len,
+                "header_qty": header_hit,
+                "ref_ratio": (ref_hits / non_empty) if non_empty else 0.0,
+                "numeric_ratio": (numeric_hits / non_empty) if non_empty else 0.0,
             }
         )
 
     qty_candidates = [
         idx
         for idx, info in enumerate(metrics)
-        if info["qty_total"] > 0 and info["qty_hits"] / info["qty_total"] >= 0.6
+        if info["header_qty"] or (info["non_empty"] > 0 and info["numeric_ratio"] >= 0.6)
     ]
     qty_col = min(qty_candidates) if qty_candidates else None
 
     ref_candidates = [
         idx
         for idx, info in enumerate(metrics)
-        if info["non_empty"] > 0 and info["ref_hits"] / info["non_empty"] >= 0.4
+        if info["non_empty"] > 0 and info["ref_ratio"] >= 0.4
     ]
     ref_col = max(ref_candidates) if ref_candidates else None
 
-    desc_candidates = list(range(column_count))
-    if qty_col is not None and len(desc_candidates) > 1 and qty_col in desc_candidates:
-        desc_candidates.remove(qty_col)
-    if ref_col is not None and len(desc_candidates) > 1 and ref_col in desc_candidates:
-        desc_candidates.remove(ref_col)
+    if qty_col is None:
+        relaxed_candidates = [
+            idx
+            for idx, info in enumerate(metrics)
+            if info["non_empty"] > 0 and info["numeric_ratio"] >= 0.4 and info["ref_ratio"] < 0.4
+        ]
+        if relaxed_candidates:
+            qty_col = min(relaxed_candidates)
+
+    desc_candidates = [idx for idx in range(column_count) if idx != qty_col and idx != ref_col]
     if not desc_candidates:
         desc_candidates = list(range(column_count))
 
@@ -703,10 +749,11 @@ def _build_columnar_table_from_entries(
     desc_col = max(desc_candidates, key=_desc_score)
 
     print(
-        "[TABLE-ID] qty_col={qty} ref_col={ref} desc_col={desc}".format(
+        "[TABLE-ID] qty_col={qty} ref_col={ref} desc_col={desc} bands_checked={bands}".format(
             qty=qty_col if qty_col is not None else "None",
             ref=ref_col if ref_col is not None else "None",
             desc=desc_col,
+            bands=len(bands_for_stats),
         )
     )
 
@@ -720,8 +767,9 @@ def _build_columnar_table_from_entries(
     rows: list[dict[str, Any]] = []
     families: dict[str, int] = {}
     for band_index, band in enumerate(band_results):
-        qty_text = _cell_at(band["cells"], qty_col)
-        if not qty_text or not qty_text.isdigit():
+        cells = band.get("cells", [])
+        qty_text = _cell_at(cells, qty_col)
+        if not qty_text:
             continue
         try:
             qty_val = int(qty_text)
@@ -729,9 +777,20 @@ def _build_columnar_table_from_entries(
             continue
         if qty_val <= 0:
             continue
-        desc_text = _cell_at(band["cells"], desc_col)
-        ref_text_candidate = _cell_at(band["cells"], ref_col)
-        ref_text, ref_value = _extract_row_reference(ref_text_candidate)
+        desc_text = _cell_at(cells, desc_col)
+        if not desc_text:
+            fallback_parts = [
+                cell.strip()
+                for idx, cell in enumerate(cells)
+                if idx != qty_col and cell.strip()
+            ]
+            desc_text = " ".join(fallback_parts)
+        desc_text = " ".join((desc_text or "").split())
+        ref_text_candidate = _cell_at(cells, ref_col)
+        ref_text = ""
+        ref_value = None
+        if ref_text_candidate:
+            ref_text, ref_value = _extract_row_reference(ref_text_candidate)
         if not ref_text:
             ref_text, ref_value = _extract_row_reference(desc_text)
         side = _detect_row_side(desc_text)
@@ -748,16 +807,27 @@ def _build_columnar_table_from_entries(
             key = f"{ref_value:.4f}".rstrip("0").rstrip(".")
             families[key] = families.get(key, 0) + qty_val
         if band_index < 10:
-            ref_display = ref_text or ""
-            side_display = side or ""
+            ref_display = ref_text or "-"
+            side_display = side or "-"
             desc_display = _truncate_cell_preview(desc_text or "", 80)
             print(
                 f"[TABLE-R] band#{band_index} qty={qty_val} ref={ref_display} "
-                f"side={side_display} desc=\"{desc_display}\""
+                f'side={side_display} desc="{desc_display}"'
             )
 
     if not rows:
-        return (None, {"bands": band_summaries, "band_cells": band_cells_dump, "rows_txt_fallback": []})
+        return (
+            None,
+            {
+                "bands": band_summaries,
+                "band_cells": band_cells_dump,
+                "rows_txt_fallback": [],
+                "qty_col": qty_col,
+                "ref_col": ref_col,
+                "desc_col": desc_col,
+                "y_eps": y_eps,
+            },
+        )
 
     total_qty = sum(row["qty"] for row in rows)
     table_info: dict[str, Any] = {
@@ -776,11 +846,9 @@ def _build_columnar_table_from_entries(
         "ref_col": ref_col,
         "desc_col": desc_col,
         "y_eps": y_eps,
+        "bands_checked": len(bands_for_stats),
     }
     return (table_info, debug_info)
-
-
-
 
 
 def _fallback_text_table(lines: Iterable[str]) -> dict[str, Any]:
@@ -823,7 +891,13 @@ def read_text_table(doc) -> dict[str, Any]:
     helper = _resolve_app_callable("extract_hole_table_from_text")
     _print_helper_debug("text", helper)
     global _LAST_TEXT_TABLE_DEBUG
-    _LAST_TEXT_TABLE_DEBUG = {"candidates": [], "band_cells": [], "bands": [], "rows": []}
+    _LAST_TEXT_TABLE_DEBUG = {
+        "candidates": [],
+        "band_cells": [],
+        "bands": [],
+        "rows": [],
+        "raw_lines": [],
+    }
     table_lines: list[str] | None = None
     fallback_candidate: Mapping[str, Any] | None = None
     best_candidate: Mapping[str, Any] | None = None
@@ -872,6 +946,7 @@ def read_text_table(doc) -> dict[str, Any]:
         merged_rows = []
         parsed_rows = []
         text_rows_info = None
+        rows_txt_initial = 0
 
         if doc is None:
             table_lines = []
@@ -1196,20 +1271,6 @@ def read_text_table(doc) -> dict[str, Any]:
             )
         _LAST_TEXT_TABLE_DEBUG["candidates"] = debug_candidates
 
-        table_candidate, debug_payload = _build_columnar_table_from_entries(
-            candidate_entries
-        )
-        columnar_table_info = table_candidate
-        columnar_debug_info = debug_payload
-        if isinstance(debug_payload, Mapping):
-            _LAST_TEXT_TABLE_DEBUG["bands"] = list(debug_payload.get("bands", []))
-            _LAST_TEXT_TABLE_DEBUG["band_cells"] = list(
-                debug_payload.get("band_cells", [])
-            )
-            _LAST_TEXT_TABLE_DEBUG["rows"] = list(
-                debug_payload.get("rows_txt_fallback", [])
-            )
-
         current_row: list[str] = []
         for idx, entry in enumerate(candidate_entries):
             line = entry.get("normalized_text", "").strip()
@@ -1229,6 +1290,7 @@ def read_text_table(doc) -> dict[str, Any]:
         if current_row:
             merged_rows.append(" ".join(current_row))
 
+        rows_txt_initial = len(merged_rows)
         print(f"[TEXT-SCAN] rows_txt count={len(merged_rows)}")
         for idx, row_text in enumerate(merged_rows[:10]):
             print(f"  [{idx:02d}] {row_text}")
@@ -1355,6 +1417,73 @@ def read_text_table(doc) -> dict[str, Any]:
                 parsed_rows = fallback_parsed
                 families = fallback_families
                 total_qty = fallback_qty
+
+        if rows_txt_initial < 8:
+            chart_lines: list[dict[str, Any]] = []
+            sheet_lines: list[dict[str, Any]] = []
+            model_lines: list[dict[str, Any]] = []
+            other_lines: list[dict[str, Any]] = []
+            for entry in collected_entries:
+                text_value = str(entry.get("text") or "").strip()
+                if not text_value:
+                    continue
+                record = {
+                    "layout_name": entry.get("layout_name"),
+                    "from_block": bool(entry.get("from_block")),
+                    "x": entry.get("x"),
+                    "y": entry.get("y"),
+                    "height": entry.get("height"),
+                    "text": text_value,
+                    "normalized_text": text_value,
+                }
+                layout_name = str(entry.get("layout_name") or "")
+                lower_name = layout_name.lower()
+                if "chart" in lower_name:
+                    chart_lines.append(record)
+                elif "sheet" in lower_name:
+                    sheet_lines.append(record)
+                elif lower_name == "model":
+                    model_lines.append(record)
+                else:
+                    other_lines.append(record)
+            raw_lines = chart_lines + sheet_lines + model_lines
+            if not raw_lines:
+                raw_lines = list(other_lines)
+            _LAST_TEXT_TABLE_DEBUG["raw_lines"] = [
+                {
+                    "layout": item.get("layout_name"),
+                    "in_block": bool(item.get("from_block")),
+                    "x": item.get("x"),
+                    "y": item.get("y"),
+                    "text": item.get("text"),
+                }
+                for item in raw_lines
+            ]
+            block_count = sum(1 for item in raw_lines if item.get("from_block"))
+            print(
+                "[COLUMN] raw_lines total={total} (chart={chart} sheet={sheet} "
+                "model={model}) blocks={blocks}".format(
+                    total=len(raw_lines),
+                    chart=len(chart_lines),
+                    sheet=len(sheet_lines),
+                    model=len(model_lines),
+                    blocks=block_count,
+                )
+            )
+            if raw_lines:
+                table_candidate, debug_payload = _build_columnar_table_from_entries(raw_lines)
+                columnar_table_info = table_candidate
+                columnar_debug_info = debug_payload
+                if isinstance(debug_payload, Mapping):
+                    _LAST_TEXT_TABLE_DEBUG["bands"] = list(
+                        debug_payload.get("bands", [])
+                    )
+                    _LAST_TEXT_TABLE_DEBUG["band_cells"] = list(
+                        debug_payload.get("band_cells", [])
+                    )
+                    _LAST_TEXT_TABLE_DEBUG["rows"] = list(
+                        debug_payload.get("rows_txt_fallback", [])
+                    )
 
         print(f"[TEXT-SCAN] parsed rows: {len(parsed_rows)}")
         for idx, row in enumerate(parsed_rows[:20]):
@@ -1489,20 +1618,19 @@ def read_text_table(doc) -> dict[str, Any]:
     if isinstance(columnar_table_info, Mapping):
         columnar_result = dict(columnar_table_info)
 
-    fallback_selected = False
+    column_selected = False
     if columnar_result:
         existing_score = _score_table(primary_result)
-        existing_rows = existing_score[1]
         fallback_score = _score_table(columnar_result)
-        if fallback_score[1] > 0 and existing_rows < 8 and fallback_score > existing_score:
+        if fallback_score[1] > 0 and fallback_score > existing_score:
             rows_count = fallback_score[1]
             qty_sum = fallback_score[0]
             print(
                 f"[EXTRACT] promoted table rows={rows_count} qty_sum={qty_sum} "
-                "source=text_table (fallback)"
+                "source=text_table (column-mode)"
             )
             primary_result = columnar_result
-            fallback_selected = True
+            column_selected = True
 
     if primary_result is None:
         fallback = _fallback_text_table(lines)
@@ -1512,7 +1640,7 @@ def read_text_table(doc) -> dict[str, Any]:
         _LAST_TEXT_TABLE_DEBUG["rows"] = []
         return {}
 
-    if fallback_selected:
+    if column_selected:
         _LAST_TEXT_TABLE_DEBUG["rows"] = list(primary_result.get("rows", []))
         return primary_result
 

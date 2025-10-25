@@ -120,7 +120,8 @@ def main(argv: Sequence[str] | None = None) -> int:
     if dump_base:
         lines_path = Path(dump_base)
         bands_path = lines_path.with_name(f"{lines_path.stem}_bands.tsv")
-        candidates = debug_payload.get("candidates", [])
+        raw_lines = debug_payload.get("raw_lines") or []
+        candidates = raw_lines or debug_payload.get("candidates", [])
         band_cells = debug_payload.get("band_cells", [])
 
         def _format_float(value: object) -> str:
