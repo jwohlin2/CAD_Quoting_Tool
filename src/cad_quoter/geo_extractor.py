@@ -259,69 +259,341 @@ def read_text_table(doc) -> dict[str, Any]:
     _print_helper_debug("text", helper)
     table_lines: list[str] | None = None
     fallback_candidate: Mapping[str, Any] | None = None
+    best_candidate: Mapping[str, Any] | None = None
+    best_score: tuple[int, int] = (0, 0)
+
+    def _analyze_helper_signature(func: Callable[..., Any]) -> tuple[bool, bool]:
+        needs_lines = False
+        allows_lines = False
+        try:
+            signature = inspect.signature(func)
+        except (TypeError, ValueError):
+            return (needs_lines, allows_lines)
+        positional: list[inspect.Parameter] = []
+        for parameter in signature.parameters.values():
+            if parameter.kind is inspect.Parameter.VAR_POSITIONAL:
+                allows_lines = True
+                continue
+            if parameter.kind in (
+                inspect.Parameter.POSITIONAL_ONLY,
+                inspect.Parameter.POSITIONAL_OR_KEYWORD,
+            ):
+                positional.append(parameter)
+        if len(positional) >= 2:
+            allows_lines = True
+            required = [
+                param
+                for param in positional
+                if param.default is inspect._empty
+            ]
+            if len(required) >= 2:
+                needs_lines = True
+        return (needs_lines, allows_lines)
 
     def ensure_lines() -> list[str]:
         nonlocal table_lines
-        if table_lines is None:
-            table_lines = _collect_table_text_lines(doc)
+        if table_lines is not None:
+            return table_lines
+
+        collected: list[str] = []
+        if doc is None:
+            table_lines = collected
+            return table_lines
+
+        def _iter_layouts() -> list[tuple[str, Any]]:
+            layouts: list[tuple[str, Any]] = []
+            modelspace = getattr(doc, "modelspace", None)
+            if callable(modelspace):
+                try:
+                    layout_obj = modelspace()
+                except Exception:
+                    layout_obj = None
+                if layout_obj is not None:
+                    layouts.append(("Model", layout_obj))
+
+            layouts_manager = getattr(doc, "layouts", None)
+            if layouts_manager is None:
+                return layouts
+            names: list[Any]
+            try:
+                raw_names = getattr(layouts_manager, "names", None)
+                if callable(raw_names):
+                    names_iter = raw_names()
+                else:
+                    names_iter = raw_names
+                names = list(names_iter or [])
+            except Exception:
+                names = []
+            get_layout = getattr(layouts_manager, "get", None)
+            for name in names:
+                if not isinstance(name, str):
+                    continue
+                if name.lower() == "model":
+                    continue
+                layout_obj = None
+                if callable(get_layout):
+                    try:
+                        layout_obj = get_layout(name)
+                    except Exception:
+                        layout_obj = None
+                if layout_obj is not None:
+                    layouts.append((name, layout_obj))
+            return layouts
+
+        def _extract_coords(entity: Any) -> tuple[float | None, float | None]:
+            insert = None
+            dxf_obj = getattr(entity, "dxf", None)
+            if dxf_obj is not None:
+                insert = getattr(dxf_obj, "insert", None)
+            if insert is None:
+                insert = getattr(entity, "insert", None)
+            x_val: float | None = None
+            y_val: float | None = None
+            if insert is not None:
+                x_val = getattr(insert, "x", None)
+                y_val = getattr(insert, "y", None)
+                if (x_val is None or y_val is None) and hasattr(insert, "__iter__"):
+                    try:
+                        parts = list(insert)
+                    except Exception:
+                        parts = []
+                    if x_val is None and len(parts) >= 1:
+                        x_val = parts[0]
+                    if y_val is None and len(parts) >= 2:
+                        y_val = parts[1]
+            try:
+                x_float = float(x_val) if x_val is not None else None
+            except Exception:
+                x_float = None
+            try:
+                y_float = float(y_val) if y_val is not None else None
+            except Exception:
+                y_float = None
+            return (x_float, y_float)
+
+        token_candidates = (
+            "TAP",
+            "C'BORE",
+            "CBORE",
+            "COUNTERBORE",
+            "DRILL",
+            "N.P.T",
+            "NPT",
+            "QTY",
+        )
+
+        for layout_index, (layout_name, layout_obj) in enumerate(_iter_layouts()):
+            query = getattr(layout_obj, "query", None)
+            if not callable(query):
+                continue
+            combined_entities: list[Any]
+            try:
+                combined_entities = list(query("TEXT, MTEXT"))
+            except Exception:
+                combined_entities = []
+            if not combined_entities:
+                combined_entities = []
+                try:
+                    combined_entities.extend(list(query("TEXT")))
+                except Exception:
+                    pass
+                try:
+                    combined_entities.extend(list(query("MTEXT")))
+                except Exception:
+                    pass
+            if not combined_entities:
+                continue
+
+            seen_entities: set[int] = set()
+            ordered_entities: list[Any] = []
+            for entity in combined_entities:
+                marker = id(entity)
+                if marker in seen_entities:
+                    continue
+                seen_entities.add(marker)
+                ordered_entities.append(entity)
+            if not ordered_entities:
+                continue
+
+            entries: list[tuple[tuple[int, float, float, int], str]] = []
+            text_fragments = 0
+            mtext_fragments = 0
+            counter = 0
+
+            def _add_fragment(fragment: Any, coords: tuple[float | None, float | None], *, is_mtext: bool) -> None:
+                nonlocal counter, text_fragments, mtext_fragments
+                normalized = _normalize_table_fragment(fragment)
+                if not normalized:
+                    return
+                x_coord, y_coord = coords
+                try:
+                    y_key = -float(y_coord) if y_coord is not None else float("inf")
+                except Exception:
+                    y_key = float("inf")
+                try:
+                    x_key = float(x_coord) if x_coord is not None else float("inf")
+                except Exception:
+                    x_key = float("inf")
+                entries.append(((layout_index, y_key, x_key, counter), normalized))
+                counter += 1
+                if is_mtext:
+                    mtext_fragments += 1
+                else:
+                    text_fragments += 1
+
+            for entity in ordered_entities:
+                dxftype = None
+                try:
+                    dxftype = entity.dxftype()
+                except Exception:
+                    dxftype = None
+                kind = str(dxftype or "").upper()
+                if kind not in {"TEXT", "MTEXT"}:
+                    continue
+                coords = _extract_coords(entity)
+                if kind == "MTEXT":
+                    raw_text = ""
+                    plain_text = getattr(entity, "plain_text", None)
+                    if callable(plain_text):
+                        try:
+                            raw_text = plain_text()
+                        except Exception:
+                            raw_text = ""
+                    if not raw_text:
+                        raw_text = getattr(entity, "text", "")
+                else:
+                    dxf_obj = getattr(entity, "dxf", None)
+                    raw_text = getattr(dxf_obj, "text", "") if dxf_obj is not None else ""
+                    if not raw_text:
+                        raw_text = getattr(entity, "text", "")
+                for fragment in str(raw_text).splitlines():
+                    _add_fragment(fragment, coords, is_mtext=(kind == "MTEXT"))
+
+            if not entries:
+                continue
+
+            entries.sort(key=lambda item: item[0])
+            kept_lines: list[str] = []
+            row_context_active = False
+            for _, text_line in entries:
+                if not text_line:
+                    row_context_active = False
+                    continue
+                upper_line = text_line.upper()
+                row_start = bool(_ROW_START_RE.match(text_line))
+                has_token = any(token in upper_line for token in token_candidates)
+                keep_line = row_start or has_token or (row_context_active and text_line)
+                if keep_line:
+                    kept_lines.append(text_line)
+                if row_start:
+                    row_context_active = True
+                elif not text_line.strip():
+                    row_context_active = False
+                elif row_context_active and keep_line:
+                    row_context_active = True
+                else:
+                    row_context_active = False
+            print(
+                f"[TEXT-SCAN] layout={layout_name} text={text_fragments} "
+                f"mtext={mtext_fragments} kept={len(kept_lines)}"
+            )
+            collected.extend(kept_lines)
+
+        table_lines = collected
         return table_lines
 
+    def _log_and_normalize(label: str, result: Any) -> tuple[dict[str, Any] | None, tuple[int, int]]:
+        rows_list: list[Any] = []
+        candidate_map: dict[str, Any] | None = None
+        if isinstance(result, Mapping):
+            candidate_map = dict(result)
+            rows_value = candidate_map.get("rows")
+            if isinstance(rows_value, list):
+                rows_list = rows_value
+            elif isinstance(rows_value, Iterable) and not isinstance(
+                rows_value, (str, bytes, bytearray)
+            ):
+                rows_list = list(rows_value)
+                candidate_map["rows"] = rows_list
+            else:
+                rows_list = []
+                candidate_map["rows"] = rows_list
+        qty_total = _sum_qty(rows_list)
+        row_count = len(rows_list)
+        print(f"[TEXT-SCAN] helper={label} rows={row_count} qty={qty_total}")
+        return candidate_map, (qty_total, row_count)
+
+    lines = ensure_lines()
+
     if callable(helper):
+        needs_lines, allows_lines = _analyze_helper_signature(helper)
+        use_lines = needs_lines or allows_lines
+        args: list[Any] = [doc]
+        if use_lines:
+            args.append(lines)
         try:
-            result = helper(doc) or {}
+            helper_result = helper(*args)
+        except TypeError as exc:
+            if use_lines and allows_lines and not needs_lines:
+                try:
+                    helper_result = helper(doc)
+                    use_lines = False
+                except Exception as inner_exc:
+                    print(f"[EXTRACT] text helper error: {inner_exc}")
+                    raise
+            else:
+                print(f"[EXTRACT] text helper error: {exc}")
+                raise
         except Exception as exc:
             print(f"[EXTRACT] text helper error: {exc}")
             raise
-        if isinstance(result, Mapping):
-            result_map = dict(result)
-            if result_map.get("rows"):
-                return result_map
-            fallback_candidate = result_map
-        else:
-            fallback_candidate = {}
+        helper_map, helper_score = _log_and_normalize(
+            "extract_hole_table_from_text", helper_result or {}
+        )
+        if helper_map is not None:
+            if fallback_candidate is None:
+                fallback_candidate = helper_map
+            if helper_score[1] > 0 and helper_score > best_score:
+                best_candidate = helper_map
+                best_score = helper_score
 
     legacy_helper = _resolve_app_callable("hole_count_from_text_table")
     _print_helper_debug("text_alt", legacy_helper)
     if callable(legacy_helper):
-        needs_lines = False
+        needs_lines, allows_lines = _analyze_helper_signature(legacy_helper)
+        use_lines = needs_lines or allows_lines
+        args: list[Any] = [doc]
+        if use_lines:
+            args.append(lines)
         try:
-            signature = inspect.signature(legacy_helper)
-        except (TypeError, ValueError):
-            signature = None
-        if signature is not None:
-            required = [
-                param
-                for param in signature.parameters.values()
-                if param.kind in (param.POSITIONAL_ONLY, param.POSITIONAL_OR_KEYWORD)
-                and param.default is param.empty
-            ]
-            needs_lines = len(required) >= 2
-
-        try:
-            if needs_lines:
-                lines = ensure_lines()
-                result = legacy_helper(doc, lines) or {}
-            else:
-                result = legacy_helper(doc) or {}
+            legacy_result = legacy_helper(*args)
         except TypeError as exc:
-            print(f"[EXTRACT] text helper error: {exc}")
-            lines = ensure_lines()
-            result = legacy_helper(doc, lines) or {}
+            if use_lines and allows_lines and not needs_lines:
+                try:
+                    legacy_result = legacy_helper(doc)
+                    use_lines = False
+                except Exception as inner_exc:
+                    print(f"[EXTRACT] text helper error: {inner_exc}")
+                    raise
+            else:
+                print(f"[EXTRACT] text helper error: {exc}")
+                raise
         except Exception as exc:
             print(f"[EXTRACT] text helper error: {exc}")
             raise
-
-        if isinstance(result, Mapping):
-            result_map = dict(result)
-            if result_map.get("rows"):
-                return result_map
+        legacy_map, legacy_score = _log_and_normalize(
+            "hole_count_from_text_table", legacy_result or {}
+        )
+        if legacy_map is not None:
             if fallback_candidate is None:
-                fallback_candidate = result_map
-    else:
-        if fallback_candidate is None:
-            fallback_candidate = {}
+                fallback_candidate = legacy_map
+            if legacy_score[1] > 0 and legacy_score > best_score:
+                best_candidate = legacy_map
+                best_score = legacy_score
 
-    lines = ensure_lines()
+    if isinstance(best_candidate, Mapping):
+        return dict(best_candidate)
+
     fallback = _fallback_text_table(lines)
     if fallback:
         return fallback
