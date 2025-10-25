@@ -19518,24 +19518,235 @@ def extract_hole_table_from_text(doc, y_tol: float = 0.04, min_rows: int = 5):
 
 
 def hole_count_from_acad_table(doc) -> dict[str, Any]:
-    """Extract hole and tap data from an AutoCAD TABLE entity."""
+    """Extract hole and tap data from AutoCAD TABLE entities across layouts and blocks."""
 
     result: dict[str, Any] = {}
     if doc is None:
         return result
 
-    for t in _all_tables(doc):
+    depth_max = 3
+    seen_tables: set[str] = set()
+    table_contexts: list[dict[str, Any]] = []
+
+    def _handle_key(table: Any) -> str:
         try:
-            n_rows = t.dxf.n_rows
-            n_cols = t.dxf.n_cols
+            handle = getattr(table.dxf, "handle", None)
+        except Exception:
+            handle = None
+        if handle:
+            return str(handle)
+        return f"id:{id(table)}"
+
+    def _block_name(entity: Any) -> str:
+        try:
+            name = getattr(entity.dxf, "name", "")
+        except Exception:
+            name = ""
+        if not name:
+            try:
+                name = getattr(entity.dxf, "block_name", "")
+            except Exception:
+                name = ""
+        return str(name or "")
+
+    def _record_table(table: Any, layout_name: str | None, chain: Sequence[str]) -> bool:
+        key = _handle_key(table)
+        if key in seen_tables:
+            return False
+        seen_tables.add(key)
+        try:
+            owner = getattr(table.dxf, "owner", None)
+        except Exception:
+            owner = None
+        try:
+            layer = getattr(table.dxf, "layer", "")
+        except Exception:
+            layer = ""
+        table_contexts.append(
+            {
+                "table": table,
+                "layout": layout_name,
+                "handle": getattr(table.dxf, "handle", None),
+                "owner": owner,
+                "layer": layer,
+                "block_chain": [name for name in chain if name],
+            }
+        )
+        return True
+
+    def _scan_space(
+        space: Any,
+        *,
+        layout_name: str | None,
+        depth: int,
+        chain: Sequence[str],
+        block_names: set[str] | None,
+        visited_blocks: set[str],
+    ) -> tuple[int, int]:
+        total_found = 0
+        added = 0
+        try:
+            entities = list(space.query("TABLE,INSERT"))
+        except Exception:
+            try:
+                entities = list(space)
+            except Exception:
+                entities = []
+        for entity in entities:
+            try:
+                kind = entity.dxftype()
+            except Exception:
+                kind = ""
+            if kind == "TABLE":
+                total_found += 1
+                if _record_table(entity, layout_name, chain):
+                    added += 1
+            elif kind == "INSERT":
+                block_name = _block_name(entity)
+                if block_names is not None and block_name:
+                    block_names.add(block_name)
+                if not block_name or depth >= depth_max or block_name in visited_blocks:
+                    continue
+                visited_blocks.add(block_name)
+                block_total, block_added = _scan_block_by_name(
+                    block_name,
+                    layout_name=layout_name,
+                    depth=depth + 1,
+                    chain=[*chain, block_name],
+                    block_names=block_names,
+                    visited_blocks=visited_blocks,
+                )
+                visited_blocks.discard(block_name)
+                total_found += block_total
+                added += block_added
+        return total_found, added
+
+    def _scan_block_by_name(
+        block_name: str,
+        *,
+        layout_name: str | None,
+        depth: int,
+        chain: Sequence[str],
+        block_names: set[str] | None,
+        visited_blocks: set[str],
+    ) -> tuple[int, int]:
+        block = None
+        try:
+            block = doc.blocks.get(block_name)
+        except Exception:
+            try:
+                block = doc.blocks[block_name]
+            except Exception:
+                block = None
+        if block is None:
+            return (0, 0)
+        return _scan_space(
+            block,
+            layout_name=layout_name,
+            depth=depth,
+            chain=chain,
+            block_names=block_names,
+            visited_blocks=visited_blocks,
+        )
+
+    def _iter_layout_spaces() -> list[tuple[str, Any, str]]:
+        spaces: list[tuple[str, Any, str]] = []
+        seen_ids: set[int] = set()
+        try:
+            msp = doc.modelspace()
+        except Exception:
+            msp = None
+        if msp is not None and id(msp) not in seen_ids:
+            seen_ids.add(id(msp))
+            spaces.append(("MODEL", msp, "model"))
+        try:
+            layout_names = list(doc.layouts.names_in_taborder())
+        except Exception:
+            layout_names = []
+        for name in layout_names:
+            try:
+                layout = doc.layouts.get(name)
+            except Exception:
+                continue
+            if getattr(layout, "is_modelspace", False):
+                continue
+            entity_space = getattr(layout, "entity_space", None)
+            if entity_space is None or id(entity_space) in seen_ids:
+                continue
+            seen_ids.add(id(entity_space))
+            layout_name = getattr(layout.dxf, "name", name) or name
+            layout_type = "model" if getattr(layout, "is_modelspace", False) else "paper"
+            spaces.append((layout_name, entity_space, layout_type))
+        return spaces
+
+    for layout_name, space, layout_type in _iter_layout_spaces():
+        block_names: set[str] = set()
+        visited_blocks: set[str] = set()
+        total_found, _ = _scan_space(
+            space,
+            layout_name=layout_name,
+            depth=0,
+            chain=[],
+            block_names=block_names,
+            visited_blocks=visited_blocks,
+        )
+        blocks_label = ", ".join(sorted(block_names)) if block_names else "-"
+        print(f"[LAYOUT] {layout_name} type={layout_type} blocks={blocks_label} tables={total_found}")
+
+    try:
+        block_items = list(doc.blocks)
+    except Exception:
+        block_items = []
+    for block in block_items:
+        block_name = getattr(block, "name", getattr(getattr(block, "dxf", None), "name", "")) or ""
+        if not block_name or block_name.startswith("*"):
+            continue
+        visited_blocks = {block_name}
+        total_found, _ = _scan_space(
+            block,
+            layout_name=None,
+            depth=0,
+            chain=[block_name],
+            block_names=None,
+            visited_blocks=visited_blocks,
+        )
+        if total_found:
+            print(f"[BLOCK] {block_name} tables={total_found}")
+
+    if not table_contexts:
+        return result
+
+    agg_total = 0
+    agg_families: dict[float, int] = {}
+    agg_rows: list[dict[str, Any]] = []
+    agg_row_taps = 0
+    agg_tap_classes = {"small": 0, "medium": 0, "large": 0, "npt": 0}
+    from_back_any = False
+    double_sided_any = False
+
+    for ctx in table_contexts:
+        table = ctx["table"]
+        try:
+            n_rows = table.dxf.n_rows
+            n_cols = table.dxf.n_cols
         except Exception:
             continue
+
+        layout_label = ctx.get("layout") or "-"
+        owner_val = ctx.get("owner")
+        owner_label = f"#{owner_val}" if owner_val else "-"
+        layer_label = ctx.get("layer") or ""
+        block_chain = ctx.get("block_chain") or []
+        blocks_label = f" blocks={'>' .join(block_chain)}" if block_chain else ""
+        print(
+            f"[ACAD-TABLE] layout={layout_label} owner={owner_label} rows={n_rows} cols={n_cols} layer={layer_label}{blocks_label}"
+        )
 
         def _row_text(row_idx: int) -> list[str]:
             cells: list[str] = []
             for c in range(n_cols):
                 try:
-                    cell = t.get_cell(row_idx, c)
+                    cell = table.get_cell(row_idx, c)
                 except Exception:
                     cell = None
                 try:
@@ -19609,7 +19820,7 @@ def hole_count_from_acad_table(doc) -> dict[str, Any]:
             cell = None
             if c_qty is not None:
                 try:
-                    cell = t.get_cell(r, c_qty)
+                    cell = table.get_cell(r, c_qty)
                 except Exception:
                     cell = None
             try:
@@ -19628,7 +19839,7 @@ def hole_count_from_acad_table(doc) -> dict[str, Any]:
             hole_id = ""
             if c_hole is not None:
                 try:
-                    hole_cell = t.get_cell(r, c_hole)
+                    hole_cell = table.get_cell(r, c_hole)
                 except Exception:
                     hole_cell = None
                 try:
@@ -19637,7 +19848,7 @@ def hole_count_from_acad_table(doc) -> dict[str, Any]:
                     hole_id = ""
             if c_ref is not None:
                 try:
-                    ref_cell = t.get_cell(r, c_ref)
+                    ref_cell = table.get_cell(r, c_ref)
                 except Exception:
                     ref_cell = None
                 try:
@@ -19646,7 +19857,7 @@ def hole_count_from_acad_table(doc) -> dict[str, Any]:
                     ref_txt = ""
             if c_desc is not None:
                 try:
-                    desc_cell = t.get_cell(r, c_desc)
+                    desc_cell = table.get_cell(r, c_desc)
                 except Exception:
                     desc_cell = None
                 try:
@@ -19698,6 +19909,13 @@ def hole_count_from_acad_table(doc) -> dict[str, Any]:
             ref_value = ref_txt.strip()
             if d is not None:
                 ref_value = f"{d:.4f}\""
+            provenance = {
+                "layout": ctx.get("layout"),
+                "owner_handle": ctx.get("owner"),
+                "layer": ctx.get("layer"),
+                "block_chain": block_chain,
+                "table_handle": ctx.get("handle"),
+            }
             rows_norm.append(
                 {
                     "hole": hole_id.strip(),
@@ -19705,67 +19923,83 @@ def hole_count_from_acad_table(doc) -> dict[str, Any]:
                     "qty": qty,
                     "desc": desc.strip(),
                     "diameter_in": d,
+                    "provenance": provenance,
                 }
             )
 
-        if total > 0:
-            filtered_classes = {k: int(v) for k, v in tap_classes.items() if v}
-            families_formatted = {
-                f'{diam:.4f}"': count for diam, count in sorted(families.items())
-            }
-            ops_entries: list[dict[str, Any]] = []
-            for row in rows_norm:
-                try:
-                    qty_val = int(row.get("qty") or 0)
-                except Exception:
-                    qty_val = 0
-                ref_val = str(row.get("ref") or "")
-                desc_val = str(row.get("desc") or "")
-                line_parts = []
-                if qty_val > 0:
-                    line_parts.append(f"QTY {qty_val}")
-                if ref_val:
-                    line_parts.append(ref_val)
-                if desc_val:
-                    line_parts.append(desc_val)
-                line_text = " ".join(line_parts).strip()
-                entry = _parse_hole_line(line_text, 1.0, source="ACAD_TABLE") if line_text else None
-                if entry:
-                    if qty_val > 0:
-                        entry["qty"] = qty_val
-                    if row.get("diameter_in") is not None:
-                        entry["ref_dia_in"] = row.get("diameter_in")
-                    entry.setdefault("ref", ref_val)
-                    ops_entries.append(entry)
-            ops_summary = (
-                aggregate_ops(
-                    rows_norm,
-                    ops_entries=ops_entries,
-                    parser_rules_params=PARAMS_DEFAULT,
-                    parser_rules_v2_enabled=PARSER_RULES_V2_ENABLED,
-                )
-                if rows_norm
-                else {}
-            )
-            result = {
-                "hole_count": total,
-                "hole_diam_families_in": families_formatted,
-                "rows": rows_norm,
-                "tap_qty_from_table": row_taps,
-                "tap_class_counts": filtered_classes,
-                "provenance_holes": "HOLE TABLE (ACAD_TABLE)",
-            }
-            if ops_summary:
-                result["ops_summary"] = ops_summary
-                claims_payload = ops_summary.get("claims") if isinstance(ops_summary, dict) else None
-                if isinstance(claims_payload, dict) and claims_payload:
-                    result["ops_claims"] = dict(claims_payload)
-            if from_back:
-                result["from_back"] = True
-            if double_sided:
-                result["double_sided_cbore"] = True
-            return result
+        if total <= 0:
+            continue
 
+        agg_total += total
+        for diam, count in families.items():
+            agg_families[diam] = agg_families.get(diam, 0) + count
+        agg_row_taps += row_taps
+        for key, val in tap_classes.items():
+            if val:
+                agg_tap_classes[key] = agg_tap_classes.get(key, 0) + int(val)
+        from_back_any = from_back_any or from_back
+        double_sided_any = double_sided_any or double_sided
+        agg_rows.extend(rows_norm)
+
+    if agg_total <= 0 or not agg_rows:
+        return result
+
+    families_formatted = {f'{diam:.4f}"': count for diam, count in sorted(agg_families.items())}
+    filtered_classes = {k: int(v) for k, v in agg_tap_classes.items() if v}
+
+    ops_entries: list[dict[str, Any]] = []
+    for row in agg_rows:
+        try:
+            qty_val = int(row.get("qty") or 0)
+        except Exception:
+            qty_val = 0
+        ref_val = str(row.get("ref") or "")
+        desc_val = str(row.get("desc") or "")
+        line_parts = []
+        if qty_val > 0:
+            line_parts.append(f"QTY {qty_val}")
+        if ref_val:
+            line_parts.append(ref_val)
+        if desc_val:
+            line_parts.append(desc_val)
+        line_text = " ".join(line_parts).strip()
+        entry = _parse_hole_line(line_text, 1.0, source="ACAD_TABLE") if line_text else None
+        if entry:
+            if qty_val > 0:
+                entry["qty"] = qty_val
+            if row.get("diameter_in") is not None:
+                entry["ref_dia_in"] = row.get("diameter_in")
+            entry.setdefault("ref", ref_val)
+            ops_entries.append(entry)
+
+    ops_summary = (
+        aggregate_ops(
+            agg_rows,
+            ops_entries=ops_entries,
+            parser_rules_params=PARAMS_DEFAULT,
+            parser_rules_v2_enabled=PARSER_RULES_V2_ENABLED,
+        )
+        if agg_rows
+        else {}
+    )
+
+    result = {
+        "hole_count": agg_total,
+        "hole_diam_families_in": families_formatted,
+        "rows": agg_rows,
+        "tap_qty_from_table": agg_row_taps,
+        "tap_class_counts": filtered_classes,
+        "provenance_holes": "HOLE TABLE (ACAD_TABLE)",
+    }
+    if ops_summary:
+        result["ops_summary"] = ops_summary
+        claims_payload = ops_summary.get("claims") if isinstance(ops_summary, dict) else None
+        if isinstance(claims_payload, dict) and claims_payload:
+            result["ops_claims"] = dict(claims_payload)
+    if from_back_any:
+        result["from_back"] = True
+    if double_sided_any:
+        result["double_sided_cbore"] = True
     return result
 
 def hole_count_from_text_table(doc, lines: Sequence[str] | None = None) -> tuple[int, dict] | tuple[None, None]:
