@@ -1076,6 +1076,7 @@ _ROW_QUANTITY_FLEX_PATTERNS = [
     re.compile(r"\b(\d+)\s*(?:REQD|REQUIRED|RE'?D)\b", re.IGNORECASE),
     re.compile(r"\(\s*(\d+)\s*\)"),
 ]
+_RE_TEXT_ROW_START = re.compile(r"^\(\s*(\d+)\s*\)")
 _LETTER_CODE_ROW_RE = re.compile(r"^\s*[A-Z]\s*(?:[-.:|]|$)")
 _HOLE_ACTION_TOKEN_RE = re.compile(_HOLE_ACTION_TOKEN_PATTERN, re.IGNORECASE)
 _DIAMETER_PREFIX_RE = re.compile(
@@ -3326,6 +3327,12 @@ def _build_columnar_table_from_entries(
             fragment_desc = " ".join(fragment.split())
             if not fragment_desc:
                 continue
+            if (
+                frag_index == 0
+                and qty_token_text
+                and not _RE_TEXT_ROW_START.match(fragment_desc)
+            ):
+                fragment_desc = f"{qty_token_text} {fragment_desc}".strip()
             ref_text, ref_value = _extract_row_reference(fragment_desc)
             has_action = bool(_HOLE_ACTION_TOKEN_RE.search(fragment_desc))
             has_ref_marker = bool(ref_text or (ref_value is not None))
@@ -3370,6 +3377,26 @@ def _build_columnar_table_from_entries(
                     f"[TABLE-R] band#{band_label} qty={qty_val} ref={ref_display} "
                     f'side={side_display} desc="{desc_display}"'
                 )
+
+    merged_rows_local = locals().get("merged_rows")
+    if isinstance(merged_rows_local, list) and len(rows) == len(merged_rows_local):
+        for idx, fallback_text in enumerate(merged_rows_local):
+            if idx >= len(rows):
+                break
+            fallback_clean = " ".join(str(fallback_text or "").split())
+            if not fallback_clean:
+                continue
+            current_desc = str(rows[idx].get("desc") or "")
+            needs_update = False
+            if (
+                _RE_TEXT_ROW_START.match(fallback_clean)
+                and not _RE_TEXT_ROW_START.match(current_desc)
+            ):
+                needs_update = True
+            elif len(fallback_clean) > len(current_desc):
+                needs_update = True
+            if needs_update:
+                rows[idx]["desc"] = fallback_clean
 
     if len(rows) < 8:
         try:
@@ -3474,6 +3501,274 @@ def _build_columnar_table_from_entries(
             "median_h": median_h,
         }
     return (table_info, debug_info)
+
+
+def _extract_mechanical_table_from_blocks(doc: Any) -> Mapping[str, Any] | None:
+    helper = _resolve_app_callable("extract_hole_table_from_text")
+    if not callable(helper):
+        return None
+
+    blocks_section = getattr(doc, "blocks", None)
+    if blocks_section is None:
+        return None
+
+    try:
+        block_iter = list(blocks_section)
+    except Exception:
+        block_iter = []
+
+    def _is_mechanical_name(name: str) -> bool:
+        upper = name.upper()
+        return upper.startswith("AM_") or upper.startswith("*U")
+
+    def _extract_text(entity: Any) -> str:
+        if entity is None:
+            return ""
+        plain = getattr(entity, "plain_text", None)
+        text_value: Any = None
+        if callable(plain):
+            try:
+                text_value = plain()
+            except Exception:
+                text_value = None
+        if not text_value:
+            dxf_obj = getattr(entity, "dxf", None)
+            text_value = getattr(dxf_obj, "text", None) if dxf_obj is not None else None
+        try:
+            return str(text_value).strip()
+        except Exception:
+            return ""
+
+    def _extract_xy(entity: Any) -> tuple[float | None, float | None]:
+        if entity is None:
+            return (None, None)
+        dxf_obj = getattr(entity, "dxf", None)
+        point = None
+        for source in (entity, dxf_obj):
+            if source is None:
+                continue
+            for attr in ("insert", "alignment_point", "align_point", "start", "position"):
+                candidate = getattr(source, attr, None)
+                if candidate is not None:
+                    point = candidate
+                    break
+            if point is not None:
+                break
+        if point is None:
+            return (None, None)
+
+        def _coerce(value: Any, attr: str | None = None) -> float | None:
+            target = value
+            if attr is not None:
+                target = getattr(value, attr, None)
+            if target is None:
+                return None
+            try:
+                return float(target)
+            except Exception:
+                return None
+
+        if hasattr(point, "xyz"):
+            try:
+                x_val, y_val, _ = point.xyz
+                return (float(x_val), float(y_val))
+            except Exception:
+                return (None, None)
+
+        for accessor in ((0, 1), ("x", "y")):
+            if isinstance(accessor[0], int):
+                try:
+                    x_val = float(point[accessor[0]])  # type: ignore[index]
+                except Exception:
+                    x_val = None
+            else:
+                x_val = _coerce(point, accessor[0])
+            if isinstance(accessor[1], int):
+                try:
+                    y_val = float(point[accessor[1]])  # type: ignore[index]
+                except Exception:
+                    y_val = None
+            else:
+                y_val = _coerce(point, accessor[1])
+            if x_val is not None or y_val is not None:
+                return (x_val, y_val)
+        return (None, None)
+
+    def _extract_height(entity: Any) -> float | None:
+        dxf_obj = getattr(entity, "dxf", None)
+        candidates: list[Any] = []
+        if dxf_obj is not None:
+            candidates.extend(
+                getattr(dxf_obj, attr, None) for attr in ("height", "char_height", "text_height")
+            )
+        candidates.append(getattr(entity, "height", None))
+        for candidate in candidates:
+            if candidate is None:
+                continue
+            try:
+                value = float(candidate)
+            except Exception:
+                continue
+            if value > 0:
+                return value
+        return None
+
+    best_result: Mapping[str, Any] | None = None
+    best_rows = 0
+
+    for block in block_iter:
+        name = getattr(block, "name", None)
+        if not isinstance(name, str):
+            continue
+        if not _is_mechanical_name(name):
+            continue
+        try:
+            entities = list(block)
+        except Exception:
+            entities = []
+        texts: list[dict[str, Any]] = []
+        for entity in entities:
+            try:
+                kind = entity.dxftype()
+            except Exception:
+                kind = None
+            if str(kind or "").upper() not in {"TEXT", "MTEXT"}:
+                continue
+            text_value = _extract_text(entity)
+            if not text_value:
+                continue
+            x_val, y_val = _extract_xy(entity)
+            height_val = _extract_height(entity)
+            texts.append(
+                {
+                    "text": text_value,
+                    "x": x_val,
+                    "y": y_val,
+                    "height": height_val,
+                }
+            )
+        headers_detected: list[str] = []
+        if texts:
+            heights = [item["height"] for item in texts if isinstance(item.get("height"), (int, float))]
+            median_height = statistics.median(heights) if heights else None
+            y_tol = max((median_height or 0.0) * 2.0, 0.25)
+            clusters: list[dict[str, Any]] = []
+            for entry in texts:
+                y_val = entry.get("y")
+                if not isinstance(y_val, (int, float)):
+                    continue
+                upper = str(entry.get("text") or "").upper()
+                tokens: set[str] = set()
+                if "HOLE" in upper:
+                    tokens.add("HOLE")
+                if "REF" in upper or "Ø" in upper or "DIA" in upper:
+                    tokens.add("REF")
+                if "QTY" in upper or "QUANTITY" in upper:
+                    tokens.add("QTY")
+                if "DESC" in upper or "DESCRIPTION" in upper:
+                    tokens.add("DESC")
+                if not tokens:
+                    continue
+                placed = False
+                for cluster in clusters:
+                    center = cluster["y"]
+                    if center is not None and abs(float(y_val) - float(center)) <= y_tol:
+                        cluster["tokens"].update(tokens)
+                        cluster["values"].append(entry)
+                        placed = True
+                        break
+                if not placed:
+                    clusters.append(
+                        {
+                            "y": float(y_val),
+                            "tokens": set(tokens),
+                            "values": [entry],
+                        }
+                    )
+            clusters = [c for c in clusters if len(c["tokens"]) >= 1]
+            best_cluster = None
+            for cluster in clusters:
+                if len(cluster["tokens"]) >= 3:
+                    if best_cluster is None or len(cluster["tokens"]) > len(best_cluster["tokens"]):
+                        best_cluster = cluster
+            if best_cluster is not None:
+                headers_detected = sorted(best_cluster["tokens"])
+        headers_display = f"{headers_detected}" if headers_detected else "[]"
+        print(f"[AMTABLE] block={name} texts={len(texts)} headers={headers_display}")
+        if len(headers_detected) < 3:
+            continue
+
+        class _BlockTextEntity:
+            __slots__ = ("dxf", "_kind", "_text")
+
+            def __init__(self, record: Mapping[str, Any]):
+                self._text = str(record.get("text") or "")
+                self._kind = "MTEXT"
+                x_val = record.get("x")
+                y_val = record.get("y")
+                if not isinstance(x_val, (int, float)):
+                    x_val = 0.0
+                if not isinstance(y_val, (int, float)):
+                    y_val = 0.0
+                self.dxf = SimpleNamespace(
+                    text=self._text,
+                    insert=SimpleNamespace(
+                        x=float(x_val),
+                        y=float(y_val),
+                        xyz=(float(x_val), float(y_val), 0.0),
+                    ),
+                )
+
+            def dxftype(self) -> str:
+                return self._kind
+
+            def plain_text(self) -> str:
+                return self._text
+
+        class _BlockTextSpace:
+            __slots__ = ("_entities",)
+
+            def __init__(self, records: Iterable[Mapping[str, Any]]):
+                self._entities = [
+                    _BlockTextEntity(rec)
+                    for rec in records
+                    if str(rec.get("text") or "").strip()
+                ]
+
+            def query(self, _pattern: str):
+                return list(self._entities)
+
+        class _BlockLayouts:
+            __slots__ = ()
+
+            def names_in_taborder(self):
+                return []
+
+            def get(self, _name: str):
+                return SimpleNamespace(entity_space=None)
+
+        class _BlockDoc:
+            __slots__ = ("_space", "layouts")
+
+            def __init__(self, records: Iterable[Mapping[str, Any]]):
+                self._space = _BlockTextSpace(records)
+                self.layouts = _BlockLayouts()
+
+            def modelspace(self):
+                return self._space
+
+        fake_doc = _BlockDoc(texts)
+        try:
+            candidate = helper(fake_doc)
+        except Exception:
+            candidate = None
+        if isinstance(candidate, Mapping) and candidate.get("rows"):
+            row_count = len(candidate.get("rows", []))
+            if row_count > best_rows:
+                best_rows = row_count
+                best_result = dict(candidate)
+
+    return best_result
 
 
 def _fallback_text_table(lines: Iterable[str]) -> dict[str, Any]:
@@ -4393,6 +4688,17 @@ def read_text_table(
                 families = fallback_families
                 total_qty = fallback_qty
 
+        if merged_rows and len(parsed_rows) == len(merged_rows):
+            for idx, fallback_text in enumerate(merged_rows):
+                if idx >= len(parsed_rows):
+                    break
+                fallback_clean = " ".join(str(fallback_text or "").split())
+                if not fallback_clean:
+                    continue
+                current_desc = str(parsed_rows[idx].get("desc") or "")
+                if len(fallback_clean) > len(current_desc):
+                    parsed_rows[idx]["desc"] = fallback_clean
+
         if rows_txt_initial < 8:
             chart_lines: list[dict[str, Any]] = []
             sheet_lines: list[dict[str, Any]] = []
@@ -5274,6 +5580,7 @@ def _read_geo_payload_from_path(
             except Exception as exc:
                 print(f"[ACAD-TABLE] DXF fallback {oda_version} failed: {exc}")
                 continue
+            mechanical_table = _extract_mechanical_table_from_blocks(fallback_doc)
             payload = read_geo(
                 fallback_doc,
                 prefer_table=prefer_table,
@@ -5282,6 +5589,54 @@ def _read_geo_payload_from_path(
                 block_name_allowlist=block_name_allowlist,
                 block_name_regex=block_name_regex,
             )
+            if isinstance(mechanical_table, Mapping) and mechanical_table.get("rows"):
+                existing_rows_obj = payload.get("rows")
+                if isinstance(existing_rows_obj, list):
+                    existing_rows = existing_rows_obj
+                elif isinstance(existing_rows_obj, Iterable):
+                    existing_rows = list(existing_rows_obj)
+                else:
+                    existing_rows = []
+                if not existing_rows:
+                    geo_obj = payload.get("geo")
+                    if isinstance(geo_obj, dict):
+                        promote_table_to_geo(geo_obj, mechanical_table, "text_table")
+                        ops_summary_obj = geo_obj.get("ops_summary")
+                        ops_summary = dict(ops_summary_obj) if isinstance(ops_summary_obj, Mapping) else {}
+                        payload["ops_summary"] = ops_summary
+                        rows_obj = ops_summary.get("rows")
+                        if isinstance(rows_obj, list):
+                            rows_list = rows_obj
+                        elif isinstance(rows_obj, Iterable):
+                            rows_list = list(rows_obj)
+                        else:
+                            rows_list = []
+                        payload["rows"] = rows_list
+                        qty_sum = _sum_qty(rows_list)
+                        payload["qty_sum"] = qty_sum
+                        hole_count_val = mechanical_table.get("hole_count")
+                        if isinstance(hole_count_val, (int, float)) and hole_count_val > 0:
+                            try:
+                                hole_count_int = int(float(hole_count_val))
+                            except Exception:
+                                hole_count_int = qty_sum
+                        else:
+                            hole_count_int = qty_sum
+                        payload["hole_count"] = hole_count_int
+                        try:
+                            geo_obj["hole_count"] = hole_count_int
+                        except Exception:
+                            pass
+                        payload["table_used"] = True
+                        payload["source"] = ops_summary.get("source")
+                        payload["provenance_holes"] = mechanical_table.get(
+                            "provenance_holes", payload.get("provenance_holes")
+                        )
+                        payload["chart_lines"] = [
+                            _format_chart_line(row)
+                            for row in rows_list
+                            if isinstance(row, Mapping)
+                        ]
             scan_info = get_last_acad_table_scan() or {}
             try:
                 tables_found = int(scan_info.get("tables_found", 0))
