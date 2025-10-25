@@ -2351,23 +2351,15 @@ def _best_geo_hole_count(geo: Mapping[str, Any]) -> int | None:
     return None
 
 
-def extract_geo_from_path(
-    path: str,
+def read_geo(
+    doc: Any,
     *,
     prefer_table: bool = True,
-    use_oda: bool = True,
     feature_flags: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
-    """Load DWG/DXF at ``path`` and return a GEO dictionary."""
+    """Process a loaded DXF/DWG document into GEO payload details."""
 
     del feature_flags  # placeholder for future feature toggles
-    path_obj = Path(path)
-    try:
-        doc = _load_doc_for_path(path_obj, use_oda=use_oda)
-    except Exception as exc:  # pragma: no cover - defensive logging
-        print(f"[EXTRACT] failed to load document: {exc}")
-        return {"error": str(exc)}
-
     geo = extract_geometry(doc)
     if not isinstance(geo, dict):
         geo = {}
@@ -2462,7 +2454,55 @@ def extract_geo_from_path(
         provenance_holes = provenance.get("holes")
     print(f"[EXTRACT] provenance={provenance_holes}")
 
-    return geo
+    debug_payload = get_last_text_table_debug() or {}
+    hole_count_val = None
+    try:
+        hole_count_val = geo.get("hole_count") if isinstance(geo, Mapping) else None
+    except Exception:
+        hole_count_val = None
+    if hole_count_val in (None, ""):
+        hole_count_val = _best_geo_hole_count(geo) if isinstance(geo, Mapping) else None
+
+    payload_rows: list[Mapping[str, Any]] = []
+    if isinstance(rows_for_log, list):
+        payload_rows = rows_for_log
+    elif isinstance(rows_for_log, Iterable):
+        payload_rows = list(rows_for_log)
+
+    return {
+        "geo": geo,
+        "ops_summary": ops_summary,
+        "rows": payload_rows,
+        "qty_sum": qty_sum,
+        "hole_count": hole_count_val,
+        "provenance_holes": provenance_holes,
+        "table_used": table_used,
+        "source": ops_summary.get("source") if isinstance(ops_summary, Mapping) else None,
+        "debug_payload": debug_payload,
+    }
+
+
+def extract_geo_from_path(
+    path: str,
+    *,
+    prefer_table: bool = True,
+    use_oda: bool = True,
+    feature_flags: Mapping[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Load DWG/DXF at ``path`` and return a GEO dictionary."""
+
+    path_obj = Path(path)
+    try:
+        doc = _load_doc_for_path(path_obj, use_oda=use_oda)
+    except Exception as exc:  # pragma: no cover - defensive logging
+        print(f"[EXTRACT] failed to load document: {exc}")
+        return {"error": str(exc)}
+
+    payload = read_geo(doc, prefer_table=prefer_table, feature_flags=feature_flags)
+    geo = payload.get("geo")
+    if isinstance(geo, dict):
+        return geo
+    return {}
 
 
 def get_last_text_table_debug() -> dict[str, Any] | None:
@@ -2472,6 +2512,7 @@ def get_last_text_table_debug() -> dict[str, Any] | None:
 
 
 __all__ = [
+    "read_geo",
     "extract_geo_from_path",
     "read_acad_table",
     "read_text_table",

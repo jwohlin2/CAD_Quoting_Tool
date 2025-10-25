@@ -13,7 +13,7 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 from cad_quoter import geo_extractor
-from cad_quoter.geo_extractor import extract_geo_from_path
+from cad_quoter.geo_extractor import read_geo
 
 DEFAULT_SAMPLE_PATH = REPO_ROOT / "Cad Files" / "301_redacted.dwg"
 
@@ -78,24 +78,67 @@ def main(argv: Sequence[str] | None = None) -> int:
     if args.debug_entities:
         os.environ["CAD_QUOTER_DEBUG_ENTITIES"] = "1"
 
-    geo = extract_geo_from_path(path, use_oda=args.use_oda)
-    ops_summary = geo.get("ops_summary") if isinstance(geo, Mapping) else {}
+    try:
+        doc = geo_extractor._load_doc_for_path(Path(path), use_oda=args.use_oda)
+    except Exception as exc:  # pragma: no cover - defensive logging
+        print(f"[geo_dump] failed to load document: {exc}")
+        return 1
+
+    payload = read_geo(doc)
+    if not isinstance(payload, Mapping):
+        payload = {}
+    else:
+        payload = dict(payload)
+
+    geo = payload.get("geo")
+    if not isinstance(geo, Mapping):
+        geo = {}
+    ops_summary = payload.get("ops_summary")
+    if not isinstance(ops_summary, Mapping):
+        ops_summary = geo.get("ops_summary") if isinstance(geo, Mapping) else {}
     if not isinstance(ops_summary, Mapping):
         ops_summary = {}
-    rows = ops_summary.get("rows") if isinstance(ops_summary, Mapping) else []
+
+    rows = payload.get("rows")
     if not isinstance(rows, list):
         rows = list(rows or [])  # type: ignore[arg-type]
-    qty_sum = _sum_qty(rows)
-    provenance = geo.get("provenance") if isinstance(geo, Mapping) else {}
-    holes_source = None
-    if isinstance(provenance, Mapping):
-        holes_source = provenance.get("holes")
+    if not rows:
+        ops_rows = ops_summary.get("rows") if isinstance(ops_summary, Mapping) else None
+        if isinstance(ops_rows, list):
+            rows = ops_rows
+        else:
+            rows = list(ops_rows or [])  # type: ignore[arg-type]
+
+    qty_sum = payload.get("qty_sum")
+    if isinstance(qty_sum, (int, float)):
+        qty_sum = int(float(qty_sum))
+    else:
+        qty_sum = _sum_qty(rows)
+
+    holes_source = payload.get("provenance_holes")
+    if holes_source is None:
+        provenance = geo.get("provenance") if isinstance(geo, Mapping) else {}
+        if isinstance(provenance, Mapping):
+            holes_source = provenance.get("holes")
+
+    hole_count = payload.get("hole_count")
+    if hole_count in (None, ""):
+        hole_count = geo.get("hole_count") if isinstance(geo, Mapping) else None
+    try:
+        if hole_count not in (None, ""):
+            hole_count = int(float(hole_count))
+    except Exception:
+        pass
+
+    source = payload.get("source")
+    if source is None and isinstance(ops_summary, Mapping):
+        source = ops_summary.get("source")
     print(
         "rows={rows} qty_sum={qty} source={src} hole_count={hole_count} provenance={prov}".format(
             rows=len(rows),
             qty=qty_sum,
-            src=ops_summary.get("source"),
-            hole_count=geo.get("hole_count"),
+            src=source,
+            hole_count=hole_count,
             prov=holes_source,
         )
     )
@@ -110,7 +153,11 @@ def main(argv: Sequence[str] | None = None) -> int:
                 f"  [{idx:02d}] QTY={qty} REF={ref} SIDE={row.get('side') if isinstance(row, Mapping) else ''} DESC={desc} HOLE={hole}"
             )
 
-    debug_payload = geo_extractor.get_last_text_table_debug() or {}
+    debug_payload = payload.get("debug_payload")
+    if isinstance(debug_payload, Mapping):
+        debug_payload = dict(debug_payload)
+    else:
+        debug_payload = geo_extractor.get_last_text_table_debug() or {}
 
     dump_base = args.dump_lines
     if args.debug_entities and len(rows) < 8 and not dump_base:
