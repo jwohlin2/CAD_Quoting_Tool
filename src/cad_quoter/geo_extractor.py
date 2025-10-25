@@ -51,6 +51,86 @@ def _print_helper_debug(tag: str, helper: Any) -> None:
     print(f"[EXTRACT] {tag} helper: {helper_desc}")
 
 
+def _safe_file_size(path: Path) -> int | None:
+    try:
+        return path.stat().st_size
+    except OSError:
+        return None
+
+
+def _doc_auditor_status(doc: Any) -> str | None:
+    audit = getattr(doc, "audit", None)
+    if not callable(audit):
+        return None
+    try:
+        auditor = audit()
+    except Exception as exc:  # pragma: no cover - defensive logging
+        return f"error={exc}"
+    errors = len(getattr(auditor, "errors", []) or [])
+    warnings = len(getattr(auditor, "warnings", []) or [])
+    fixes = len(getattr(auditor, "fixes", []) or [])
+    return f"errors={errors} warnings={warnings} fixes={fixes}"
+
+
+def _layout_entity_counts(doc: Any) -> dict[str, int]:
+    totals: dict[str, int] = {"TABLE": 0, "MTEXT": 0, "TEXT": 0, "INSERT": 0}
+    layouts = getattr(doc, "layouts", None)
+    if layouts is None:
+        return totals
+    try:
+        layout_iterable = list(layouts)
+    except Exception:  # pragma: no cover - defensive logging
+        try:
+            layout_iterable = list(iter(layouts))
+        except Exception:
+            return totals
+    if not layout_iterable:
+        return totals
+    for layout in layout_iterable:
+        layout_name = getattr(layout, "name", None)
+        if not layout_name:
+            dxf_obj = getattr(layout, "dxf", None)
+            layout_name = getattr(dxf_obj, "name", None)
+        if not layout_name:
+            layout_name = str(layout)
+        counts: list[str] = []
+        for entity_type in ("TABLE", "MTEXT", "TEXT", "INSERT"):
+            query = getattr(layout, "query", None)
+            count = 0
+            if callable(query):
+                try:
+                    results = query(entity_type)
+                except Exception:
+                    results = []
+                try:
+                    count = len(results)
+                except TypeError:
+                    try:
+                        count = sum(1 for _ in results)
+                    except Exception:
+                        count = 0
+            totals[entity_type] = totals.get(entity_type, 0) + count
+            counts.append(f"{entity_type}={count}")
+        print(f"[LAYOUT] {layout_name}: {' '.join(counts)}")
+    return totals
+
+
+def _print_doc_open_diagnostics(doc: Any, path: Path) -> dict[str, int]:
+    size = _safe_file_size(path)
+    line = f"[OPEN] file={path} size={size if size is not None else 'unknown'}"
+    auditor_status = _doc_auditor_status(doc)
+    if auditor_status:
+        line += f" auditor={auditor_status}"
+    print(line)
+    return _layout_entity_counts(doc)
+
+
+def _should_attempt_dwg_conversion(counts: Mapping[str, int] | None) -> bool:
+    if not isinstance(counts, Mapping):
+        return False
+    return sum(int(counts.get(key, 0)) for key in ("TABLE", "MTEXT", "TEXT")) == 0
+
+
 _ROW_START_RE = re.compile(r"\(\s*\d+\s*\)")
 _DIAMETER_PREFIX_RE = re.compile(
     r"(?:Ø|⌀|DIA(?:\.\b|\b))\s*(\d+\s*/\s*\d+|\d*\.\d+|\.\d+|\d+)",
@@ -587,6 +667,8 @@ def _load_doc_for_path(path: Path, *, use_oda: bool) -> Any:
         raise AttributeError("ezdxf module does not expose a callable readfile")
     lower_suffix = path.suffix.lower()
     if lower_suffix == ".dwg":
+        doc = None
+        counts: Mapping[str, int] | None = None
         if use_oda and _HAS_ODAFC:
             odafc_mod = None
             try:
@@ -596,10 +678,19 @@ def _load_doc_for_path(path: Path, *, use_oda: bool) -> Any:
             if odafc_mod is not None:
                 odaread = getattr(odafc_mod, "readfile", None)
                 if callable(odaread):
-                    return odaread(str(path))
-        dxf_path = convert_dwg_to_dxf(str(path))
-        return readfile(dxf_path)
-    return readfile(str(path))
+                    doc = odaread(str(path))
+                    counts = _print_doc_open_diagnostics(doc, path)
+                    if _should_attempt_dwg_conversion(counts):
+                        print("[OPEN] No entities in DWG via ezdxf; attempting DWG→DXF conversion")
+                        doc = None
+        if doc is None:
+            dxf_path = Path(convert_dwg_to_dxf(str(path)))
+            doc = readfile(str(dxf_path))
+            _print_doc_open_diagnostics(doc, dxf_path)
+        return doc
+    doc = readfile(str(path))
+    _print_doc_open_diagnostics(doc, path)
+    return doc
 
 
 def _ensure_ops_summary_map(candidate: Any) -> dict[str, Any]:
