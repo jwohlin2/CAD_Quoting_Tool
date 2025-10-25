@@ -17460,6 +17460,60 @@ def compute_quote_from_df(  # type: ignore[reportGeneralTypeIssues]
                 if coerced:
                     hole_diams.append(float(coerced))
 
+    ops_claims_map: Mapping[str, Any] | None = None
+    if isinstance(geo_payload, _MappingABC):
+        claims_candidate = geo_payload.get("ops_claims")
+        if isinstance(claims_candidate, _MappingABC):
+            ops_claims_map = claims_candidate
+        else:
+            summary_candidate = geo_payload.get("ops_summary")
+            if isinstance(summary_candidate, _MappingABC):
+                claims_candidate = summary_candidate.get("claims")
+                if isinstance(claims_candidate, _MappingABC):
+                    ops_claims_map = claims_candidate
+
+    fallback_groups: list[dict[str, Any]] = []
+
+    def _normalize_drill_groups(
+        groups: Sequence[Mapping[str, Any]] | None,
+    ) -> list[dict[str, Any]]:
+        normalized: list[dict[str, Any]] = []
+        if isinstance(groups, Sequence) and not isinstance(groups, (str, bytes, bytearray)):
+            for group in groups:
+                if not isinstance(group, _MappingABC):
+                    continue
+                entry = dict(group)
+                op_value = str(entry.get("op") or "drill").strip() or "drill"
+                entry["op"] = op_value
+                entry.setdefault("op_name", op_value)
+                qty_val = _coerce_float_or_none(entry.get("qty"))
+                if qty_val is not None:
+                    entry["qty"] = int(round(qty_val))
+                normalized.append(entry)
+        return normalized
+
+    def _publish_fallback_groups(
+        groups: Sequence[Mapping[str, Any]] | None,
+    ) -> list[dict[str, Any]]:
+        normalized_groups = _normalize_drill_groups(groups)
+        if normalized_groups:
+            normalized_groups.sort(
+                key=lambda item: (
+                    0
+                    if str(item.get("op") or "").strip().lower().startswith("deep")
+                    else 1,
+                    _safe_float(item.get("diameter_in"), 0.0),
+                )
+            )
+            fallback_deep, fallback_std = _apply_drilling_meta_fallback(
+                drilling_meta_container,
+                normalized_groups,
+            )
+            drilling_meta_container["bins_list"] = normalized_groups
+            drilling_meta_container["holes_deep"] = fallback_deep
+            drilling_meta_container["holes_std"] = fallback_std
+        return normalized_groups
+
     thickness_in = _coerce_float_or_none(value_map.get("Thickness (in)"))
     if thickness_in is None and isinstance(geo_payload, _MappingABC):
         thickness_in = _coerce_float_or_none(geo_payload.get("thickness_in"))
@@ -17513,96 +17567,16 @@ def compute_quote_from_df(  # type: ignore[reportGeneralTypeIssues]
                 )
             drill_total_minutes = max(0.0, float(estimator_hours or 0.0)) * 60.0
 
-            if drill_debug_summary:
-                bins_list: list[dict[str, Any]] = []
-                for op_key, summary in drill_debug_summary.items():
-                    if not isinstance(summary, _MappingABC):
-                        continue
-                    bins_map = summary.get("bins")
-                    if not isinstance(bins_map, _MappingABC):
-                        continue
-                    op_display = str(summary.get("operation") or op_key or "").strip()
-                    sortable_bins: list[Mapping[str, Any]] = []
-                    for bin_payload in bins_map.values():
-                        if not isinstance(bin_payload, _MappingABC):
-                            continue
-                        sortable_bins.append(cast(Mapping[str, Any], bin_payload))
-                    for bin_payload in sorted(
-                        sortable_bins,
-                        key=lambda item: _safe_float(item.get("diameter_in"), 0.0),
-                    ):
-                        entry = dict(bin_payload)
-                        speeds = entry.get("speeds")
-                        if isinstance(speeds, _MappingABC):
-                            for speed_key in ("sfm", "ipr", "rpm", "ipm"):
-                                if speed_key not in entry and speeds.get(speed_key) is not None:
-                                    entry[speed_key] = _safe_float(speeds.get(speed_key), 0.0)
-                        depth_in = None
-                        for candidate in (
-                            entry.get("depth_in"),
-                            entry.get("depth_max"),
-                            entry.get("depth_min"),
-                        ):
-                            try:
-                                if candidate is None:
-                                    continue
-                                depth_val = float(candidate)
-                            except (TypeError, ValueError):
-                                continue
-                            if math.isfinite(depth_val):
-                                depth_in = depth_val
-                                break
-                        if depth_in is not None:
-                            entry["depth_in"] = depth_in
-                        dia_val = entry.get("diameter_in")
-                        try:
-                            entry["diameter_in"] = float(dia_val) if dia_val is not None else None
-                        except (TypeError, ValueError):
-                            entry.pop("diameter_in", None)
-                        qty_val = entry.get("qty")
-                        qty_numeric = _safe_float(qty_val, 0.0)
-                        entry["qty"] = int(round(qty_numeric))
-                        op_resolved = op_display or op_key or "drill"
-                        entry["op"] = op_resolved
-                        entry.setdefault("op_name", op_resolved)
-                        bins_list.append(entry)
-
-                if bins_list:
-                    bins_list.sort(
-                        key=lambda item: (
-                            0
-                            if str(item.get("op") or "").strip().lower().startswith("deep")
-                            else 1,
-                            _safe_float(item.get("diameter_in"), 0.0),
-                        )
-                    )
-                    drilling_meta_container["bins_list"] = bins_list
-
-                    deep_qty = sum(
-                        int(entry.get("qty") or 0)
-                        for entry in bins_list
-                        if str(entry.get("op") or "").strip().lower().startswith("deep")
-                    )
-                    std_qty = sum(
-                        int(entry.get("qty") or 0)
-                        for entry in bins_list
-                        if not str(entry.get("op") or "").strip().lower().startswith("deep")
-                    )
-                    drilling_meta_container["holes_deep"] = deep_qty
-                    drilling_meta_container["holes_std"] = std_qty
-
-                    if bins_list and not drilling_meta_container.get("dia_in_vals"):
-                        drilling_meta_container["dia_in_vals"] = [
-                            entry.get("diameter_in")
-                            for entry in bins_list
-                            if entry.get("diameter_in") is not None
-                        ]
-                    if bins_list and not drilling_meta_container.get("depth_in_vals"):
-                        drilling_meta_container["depth_in_vals"] = [
-                            entry.get("depth_in")
-                            for entry in bins_list
-                            if entry.get("depth_in") is not None
-                        ]
+            if hole_diams:
+                computed_groups = build_drill_groups_from_geometry(
+                    hole_diams,
+                    thickness_in,
+                    ops_claims_map,
+                    geo_payload,
+                )
+                published_groups = _publish_fallback_groups(computed_groups)
+                if published_groups:
+                    fallback_groups = published_groups
 
     drilling_summary_raw = process_plan_summary.get("drilling")
     if isinstance(drilling_summary_raw, dict):
@@ -17621,24 +17595,14 @@ def compute_quote_from_df(  # type: ignore[reportGeneralTypeIssues]
     if isinstance(groups_existing, Sequence) and not isinstance(groups_existing, (str, bytes)):
         has_groups = bool(groups_existing)
 
-    fallback_groups: list[dict[str, Any]] = []
-    ops_claims_map: Mapping[str, Any] | None = None
-    if isinstance(geo_payload, _MappingABC):
-        claims_candidate = geo_payload.get("ops_claims")
-        if isinstance(claims_candidate, _MappingABC):
-            ops_claims_map = claims_candidate
-        else:
-            summary_candidate = geo_payload.get("ops_summary")
-            if isinstance(summary_candidate, _MappingABC):
-                claims_candidate = summary_candidate.get("claims")
-                if isinstance(claims_candidate, _MappingABC):
-                    ops_claims_map = claims_candidate
-    if not has_groups and hole_diams:
-        fallback_groups = build_drill_groups_from_geometry(
-            hole_diams,
-            thickness_in,
-            ops_claims_map,
-            geo_payload,
+    if not fallback_groups and not has_groups and hole_diams:
+        fallback_groups = _publish_fallback_groups(
+            build_drill_groups_from_geometry(
+                hole_diams,
+                thickness_in,
+                ops_claims_map,
+                geo_payload,
+            )
         )
 
     if fallback_groups:
