@@ -21654,16 +21654,6 @@ def _coerce_int_or_zero(value: Any) -> int:
         return 0
 
 def extract_2d_features_from_dxf_or_dwg(path: str | Path) -> dict[str, Any]:
-    if os.environ.get("GEO_EXTRACTOR_V2") == "1":
-        from cad_quoter.geo_extractor import extract_geo_from_path
-
-        return extract_geo_from_path(
-            str(path),
-            prefer_table=True,
-            use_oda=_HAS_ODAFC,
-            feature_flags=os.environ,
-        )
-
     ezdxf_mod = geometry.require_ezdxf()
 
     # --- load doc ---
@@ -21699,19 +21689,80 @@ def extract_2d_features_from_dxf_or_dwg(path: str | Path) -> dict[str, Any]:
 
     geo = _build_geo_from_ezdxf_doc(doc)
 
-    acad_info = hole_count_from_acad_table(doc) or {}
+    table_info: dict[str, Any] = {}
+    geo_rows_payload: Mapping[str, Any] | None = None
+    rows_from_geo: list[dict[str, Any]] = []
+
+    def _coerce_row_dicts(candidate: Any) -> list[dict[str, Any]]:
+        rows: list[dict[str, Any]] = []
+        if candidate is None:
+            return rows
+        if isinstance(candidate, Mapping):
+            iterable = candidate.values()
+        elif isinstance(candidate, Iterable) and not isinstance(candidate, (str, bytes)):
+            iterable = candidate
+        else:
+            return rows
+        for item in iterable:
+            if isinstance(item, Mapping):
+                rows.append(dict(item))
+            else:
+                try:
+                    row_dict = dict(item)
+                except Exception:
+                    continue
+                rows.append(row_dict)
+        return rows
+
+    def _dedupe_ops_rows(rows: Iterable[Mapping[str, Any]]) -> list[dict[str, Any]]:
+        seen: set[tuple[str, str, str, int]] = set()
+        deduped: list[dict[str, Any]] = []
+        for row in rows or []:
+            if not isinstance(row, Mapping):
+                continue
+            row_dict = dict(row)
+            hole_key = str(row_dict.get("hole") or row_dict.get("id") or "").strip().upper()
+            ref_key = str(row_dict.get("ref") or "").strip().upper()
+            desc_key = re.sub(r"\s+", " ", str(row_dict.get("desc") or "")).strip()
+            try:
+                qty_val = int(float(row_dict.get("qty") or 0))
+            except Exception:
+                qty_val = 0
+            key = (hole_key, ref_key, desc_key, qty_val)
+            if key in seen:
+                continue
+            seen.add(key)
+            row_dict["qty"] = qty_val
+            deduped.append(row_dict)
+        return deduped
+
+    def _normalize_chart_lines(lines_candidate: Any) -> list[str]:
+        if not lines_candidate:
+            return []
+        if isinstance(lines_candidate, str):
+            candidate_iter = [lines_candidate]
+        elif isinstance(lines_candidate, Iterable):
+            candidate_iter = lines_candidate
+        else:
+            candidate_iter = []
+        seen_lines: set[str] = set()
+        normalized_lines: list[str] = []
+        for raw in candidate_iter:
+            if raw is None:
+                continue
+            text = str(raw)
+            normalized = re.sub(r"\s+", " ", text).strip()
+            if not normalized or normalized in seen_lines:
+                continue
+            seen_lines.add(normalized)
+            normalized_lines.append(normalized)
+        return normalized_lines
+
     try:
-        text_info = extract_hole_table_from_text(doc) or {}
-    except Exception:
-        text_info = {}
-    acad_rows_count = (
-        len((acad_info.get("rows") if isinstance(acad_info, _MappingABC) else []) or [])
-    )
-    text_rows_count = (
-        len((text_info.get("rows") if isinstance(text_info, _MappingABC) else []) or [])
-    )
-    print("[ACAD] rows=", acad_rows_count)
-    print("[TEXT] rows=", text_rows_count)
+        from cad_quoter import geo_extractor as _geo_extractor_mod
+    except Exception as exc:
+        print(f"[EXTRACTOR] cad_quoter.geo_extractor import failed: {exc}")
+        _geo_extractor_mod = None
 
     best_table_info = _choose_better(acad_info, text_info)
     table_info = best_table_info or {}
@@ -21764,18 +21815,134 @@ def extract_2d_features_from_dxf_or_dwg(path: str | Path) -> dict[str, Any]:
     rows_debug = ops_summary_debug.get("rows") or []
     if isinstance(rows_debug, _MappingABC):
         try:
-            rows_debug = list(rows_debug.values())
-        except Exception:
-            rows_debug = []
-    elif not isinstance(rows_debug, list):
+            geo_rows_payload = _geo_extractor_mod.read_geo(doc)
+        except Exception as exc:
+            print(f"[EXTRACTOR] geo_extractor.read_geo error: {exc}")
+            geo_rows_payload = {}
+    else:
+        geo_rows_payload = {}
+
+    if isinstance(geo_rows_payload, Mapping):
+        ops_summary_payload = geo_rows_payload.get("ops_summary")
+        ops_summary_copy: dict[str, Any] = {}
+        if isinstance(ops_summary_payload, Mapping):
+            ops_summary_copy = dict(ops_summary_payload)
+            rows_from_geo = _coerce_row_dicts(ops_summary_copy.get("rows"))
+        else:
+            rows_from_geo = []
+        rows_from_geo = _dedupe_ops_rows(rows_from_geo)
+        if rows_from_geo:
+            ops_summary_copy["rows"] = rows_from_geo
+            table_info["rows"] = rows_from_geo
+        if ops_summary_copy:
+            table_info["ops_summary"] = ops_summary_copy
+            geo["ops_summary"] = dict(ops_summary_copy)
+
+        hole_count_val = geo_rows_payload.get("hole_count")
+        if hole_count_val is not None:
+            table_info["hole_count"] = hole_count_val
+            try:
+                geo["hole_count"] = int(float(hole_count_val))
+            except Exception:
+                pass
+
+        hole_families_val = geo_rows_payload.get("hole_diam_families_in")
+        if isinstance(hole_families_val, Mapping):
+            families_map = {str(k): v for k, v in hole_families_val.items()}
+            table_info.setdefault("hole_diam_families_in", dict(families_map))
+            geo["hole_diam_families_in"] = dict(families_map)
+        elif hole_families_val:
+            table_info.setdefault("hole_diam_families_in", hole_families_val)
+            geo["hole_diam_families_in"] = hole_families_val
+
+        chart_lines_from_geo = _normalize_chart_lines(geo_rows_payload.get("chart_lines"))
+        if chart_lines_from_geo:
+            geo["chart_lines"] = chart_lines_from_geo
+
+        provenance_holes_val: str | None = None
+        provenance_direct = geo_rows_payload.get("provenance_holes")
+        if isinstance(provenance_direct, str) and provenance_direct:
+            provenance_holes_val = provenance_direct
+        else:
+            provenance_payload = geo_rows_payload.get("provenance")
+            if isinstance(provenance_payload, Mapping):
+                holes_val = provenance_payload.get("holes")
+                if isinstance(holes_val, str) and holes_val:
+                    provenance_holes_val = holes_val
+        if provenance_holes_val:
+            table_info["provenance_holes"] = provenance_holes_val
+            provenance_entry = geo.get("provenance")
+            if isinstance(provenance_entry, Mapping):
+                prov_copy = dict(provenance_entry)
+            else:
+                prov_copy = {}
+            prov_copy["holes"] = provenance_holes_val
+            geo["provenance"] = prov_copy
+
+        source_debug = None
+        ops_summary_for_debug = table_info.get("ops_summary")
+        if isinstance(ops_summary_for_debug, Mapping):
+            source_debug = ops_summary_for_debug.get("source")
+        print(
+            f"[EXTRACTOR] read_geo rows: {len(rows_from_geo)} "
+            f"(qty_sum={_rows_qty_sum(rows_from_geo)}) source={source_debug}"
+        )
+    else:
+        rows_from_geo = []
+
+    if not table_info.get("rows"):
+        acad_info = hole_count_from_acad_table(doc) or {}
         try:
-            rows_debug = list(rows_debug)
+            text_info = extract_hole_table_from_text(doc) or {}
         except Exception:
-            rows_debug = []
+            text_info = {}
+        acad_rows_count = (
+            len((acad_info.get("rows") if isinstance(acad_info, _MappingABC) else []) or [])
+        )
+        text_rows_count = (
+            len((text_info.get("rows") if isinstance(text_info, _MappingABC) else []) or [])
+        )
+        print("[ACAD] rows=", acad_rows_count)
+        print("[TEXT] rows=", text_rows_count)
+        best_table_info = _choose_better(acad_info, text_info)
+        if best_table_info.get("rows"):
+            _persist_rows_and_totals(
+                geo,
+                best_table_info,
+                src=("acad_table" if best_table_info is acad_info else "text_table"),
+            )
+            merged_table = dict(table_info)
+            merged_table.update(best_table_info)
+            table_info = merged_table
+        else:
+            table_info = dict(table_info)
+
+    final_rows = _dedupe_ops_rows(_coerce_row_dicts((table_info or {}).get("rows")))
+    if final_rows:
+        table_ops_summary_any = table_info.get("ops_summary")
+        if isinstance(table_ops_summary_any, Mapping):
+            table_ops_summary_map: dict[str, Any] = dict(table_ops_summary_any)
+        else:
+            table_ops_summary_map = {}
+        table_ops_summary_map["rows"] = final_rows
+        table_info["rows"] = final_rows
+        table_info["ops_summary"] = table_ops_summary_map
+        geo["ops_summary"] = dict(table_ops_summary_map)
+    else:
+        table_info = dict(table_info or {})
+        table_info.pop("rows", None)
+        ops_summary_any = table_info.get("ops_summary")
+        if isinstance(ops_summary_any, Mapping):
+            table_info["ops_summary"] = dict(ops_summary_any)
+
+    ops_summary_debug = table_info.get("ops_summary")
+    if isinstance(ops_summary_debug, Mapping):
+        source_debug = ops_summary_debug.get("source")
+    else:
+        ops_summary_debug = {}
+        source_debug = None
+    rows_debug = final_rows
     sum_qty_debug = _rows_qty_sum(rows_debug)
-    source_debug = (
-        ops_summary_debug.get("source") if isinstance(ops_summary_debug, _MappingABC) else None
-    )
     print(
         f"[EXTRACTOR] wrote ops rows: {len(rows_debug)} (qty_sum={sum_qty_debug}) "
         f"source={source_debug}"
@@ -22119,16 +22286,16 @@ def extract_2d_features_from_dxf_or_dwg(path: str | Path) -> dict[str, Any]:
         top_level_hole_count = len(hole_diams_mm)
         geo["hole_count"] = top_level_hole_count
 
-    chart_lines: list[str] = []
+    chart_lines: list[str] = _normalize_chart_lines(geo.get("chart_lines"))
     chart_ops: list[dict[str, Any]] = []
     chart_reconcile: dict[str, Any] | None = None
     chart_source: str | None = None
     chart_summary: dict[str, Any] | None = None
 
     extractor = _extract_text_lines_from_dxf or geometry.extract_text_lines_from_dxf
-    chart_lines = []
-    _chart_all_lines: list[str] = []
-    _chart_seen: set[str] = set()
+    chart_lines = list(chart_lines)
+    _chart_all_lines: list[str] = list(chart_lines)
+    _chart_seen: set[str] = set(chart_lines)
 
     def _append_chart_line(value: Any) -> None:
         if not isinstance(value, str):
@@ -22180,6 +22347,7 @@ def extract_2d_features_from_dxf_or_dwg(path: str | Path) -> dict[str, Any]:
         chart_lines = [ln for ln in _chart_all_lines if _DXF_HOLE_TOKENS.search(ln)]
     else:
         chart_lines = list(_chart_all_lines)
+    geo["chart_lines"] = list(chart_lines)
     geo["debug_chart_counts"] = {
         "all_text": len(_chart_all_lines),
         "chart_lines": len(chart_lines),

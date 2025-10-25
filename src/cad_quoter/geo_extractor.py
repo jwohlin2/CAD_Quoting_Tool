@@ -2373,8 +2373,11 @@ def read_geo(
     if isinstance(existing_ops_summary, Mapping):
         existing_source = str(existing_ops_summary.get("source") or "")
     existing_is_table = bool(
-        (existing_source and "table" in existing_source.lower())
-        or (isinstance(provenance_holes, str) and provenance_holes.upper() == "HOLE TABLE")
+        use_tables
+        and (
+            (existing_source and "table" in existing_source.lower())
+            or (isinstance(provenance_holes, str) and provenance_holes.upper() == "HOLE TABLE")
+        )
     )
     if existing_is_table and isinstance(existing_ops_summary, Mapping):
         current_table_info = dict(existing_ops_summary)
@@ -2404,7 +2407,12 @@ def read_geo(
     source_tag = None
     existing_score = _score_table(current_table_info)
     best_score = _score_table(best_table)
-    if isinstance(best_table, Mapping) and best_table.get("rows") and best_score > existing_score:
+    if (
+        use_tables
+        and isinstance(best_table, Mapping)
+        and best_table.get("rows")
+        and best_score > existing_score
+    ):
         source_tag = "acad_table" if score_a >= score_b else "text_table"
         promote_table_to_geo(geo, best_table, source_tag)
         table_used = True
@@ -2505,6 +2513,29 @@ def extract_geo_from_path(
     return {}
 
 
+def extract_geo_from_path(
+    path: str,
+    *,
+    prefer_table: bool = True,
+    use_oda: bool = True,
+    feature_flags: Mapping[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Load DWG/DXF at ``path`` and return a GEO dictionary."""
+
+    path_obj = Path(path)
+    try:
+        doc = _load_doc_for_path(path_obj, use_oda=use_oda)
+    except Exception as exc:  # pragma: no cover - defensive logging
+        print(f"[EXTRACT] failed to load document: {exc}")
+        return {"error": str(exc)}
+
+    return read_geo(
+        doc,
+        prefer_table=prefer_table,
+        feature_flags=feature_flags,
+    )
+
+
 def get_last_text_table_debug() -> dict[str, Any] | None:
     if isinstance(_LAST_TEXT_TABLE_DEBUG, dict):
         return _LAST_TEXT_TABLE_DEBUG
@@ -2520,5 +2551,6 @@ __all__ = [
     "choose_better_table",
     "promote_table_to_geo",
     "extract_geometry",
+    "read_geo",
     "get_last_text_table_debug",
 ]
