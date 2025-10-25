@@ -131,13 +131,15 @@ def _normalize_oda_version(version: str | None) -> str | None:
         return None
     mapping = {
         "ACAD2000": "ACAD2000",
+        "2000": "ACAD2000",
         "ACAD2004": "ACAD2004",
+        "2004": "ACAD2004",
         "ACAD2007": "ACAD2007",
-        "ACAD2010": "ACAD2010",
+        "2007": "ACAD2007",
         "ACAD2013": "ACAD2013",
-        "ACAD2014": "ACAD2014",
-        "ACAD2017": "ACAD2017",
+        "2013": "ACAD2013",
         "ACAD2018": "ACAD2018",
+        "2018": "ACAD2018",
     }
     return mapping.get(normalized, normalized)
 
@@ -167,7 +169,16 @@ def log_last_dxf_fallback(tables_found: Any) -> None:
             tables_count = int(float(tables_found))
         except Exception:
             tables_count = 0
-    print(f"[DXF-FALLBACK] version={version} path={path} tables={tables_count}")
+    ok = info.get("ok") if isinstance(info, Mapping) else None
+    ok_display = bool(ok) if isinstance(ok, (bool, int)) else False
+    print(
+        "[DXF-FALLBACK] version={version} path={path} tables={tables} ok={ok}".format(
+            version=version,
+            path=path,
+            tables=tables_count,
+            ok=ok_display,
+        )
+    )
 
 
 def scan_tables_everywhere(doc) -> list[TableHit]:
@@ -1750,6 +1761,24 @@ def _iter_entity_text_fragments(entity: Any) -> Iterable[tuple[str, bool]]:
         for piece in base.splitlines():
             if piece.strip():
                 yield (piece, True)
+    elif kind in {"ATTRIB", "ATTDEF"}:
+        dxf_obj = getattr(entity, "dxf", None)
+        candidates: list[Any] = []
+        if dxf_obj is not None:
+            for attr in ("text", "value", "tag", "prompt", "default"):
+                candidates.append(getattr(dxf_obj, attr, None))
+        for attr in ("text", "value", "tag", "prompt", "default"):
+            candidates.append(getattr(entity, attr, None))
+        for raw in candidates:
+            if not raw:
+                continue
+            try:
+                text_value = str(raw)
+            except Exception:
+                text_value = raw if isinstance(raw, str) else ""
+            for piece in text_value.splitlines():
+                if piece.strip():
+                    yield (piece, False)
     else:
         raw_text = getattr(entity, "text", "")
         if not raw_text:
@@ -4441,15 +4470,14 @@ def read_text_table(
                         visited_blocks.discard(name_str)
                     attrib_delta = attrib_count - attrib_before
                     mleader_delta = mleader_count - mleader_before
-                    if attrib_delta or mleader_delta:
-                        print(
-                            "[INSERT] name={name} depth={depth} attrib={attrib} mleader={mleader}".format(
-                                name=name_str or "-",
-                                depth=depth,
-                                attrib=attrib_delta,
-                                mleader=mleader_delta,
-                            )
+                    print(
+                        "[INSERT] name={name} depth={depth} attrib={attrib} mleader={mleader}".format(
+                            name=name_str or "-",
+                            depth=depth,
+                            attrib=attrib_delta,
+                            mleader=mleader_delta,
                         )
+                    )
 
             for entity in base_entities:
                 marker = id(entity)
@@ -4530,7 +4558,7 @@ def read_text_table(
                             allow=allowlist_display,
                         )
                     )
-                    filtered_entries.extend(layout_entries)
+                    lines_for_layout = list(layout_entries)
                 else:
                     print(
                         "[LAYER] layout={layout} allow={allow} kept={count}".format(
@@ -4539,7 +4567,8 @@ def read_text_table(
                             count=kept_count,
                         )
                     )
-                    filtered_entries.extend(kept_for_layout)
+                    lines_for_layout = list(kept_for_layout)
+                filtered_entries.extend(lines_for_layout)
         else:
             filtered_entries = list(collected_entries)
 
@@ -5231,6 +5260,24 @@ def read_text_table(
 
     if column_selected:
         primary_result.setdefault("source", "text_table")
+    if isinstance(columnar_debug_info, Mapping):
+        bands_payload = columnar_debug_info.get("bands", [])
+        band_cells_payload = columnar_debug_info.get("band_cells", [])
+
+        def _as_list(value: Any) -> list[Any]:
+            if isinstance(value, list):
+                return list(value)
+            if isinstance(value, Iterable) and not isinstance(value, (str, bytes, bytearray)):
+                return list(value)
+            if value in (None, ""):
+                return []
+            return [value]
+
+        _LAST_TEXT_TABLE_DEBUG["bands"] = _as_list(bands_payload)
+        _LAST_TEXT_TABLE_DEBUG["band_cells"] = _as_list(band_cells_payload)
+    elif "band_cells" not in _LAST_TEXT_TABLE_DEBUG:
+        _LAST_TEXT_TABLE_DEBUG["band_cells"] = []
+        _LAST_TEXT_TABLE_DEBUG["bands"] = []
     _LAST_TEXT_TABLE_DEBUG["rows"] = list(primary_result.get("rows", []))
     return primary_result
 
@@ -5613,9 +5660,28 @@ def _load_doc_for_path(path: Path, *, use_oda: bool, out_ver: str | None = None)
                 )
             )
             dxf_path = convert_dwg_to_dxf(str(path), out_ver=oda_version)
-            _LAST_DXF_FALLBACK_INFO = {"version": oda_version, "path": str(dxf_path)}
+            ok = os.path.exists(dxf_path)
+            if not ok:
+                raise AssertionError(
+                    f"ODA fallback {oda_version} did not produce a DXF at {dxf_path}"
+                )
+            print(f"[DXF-FALLBACK] version={oda_version} path={dxf_path} ok={ok}")
+            _LAST_DXF_FALLBACK_INFO = {
+                "version": oda_version,
+                "path": str(dxf_path),
+                "ok": ok,
+            }
         else:
             dxf_path = convert_dwg_to_dxf(str(path))
+            ok = os.path.exists(dxf_path)
+            print(
+                "[DXF-FALLBACK] version={ver} path={path} ok={ok}".format(
+                    ver="ACAD2018",
+                    path=dxf_path,
+                    ok=ok,
+                )
+            )
+            _LAST_DXF_FALLBACK_INFO = {"version": "ACAD2018", "path": str(dxf_path), "ok": ok}
         return readfile(dxf_path)
     return readfile(str(path))
 
@@ -5765,6 +5831,14 @@ def read_geo(
         ops_summary["totals"] = dict(totals)
 
     rows_for_log = rows
+    if (not rows_for_log) and text_rows and isinstance(text_info, Mapping):
+        candidate_rows = text_info.get("rows")
+        if isinstance(candidate_rows, list):
+            rows_for_log = list(candidate_rows)
+        elif isinstance(candidate_rows, Iterable) and not isinstance(
+            candidate_rows, (str, bytes, bytearray)
+        ):
+            rows_for_log = list(candidate_rows)
     if table_used:
         rows_for_log = ops_summary.get("rows") or []
         if not isinstance(rows_for_log, list) and isinstance(rows_for_log, Iterable):
