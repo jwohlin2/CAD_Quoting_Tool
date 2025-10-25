@@ -22165,8 +22165,6 @@ def extract_2d_features_from_dxf_or_dwg(path: str | Path) -> dict[str, Any]:
             continue
 
     # Tunables (env overrides allowed)
-    import os, math
-
     CENTER_BIN_MM = float(os.getenv("GEO_CENTER_TOL_MM", "0.06"))
     CENTER_PROX_MM = float(os.getenv("GEO_CENTER_PROX_MM", "0.22"))
     MIN_DD_MM = float(os.getenv("GEO_MIN_RING_DELTA_MM", "0.50"))
