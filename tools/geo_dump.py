@@ -88,6 +88,12 @@ def main(argv: Sequence[str] | None = None) -> int:
         help="Enable detailed AutoCAD table tracing diagnostics",
     )
     parser.add_argument(
+        "--depth-max",
+        type=int,
+        metavar="N",
+        help="Override block INSERT recursion depth for ACAD tables",
+    )
+    parser.add_argument(
         "--show-rows",
         type=int,
         metavar="N",
@@ -102,6 +108,9 @@ def main(argv: Sequence[str] | None = None) -> int:
     if not path:
         path = str(DEFAULT_SAMPLE_PATH)
         print(f"[geo_dump] Using default sample: {path}")
+
+    if args.depth_max is not None:
+        os.environ["CAD_QUOTER_ACAD_DEPTH_MAX"] = str(args.depth_max)
 
     geo_extractor.set_trace_acad(bool(args.trace_acad))
 
@@ -138,6 +147,10 @@ def main(argv: Sequence[str] | None = None) -> int:
     allow_layers_arg = getattr(args, "allow_layers", None)
     if allow_layers_arg:
         layer_allow_args.extend(part.strip() for part in allow_layers_arg.split(","))
+    if layer_allow_args:
+        os.environ["CAD_QUOTER_ACAD_ALLOW_LAYERS"] = ",".join(layer_allow_args)
+    else:
+        os.environ.pop("CAD_QUOTER_ACAD_ALLOW_LAYERS", None)
     if layer_allow_args:
         normalized_layers: list[str] = []
         allow_all = False

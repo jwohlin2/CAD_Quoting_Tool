@@ -1361,11 +1361,54 @@ def read_acad_table(
     helper = _resolve_app_callable("hole_count_from_acad_table")
     _print_helper_debug("acad", helper)
     if callable(helper):
+        module = None
+        try:
+            module = inspect.getmodule(helper)
+        except Exception:
+            module = None
+        if module is None:
+            try:
+                module = _load_app_module()
+            except Exception:
+                module = None
+        sentinel = object()
+        prev_allow = sentinel
+        prev_depth = sentinel
+        if module is not None:
+            try:
+                prev_allow = getattr(module, "_ACAD_LAYER_ALLOW_OVERRIDE")
+            except AttributeError:
+                prev_allow = sentinel
+            setattr(module, "_ACAD_LAYER_ALLOW_OVERRIDE", layer_allowlist)
+            try:
+                prev_depth = getattr(module, "_ACAD_DEPTH_MAX_OVERRIDE")
+            except AttributeError:
+                prev_depth = sentinel
+            depth_override = None
+            if feature_flags and isinstance(feature_flags, Mapping):
+                depth_override = feature_flags.get("acad_depth_max")
+            setattr(module, "_ACAD_DEPTH_MAX_OVERRIDE", depth_override)
         try:
             result = helper(doc) or {}
         except Exception as exc:
             print(f"[EXTRACT] acad helper error: {exc}")
             raise
+        finally:
+            if module is not None:
+                if prev_allow is sentinel:
+                    try:
+                        delattr(module, "_ACAD_LAYER_ALLOW_OVERRIDE")
+                    except AttributeError:
+                        pass
+                else:
+                    setattr(module, "_ACAD_LAYER_ALLOW_OVERRIDE", prev_allow)
+                if prev_depth is sentinel:
+                    try:
+                        delattr(module, "_ACAD_DEPTH_MAX_OVERRIDE")
+                    except AttributeError:
+                        pass
+                else:
+                    setattr(module, "_ACAD_DEPTH_MAX_OVERRIDE", prev_depth)
         if isinstance(result, Mapping):
             return dict(result)
         return {}
