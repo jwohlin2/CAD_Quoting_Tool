@@ -1056,6 +1056,13 @@ def _split_mtext_plain_text(text: Any) -> list[str]:
 _HOLE_ACTION_TOKEN_PATTERN = (
     r"(Ø|⌀|C['’]?BORE|COUNTER\s*BORE|DRILL|TAP|N\.?P\.?T|NPT|THRU|JIG\s*GRIND)"
 )
+_FRAGMENT_SPLIT_RE = re.compile(r";|(?<=\))\s+(?=\d+\))")
+_INCH_MARK_REF_RE = re.compile(r"\b(\d+(?:\.\d+)?)(?:\s*\"|[ ]?in\b)", re.IGNORECASE)
+_DIA_SYMBOL_INLINE_RE = re.compile(r"[Ø⌀]\s*(\d+(?:\.\d+)?)")
+_LETTER_DRILL_REF_RE = re.compile(r"\b([A-HJ-NP-Z])\"?\b")
+_NUMBER_DRILL_REF_RE = re.compile(r"#\d+\b")
+_PIPE_NPT_REF_RE = re.compile(r"\b(\d+\/\d+-\s*N\.?P\.?T\.?)", re.IGNORECASE)
+_THREAD_CALL_OUT_RE = re.compile(r"\b(\d+\/\d+|M\d+(?:\.\d+)?)-\d+\b", re.IGNORECASE)
 _ROW_QUANTITY_PATTERNS = [
     re.compile(r"^\(\s*(\d+)\s*\)", re.IGNORECASE),
     re.compile(r"^\s*(\d+)\s*[x×]\b", re.IGNORECASE),
@@ -1731,10 +1738,39 @@ def _extract_band_quantity(text: str) -> tuple[int | None, str]:
 
 
 def _extract_row_reference(desc: str) -> tuple[str, float | None]:
-    diameter = _extract_diameter(desc)
-    if diameter is not None and diameter > 0 and diameter <= 10:
-        return (_format_ref_value(diameter), diameter)
     search_space = desc or ""
+    diameter = _extract_diameter(search_space)
+    if diameter is not None and 0 < diameter <= 10:
+        return (_format_ref_value(diameter), diameter)
+
+    thread_match = _THREAD_CALL_OUT_RE.search(search_space)
+    if thread_match:
+        return (thread_match.group(0).upper(), None)
+
+    pipe_match = _PIPE_NPT_REF_RE.search(search_space)
+    if pipe_match:
+        return (pipe_match.group(1).upper().replace(" ", ""), None)
+
+    number_drill = _NUMBER_DRILL_REF_RE.search(search_space)
+    if number_drill:
+        return (number_drill.group(0).upper(), None)
+
+    letter_drill = _LETTER_DRILL_REF_RE.search(search_space)
+    if letter_drill:
+        return (letter_drill.group(1).upper(), None)
+
+    inch_match = _INCH_MARK_REF_RE.search(search_space)
+    if inch_match:
+        value = _parse_number_token(inch_match.group(1))
+        if value is not None and 0 < value <= 10:
+            return (_format_ref_value(value), value)
+
+    dia_inline = _DIA_SYMBOL_INLINE_RE.search(search_space)
+    if dia_inline:
+        value = _parse_number_token(dia_inline.group(1))
+        if value is not None and 0 < value <= 10:
+            return (_format_ref_value(value), value)
+
     for match in _FRACTION_RE.finditer(search_space):
         value = _parse_number_token(match.group(0))
         if value is not None and 0 < value <= 10:
@@ -3034,6 +3070,27 @@ def _build_columnar_table_from_entries(
             }
         )
 
+    synthetic_qty_mode = False
+    if column_count <= 1 and qty_groups_count == 0:
+        qty_style_hits = 0
+        considered_bands = 0
+        for band in bands_for_stats:
+            cells = band.get("cells", [])
+            if not cells:
+                continue
+            text_candidate = cells[0].strip()
+            if not text_candidate:
+                continue
+            considered_bands += 1
+            if _ROW_QUANTITY_PATTERNS[0].match(text_candidate) or _match_row_quantity(
+                text_candidate
+            ):
+                qty_style_hits += 1
+        if considered_bands >= 2:
+            threshold = max(2, math.ceil(considered_bands * 0.6))
+            if qty_style_hits >= threshold:
+                synthetic_qty_mode = True
+
     fallback_qty_col: int | None = header_cols.get("qty") if header_cols else None
     qty_candidates = [
         idx
@@ -3061,6 +3118,9 @@ def _build_columnar_table_from_entries(
                 fallback_qty_col = min(numericish_candidates)
             elif column_count > 0:
                 fallback_qty_col = 0
+
+    if synthetic_qty_mode:
+        fallback_qty_col = None
 
     qty_votes: dict[int, int] = defaultdict(int)
     qty_index_counts: dict[int, int] = defaultdict(int)
@@ -3127,6 +3187,8 @@ def _build_columnar_table_from_entries(
         qty_col = fallback_qty_col
     if "qty" in header_cols:
         qty_col = header_cols["qty"]
+    if synthetic_qty_mode and "qty" not in header_cols:
+        qty_col = None
 
     ref_candidates = [
         idx
@@ -3136,6 +3198,8 @@ def _build_columnar_table_from_entries(
     ref_col = max(ref_candidates) if ref_candidates else None
     if "ref" in header_cols:
         ref_col = header_cols["ref"]
+    elif synthetic_qty_mode:
+        ref_col = None
 
     desc_candidates = [idx for idx in range(column_count) if idx != qty_col and idx != ref_col]
     if not desc_candidates:
@@ -3149,11 +3213,16 @@ def _build_columnar_table_from_entries(
     if "desc" in header_cols:
         desc_col = header_cols["desc"]
 
+    qty_display = "synthetic" if synthetic_qty_mode else (qty_col if qty_col is not None else "None")
+    if synthetic_qty_mode and ref_col is None:
+        ref_display = "desc-extracted"
+    else:
+        ref_display = ref_col if ref_col is not None else "None"
     print(
         "[TABLE-ID] qty_x≈{qx} qty_col={qty} ref_col={ref} desc_col={desc} bands_checked={bands}".format(
             qx=qty_x_display,
-            qty=qty_col if qty_col is not None else "None",
-            ref=ref_col if ref_col is not None else "None",
+            qty=qty_display,
+            ref=ref_display,
             desc=desc_col,
             bands=len(bands_for_stats),
         )
@@ -3193,6 +3262,14 @@ def _build_columnar_table_from_entries(
         combined_row_text = " ".join(
             cell.strip() for cell in cells if cell.strip()
         )
+        if synthetic_qty_mode:
+            qty_token_present = bool(
+                _match_row_quantity(combined_row_text)
+                or _search_flexible_quantity(combined_row_text)
+            )
+            action_token_present = bool(_HOLE_ACTION_TOKEN_RE.search(combined_row_text))
+            if not qty_token_present and not action_token_present:
+                continue
         fallback_qty: int | None = None
         fallback_remainder = combined_row_text
         if combined_row_text:
@@ -3216,8 +3293,13 @@ def _build_columnar_table_from_entries(
             continue
         desc_idx = _resolved_index(desc_col, "desc")
         desc_text = _cell_at(cells, desc_idx)
+        original_desc_text = desc_text
         if used_qty_fallback:
             desc_text = fallback_desc or desc_text
+            if fallback_desc and qty_val is not None:
+                original_for_prefix = original_desc_text or combined_row_text
+                if _ROW_QUANTITY_PATTERNS[0].match(original_for_prefix or ""):
+                    desc_text = f"({qty_val}) {desc_text}".strip()
         if not desc_text:
             exclude_index = qty_idx if qty_idx is not None else qty_col
             fallback_parts = [
@@ -3236,7 +3318,8 @@ def _build_columnar_table_from_entries(
         hole_text = _cell_at(cells, hole_idx)
         side_idx = _resolved_index(header_cols.get("side"), "side")
         side_cell_text = _cell_at(cells, side_idx)
-        fragments = [frag.strip() for frag in desc_text.split(";") if frag.strip()]
+        fragment_candidates = _FRAGMENT_SPLIT_RE.split(desc_text)
+        fragments = [frag.strip() for frag in fragment_candidates if frag.strip()]
         if not fragments:
             fragments = [desc_text]
         for frag_index, fragment in enumerate(fragments):
@@ -3244,6 +3327,10 @@ def _build_columnar_table_from_entries(
             if not fragment_desc:
                 continue
             ref_text, ref_value = _extract_row_reference(fragment_desc)
+            has_action = bool(_HOLE_ACTION_TOKEN_RE.search(fragment_desc))
+            has_ref_marker = bool(ref_text or (ref_value is not None))
+            if not has_action and not has_ref_marker and not ref_cell_ref[0]:
+                continue
             if not ref_text and ref_cell_ref[0]:
                 ref_text, ref_value = ref_cell_ref
             combined_side_text = " ".join(
@@ -3373,6 +3460,7 @@ def _build_columnar_table_from_entries(
         "header_band": header_band_index,
         "bands_checked": len(bands_for_stats),
         "qty_x": qty_x,
+        "synthetic_qty": synthetic_qty_mode,
     }
     if roi_info is not None:
         debug_info["roi"] = roi_info
@@ -4171,10 +4259,12 @@ def read_text_table(
                 if qty_val is None or qty_val <= 0:
                     continue
                 side_hint = _detect_row_side(text_value)
-                fragments = [frag.strip() for frag in remainder.split(";") if frag.strip()]
+                fragment_candidates = _FRAGMENT_SPLIT_RE.split(remainder)
+                fragments = [frag.strip() for frag in fragment_candidates if frag.strip()]
                 if not fragments:
                     base_fragment = remainder_clean or text_value
                     fragments = [base_fragment]
+                has_paren_prefix = bool(_ROW_QUANTITY_PATTERNS[0].match(text_value))
                 for fragment in fragments:
                     fragment_clean = " ".join(fragment.split())
                     if not fragment_clean:
@@ -4188,6 +4278,10 @@ def read_text_table(
                         if not display_fragment.startswith(prefix):
                             display_fragment = f"{prefix} {display_fragment}".strip()
                     ref_text, ref_value = _extract_row_reference(fragment_clean)
+                    has_action = bool(_HOLE_ACTION_TOKEN_RE.search(fragment_clean))
+                    has_reference = bool(ref_text or (ref_value is not None))
+                    if not has_action and not has_reference:
+                        continue
                     side = _detect_row_side(fragment_clean) or side_hint
                     row_dict: dict[str, Any] = {
                         "hole": "",
