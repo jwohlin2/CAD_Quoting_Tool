@@ -2067,6 +2067,151 @@ def read_text_table(doc) -> dict[str, Any]:
     return primary_result
 
 
+def _normalize_table_rows(rows_value: Any) -> list[dict[str, Any]]:
+    if isinstance(rows_value, list):
+        source = rows_value
+    elif isinstance(rows_value, Iterable) and not isinstance(rows_value, (str, bytes, bytearray)):
+        source = list(rows_value)
+    else:
+        return []
+    normalized: list[dict[str, Any]] = []
+    for row in source:
+        if isinstance(row, Mapping):
+            normalized.append(dict(row))
+    return normalized
+
+
+def _qty_to_text(value: Any) -> str | None:
+    if value is None:
+        return None
+    if isinstance(value, Fraction):
+        if value.denominator == 1:
+            return str(value.numerator)
+        return str(value)
+    if isinstance(value, (int,)):
+        return str(int(value))
+    if isinstance(value, float):
+        if not math.isfinite(value):
+            return None
+        rounded = int(round(value))
+        if abs(rounded - value) < 1e-6:
+            return str(rounded)
+        return str(value)
+    text = str(value).strip()
+    return text or None
+
+
+def _format_chart_lines_from_rows(rows: Iterable[Mapping[str, Any]]) -> list[str]:
+    chart_lines: list[str] = []
+    for row in rows:
+        if not isinstance(row, Mapping):
+            continue
+        desc = str(row.get("desc") or "").strip()
+        if desc:
+            cleaned_desc = " ".join(desc.split())
+        else:
+            cleaned_desc = ""
+        qty_text = _qty_to_text(row.get("qty"))
+        if cleaned_desc:
+            if not cleaned_desc.startswith("(") and qty_text:
+                line = f"({qty_text}) {cleaned_desc}"
+            else:
+                line = cleaned_desc
+        else:
+            parts: list[str] = []
+            if qty_text:
+                parts.append(f"({qty_text})")
+            hole_val = str(row.get("hole") or "").strip()
+            if hole_val:
+                parts.append(hole_val)
+            ref_val = str(row.get("ref") or "").strip()
+            if ref_val:
+                parts.append(ref_val)
+            side_val = str(row.get("side") or "").strip()
+            if side_val:
+                parts.append(side_val)
+            extra_desc = str(row.get("desc") or "").strip()
+            if extra_desc:
+                parts.append(extra_desc)
+            line = " ".join(part for part in parts if part)
+        line = " ".join(line.split())
+        if line:
+            chart_lines.append(line)
+    return chart_lines
+
+
+def read_geo(doc) -> dict[str, Any]:
+    acad_info_raw = read_acad_table(doc) or {}
+    acad_info = dict(acad_info_raw) if isinstance(acad_info_raw, Mapping) else {}
+    acad_rows = _normalize_table_rows(acad_info.get("rows"))
+    if acad_rows:
+        acad_info["rows"] = acad_rows
+
+    best_info: dict[str, Any] = dict(acad_info) if acad_rows else {}
+    text_info: dict[str, Any] = {}
+
+    if acad_rows:
+        text_info_raw = read_text_table(doc) or {}
+        if isinstance(text_info_raw, Mapping):
+            text_info = dict(text_info_raw)
+            text_rows = _normalize_table_rows(text_info.get("rows"))
+            if text_rows:
+                text_info["rows"] = text_rows
+            chosen = choose_better_table(acad_info, text_info)
+            if isinstance(chosen, Mapping):
+                best_info = dict(chosen)
+    else:
+        text_info_raw = read_text_table(doc) or {}
+        if isinstance(text_info_raw, Mapping):
+            text_info = dict(text_info_raw)
+            text_rows = _normalize_table_rows(text_info.get("rows"))
+            if text_rows:
+                text_info["rows"] = text_rows
+            best_info = dict(text_info)
+
+    rows = _normalize_table_rows(best_info.get("rows"))
+    if not rows and text_info:
+        rows = _normalize_table_rows(text_info.get("rows"))
+        if rows:
+            best_info = dict(text_info)
+
+    if rows:
+        best_info["rows"] = rows
+
+    hole_count_val: Any = best_info.get("hole_count")
+    if hole_count_val is None:
+        hole_count = _sum_qty(rows)
+    else:
+        try:
+            hole_count = int(float(hole_count_val))
+        except Exception:
+            hole_count = _sum_qty(rows)
+
+    provenance = best_info.get("provenance_holes")
+    if not provenance and text_info:
+        provenance = text_info.get("provenance_holes")
+    if not provenance:
+        provenance = "HOLE TABLE" if rows else "HOLE TABLE (TEXT_FALLBACK)"
+
+    families_val = best_info.get("hole_diam_families_in")
+    if not isinstance(families_val, Mapping) and text_info:
+        families_val = text_info.get("hole_diam_families_in")
+    families = dict(families_val) if isinstance(families_val, Mapping) else None
+
+    chart_lines = _format_chart_lines_from_rows(rows)
+
+    result: dict[str, Any] = {
+        "rows": rows,
+        "hole_count": hole_count,
+        "provenance_holes": provenance,
+        "chart_lines": chart_lines,
+    }
+    if families is not None:
+        result["hole_diam_families_in"] = families
+
+    return result
+
+
 def choose_better_table(a: Mapping[str, Any] | None, b: Mapping[str, Any] | None) -> Mapping[str, Any]:
     helper = _resolve_app_callable("_choose_better")
     if callable(helper):
@@ -2212,10 +2357,9 @@ def read_geo(
     prefer_table: bool = True,
     feature_flags: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
-    """Build a GEO dictionary from an already-loaded ezdxf document."""
+    """Process a loaded DXF/DWG document into GEO payload details."""
 
     del feature_flags  # placeholder for future feature toggles
-    use_tables = bool(prefer_table)
     geo = extract_geometry(doc)
     if not isinstance(geo, dict):
         geo = {}
@@ -2318,7 +2462,55 @@ def read_geo(
         provenance_holes = provenance.get("holes")
     print(f"[EXTRACT] provenance={provenance_holes}")
 
-    return geo
+    debug_payload = get_last_text_table_debug() or {}
+    hole_count_val = None
+    try:
+        hole_count_val = geo.get("hole_count") if isinstance(geo, Mapping) else None
+    except Exception:
+        hole_count_val = None
+    if hole_count_val in (None, ""):
+        hole_count_val = _best_geo_hole_count(geo) if isinstance(geo, Mapping) else None
+
+    payload_rows: list[Mapping[str, Any]] = []
+    if isinstance(rows_for_log, list):
+        payload_rows = rows_for_log
+    elif isinstance(rows_for_log, Iterable):
+        payload_rows = list(rows_for_log)
+
+    return {
+        "geo": geo,
+        "ops_summary": ops_summary,
+        "rows": payload_rows,
+        "qty_sum": qty_sum,
+        "hole_count": hole_count_val,
+        "provenance_holes": provenance_holes,
+        "table_used": table_used,
+        "source": ops_summary.get("source") if isinstance(ops_summary, Mapping) else None,
+        "debug_payload": debug_payload,
+    }
+
+
+def extract_geo_from_path(
+    path: str,
+    *,
+    prefer_table: bool = True,
+    use_oda: bool = True,
+    feature_flags: Mapping[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Load DWG/DXF at ``path`` and return a GEO dictionary."""
+
+    path_obj = Path(path)
+    try:
+        doc = _load_doc_for_path(path_obj, use_oda=use_oda)
+    except Exception as exc:  # pragma: no cover - defensive logging
+        print(f"[EXTRACT] failed to load document: {exc}")
+        return {"error": str(exc)}
+
+    payload = read_geo(doc, prefer_table=prefer_table, feature_flags=feature_flags)
+    geo = payload.get("geo")
+    if isinstance(geo, dict):
+        return geo
+    return {}
 
 
 def extract_geo_from_path(
@@ -2351,9 +2543,11 @@ def get_last_text_table_debug() -> dict[str, Any] | None:
 
 
 __all__ = [
+    "read_geo",
     "extract_geo_from_path",
     "read_acad_table",
     "read_text_table",
+    "read_geo",
     "choose_better_table",
     "promote_table_to_geo",
     "extract_geometry",

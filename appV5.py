@@ -97,106 +97,6 @@ _re = re
 # --- Ops aggregation from HOLE TABLE rows (minimal) ---
 _SIDE_BOTH = re.compile(r"\b(FRONT\s*&\s*BACK|BOTH\s+SIDES)\b", re.I)
 _SIDE_BACK = re.compile(r"\b(?:FROM\s+)?BACK\b", re.I)
-_SIDE_FRONT = re.compile(r"\b(?:FROM\s+)?FRONT\b", re.I)
-
-
-def _row_side(desc: str) -> str | None:
-    U = (desc or "").upper()
-    if _SIDE_BOTH.search(U):
-        return "BOTH"
-    if _SIDE_BACK.search(U):
-        return "BACK"
-    if _SIDE_FRONT.search(U):
-        return "FRONT"
-    return None
-
-
-def aggregate_ops_from_rows(rows: list[dict]) -> dict:
-    """Aggregate lightweight drilling/tapping counters from HOLE TABLE rows."""
-
-    totals: defaultdict[str, int] = defaultdict(int)
-    actions: defaultdict[str, int] = defaultdict(int)
-    detail: list[dict[str, Any]] = []
-    for r in rows or []:
-        try:
-            qty = int(float(r.get("qty") or 0))
-        except Exception:
-            qty = 0
-        if qty <= 0:
-            continue
-        desc = str(r.get("desc", ""))
-        side = _row_side(desc)
-        U = desc.upper()
-
-        if "TAP" in U:
-            if side == "BACK":
-                totals["tap_back"] += qty
-                actions["tap_back"] += qty
-            elif side == "BOTH":
-                totals["tap_front"] += qty
-                totals["tap_back"] += qty
-                actions["tap_front"] += qty
-                actions["tap_back"] += qty
-            else:
-                totals["tap_front"] += qty
-                actions["tap_front"] += qty
-            totals["tap"] += qty
-            totals["drill"] += qty
-            actions["drill"] += qty
-
-        if (
-            "CBORE" in U
-            or "C'BORE" in U
-            or "COUNTERBORE" in U
-            or "COUNTER BORE" in U
-        ):
-            if side == "BACK":
-                totals["counterbore_back"] += qty
-                actions["counterbore_back"] += qty
-            elif side == "BOTH":
-                totals["counterbore_front"] += qty
-                totals["counterbore_back"] += qty
-                actions["counterbore_front"] += qty
-                actions["counterbore_back"] += qty
-            else:
-                totals["counterbore_front"] += qty
-                actions["counterbore_front"] += qty
-            totals["counterbore"] += qty
-
-        if (
-            "C DRILL" in U
-            or "C’DRILL" in U
-            or "CENTER DRILL" in U
-            or "SPOT DRILL" in U
-            or "SPOT" in U
-        ):
-            if ("THRU" not in U) and ("TAP" not in U):
-                totals["spot"] += qty
-                actions["spot"] += qty
-
-        if "JIG GRIND" in U:
-            totals["jig_grind"] += qty
-            actions["jig_grind"] += qty
-
-        detail.append(
-            {
-                "hole": r.get("hole") or r.get("id") or "",
-                "ref": r.get("ref", ""),
-                "qty": qty,
-                "desc": desc,
-            }
-        )
-
-    back_ops_total = int(totals.get("counterbore_back", 0) + totals.get("tap_back", 0))
-    return {
-        "totals": dict(totals),
-        "rows": detail,
-        "actions_total": int(sum(actions.values())),
-        "back_ops_total": back_ops_total,
-        "flip_required": bool(back_ops_total > 0),
-    }
-
-
 # --- HOLE TABLE promotion helpers -------------------------------------------
 NUM_DEC_RE = re.compile(r"(?<!\d)(?:\d+\.\d+|\.\d+|\d+)(?!\d)")
 NUM_FRAC_RE = re.compile(r"(?<!\d)(\d+)\s*/\s*(\d+)(?!\d)")
@@ -237,59 +137,6 @@ def _score_table(info: dict | None) -> tuple[int, int]:
 def _choose_better(a: dict | None, b: dict | None) -> dict:
     return a if _score_table(a) >= _score_table(b) else (b or {})
 
-
-def _persist_rows_and_totals(geo: dict, info: dict, *, src: str) -> None:
-    """Publish rows & totals into the *same* geo the app reads."""
-
-    if not isinstance(info, dict):
-        return
-    rows = info.get("rows") or []
-    if not rows:
-        return
-    ops = geo.setdefault("ops_summary", {})
-    ops["rows"] = rows
-    ops["source"] = src
-    # Totals: count tap/cbore/spot/jig; split front/back using desc
-    totals = defaultdict(int)
-    for r in rows:
-        q = int(float(r.get("qty") or 0))
-        U = (r.get("desc", "") or "").upper()
-        back = "FROM BACK" in U
-        both = ("FRONT & BACK" in U) or ("BOTH SIDES" in U)
-        if "TAP" in U:
-            totals["tap"] += q
-            totals["drill"] += q  # pilot drill
-            if both:
-                totals["tap_front"] += q
-                totals["tap_back"] += q
-            elif back:
-                totals["tap_back"] += q
-            else:
-                totals["tap_front"] += q
-        if ("CBORE" in U) or ("C'BORE" in U) or ("COUNTER BORE" in U) or ("COUNTERBORE" in U):
-            totals["counterbore"] += q
-            if both:
-                totals["counterbore_front"] += q
-                totals["counterbore_back"] += q
-            elif back:
-                totals["counterbore_back"] += q
-            else:
-                totals["counterbore_front"] += q
-        if "JIG GRIND" in U:
-            totals["jig_grind"] += q
-        if ("SPOT" in U or "CENTER DRILL" in U or "C DRILL" in U or "C’DRILL" in U) and (
-            "TAP" not in U and "THRU" not in U
-        ):
-            totals["spot"] += q
-    ops["totals"] = dict(totals)
-    # Prefer table hole_count; else sum of QTY
-    try:
-        hc = int(info.get("hole_count") or _rows_qty_sum(rows))
-        geo["hole_count"] = hc
-    except Exception:
-        pass
-    # provenance for sanity
-    geo.setdefault("provenance", {}).update({"holes": "HOLE TABLE"})
 
 from cad_quoter.app._value_utils import (
     _format_value,
@@ -21917,7 +21764,56 @@ def extract_2d_features_from_dxf_or_dwg(path: str | Path) -> dict[str, Any]:
         print(f"[EXTRACTOR] cad_quoter.geo_extractor import failed: {exc}")
         _geo_extractor_mod = None
 
-    if _geo_extractor_mod is not None:
+    best_table_info = _choose_better(acad_info, text_info)
+    table_info = best_table_info or {}
+    table_rows = (table_info or {}).get("rows") or []
+    table_ops_summary = table_info.get("ops_summary") if table_info else None
+    table_summary_metadata = (
+        table_ops_summary if isinstance(table_ops_summary, _MappingABC) else None
+    )
+
+    if table_rows:
+        source_tag = "acad_table" if best_table_info is acad_info else "text_table"
+        try:
+            update_geo_ops_summary_from_hole_rows(
+                geo,
+                summary_rows=table_rows,
+                ops_source=source_tag,
+                apply_built_rows=_apply_built_rows,
+                summary_metadata=table_summary_metadata,
+            )
+        except Exception:
+            pass
+
+        nested_geo = geo.get("geo") if isinstance(geo, dict) else None
+        if isinstance(nested_geo, _MutableMappingABC):
+            try:
+                update_geo_ops_summary_from_hole_rows(
+                    nested_geo,
+                    summary_rows=table_rows,
+                    ops_source=source_tag,
+                    apply_built_rows=_apply_built_rows,
+                    summary_metadata=table_summary_metadata,
+                )
+            except Exception:
+                pass
+
+        try:
+            geo["hole_count"] = int(
+                table_info.get("hole_count")
+                or (geo.get("hole_count") if isinstance(geo, dict) else 0)
+                or _rows_qty_sum(table_rows)
+            )
+        except Exception:
+            pass
+
+        geo.setdefault("provenance", {}).update({"holes": "HOLE TABLE"})
+
+    ops_summary_debug = geo.get("ops_summary") if isinstance(geo, _MappingABC) else None
+    if not isinstance(ops_summary_debug, _MappingABC):
+        ops_summary_debug = {}
+    rows_debug = ops_summary_debug.get("rows") or []
+    if isinstance(rows_debug, _MappingABC):
         try:
             geo_rows_payload = _geo_extractor_mod.read_geo(doc)
         except Exception as exc:
@@ -22052,81 +21948,14 @@ def extract_2d_features_from_dxf_or_dwg(path: str | Path) -> dict[str, Any]:
         f"source={source_debug}"
     )
 
-    table_info = dict(table_info)
-    best_table_info = dict(table_info)
-
     sp = doc.modelspace()
     units = detect_units_scale(doc)
     to_in = float(units.get("to_in", 1.0) or 1.0)
     u2mm = to_in * 25.4
 
-    table_ops_summary = table_info.get("ops_summary") if table_info else None
-
-    rows_for_ops = (table_info or {}).get("rows") or []
-    if rows_for_ops:
-        agg_from_rows = aggregate_ops_from_rows(rows_for_ops)
-        agg_totals = (
-            agg_from_rows.get("totals")
-            if isinstance(agg_from_rows, Mapping)
-            else None
-        )
-
-        def _ensure_ops_summary(G):
-            if not isinstance(G, dict):
-                return
-
-            existing_summary = G.get("ops_summary")
-            if isinstance(existing_summary, Mapping):
-                ops_summary_map: dict[str, Any] = dict(existing_summary)
-            else:
-                ops_summary_map = {}
-
-            if isinstance(table_ops_summary, Mapping):
-                for key, value in table_ops_summary.items():
-                    if key in {"rows", "totals"}:
-                        continue
-                    ops_summary_map.setdefault(key, value)
-
-            ops_summary_map["rows"] = rows_for_ops
-
-            totals_map: dict[str, Any] = {}
-            if isinstance(existing_summary, Mapping):
-                existing_totals = existing_summary.get("totals")
-                if isinstance(existing_totals, Mapping):
-                    totals_map.update(existing_totals)
-            if isinstance(table_ops_summary, Mapping):
-                table_totals = table_ops_summary.get("totals")
-                if isinstance(table_totals, Mapping):
-                    totals_map.update(table_totals)
-            if isinstance(ops_summary_map.get("totals"), Mapping):
-                totals_map.update(dict(ops_summary_map["totals"]))
-            if isinstance(agg_totals, Mapping):
-                totals_map.update(agg_totals)
-            ops_summary_map["totals"] = totals_map
-
-            if isinstance(agg_from_rows, Mapping):
-                for key in ("actions_total", "back_ops_total", "flip_required"):
-                    if key in agg_from_rows and key not in ops_summary_map:
-                        ops_summary_map[key] = agg_from_rows[key]
-
-            G["ops_summary"] = ops_summary_map
-
-        _ensure_ops_summary(geo)
-        nested_geo = geo.get("geo") if isinstance(geo, dict) else None
-        if isinstance(nested_geo, dict):
-            _ensure_ops_summary(nested_geo)
-
-        try:
-            geo["hole_count"] = int(
-                table_info.get("hole_count")
-                or (geo.get("hole_count") if isinstance(geo, dict) else 0)
-                or 0
-            )
-        except Exception:
-            pass
-    elif isinstance(table_ops_summary, Mapping):
+    if not table_rows and isinstance(table_ops_summary, _MappingABC):
         geo["ops_summary"] = dict(table_ops_summary)
-    elif table_ops_summary:
+    elif not table_rows and table_ops_summary:
         geo["ops_summary"] = table_ops_summary
 
     hole_source: str | None = None
@@ -22550,11 +22379,38 @@ def extract_2d_features_from_dxf_or_dwg(path: str | Path) -> dict[str, Any]:
     have_rows = ((geo.get("ops_summary") or {}).get("rows") or [])
     if _score_table(candidate) > _score_table({"rows": have_rows}):
         best_table_info = candidate
-        _persist_rows_and_totals(
-            geo,
-            candidate,
-            src=("acad_table" if candidate is acad2 else "text_table"),
+        candidate_rows = (
+            candidate.get("rows") if isinstance(candidate, _MappingABC) else None
         )
+        candidate_summary = (
+            candidate.get("ops_summary")
+            if isinstance(candidate, _MappingABC)
+            else None
+        )
+        candidate_metadata = (
+            candidate_summary if isinstance(candidate_summary, _MappingABC) else None
+        )
+        source_tag = "acad_table" if candidate is acad2 else "text_table"
+        if candidate_rows:
+            try:
+                update_geo_ops_summary_from_hole_rows(
+                    geo,
+                    summary_rows=candidate_rows,
+                    ops_source=source_tag,
+                    apply_built_rows=_apply_built_rows,
+                    summary_metadata=candidate_metadata,
+                )
+            except Exception:
+                pass
+            try:
+                geo["hole_count"] = int(
+                    candidate.get("hole_count")
+                    or (geo.get("hole_count") if isinstance(geo, dict) else 0)
+                    or _rows_qty_sum(candidate_rows)
+                )
+            except Exception:
+                pass
+            geo.setdefault("provenance", {}).update({"holes": "HOLE TABLE"})
 
     ops_summary_debug = geo.get("ops_summary") if isinstance(geo, _MappingABC) else None
     if not isinstance(ops_summary_debug, _MappingABC):
@@ -22629,7 +22485,7 @@ def extract_2d_features_from_dxf_or_dwg(path: str | Path) -> dict[str, Any]:
             )
 
         try:
-            ops_rows = update_geo_ops_summary_from_hole_rows(
+            update_geo_ops_summary_from_hole_rows(
                 geo,
                 hole_rows=hole_rows,
                 chart_lines=chart_lines,
@@ -22637,36 +22493,8 @@ def extract_2d_features_from_dxf_or_dwg(path: str | Path) -> dict[str, Any]:
                 chart_summary=chart_summary,
                 apply_built_rows=_apply_built_rows,
             )
-            rows_for_totals: list[dict[str, Any]] = []
-            if isinstance(ops_rows, (_MappingABC, dict)):
-                candidate_rows = ops_rows.get("rows") if isinstance(ops_rows, dict) else None
-                if isinstance(candidate_rows, list):
-                    rows_for_totals = [
-                        dict(row)
-                        for row in candidate_rows
-                        if isinstance(row, (_MappingABC, dict))
-                    ]
-            elif isinstance(ops_rows, list):
-                rows_for_totals = [
-                    dict(row)
-                    for row in ops_rows
-                    if isinstance(row, (_MappingABC, dict))
-                ]
-            if rows_for_totals:
-                ops_summary_map = geo.setdefault("ops_summary", {})
-                ops_summary_map["rows"] = rows_for_totals
-                try:
-                    totals_map = aggregate_ops(
-                        rows_for_totals,
-                        ops_entries=chart_ops,
-                    ).get("totals", {})
-                except Exception:
-                    totals_map = {}
-                ops_summary_map["totals"] = dict(totals_map) if isinstance(
-                    totals_map, (_MappingABC, dict)
-                ) else {}
         except Exception:
-            ops_rows = []
+            pass
         # --- end publish rows ---
     if chart_summary:
         geo.setdefault("chart_summary", chart_summary)
