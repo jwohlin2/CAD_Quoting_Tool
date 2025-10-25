@@ -117,6 +117,15 @@ _COLUMN_TOKEN_RE = re.compile(
     r"(TAP|DRILL|THRU|C['’]?BORE|COUNTER\s*BORE|N\.?P\.?T|NPT|Ø|JIG)",
     re.IGNORECASE,
 )
+_ROI_ANCHOR_RE = re.compile(
+    r"(TAP|DRILL|THRU|C['’]?BORE|CBORE|COUNTER\s*BORE|N\.?P\.?T|NPT|JIG\s*GRIND|Ø)",
+    re.IGNORECASE,
+)
+_TITLE_KEYWORD_RE = re.compile(
+    r"(GENTITLE|TITLE|DRAWING|SHEET|SCALE|REV|DWG|DATE)",
+    re.IGNORECASE,
+)
+_SMALL_INT_TOKEN_RE = re.compile(r"\b\d+\b")
 _FRACTION_RE = re.compile(r"\b\d+\s*/\s*\d+\b")
 _DECIMAL_RE = re.compile(r"\b(?:\d+\.\d+|\.\d+)\b")
 _MAX_INSERT_DEPTH = 2
@@ -515,6 +524,51 @@ def _build_columnar_table_from_entries(
             {"bands": [], "band_cells": [], "rows_txt_fallback": [], "qty_col": None, "ref_col": None, "desc_col": None},
         )
 
+    records_all = list(records)
+    roi_info: dict[str, Any] | None = None
+    anchor_lines = [rec for rec in records_all if _ROI_ANCHOR_RE.search(rec["text"])]
+    filtered_records = records_all
+    if anchor_lines:
+        xmin = min(rec["x"] for rec in anchor_lines)
+        xmax = max(rec["x"] for rec in anchor_lines)
+        ymin = min(rec["y"] for rec in anchor_lines)
+        ymax = max(rec["y"] for rec in anchor_lines)
+        dx = 200.0
+        dy = 300.0
+        expanded_box = [xmin - dx, xmax + dx, ymin - dy, ymax + dy]
+        roi_records = [
+            rec
+            for rec in records_all
+            if expanded_box[0] <= rec["x"] <= expanded_box[1]
+            and expanded_box[2] <= rec["y"] <= expanded_box[3]
+        ]
+        print(
+            "[ROI] anchors={count} bbox=[{xmin:.1f},{xmax:.1f},{ymin:.1f},{ymax:.1f}] expanded=[{ex0:.1f},{ex1:.1f},{ey0:.1f},{ey1:.1f}]".format(
+                count=len(anchor_lines),
+                xmin=xmin,
+                xmax=xmax,
+                ymin=ymin,
+                ymax=ymax,
+                ex0=expanded_box[0],
+                ex1=expanded_box[1],
+                ey0=expanded_box[2],
+                ey1=expanded_box[3],
+            )
+        )
+        if roi_records:
+            filtered_records = roi_records
+        print(
+            f"[ROI] raw_lines -> roi_lines: {len(records_all)} -> {len(filtered_records)}"
+        )
+        roi_info = {
+            "anchors": len(anchor_lines),
+            "bbox": [xmin, xmax, ymin, ymax],
+            "expanded": expanded_box,
+            "total": len(records_all),
+            "kept": len(filtered_records),
+        }
+    records = list(filtered_records)
+
     records.sort(key=lambda item: (-item["y"], item["x"]))
 
     height_values = [
@@ -552,11 +606,33 @@ def _build_columnar_table_from_entries(
         raw_bands.append(current_band)
 
     bands: list[list[dict[str, Any]]] = []
-    for band in raw_bands:
+    for raw_index, band in enumerate(raw_bands):
         if len(band) < 2:
             continue
         combined = " ".join(item["text"] for item in band)
         if not any(char.isdigit() for char in combined) and not _COLUMN_TOKEN_RE.search(combined):
+            continue
+        drop_band = False
+        combined_upper = combined.upper()
+        if _TITLE_KEYWORD_RE.search(combined_upper):
+            drop_band = True
+        else:
+            small_ints = []
+            for token in _SMALL_INT_TOKEN_RE.findall(combined):
+                try:
+                    value = int(token)
+                except Exception:
+                    continue
+                if 1 <= value <= 16:
+                    small_ints.append(value)
+            if len(small_ints) >= 10:
+                drop_band = True
+            elif len(small_ints) >= 12 and len(set(small_ints)) <= 16:
+                drop_band = True
+        if drop_band:
+            print(
+                f"[TABLE-Y] drop band#{raw_index} reason=title-block lines={len(band)}"
+            )
             continue
         bands.append(band)
 
@@ -662,13 +738,11 @@ def _build_columnar_table_from_entries(
 
     column_count = max(len(band["cells"]) for band in band_results)
     integer_re = re.compile(r"^\d{1,3}$")
-    qty_header_values = {"QTY", "QTY.", "QTY:"}
+    qty_header_re = re.compile(r"^QTY[:.]?$", re.IGNORECASE)
+    ref_value_re = re.compile(r"(Ø|⌀|\"|\d+\s*/\s*\d+|(?<!\d)\.\d+|\d+\.\d+)")
+    ref_header_re = re.compile(r"^REF\b", re.IGNORECASE)
 
-    bands_for_stats = sorted(
-        band_results, key=lambda item: int(item.get("line_count", 0)), reverse=True
-    )
-    if len(bands_for_stats) > 5:
-        bands_for_stats = bands_for_stats[:5]
+    bands_for_stats = band_results[:5]
 
     metrics: list[dict[str, Any]] = []
     for col_index in range(column_count):
@@ -678,6 +752,7 @@ def _build_columnar_table_from_entries(
         token_hits = 0
         total_len = 0
         header_hit = False
+        ref_header_hit = False
         for band in bands_for_stats:
             cells = band.get("cells", [])
             if col_index >= len(cells):
@@ -688,8 +763,10 @@ def _build_columnar_table_from_entries(
             non_empty += 1
             total_len += len(cell_text)
             upper_text = cell_text.upper()
-            if upper_text in qty_header_values:
+            if qty_header_re.match(upper_text):
                 header_hit = True
+            if ref_header_re.match(upper_text):
+                ref_header_hit = True
             if integer_re.match(cell_text):
                 try:
                     value = int(cell_text)
@@ -697,11 +774,14 @@ def _build_columnar_table_from_entries(
                     value = None
                 if value is not None and 0 < value <= 999:
                     numeric_hits += 1
-            if _cell_has_ref_marker(cell_text):
+            if ref_value_re.search(cell_text):
                 ref_hits += 1
             if _HOLE_ACTION_TOKEN_RE.search(cell_text):
                 token_hits += 1
         avg_len = (total_len / non_empty) if non_empty else 0.0
+        numeric_ratio = (numeric_hits / non_empty) if non_empty else 0.0
+        ref_ratio = (ref_hits / non_empty) if non_empty else 0.0
+        action_ratio = (token_hits / non_empty) if non_empty else 0.0
         metrics.append(
             {
                 "non_empty": non_empty,
@@ -710,8 +790,10 @@ def _build_columnar_table_from_entries(
                 "token_hits": token_hits,
                 "avg_len": avg_len,
                 "header_qty": header_hit,
-                "ref_ratio": (ref_hits / non_empty) if non_empty else 0.0,
-                "numeric_ratio": (numeric_hits / non_empty) if non_empty else 0.0,
+                "header_ref": ref_header_hit,
+                "ref_ratio": ref_ratio,
+                "numeric_ratio": numeric_ratio,
+                "action_ratio": action_ratio,
             }
         )
 
@@ -722,21 +804,23 @@ def _build_columnar_table_from_entries(
     ]
     qty_col = min(qty_candidates) if qty_candidates else None
 
-    ref_candidates = [
-        idx
-        for idx, info in enumerate(metrics)
-        if info["non_empty"] > 0 and info["ref_ratio"] >= 0.4
-    ]
-    ref_col = max(ref_candidates) if ref_candidates else None
-
     if qty_col is None:
         relaxed_candidates = [
             idx
             for idx, info in enumerate(metrics)
-            if info["non_empty"] > 0 and info["numeric_ratio"] >= 0.4 and info["ref_ratio"] < 0.4
+            if info["non_empty"] > 0 and info["numeric_ratio"] >= 0.4
         ]
         if relaxed_candidates:
             qty_col = min(relaxed_candidates)
+        elif column_count > 0:
+            qty_col = 0
+
+    ref_candidates = [
+        idx
+        for idx, info in enumerate(metrics)
+        if info["header_ref"] or (info["non_empty"] > 0 and info["ref_ratio"] >= 0.4)
+    ]
+    ref_col = max(ref_candidates) if ref_candidates else None
 
     desc_candidates = [idx for idx in range(column_count) if idx != qty_col and idx != ref_col]
     if not desc_candidates:
@@ -744,7 +828,7 @@ def _build_columnar_table_from_entries(
 
     def _desc_score(index: int) -> tuple[float, float, int]:
         data = metrics[index]
-        return (float(data["token_hits"]), float(data["avg_len"]), -index)
+        return (float(data["action_ratio"]), float(data["avg_len"]), -index)
 
     desc_col = max(desc_candidates, key=_desc_score)
 
@@ -815,6 +899,54 @@ def _build_columnar_table_from_entries(
                 f'side={side_display} desc="{desc_display}"'
             )
 
+    if len(rows) < 8:
+        try:
+            raw_path = Path("raw_lines.tsv")
+            with raw_path.open("w", encoding="utf-8") as handle:
+                handle.write("layout\tin_block\tx\ty\ttext\n")
+                for rec in records_all:
+                    layout_val = str(rec.get("layout") or "")
+                    in_block = "1" if rec.get("from_block") else "0"
+                    x_val = rec.get("x")
+                    y_val = rec.get("y")
+                    if isinstance(x_val, (int, float)):
+                        x_text = f"{float(x_val):.3f}"
+                    else:
+                        x_text = ""
+                    if isinstance(y_val, (int, float)):
+                        y_text = f"{float(y_val):.3f}"
+                    else:
+                        y_text = ""
+                    text_val = rec.get("text") or ""
+                    handle.write(
+                        f"{layout_val}\t{in_block}\t{x_text}\t{y_text}\t{text_val}\n"
+                    )
+        except Exception as exc:
+            print(f"[COLUMN] failed to write raw_lines.tsv: {exc}")
+        try:
+            roi_path = Path("roi_cells.tsv")
+            with roi_path.open("w", encoding="utf-8") as handle:
+                handle.write("band\tcol\tx_center\ty_center\ttext\n")
+                for cell in band_cells_dump:
+                    band_idx = cell.get("band")
+                    col_idx = cell.get("col")
+                    x_center = cell.get("x_center")
+                    y_center = cell.get("y_center")
+                    if isinstance(x_center, (int, float)):
+                        x_center_text = f"{float(x_center):.3f}"
+                    else:
+                        x_center_text = ""
+                    if isinstance(y_center, (int, float)):
+                        y_center_text = f"{float(y_center):.3f}"
+                    else:
+                        y_center_text = ""
+                    text_val = cell.get("text") or ""
+                    handle.write(
+                        f"{band_idx}\t{col_idx}\t{x_center_text}\t{y_center_text}\t{text_val}\n"
+                    )
+        except Exception as exc:
+            print(f"[COLUMN] failed to write roi_cells.tsv: {exc}")
+
     if not rows:
         return (
             None,
@@ -826,6 +958,7 @@ def _build_columnar_table_from_entries(
                 "ref_col": ref_col,
                 "desc_col": desc_col,
                 "y_eps": y_eps,
+                "roi": roi_info,
             },
         )
 
@@ -848,6 +981,16 @@ def _build_columnar_table_from_entries(
         "y_eps": y_eps,
         "bands_checked": len(bands_for_stats),
     }
+    if roi_info is not None:
+        debug_info["roi"] = roi_info
+    else:
+        debug_info["roi"] = {
+            "anchors": 0,
+            "bbox": None,
+            "expanded": None,
+            "total": len(records_all),
+            "kept": len(records),
+        }
     return (table_info, debug_info)
 
 
@@ -947,6 +1090,7 @@ def read_text_table(doc) -> dict[str, Any]:
         parsed_rows = []
         text_rows_info = None
         rows_txt_initial = 0
+        hint_logged = False
 
         if doc is None:
             table_lines = []
@@ -1075,6 +1219,7 @@ def read_text_table(doc) -> dict[str, Any]:
 
             def _process_entity(entity: Any, *, depth: int, from_block: bool) -> None:
                 nonlocal text_fragments, mtext_fragments, kept_count, from_blocks_count, counter
+                nonlocal hint_logged
                 if depth > _MAX_INSERT_DEPTH:
                     return
                 dxftype = None
@@ -1090,6 +1235,14 @@ def read_text_table(doc) -> dict[str, Any]:
                         normalized = _normalize_table_fragment(fragment)
                         if not normalized:
                             continue
+                        if (
+                            not hint_logged
+                            and "SEE SHEET 2 FOR HOLE CHART" in normalized.upper()
+                        ):
+                            print(
+                                "[HINT] Found \"SEE SHEET 2 FOR HOLE CHART\" — ensure the target sheet/insert is present in this DWG/XREF."
+                            )
+                            hint_logged = True
                         entry = {
                             "layout_index": layout_index,
                             "layout_name": layout_name,
