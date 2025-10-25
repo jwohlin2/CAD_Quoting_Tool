@@ -64,6 +64,7 @@ from cad_quoter.pricing.machining_report import _drill_time_model
 
 import copy
 import csv
+import fnmatch
 import json
 import math
 import re
@@ -175,6 +176,421 @@ except Exception:
     )
     _harvest_dxf_text_lines = None
 # --- GEO helpers -------------------------------------------------------------
+
+
+_ACAD_LAYER_ALLOW_ENV = "CAD_QUOTER_ACAD_ALLOW_LAYERS"
+_ACAD_DEPTH_MAX_ENV = "CAD_QUOTER_ACAD_DEPTH_MAX"
+
+
+def _is_trace_acad_enabled() -> bool:
+    try:
+        from cad_quoter import geo_extractor as _geo_extractor_mod  # type: ignore
+    except Exception:
+        return False
+    return bool(getattr(_geo_extractor_mod, "_TRACE_ACAD", False))
+
+
+def _resolve_acad_depth_max(default: int = 3) -> int:
+    override = os.environ.get(_ACAD_DEPTH_MAX_ENV, "").strip()
+    if not override:
+        try:
+            from cad_quoter import geo_extractor as _geo_extractor_mod  # type: ignore
+        except Exception:
+            pass
+        else:
+            attr = getattr(_geo_extractor_mod, "_ACAD_DEPTH_MAX_OVERRIDE", None)
+            if attr is not None:
+                try:
+                    candidate = int(float(attr))
+                except Exception:
+                    return default
+                return max(0, candidate)
+        return default
+    try:
+        candidate = int(float(override))
+    except Exception:
+        return default
+    return max(0, candidate)
+
+
+def _normalize_layer_patterns(values: Iterable[str] | None) -> list[str] | None:
+    if values is None:
+        return None
+    patterns: list[str] = []
+    allow_all = False
+    for raw in values:
+        if raw is None:
+            continue
+        text = str(raw).strip()
+        if not text:
+            continue
+        upper = text.upper()
+        if upper in {"ALL", "*", "<ALL>"}:
+            allow_all = True
+            break
+        patterns.append(upper)
+    if allow_all:
+        return None
+    return patterns or None
+
+
+def _resolve_acad_layer_allowlist() -> list[str] | None:
+    env_value = os.environ.get(_ACAD_LAYER_ALLOW_ENV, "")
+    if not env_value:
+        try:
+            from cad_quoter import geo_extractor as _geo_extractor_mod  # type: ignore
+        except Exception:
+            return None
+        override = getattr(_geo_extractor_mod, "_ACAD_LAYER_ALLOW_OVERRIDE", None)
+        if override is None:
+            return None
+        if isinstance(override, str):
+            return _normalize_layer_patterns(re.split(r"[;,]", override))
+        if isinstance(override, Iterable):
+            return _normalize_layer_patterns(list(override))
+        return None
+    parts = re.split(r"[;,]", env_value)
+    return _normalize_layer_patterns(parts)
+
+
+def _layer_matches_allowlist(layer: Any, allow_patterns: list[str] | None) -> bool:
+    if not allow_patterns:
+        return True
+    try:
+        candidate = str(layer or "")
+    except Exception:
+        candidate = ""
+    target = candidate.strip().upper()
+    if not target and "" not in allow_patterns:
+        return False
+    for pattern in allow_patterns:
+        if fnmatch.fnmatchcase(target, pattern):
+            return True
+    return False
+
+
+def _scan_tables_in_layouts_and_blocks(
+    doc: Any,
+    *,
+    depth_max: int = 3,
+    allow_layers: list[str] | None = None,
+    trace: bool = False,
+) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    seen_tables: set[str] = set()
+    contexts: list[dict[str, Any]] = []
+    scan_tables_meta: list[dict[str, Any]] = []
+    layouts_scanned: set[str] = set()
+    blocks_scanned: set[str] = set()
+
+    def _handle_key(table: Any) -> str:
+        try:
+            handle = getattr(table.dxf, "handle", None)
+        except Exception:
+            handle = None
+        if handle:
+            return str(handle)
+        return f"id:{id(table)}"
+
+    def _block_name(entity: Any) -> str:
+        try:
+            name = getattr(entity.dxf, "name", "")
+        except Exception:
+            name = ""
+        if not name:
+            try:
+                name = getattr(entity.dxf, "block_name", "")
+            except Exception:
+                name = ""
+        return str(name or "")
+
+    def _record_table(table: Any, layout_name: str | None, chain: Sequence[str]) -> bool:
+        key = _handle_key(table)
+        if key in seen_tables:
+            return False
+        seen_tables.add(key)
+        try:
+            owner = getattr(table.dxf, "owner", None)
+        except Exception:
+            owner = None
+        try:
+            layer = getattr(table.dxf, "layer", "")
+        except Exception:
+            layer = ""
+        try:
+            n_rows = getattr(table.dxf, "n_rows", None)
+        except Exception:
+            n_rows = None
+        try:
+            n_cols = getattr(table.dxf, "n_cols", None)
+        except Exception:
+            n_cols = None
+        allowed = _layer_matches_allowlist(layer, allow_layers)
+        context = {
+            "table": table,
+            "layout": layout_name,
+            "handle": getattr(table.dxf, "handle", None),
+            "owner": owner,
+            "layer": layer,
+            "block_chain": [name for name in chain if name],
+            "allowed": allowed,
+        }
+        contexts.append(context)
+        table_entry = {
+            "layout": layout_name,
+            "owner": owner,
+            "layer": layer,
+            "handle": context["handle"],
+            "rows": n_rows,
+            "cols": n_cols,
+            "type": getattr(table, "dxftype", lambda: "TABLE")(),
+            "block_chain": context["block_chain"],
+            "allowed": allowed,
+        }
+        scan_tables_meta.append(table_entry)
+        return allowed
+
+    def _scan_space(
+        space: Any,
+        *,
+        layout_name: str | None,
+        depth: int,
+        chain: Sequence[str],
+        block_names: set[str] | None,
+        visited_blocks: set[str],
+    ) -> tuple[int, int]:
+        total_found = 0
+        allowed_added = 0
+        try:
+            entities = list(space.query("TABLE,INSERT"))
+        except Exception:
+            try:
+                entities = list(space)
+            except Exception:
+                entities = []
+        for entity in entities:
+            try:
+                kind = entity.dxftype()
+            except Exception:
+                kind = ""
+            upper_kind = str(kind or "").upper()
+            if upper_kind == "TABLE":
+                total_found += 1
+                if _record_table(entity, layout_name, chain):
+                    allowed_added += 1
+            elif upper_kind == "INSERT":
+                block_name = _block_name(entity)
+                if block_names is not None and block_name:
+                    block_names.add(block_name)
+                if not block_name or depth >= depth_max or block_name in visited_blocks:
+                    continue
+                visited_blocks.add(block_name)
+                block_total, block_allowed = _scan_block_by_name(
+                    block_name,
+                    layout_name=layout_name,
+                    depth=depth + 1,
+                    chain=[*chain, block_name],
+                    block_names=block_names,
+                    visited_blocks=visited_blocks,
+                )
+                visited_blocks.discard(block_name)
+                total_found += block_total
+                allowed_added += block_allowed
+        return total_found, allowed_added
+
+    def _scan_block_by_name(
+        block_name: str,
+        *,
+        layout_name: str | None,
+        depth: int,
+        chain: Sequence[str],
+        block_names: set[str] | None,
+        visited_blocks: set[str],
+    ) -> tuple[int, int]:
+        block = None
+        try:
+            block = doc.blocks.get(block_name)
+        except Exception:
+            try:
+                block = doc.blocks[block_name]
+            except Exception:
+                block = None
+        if block is None:
+            return (0, 0)
+        return _scan_space(
+            block,
+            layout_name=layout_name,
+            depth=depth,
+            chain=chain,
+            block_names=block_names,
+            visited_blocks=visited_blocks,
+        )
+
+    def _iter_layout_spaces() -> list[tuple[str, Any, str]]:
+        spaces: list[tuple[str, Any, str]] = []
+        seen_ids: set[int] = set()
+        try:
+            msp = doc.modelspace()
+        except Exception:
+            msp = None
+        if msp is not None and id(msp) not in seen_ids:
+            seen_ids.add(id(msp))
+            spaces.append(("MODEL", msp, "model"))
+            layouts_scanned.add("MODEL")
+        try:
+            layout_names = list(doc.layouts.names_in_taborder())
+        except Exception:
+            layout_names = []
+        for name in layout_names:
+            try:
+                layout = doc.layouts.get(name)
+            except Exception:
+                continue
+            if getattr(layout, "is_modelspace", False):
+                continue
+            entity_space = getattr(layout, "entity_space", None)
+            if entity_space is None or id(entity_space) in seen_ids:
+                continue
+            seen_ids.add(id(entity_space))
+            layout_name = getattr(layout.dxf, "name", name) or name
+            layout_type = "model" if getattr(layout, "is_modelspace", False) else "paper"
+            spaces.append((layout_name, entity_space, layout_type))
+            layouts_scanned.add(str(layout_name or ""))
+        return spaces
+
+    layout_summaries: list[dict[str, Any]] = []
+    for layout_name, space, layout_type in _iter_layout_spaces():
+        block_names: set[str] = set()
+        visited_blocks: set[str] = set()
+        total_found, allowed_added = _scan_space(
+            space,
+            layout_name=layout_name,
+            depth=0,
+            chain=[],
+            block_names=block_names,
+            visited_blocks=visited_blocks,
+        )
+        layout_summary = {
+            "name": layout_name,
+            "type": layout_type,
+            "tables": total_found,
+            "allowed_tables": allowed_added,
+            "blocks": sorted(block_names),
+        }
+        layout_summaries.append(layout_summary)
+        if trace:
+            blocks_label = ", ".join(layout_summary["blocks"]) if layout_summary["blocks"] else "-"
+            print(
+                f"[LAYOUT] {layout_name} type={layout_type} blocks={blocks_label} "
+                f"tables={total_found} allowed={allowed_added}"
+            )
+
+    block_summaries: list[dict[str, Any]] = []
+    try:
+        block_items = list(doc.blocks)
+    except Exception:
+        block_items = []
+    for block in block_items:
+        block_name = getattr(block, "name", getattr(getattr(block, "dxf", None), "name", "")) or ""
+        if not block_name or block_name.startswith("*"):
+            continue
+        blocks_scanned.add(block_name)
+        visited_blocks = {block_name}
+        total_found, allowed_added = _scan_space(
+            block,
+            layout_name=None,
+            depth=0,
+            chain=[block_name],
+            block_names=None,
+            visited_blocks=visited_blocks,
+        )
+        block_summary = {
+            "name": block_name,
+            "tables": total_found,
+            "allowed_tables": allowed_added,
+        }
+        block_summaries.append(block_summary)
+        if trace and total_found:
+            print(f"[BLOCK] {block_name} tables={total_found} allowed={allowed_added}")
+
+    allowed_count = sum(1 for ctx in contexts if ctx.get("allowed", True))
+
+    summary_payload = {
+        "layouts": sorted({entry["name"] for entry in layout_summaries if entry.get("name")}),
+        "blocks": sorted(blocks_scanned),
+        "tables_found": len(contexts),
+        "tables_allowed": allowed_count,
+        "tables": scan_tables_meta,
+        "layout_summaries": layout_summaries,
+        "block_summaries": block_summaries,
+        "depth_max": depth_max,
+        "layer_allow": allow_layers,
+    }
+
+    try:
+        from cad_quoter import geo_extractor as _geo_extractor_mod  # type: ignore
+    except Exception:
+        _geo_extractor_mod = None
+    if _geo_extractor_mod is not None:
+        try:
+            setattr(_geo_extractor_mod, "_LAST_ACAD_TABLE_SCAN", summary_payload)
+        except Exception:
+            pass
+
+    return contexts, summary_payload
+
+
+def _collect_layout_names(doc: Any) -> list[str]:
+    names: list[str] = []
+    try:
+        names.append("MODEL")
+    except Exception:
+        pass
+    layouts = getattr(doc, "layouts", None)
+    if layouts is None:
+        return names
+    for attr in ("names_in_taborder", "names"):
+        getter = getattr(layouts, attr, None)
+        if callable(getter):
+            try:
+                values = list(getter())
+            except Exception:
+                continue
+        else:
+            values = getter
+        if not values:
+            continue
+        for value in values:
+            if isinstance(value, str) and value.strip():
+                names.append(value.strip())
+        if names:
+            break
+    return names
+
+
+def _follow_sheet_hints(text_lines: Sequence[str], layout_names: Sequence[str]) -> list[str]:
+    if not text_lines:
+        return []
+    layout_lookup = {re.sub(r"[^A-Z0-9]", "", name.upper()): name for name in layout_names if isinstance(name, str)}
+    hints: list[str] = []
+    pattern = re.compile(r"SEE\s+SHEET\s*([A-Z0-9-]+)", re.IGNORECASE)
+    for line in text_lines:
+        if not line:
+            continue
+        for match in pattern.finditer(str(line)):
+            token = match.group(1).upper()
+            normalized = re.sub(r"[^A-Z0-9]", "", token)
+            target = layout_lookup.get(normalized, token)
+            hints.append(target)
+    return hints
+
+
+def _columnize_and_split(rows: Sequence[str]) -> list[tuple[str, list[str]]]:
+    columns: list[tuple[str, list[str]]] = []
+    for raw in rows:
+        text = str(raw or "")
+        parts = [segment.strip() for segment in text.split("|")]
+        columns.append((text, parts))
+    return columns
 
 
 def _get_core_geo_map(geo_map: dict | None) -> dict:
@@ -19524,197 +19940,43 @@ def hole_count_from_acad_table(doc) -> dict[str, Any]:
     if doc is None:
         return result
 
-    depth_max = 3
-    seen_tables: set[str] = set()
-    table_contexts: list[dict[str, Any]] = []
+    depth_max = _resolve_acad_depth_max()
+    allow_layers = _resolve_acad_layer_allowlist()
+    trace = _is_trace_acad_enabled()
 
-    def _handle_key(table: Any) -> str:
-        try:
-            handle = getattr(table.dxf, "handle", None)
-        except Exception:
-            handle = None
-        if handle:
-            return str(handle)
-        return f"id:{id(table)}"
+    table_contexts, scan_summary = _scan_tables_in_layouts_and_blocks(
+        doc,
+        depth_max=depth_max,
+        allow_layers=allow_layers,
+        trace=trace,
+    )
 
-    def _block_name(entity: Any) -> str:
-        try:
-            name = getattr(entity.dxf, "name", "")
-        except Exception:
-            name = ""
-        if not name:
-            try:
-                name = getattr(entity.dxf, "block_name", "")
-            except Exception:
-                name = ""
-        return str(name or "")
-
-    def _record_table(table: Any, layout_name: str | None, chain: Sequence[str]) -> bool:
-        key = _handle_key(table)
-        if key in seen_tables:
-            return False
-        seen_tables.add(key)
-        try:
-            owner = getattr(table.dxf, "owner", None)
-        except Exception:
-            owner = None
-        try:
-            layer = getattr(table.dxf, "layer", "")
-        except Exception:
-            layer = ""
-        table_contexts.append(
-            {
-                "table": table,
-                "layout": layout_name,
-                "handle": getattr(table.dxf, "handle", None),
-                "owner": owner,
-                "layer": layer,
-                "block_chain": [name for name in chain if name],
-            }
-        )
-        return True
-
-    def _scan_space(
-        space: Any,
-        *,
-        layout_name: str | None,
-        depth: int,
-        chain: Sequence[str],
-        block_names: set[str] | None,
-        visited_blocks: set[str],
-    ) -> tuple[int, int]:
-        total_found = 0
-        added = 0
-        try:
-            entities = list(space.query("TABLE,INSERT"))
-        except Exception:
-            try:
-                entities = list(space)
-            except Exception:
-                entities = []
-        for entity in entities:
-            try:
-                kind = entity.dxftype()
-            except Exception:
-                kind = ""
-            if kind == "TABLE":
-                total_found += 1
-                if _record_table(entity, layout_name, chain):
-                    added += 1
-            elif kind == "INSERT":
-                block_name = _block_name(entity)
-                if block_names is not None and block_name:
-                    block_names.add(block_name)
-                if not block_name or depth >= depth_max or block_name in visited_blocks:
-                    continue
-                visited_blocks.add(block_name)
-                block_total, block_added = _scan_block_by_name(
-                    block_name,
-                    layout_name=layout_name,
-                    depth=depth + 1,
-                    chain=[*chain, block_name],
-                    block_names=block_names,
-                    visited_blocks=visited_blocks,
-                )
-                visited_blocks.discard(block_name)
-                total_found += block_total
-                added += block_added
-        return total_found, added
-
-    def _scan_block_by_name(
-        block_name: str,
-        *,
-        layout_name: str | None,
-        depth: int,
-        chain: Sequence[str],
-        block_names: set[str] | None,
-        visited_blocks: set[str],
-    ) -> tuple[int, int]:
-        block = None
-        try:
-            block = doc.blocks.get(block_name)
-        except Exception:
-            try:
-                block = doc.blocks[block_name]
-            except Exception:
-                block = None
-        if block is None:
-            return (0, 0)
-        return _scan_space(
-            block,
-            layout_name=layout_name,
-            depth=depth,
-            chain=chain,
-            block_names=block_names,
-            visited_blocks=visited_blocks,
-        )
-
-    def _iter_layout_spaces() -> list[tuple[str, Any, str]]:
-        spaces: list[tuple[str, Any, str]] = []
-        seen_ids: set[int] = set()
-        try:
-            msp = doc.modelspace()
-        except Exception:
-            msp = None
-        if msp is not None and id(msp) not in seen_ids:
-            seen_ids.add(id(msp))
-            spaces.append(("MODEL", msp, "model"))
-        try:
-            layout_names = list(doc.layouts.names_in_taborder())
-        except Exception:
-            layout_names = []
-        for name in layout_names:
-            try:
-                layout = doc.layouts.get(name)
-            except Exception:
-                continue
-            if getattr(layout, "is_modelspace", False):
-                continue
-            entity_space = getattr(layout, "entity_space", None)
-            if entity_space is None or id(entity_space) in seen_ids:
-                continue
-            seen_ids.add(id(entity_space))
-            layout_name = getattr(layout.dxf, "name", name) or name
-            layout_type = "model" if getattr(layout, "is_modelspace", False) else "paper"
-            spaces.append((layout_name, entity_space, layout_type))
-        return spaces
-
-    for layout_name, space, layout_type in _iter_layout_spaces():
-        block_names: set[str] = set()
-        visited_blocks: set[str] = set()
-        total_found, _ = _scan_space(
-            space,
-            layout_name=layout_name,
-            depth=0,
-            chain=[],
-            block_names=block_names,
-            visited_blocks=visited_blocks,
-        )
-        blocks_label = ", ".join(sorted(block_names)) if block_names else "-"
-        print(f"[LAYOUT] {layout_name} type={layout_type} blocks={blocks_label} tables={total_found}")
-
-    try:
-        block_items = list(doc.blocks)
-    except Exception:
-        block_items = []
-    for block in block_items:
-        block_name = getattr(block, "name", getattr(getattr(block, "dxf", None), "name", "")) or ""
-        if not block_name or block_name.startswith("*"):
-            continue
-        visited_blocks = {block_name}
-        total_found, _ = _scan_space(
-            block,
-            layout_name=None,
-            depth=0,
-            chain=[block_name],
-            block_names=None,
-            visited_blocks=visited_blocks,
-        )
-        if total_found:
-            print(f"[BLOCK] {block_name} tables={total_found}")
-
-    if not table_contexts:
+    total_tables = len(table_contexts)
+    if not total_tables:
         return result
+
+    allowed_contexts = [ctx for ctx in table_contexts if ctx.get("allowed", True)]
+    if not allowed_contexts:
+        if trace:
+            layouts_count = len(scan_summary.get("layouts", []) or [])
+            blocks_count = len(scan_summary.get("blocks", []) or [])
+            print(
+                f"[ACAD-TABLE] scanned layouts={layouts_count} blocks={blocks_count} "
+                f"tables_found={total_tables} allowed=0"
+            )
+        return result
+
+    if trace:
+        layouts_count = len(scan_summary.get("layouts", []) or [])
+        blocks_count = len(scan_summary.get("blocks", []) or [])
+        allowed_count = len(allowed_contexts)
+        allow_display = allow_layers if allow_layers is not None else ["ALL"]
+        print(
+            f"[ACAD-TABLE] scanned layouts={layouts_count} blocks={blocks_count} "
+            f"tables_found={total_tables} allowed={allowed_count} depth_max={depth_max}"
+        )
+        if allow_layers:
+            print(f"[ACAD-TABLE] layer_allow={allow_display}")
 
     agg_total = 0
     agg_families: dict[float, int] = {}
@@ -19724,7 +19986,7 @@ def hole_count_from_acad_table(doc) -> dict[str, Any]:
     from_back_any = False
     double_sided_any = False
 
-    for ctx in table_contexts:
+    for ctx in allowed_contexts:
         table = ctx["table"]
         try:
             n_rows = table.dxf.n_rows
@@ -19738,9 +20000,10 @@ def hole_count_from_acad_table(doc) -> dict[str, Any]:
         layer_label = ctx.get("layer") or ""
         block_chain = ctx.get("block_chain") or []
         blocks_label = f" blocks={'>' .join(block_chain)}" if block_chain else ""
-        print(
-            f"[ACAD-TABLE] layout={layout_label} owner={owner_label} rows={n_rows} cols={n_cols} layer={layer_label}{blocks_label}"
-        )
+        if trace:
+            print(
+                f"[ACAD-TABLE] layout={layout_label} owner={owner_label} rows={n_rows} cols={n_cols} layer={layer_label}{blocks_label}"
+            )
 
         def _row_text(row_idx: int) -> list[str]:
             cells: list[str] = []
@@ -20011,6 +20274,12 @@ def hole_count_from_text_table(doc, lines: Sequence[str] | None = None) -> tuple
     if not cleaned:
         return None, None
 
+    trace = _is_trace_acad_enabled()
+    layout_names = _collect_layout_names(doc) if doc is not None else []
+    hints = _follow_sheet_hints(cleaned, layout_names)
+    if hints and trace:
+        print(f"[TEXT-TABLE] follow_sheet_hints={hints}")
+
     idx = None
     for i, s in enumerate(cleaned):
         if "HOLE TABLE" in s.upper():
@@ -20021,8 +20290,8 @@ def hole_count_from_text_table(doc, lines: Sequence[str] | None = None) -> tuple
 
     total = 0
     fam: dict[float, int] = {}
-    for s in cleaned[idx + 1 :]:
-        u = s.upper()
+    for original, columns in _columnize_and_split(cleaned[idx + 1 :]):
+        u = original.upper()
         if not u or "DESCRIPTION" in u:
             continue
         if "LIST OF COORDINATES" in u or "SEE SHEET" in u:
@@ -20030,8 +20299,8 @@ def hole_count_from_text_table(doc, lines: Sequence[str] | None = None) -> tuple
 
         mqty = re.search(r"\bQTY\b[:\s]*([0-9]+)", u)
         if not mqty:
-            cols = [c.strip() for c in u.split("|")]
-            for c in cols:
+            for col in columns:
+                c = col.strip()
                 if c.isdigit():
                     mqty = re.match(r"(\d+)$", c)
                     if mqty:
