@@ -14,7 +14,7 @@ from pathlib import Path
 import re
 import statistics
 from typing import Any, Callable
-from types import SimpleNamespace
+from fnmatch import fnmatchcase
 
 from cad_quoter import geometry
 from cad_quoter.geometry import convert_dwg_to_dxf
@@ -935,26 +935,63 @@ def _compute_entity_bbox(
     return (min(xs), max(xs), min(ys), max(ys))
 
 
+class _LayerAllowlist(Iterable[str]):
+    __slots__ = ("_patterns",)
+
+    def __init__(self, patterns: Iterable[str]):
+        unique: list[str] = []
+        seen: set[str] = set()
+        for pattern in patterns:
+            upper = pattern.upper()
+            if upper in seen:
+                continue
+            seen.add(upper)
+            unique.append(upper)
+        self._patterns = tuple(unique)
+
+    def __iter__(self):
+        return iter(self._patterns)
+
+    def __contains__(self, value: object) -> bool:  # pragma: no cover - exercised via iteration
+        if not self._patterns:
+            return False
+        text = "" if value is None else str(value)
+        candidate = text.upper()
+        for pattern in self._patterns:
+            if fnmatchcase(candidate, pattern):
+                return True
+        return False
+
+    def __len__(self) -> int:
+        return len(self._patterns)
+
+    def __repr__(self) -> str:  # pragma: no cover - debugging helper
+        return f"_LayerAllowlist(patterns={self._patterns!r})"
+
+
 def _normalize_layer_allowlist(
     layer_allowlist: Iterable[str] | None,
-) -> set[str] | None:
+) -> _LayerAllowlist | None:
     if layer_allowlist is None:
         return None
     special_tokens = {"ALL", "*", "<ALL>"}
-    normalized: set[str] = set()
+    normalized: list[str] = []
     for value in layer_allowlist:
         if value is None:
             continue
-        text = str(value).strip()
-        if not text:
-            continue
-        upper = text.upper()
-        if upper in special_tokens:
-            return None
-        normalized.add(upper)
-    if not normalized:
-        return set()
-    return normalized
+        if isinstance(value, str):
+            raw_values = value.split(",")
+        else:
+            raw_values = [value]
+        for item in raw_values:
+            text = str(item).strip()
+            if not text:
+                continue
+            upper = text.upper()
+            if upper in special_tokens:
+                return None
+            normalized.append(upper)
+    return _LayerAllowlist(normalized)
 
 
 @lru_cache(maxsize=1)
@@ -1019,6 +1056,13 @@ def _split_mtext_plain_text(text: Any) -> list[str]:
 _HOLE_ACTION_TOKEN_PATTERN = (
     r"(Ø|⌀|C['’]?BORE|COUNTER\s*BORE|DRILL|TAP|N\.?P\.?T|NPT|THRU|JIG\s*GRIND)"
 )
+_FRAGMENT_SPLIT_RE = re.compile(r";|(?<=\))\s+(?=\d+\))")
+_INCH_MARK_REF_RE = re.compile(r"\b(\d+(?:\.\d+)?)(?:\s*\"|[ ]?in\b)", re.IGNORECASE)
+_DIA_SYMBOL_INLINE_RE = re.compile(r"[Ø⌀]\s*(\d+(?:\.\d+)?)")
+_LETTER_DRILL_REF_RE = re.compile(r"\b([A-HJ-NP-Z])\"?\b")
+_NUMBER_DRILL_REF_RE = re.compile(r"#\d+\b")
+_PIPE_NPT_REF_RE = re.compile(r"\b(\d+\/\d+-\s*N\.?P\.?T\.?)", re.IGNORECASE)
+_THREAD_CALL_OUT_RE = re.compile(r"\b(\d+\/\d+|M\d+(?:\.\d+)?)-\d+\b", re.IGNORECASE)
 _ROW_QUANTITY_PATTERNS = [
     re.compile(r"^\(\s*(\d+)\s*\)", re.IGNORECASE),
     re.compile(r"^\s*(\d+)\s*[x×]\b", re.IGNORECASE),
@@ -1088,6 +1132,140 @@ _BAND_QTY_FALLBACK_PATTERNS = [
 ]
 
 _LAST_TEXT_TABLE_DEBUG: dict[str, Any] | None = None
+_PROMOTED_ROWS_LOGGED = False
+
+
+def _promoted_rows_preview_limit() -> int:
+    raw_value = os.environ.get("CAD_QUOTER_SHOW_ROWS")
+    if raw_value in (None, ""):
+        return 0
+    try:
+        limit = int(float(str(raw_value).strip()))
+    except Exception:
+        return 0
+    return max(limit, 0)
+
+
+def _clean_cell_text(value: Any) -> str:
+    if value is None:
+        return ""
+    return " ".join(str(value).split())
+
+
+def _normalize_for_dedupe(value: Any) -> str:
+    return _clean_cell_text(value).upper()
+
+
+def _classify_promoted_row(desc_upper: str) -> str:
+    if not desc_upper:
+        return "note"
+    tap_tokens = ("TAP", "THREAD", "NPT", "N.P.T", "NPTF", "NPS")
+    counterbore_tokens = ("COUNTERBORE", "COUNTER BORE", "C'BORE", "CBORE", "SPOTFACE", "SPOT FACE")
+    drill_tokens = (
+        "DRILL",
+        "THRU",
+        "Ø",
+        "⌀",
+        "DIA",
+        "CSK",
+        "C'SINK",
+        "COUNTERSINK",
+        "SPOT",
+        "REAM",
+        "JIG GRIND",
+        "CENTER DRILL",
+        "C DRILL",
+        "C’DRILL",
+    )
+    if any(token in desc_upper for token in tap_tokens):
+        return "tap"
+    if any(token in desc_upper for token in counterbore_tokens):
+        return "counterbore"
+    drill_hit = any(token in desc_upper for token in drill_tokens)
+    if ("NOTE" in desc_upper or desc_upper.startswith("SEE ")) and not drill_hit:
+        return "note"
+    return "drill"
+
+
+def _prepare_columnar_promoted_rows(
+    table_info: Mapping[str, Any] | None,
+) -> tuple[list[dict[str, Any]], int]:
+    rows_raw = _normalize_table_rows(table_info.get("rows") if isinstance(table_info, Mapping) else None)
+    seen: set[tuple[int, str, str, str]] = set()
+    grouped: dict[str, list[dict[str, Any]]] = {
+        "tap": [],
+        "counterbore": [],
+        "drill": [],
+    }
+    for row in rows_raw:
+        if not isinstance(row, Mapping):
+            continue
+        qty_raw = row.get("qty")
+        try:
+            qty_val = int(float(qty_raw or 0))
+        except Exception:
+            qty_val = 0
+        if qty_val <= 0:
+            continue
+        desc_clean = _clean_cell_text(row.get("desc"))
+        ref_clean = _clean_cell_text(row.get("ref"))
+        side_clean = _clean_cell_text(row.get("side"))
+        dedupe_key = (
+            qty_val,
+            _normalize_for_dedupe(ref_clean),
+            _normalize_for_dedupe(side_clean),
+            _normalize_for_dedupe(desc_clean),
+        )
+        if dedupe_key in seen:
+            continue
+        seen.add(dedupe_key)
+        prepared_row: dict[str, Any] = dict(row)
+        prepared_row["qty"] = qty_val
+        prepared_row["desc"] = desc_clean
+        prepared_row["ref"] = ref_clean
+        if side_clean:
+            prepared_row["side"] = side_clean
+        elif "side" in prepared_row:
+            prepared_row.pop("side")
+        prepared_row["hole"] = _clean_cell_text(row.get("hole"))
+        row_type = _classify_promoted_row(_normalize_for_dedupe(desc_clean))
+        if row_type == "note":
+            continue
+        grouped[row_type].append(prepared_row)
+    ordered_rows: list[dict[str, Any]] = []
+    for kind in ("tap", "counterbore", "drill"):
+        ordered_rows.extend(grouped[kind])
+    qty_sum = sum(row.get("qty", 0) for row in ordered_rows if isinstance(row.get("qty"), int))
+    return (ordered_rows, qty_sum)
+
+
+def _print_promoted_rows_once(rows: Iterable[Mapping[str, Any]]) -> None:
+    global _PROMOTED_ROWS_LOGGED
+    if _PROMOTED_ROWS_LOGGED:
+        return
+    limit = _promoted_rows_preview_limit()
+    if limit <= 0:
+        return
+    materialized = [dict(row) for row in rows if isinstance(row, Mapping)]
+    if not materialized:
+        return
+    count = min(limit, len(materialized))
+    print(f"[EXTRACT] promoted rows preview_count={count}")
+    for idx, row in enumerate(materialized[:count]):
+        qty_display = row.get("qty")
+        ref_display = row.get("ref") or "-"
+        side_display = row.get("side") or "-"
+        desc_display = row.get("desc") or ""
+        print(
+            "[EXTRACT] promoted row[{idx:02d}] qty={qty} ref={ref} side={side} desc={desc}".format(
+                idx=idx,
+                qty=qty_display,
+                ref=ref_display,
+                side=side_display,
+                desc=desc_display,
+            )
+        )
+    _PROMOTED_ROWS_LOGGED = True
 
 
 def _score_table(info: Mapping[str, Any] | None) -> tuple[int, int, int]:
@@ -1356,6 +1534,37 @@ def _iter_entity_text_fragments(entity: Any) -> Iterable[tuple[str, bool]]:
         for piece in base.splitlines():
             if piece.strip():
                 yield (piece, False)
+    elif kind == "MLEADER":
+        context = getattr(entity, "context", None)
+        if context is None:
+            return
+        mtext = getattr(context, "mtext", None)
+        if mtext is None:
+            raw_text = getattr(context, "text", "")
+            try:
+                base = str(raw_text)
+            except Exception:
+                base = raw_text if isinstance(raw_text, str) else ""
+            for piece in base.splitlines():
+                if piece.strip():
+                    yield (piece, True)
+            return
+        plain_text = getattr(mtext, "plain_text", None)
+        content = None
+        if callable(plain_text):
+            try:
+                content = plain_text()
+            except Exception:
+                content = None
+        if content is None:
+            content = getattr(mtext, "text", "")
+        try:
+            base = str(content)
+        except Exception:
+            base = content if isinstance(content, str) else ""
+        for piece in base.splitlines():
+            if piece.strip():
+                yield (piece, True)
     else:
         raw_text = getattr(entity, "text", "")
         if not raw_text:
@@ -1530,10 +1739,39 @@ def _extract_band_quantity(text: str) -> tuple[int | None, str]:
 
 
 def _extract_row_reference(desc: str) -> tuple[str, float | None]:
-    diameter = _extract_diameter(desc)
-    if diameter is not None and diameter > 0 and diameter <= 10:
-        return (_format_ref_value(diameter), diameter)
     search_space = desc or ""
+    diameter = _extract_diameter(search_space)
+    if diameter is not None and 0 < diameter <= 10:
+        return (_format_ref_value(diameter), diameter)
+
+    thread_match = _THREAD_CALL_OUT_RE.search(search_space)
+    if thread_match:
+        return (thread_match.group(0).upper(), None)
+
+    pipe_match = _PIPE_NPT_REF_RE.search(search_space)
+    if pipe_match:
+        return (pipe_match.group(1).upper().replace(" ", ""), None)
+
+    number_drill = _NUMBER_DRILL_REF_RE.search(search_space)
+    if number_drill:
+        return (number_drill.group(0).upper(), None)
+
+    letter_drill = _LETTER_DRILL_REF_RE.search(search_space)
+    if letter_drill:
+        return (letter_drill.group(1).upper(), None)
+
+    inch_match = _INCH_MARK_REF_RE.search(search_space)
+    if inch_match:
+        value = _parse_number_token(inch_match.group(1))
+        if value is not None and 0 < value <= 10:
+            return (_format_ref_value(value), value)
+
+    dia_inline = _DIA_SYMBOL_INLINE_RE.search(search_space)
+    if dia_inline:
+        value = _parse_number_token(dia_inline.group(1))
+        if value is not None and 0 < value <= 10:
+            return (_format_ref_value(value), value)
+
     for match in _FRACTION_RE.finditer(search_space):
         value = _parse_number_token(match.group(0))
         if value is not None and 0 < value <= 10:
@@ -2833,6 +3071,27 @@ def _build_columnar_table_from_entries(
             }
         )
 
+    synthetic_qty_mode = False
+    if column_count <= 1 and qty_groups_count == 0:
+        qty_style_hits = 0
+        considered_bands = 0
+        for band in bands_for_stats:
+            cells = band.get("cells", [])
+            if not cells:
+                continue
+            text_candidate = cells[0].strip()
+            if not text_candidate:
+                continue
+            considered_bands += 1
+            if _ROW_QUANTITY_PATTERNS[0].match(text_candidate) or _match_row_quantity(
+                text_candidate
+            ):
+                qty_style_hits += 1
+        if considered_bands >= 2:
+            threshold = max(2, math.ceil(considered_bands * 0.6))
+            if qty_style_hits >= threshold:
+                synthetic_qty_mode = True
+
     fallback_qty_col: int | None = header_cols.get("qty") if header_cols else None
     qty_candidates = [
         idx
@@ -2860,6 +3119,9 @@ def _build_columnar_table_from_entries(
                 fallback_qty_col = min(numericish_candidates)
             elif column_count > 0:
                 fallback_qty_col = 0
+
+    if synthetic_qty_mode:
+        fallback_qty_col = None
 
     qty_votes: dict[int, int] = defaultdict(int)
     qty_index_counts: dict[int, int] = defaultdict(int)
@@ -2926,6 +3188,8 @@ def _build_columnar_table_from_entries(
         qty_col = fallback_qty_col
     if "qty" in header_cols:
         qty_col = header_cols["qty"]
+    if synthetic_qty_mode and "qty" not in header_cols:
+        qty_col = None
 
     ref_candidates = [
         idx
@@ -2935,6 +3199,8 @@ def _build_columnar_table_from_entries(
     ref_col = max(ref_candidates) if ref_candidates else None
     if "ref" in header_cols:
         ref_col = header_cols["ref"]
+    elif synthetic_qty_mode:
+        ref_col = None
 
     desc_candidates = [idx for idx in range(column_count) if idx != qty_col and idx != ref_col]
     if not desc_candidates:
@@ -2948,11 +3214,16 @@ def _build_columnar_table_from_entries(
     if "desc" in header_cols:
         desc_col = header_cols["desc"]
 
+    qty_display = "synthetic" if synthetic_qty_mode else (qty_col if qty_col is not None else "None")
+    if synthetic_qty_mode and ref_col is None:
+        ref_display = "desc-extracted"
+    else:
+        ref_display = ref_col if ref_col is not None else "None"
     print(
         "[TABLE-ID] qty_x≈{qx} qty_col={qty} ref_col={ref} desc_col={desc} bands_checked={bands}".format(
             qx=qty_x_display,
-            qty=qty_col if qty_col is not None else "None",
-            ref=ref_col if ref_col is not None else "None",
+            qty=qty_display,
+            ref=ref_display,
             desc=desc_col,
             bands=len(bands_for_stats),
         )
@@ -2992,6 +3263,14 @@ def _build_columnar_table_from_entries(
         combined_row_text = " ".join(
             cell.strip() for cell in cells if cell.strip()
         )
+        if synthetic_qty_mode:
+            qty_token_present = bool(
+                _match_row_quantity(combined_row_text)
+                or _search_flexible_quantity(combined_row_text)
+            )
+            action_token_present = bool(_HOLE_ACTION_TOKEN_RE.search(combined_row_text))
+            if not qty_token_present and not action_token_present:
+                continue
         fallback_qty: int | None = None
         fallback_remainder = combined_row_text
         if combined_row_text:
@@ -3015,8 +3294,13 @@ def _build_columnar_table_from_entries(
             continue
         desc_idx = _resolved_index(desc_col, "desc")
         desc_text = _cell_at(cells, desc_idx)
+        original_desc_text = desc_text
         if used_qty_fallback:
             desc_text = fallback_desc or desc_text
+            if fallback_desc and qty_val is not None:
+                original_for_prefix = original_desc_text or combined_row_text
+                if _ROW_QUANTITY_PATTERNS[0].match(original_for_prefix or ""):
+                    desc_text = f"({qty_val}) {desc_text}".strip()
         if not desc_text:
             exclude_index = qty_idx if qty_idx is not None else qty_col
             fallback_parts = [
@@ -3035,18 +3319,8 @@ def _build_columnar_table_from_entries(
         hole_text = _cell_at(cells, hole_idx)
         side_idx = _resolved_index(header_cols.get("side"), "side")
         side_cell_text = _cell_at(cells, side_idx)
-        qty_token_text = ""
-        if combined_row_text:
-            qty_token_match = _RE_TEXT_ROW_START.match(combined_row_text)
-            if qty_token_match:
-                qty_token_text = qty_token_match.group(0).strip()
-            elif (
-                isinstance(qty_val, int)
-                and qty_val > 0
-                and combined_row_text.strip().startswith("(")
-            ):
-                qty_token_text = f"({qty_val})"
-        fragments = [frag.strip() for frag in desc_text.split(";") if frag.strip()]
+        fragment_candidates = _FRAGMENT_SPLIT_RE.split(desc_text)
+        fragments = [frag.strip() for frag in fragment_candidates if frag.strip()]
         if not fragments:
             fragments = [desc_text]
         for frag_index, fragment in enumerate(fragments):
@@ -3060,6 +3334,10 @@ def _build_columnar_table_from_entries(
             ):
                 fragment_desc = f"{qty_token_text} {fragment_desc}".strip()
             ref_text, ref_value = _extract_row_reference(fragment_desc)
+            has_action = bool(_HOLE_ACTION_TOKEN_RE.search(fragment_desc))
+            has_ref_marker = bool(ref_text or (ref_value is not None))
+            if not has_action and not has_ref_marker and not ref_cell_ref[0]:
+                continue
             if not ref_text and ref_cell_ref[0]:
                 ref_text, ref_value = ref_cell_ref
             combined_side_text = " ".join(
@@ -3209,6 +3487,7 @@ def _build_columnar_table_from_entries(
         "header_band": header_band_index,
         "bands_checked": len(bands_for_stats),
         "qty_x": qty_x,
+        "synthetic_qty": synthetic_qty_mode,
     }
     if roi_info is not None:
         debug_info["roi"] = roi_info
@@ -3539,7 +3818,7 @@ def read_text_table(
 ) -> dict[str, Any]:
     helper = _resolve_app_callable("extract_hole_table_from_text")
     _print_helper_debug("text", helper)
-    global _LAST_TEXT_TABLE_DEBUG
+    global _LAST_TEXT_TABLE_DEBUG, _PROMOTED_ROWS_LOGGED
     _LAST_TEXT_TABLE_DEBUG = {
         "candidates": [],
         "band_cells": [],
@@ -3604,12 +3883,16 @@ def read_text_table(
             return table_lines
 
         collected_entries: list[dict[str, Any]] = []
+        entries_by_layout: defaultdict[int, list[dict[str, Any]]] = defaultdict(list)
+        layout_names: dict[int, str] = {}
+        layout_order: list[int] = []
         merged_rows = []
         parsed_rows = []
         text_rows_info = None
         rows_txt_initial = 0
         hint_logged = False
         attrib_count = 0
+        mleader_count = 0
         preferred_block_names: list[str] = []
         preferred_block_rois: list[dict[str, Any]] = []
         block_height_samples: defaultdict[str, list[float]] = defaultdict(list)
@@ -3727,15 +4010,18 @@ def read_text_table(
         debug_enabled = _debug_entities_enabled()
 
         for layout_index, (layout_name, layout_obj) in enumerate(_iter_layouts()):
+            layout_names[layout_index] = layout_name
+            if layout_index not in layout_order:
+                layout_order.append(layout_index)
             query = getattr(layout_obj, "query", None)
             base_entities: list[Any] = []
             if callable(query):
                 try:
-                    base_entities = list(query("TEXT, MTEXT, INSERT"))
+                    base_entities = list(query("TEXT, MTEXT, MLEADER, INSERT"))
                 except Exception:
                     base_entities = []
                 if not base_entities:
-                    for spec in ("TEXT", "MTEXT", "INSERT"):
+                    for spec in ("TEXT", "MTEXT", "MLEADER", "INSERT"):
                         try:
                             base_entities.extend(list(query(spec)))
                         except Exception:
@@ -3793,7 +4079,7 @@ def read_text_table(
                 active_block: str | None,
             ) -> None:
                 nonlocal text_fragments, mtext_fragments, kept_count, from_blocks_count, counter
-                nonlocal attrib_count
+                nonlocal attrib_count, mleader_count
                 nonlocal hint_logged
                 if depth > _MAX_INSERT_DEPTH:
                     return
@@ -3811,7 +4097,7 @@ def read_text_table(
                     candidate = parent_effective_layer or layer_name or ""
                     effective_layer = candidate
                     effective_layer_upper = candidate.upper() if candidate else ""
-                if kind in {"TEXT", "MTEXT", "ATTRIB", "ATTDEF"}:
+                if kind in {"TEXT", "MTEXT", "ATTRIB", "ATTDEF", "MLEADER"}:
                     coords = _extract_coords(entity)
                     text_height = _extract_text_height(entity)
                     for fragment, is_mtext in _iter_entity_text_fragments(entity):
@@ -3820,6 +4106,8 @@ def read_text_table(
                             continue
                         if kind in {"ATTRIB", "ATTDEF"}:
                             attrib_count += 1
+                        elif kind == "MLEADER":
+                            mleader_count += 1
                         if (
                             not hint_logged
                             and "SEE SHEET 2 FOR HOLE CHART" in normalized.upper()
@@ -3845,6 +4133,7 @@ def read_text_table(
                         }
                         counter += 1
                         collected_entries.append(entry)
+                        entries_by_layout[layout_index].append(entry)
                         kept_count += 1
                         if (
                             active_block
@@ -3859,6 +4148,8 @@ def read_text_table(
                         if from_block:
                             from_blocks_count += 1
                 elif kind == "INSERT" and depth < _MAX_INSERT_DEPTH:
+                    attrib_before = attrib_count
+                    mleader_before = mleader_count
                     block_name = None
                     dxf_obj = getattr(entity, "dxf", None)
                     if dxf_obj is not None:
@@ -3948,6 +4239,17 @@ def read_text_table(
                         )
                     if name_str:
                         visited_blocks.discard(name_str)
+                    attrib_delta = attrib_count - attrib_before
+                    mleader_delta = mleader_count - mleader_before
+                    if attrib_delta or mleader_delta:
+                        print(
+                            "[INSERT] name={name} depth={depth} attrib={attrib} mleader={mleader}".format(
+                                name=name_str or "-",
+                                depth=depth,
+                                attrib=attrib_delta,
+                                mleader=mleader_delta,
+                            )
+                        )
 
             for entity in base_entities:
                 marker = id(entity)
@@ -3970,9 +4272,11 @@ def read_text_table(
         if preferred_block_names:
             print(f"[TEXT-SCAN] preferred_blocks={preferred_block_names}")
         _LAST_TEXT_TABLE_DEBUG["preferred_blocks"] = list(preferred_block_names)
+        _LAST_TEXT_TABLE_DEBUG["attrib_lines"] = attrib_count
+        _LAST_TEXT_TABLE_DEBUG["mleader_lines"] = mleader_count
         print(
-            f"[TEXT-SCAN] attrib_lines={attrib_count} depth_max={_MAX_INSERT_DEPTH} "
-            f"allow_layers={allowlist_display}"
+            f"[TEXT-SCAN] attrib_lines={attrib_count} mleader_lines={mleader_count} "
+            f"depth_max={_MAX_INSERT_DEPTH} allow_layers={allowlist_display}"
         )
 
         def _format_layer_summary(counts: Mapping[str, int]) -> str:
@@ -3992,21 +4296,38 @@ def read_text_table(
         print(f"[TEXT-SCAN] kept_by_layer(pre)={_format_layer_summary(layer_counts_pre)}")
 
         if resolved_allowlist is not None:
-            filtered_entries = [
-                entry
-                for entry in collected_entries
-                if not (entry.get("effective_layer_upper") or "")
-                or (entry.get("effective_layer_upper") or "") in resolved_allowlist
-            ]
+            filtered_entries: list[dict[str, Any]] = []
+            for layout_index in layout_order:
+                layout_entries = entries_by_layout.get(layout_index)
+                if not layout_entries:
+                    continue
+                layout_name = layout_names.get(layout_index, str(layout_index))
+                kept_for_layout = [
+                    entry
+                    for entry in layout_entries
+                    if not (entry.get("effective_layer_upper") or "")
+                    or (entry.get("effective_layer_upper") or "")
+                    in resolved_allowlist
+                ]
+                kept_count = len(kept_for_layout)
+                if kept_count == 0:
+                    print(
+                        "[LAYER] layout={layout} allow={allow} kept=0 → fallback=no-filter".format(
+                            layout=layout_name,
+                            allow=allowlist_display,
+                        )
+                    )
+                    filtered_entries.extend(layout_entries)
+                else:
+                    print(
+                        "[LAYER] layout={layout} allow={allow} kept={count}".format(
+                            layout=layout_name,
+                            allow=allowlist_display,
+                            count=kept_count,
+                        )
+                    )
+                    filtered_entries.extend(kept_for_layout)
         else:
-            filtered_entries = list(collected_entries)
-
-        if (
-            resolved_allowlist is not None
-            and not filtered_entries
-            and collected_entries
-        ):
-            print("[TEXT-SCAN] layer-allowlist emptied set; falling back to no layer filter")
             filtered_entries = list(collected_entries)
 
         layer_counts_post: dict[str, int] = defaultdict(int)
@@ -4142,8 +4463,10 @@ def read_text_table(
                     y_display = f"{float(y_val):.3f}"
                 else:
                     y_display = "-"
+                block_display = entry.get("block_name") or "-"
                 print(
-                    f"  [{idx:02d}] (x={x_display} y={y_display}) text=\"{entry.get('text', '')}\""
+                    f"  [{idx:02d}] (x={x_display} y={y_display}) block={block_display} "
+                    f"text=\"{entry.get('text', '')}\""
                 )
 
         normalized_entries: list[dict[str, Any]] = []
@@ -4178,6 +4501,7 @@ def read_text_table(
                 {
                     "layout": entry.get("layout_name"),
                     "in_block": bool(entry.get("from_block")),
+                    "block": entry.get("block_name"),
                     "x": entry.get("x"),
                     "y": entry.get("y"),
                     "text": entry.get("normalized_text")
@@ -4220,33 +4544,44 @@ def read_text_table(
                 if not text_value:
                     continue
                 qty_val, remainder = _extract_row_quantity_and_remainder(text_value)
+                remainder_clean = remainder.strip()
+                remainder_normalized = " ".join(remainder_clean.split())
+                qty_prefix: str | None = None
+                if text_value:
+                    match = _match_row_quantity(text_value)
+                    if match:
+                        qty_prefix = match.group(0).strip()
                 if qty_val is None or qty_val <= 0:
                     continue
                 side_hint = _detect_row_side(text_value)
-                qty_token_text = ""
-                qty_token_match = _RE_TEXT_ROW_START.match(text_value)
-                if qty_token_match:
-                    qty_token_text = qty_token_match.group(0).strip()
-                fragments = [frag.strip() for frag in remainder.split(";") if frag.strip()]
+                fragment_candidates = _FRAGMENT_SPLIT_RE.split(remainder)
+                fragments = [frag.strip() for frag in fragment_candidates if frag.strip()]
                 if not fragments:
-                    base_fragment = remainder.strip() or text_value
+                    base_fragment = remainder_clean or text_value
                     fragments = [base_fragment]
-                for frag_index, fragment in enumerate(fragments):
+                has_paren_prefix = bool(_ROW_QUANTITY_PATTERNS[0].match(text_value))
+                for fragment in fragments:
                     fragment_clean = " ".join(fragment.split())
                     if not fragment_clean:
                         continue
-                    if (
-                        frag_index == 0
-                        and qty_token_text
-                        and not _RE_TEXT_ROW_START.match(fragment_clean)
-                    ):
-                        fragment_clean = f"{qty_token_text} {fragment_clean}".strip()
+                    display_fragment = fragment_clean
+                    if len(fragments) == 1 and fragment_clean == remainder_normalized:
+                        display_fragment = text_value
+                    elif qty_prefix:
+                        prefix = qty_prefix
+                        qty_prefix = None
+                        if not display_fragment.startswith(prefix):
+                            display_fragment = f"{prefix} {display_fragment}".strip()
                     ref_text, ref_value = _extract_row_reference(fragment_clean)
+                    has_action = bool(_HOLE_ACTION_TOKEN_RE.search(fragment_clean))
+                    has_reference = bool(ref_text or (ref_value is not None))
+                    if not has_action and not has_reference:
+                        continue
                     side = _detect_row_side(fragment_clean) or side_hint
                     row_dict: dict[str, Any] = {
                         "hole": "",
                         "qty": qty_val,
-                        "desc": fragment_clean,
+                        "desc": display_fragment,
                         "ref": ref_text,
                     }
                     if side:
@@ -4376,6 +4711,7 @@ def read_text_table(
                 record = {
                     "layout_name": entry.get("layout_name"),
                     "from_block": bool(entry.get("from_block")),
+                    "block_name": entry.get("block_name"),
                     "x": entry.get("x"),
                     "y": entry.get("y"),
                     "height": entry.get("height"),
@@ -4399,6 +4735,7 @@ def read_text_table(
                 {
                     "layout": item.get("layout_name"),
                     "in_block": bool(item.get("from_block")),
+                    "block": item.get("block_name"),
                     "x": item.get("x"),
                     "y": item.get("y"),
                     "text": item.get("text"),
@@ -4564,23 +4901,25 @@ def read_text_table(
     elif isinstance(fallback_candidate, Mapping):
         primary_result = dict(fallback_candidate)
 
+    _PROMOTED_ROWS_LOGGED = False
+
     columnar_result: dict[str, Any] | None = None
     if isinstance(columnar_table_info, Mapping):
         columnar_result = dict(columnar_table_info)
+        promoted_rows, promoted_qty_sum = _prepare_columnar_promoted_rows(columnar_result)
+        columnar_result["rows"] = promoted_rows
+        if promoted_qty_sum > 0:
+            columnar_result["hole_count"] = promoted_qty_sum
+        columnar_result["source_label"] = "text_table (column-mode+stripe)"
 
     column_selected = False
     if columnar_result:
         existing_score = _score_table(primary_result)
         fallback_score = _score_table(columnar_result)
         if fallback_score[1] > 0 and fallback_score > existing_score:
-            rows_count = fallback_score[1]
-            qty_sum = fallback_score[0]
-            print(
-                f"[EXTRACT] promoted table rows={rows_count} qty_sum={qty_sum} "
-                "source=text_table (column-mode+stripe)"
-            )
             primary_result = columnar_result
             column_selected = True
+            _print_promoted_rows_once(columnar_result.get("rows", []))
 
     if primary_result is None:
         fallback = _fallback_text_table(lines)
@@ -4592,10 +4931,6 @@ def read_text_table(
 
     if column_selected:
         primary_result.setdefault("source", "text_table")
-        _LAST_TEXT_TABLE_DEBUG["rows"] = list(primary_result.get("rows", []))
-        return primary_result
-
-    primary_result.setdefault("source", "text_table")
     _LAST_TEXT_TABLE_DEBUG["rows"] = list(primary_result.get("rows", []))
     return primary_result
 
@@ -4879,7 +5214,12 @@ def promote_table_to_geo(geo: dict[str, Any], table_info: Mapping[str, Any], sou
         return
     ops_summary = geo.setdefault("ops_summary", {})
     ops_summary["rows"] = list(rows)
-    ops_summary["source"] = source_tag
+    source_label = source_tag
+    if isinstance(table_info, Mapping):
+        label_candidate = table_info.get("source_label") or table_info.get("source")
+        if isinstance(label_candidate, str) and label_candidate.strip():
+            source_label = label_candidate
+    ops_summary["source"] = source_label
     totals = defaultdict(int)
     for row in rows:
         if not isinstance(row, Mapping):
