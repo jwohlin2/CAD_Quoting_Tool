@@ -21,6 +21,116 @@ from cad_quoter.vendors import ezdxf as _ezdxf_vendor
 _HAS_ODAFC = bool(getattr(geometry, "HAS_ODAFC", False))
 
 _DEFAULT_LAYER_ALLOWLIST = frozenset({"BALLOON"})
+_PREFERRED_BLOCK_NAME_RE = re.compile(r"HOLE.*(?:CHART|TABLE)", re.IGNORECASE)
+
+
+def _normalize_block_allowlist(
+    block_allowlist: Iterable[str] | None,
+) -> set[str]:
+    if block_allowlist is None:
+        return set()
+    normalized: set[str] = set()
+    for value in block_allowlist:
+        if value is None:
+            continue
+        text = str(value).strip()
+        if not text:
+            continue
+        normalized.add(text.upper())
+    return normalized
+
+
+def _compile_block_name_patterns(
+    block_patterns: Iterable[str] | str | None,
+) -> list[re.Pattern[str]]:
+    if block_patterns is None:
+        return []
+    if isinstance(block_patterns, str):
+        candidates: Iterable[str] = [block_patterns]
+    else:
+        candidates = block_patterns
+    compiled: list[re.Pattern[str]] = []
+    for value in candidates:
+        if value is None:
+            continue
+        text = str(value).strip()
+        if not text:
+            continue
+        try:
+            compiled.append(re.compile(text, re.IGNORECASE))
+        except re.error:
+            continue
+    return compiled
+
+
+def _gather_entity_points(entity: Any) -> list[tuple[float, float]]:
+    points: list[tuple[float, float]] = []
+
+    def _append_value(value: Any) -> None:
+        if value is None:
+            return
+        if hasattr(value, "x") and hasattr(value, "y"):
+            try:
+                points.append((float(value.x), float(value.y)))
+            except Exception:
+                return
+            return
+        if isinstance(value, (tuple, list)):
+            if len(value) >= 2:
+                try:
+                    points.append((float(value[0]), float(value[1])))
+                except Exception:
+                    pass
+            for item in value:
+                _append_value(item)
+
+    for source in (getattr(entity, "dxf", None), entity):
+        if source is None:
+            continue
+        for attr in (
+            "insert",
+            "alignment_point",
+            "start",
+            "end",
+            "center",
+            "defpoint",
+            "base_point",
+            "location",
+        ):
+            _append_value(getattr(source, attr, None))
+    try:
+        iterator = iter(entity)
+    except Exception:
+        iterator = None
+    if iterator is not None:
+        for item in iterator:
+            _append_value(getattr(item, "dxf", None))
+            _append_value(item)
+    return points
+
+
+def _compute_entity_bbox(
+    entity: Any,
+    *,
+    include_virtual: bool = False,
+    virtual_entities: Iterable[Any] | None = None,
+) -> tuple[float, float, float, float] | None:
+    points = _gather_entity_points(entity)
+    if include_virtual:
+        if virtual_entities is None:
+            try:
+                virtual_entities = list(entity.virtual_entities())
+            except Exception:
+                virtual_entities = []
+        for child in virtual_entities or []:
+            points.extend(_gather_entity_points(child))
+    if not points:
+        return None
+    xs = [pt[0] for pt in points if isinstance(pt[0], (int, float))]
+    ys = [pt[1] for pt in points if isinstance(pt[1], (int, float))]
+    if not xs or not ys:
+        return None
+    return (min(xs), max(xs), min(ys), max(ys))
 
 
 def _normalize_layer_allowlist(
@@ -482,65 +592,16 @@ def read_acad_table(
                 return {}
         return hits
 
-    def _gather_points(entity: Any) -> list[tuple[float, float]]:
-        points: list[tuple[float, float]] = []
-
-        def _append_value(value: Any) -> None:
-            if value is None:
-                return
-            if hasattr(value, "x") and hasattr(value, "y"):
-                try:
-                    points.append((float(value.x), float(value.y)))
-                except Exception:
-                    return
-                return
-            if isinstance(value, (tuple, list)):
-                if len(value) >= 2:
-                    try:
-                        points.append((float(value[0]), float(value[1])))
-                    except Exception:
-                        pass
-                for item in value:
-                    _append_value(item)
-
-        for source in (getattr(entity, "dxf", None), entity):
-            if source is None:
-                continue
-            for attr in (
-                "insert",
-                "alignment_point",
-                "start",
-                "end",
-                "center",
-                "defpoint",
-                "base_point",
-                "location",
-            ):
-                _append_value(getattr(source, attr, None))
-        try:
-            iterator = iter(entity)
-        except Exception:
-            iterator = None
-        if iterator is not None:
-            for item in iterator:
-                _append_value(getattr(item, "dxf", None))
-                _append_value(item)
-        return points
-
     def _compute_table_bbox(entity: Any) -> tuple[float, float, float, float] | None:
         try:
             virtual_entities = list(entity.virtual_entities())
         except Exception:
             virtual_entities = []
-        all_points: list[tuple[float, float]] = []
-        for child in virtual_entities:
-            all_points.extend(_gather_points(child))
-        all_points.extend(_gather_points(entity))
-        if not all_points:
-            return None
-        xs = [pt[0] for pt in all_points]
-        ys = [pt[1] for pt in all_points]
-        return (min(xs), max(xs), min(ys), max(ys))
+        return _compute_entity_bbox(
+            entity,
+            include_virtual=True,
+            virtual_entities=virtual_entities,
+        )
 
     def _estimate_text_height(entity: Any, n_rows: int) -> float:
         heights: list[float] = []
@@ -1275,18 +1336,34 @@ def _build_columnar_table_from_entries(
                     roi_median_height = 0.0
                 handle = roi_hint.get("handle")
                 layer = roi_hint.get("layer")
-                print(
-                    "[ROI] seeded_from={src} handle={handle} layer={layer} "
-                    "box=[{xmin:.1f}..{xmax:.1f}, {ymin:.1f}..{ymax:.1f}]".format(
-                        src=source,
-                        handle=handle,
-                        layer=layer or "-",
-                        xmin=xmin,
-                        xmax=xmax,
-                        ymin=ymin,
-                        ymax=ymax,
+                block_name = roi_hint.get("name")
+                if block_name is not None:
+                    roi_info["name"] = block_name
+                if source.upper() == "BLOCK":
+                    print(
+                        "[ROI] seeded_from=BLOCK name={name} layer={layer} "
+                        "box=[{xmin:.1f}..{xmax:.1f}, {ymin:.1f}..{ymax:.1f}]".format(
+                            name=block_name or handle or "-",
+                            layer=layer or "-",
+                            xmin=xmin,
+                            xmax=xmax,
+                            ymin=ymin,
+                            ymax=ymax,
+                        )
                     )
-                )
+                else:
+                    print(
+                        "[ROI] seeded_from={src} handle={handle} layer={layer} "
+                        "box=[{xmin:.1f}..{xmax:.1f}, {ymin:.1f}..{ymax:.1f}]".format(
+                            src=source,
+                            handle=handle,
+                            layer=layer or "-",
+                            xmin=xmin,
+                            xmax=xmax,
+                            ymin=ymin,
+                            ymax=ymax,
+                        )
+                    )
 
     all_height_values = [
         float(rec["height"])
@@ -1485,9 +1562,9 @@ def _build_columnar_table_from_entries(
             f"[ROI] raw_lines -> roi_lines: {len(records_all)} -> {kept_count}"
         )
 
-    y_gap_limit = 0.75 * median_h if median_h > 0 else 3.0
+    y_gap_limit = 0.75 * median_h if median_h > 0 else 4.0
     if y_gap_limit <= 0:
-        y_gap_limit = 3.0
+        y_gap_limit = 4.0
 
     raw_bands: list[list[dict[str, Any]]] = []
     current_band: list[dict[str, Any]] = []
@@ -1501,13 +1578,15 @@ def _build_columnar_table_from_entries(
             prev_y = y_val
             continue
         band_center = current_sum_y / len(current_band)
-        within_prev = abs(y_val - prev_y) <= y_gap_limit if prev_y is not None else True
         within_center = abs(y_val - band_center) <= y_gap_limit
-        if within_prev and within_center:
+        if within_center:
             proposed_sum = current_sum_y + y_val
             proposed_count = len(current_band) + 1
             proposed_center = proposed_sum / proposed_count
-            if abs(proposed_center - band_center) <= y_gap_limit:
+            if (
+                abs(proposed_center - band_center) <= y_gap_limit
+                and abs(y_val - proposed_center) <= y_gap_limit
+            ):
                 current_band.append(record)
                 current_sum_y = proposed_sum
             else:
@@ -2407,6 +2486,8 @@ def read_text_table(
     *,
     layer_allowlist: Iterable[str] | None = _DEFAULT_LAYER_ALLOWLIST,
     roi_hint: Mapping[str, Any] | None = None,
+    block_name_allowlist: Iterable[str] | None = None,
+    block_name_regex: Iterable[str] | str | None = None,
 ) -> dict[str, Any]:
     helper = _resolve_app_callable("extract_hole_table_from_text")
     _print_helper_debug("text", helper)
@@ -2419,8 +2500,12 @@ def read_text_table(
         "raw_lines": [],
         "roi_hint": roi_hint,
         "roi": None,
+        "preferred_blocks": [],
     }
+    roi_hint_effective: Mapping[str, Any] | None = roi_hint
     resolved_allowlist = _normalize_layer_allowlist(layer_allowlist)
+    normalized_block_allow = _normalize_block_allowlist(block_name_allowlist)
+    block_regex_patterns = _compile_block_name_patterns(block_name_regex)
     allowlist_display = (
         "None"
         if resolved_allowlist is None
@@ -2466,7 +2551,7 @@ def read_text_table(
 
     def ensure_lines() -> list[str]:
         nonlocal table_lines, text_rows_info, merged_rows, parsed_rows
-        nonlocal columnar_table_info, columnar_debug_info
+        nonlocal columnar_table_info, columnar_debug_info, roi_hint_effective
         if table_lines is not None:
             return table_lines
 
@@ -2477,6 +2562,9 @@ def read_text_table(
         rows_txt_initial = 0
         hint_logged = False
         attrib_count = 0
+        preferred_block_names: list[str] = []
+        preferred_block_rois: list[dict[str, Any]] = []
+        block_height_samples: defaultdict[str, list[float]] = defaultdict(list)
 
         if doc is None:
             table_lines = []
@@ -2648,7 +2736,14 @@ def read_text_table(
                         attr_seen.add(marker)
                         yield attr_entity
 
-            def _process_entity(entity: Any, *, depth: int, from_block: bool) -> None:
+            def _process_entity(
+                entity: Any,
+                *,
+                depth: int,
+                from_block: bool,
+                parent_effective_layer: str | None,
+                active_block: str | None,
+            ) -> None:
                 nonlocal text_fragments, mtext_fragments, kept_count, from_blocks_count, counter
                 nonlocal attrib_count
                 nonlocal hint_logged
@@ -2660,10 +2755,17 @@ def read_text_table(
                 except Exception:
                     dxftype = None
                 kind = str(dxftype or "").upper()
+                layer_name = _extract_layer(entity)
+                layer_upper = layer_name.upper() if layer_name else ""
+                effective_layer = layer_name
+                effective_layer_upper = layer_upper
+                if not effective_layer_upper or effective_layer_upper == "0":
+                    candidate = parent_effective_layer or layer_name or ""
+                    effective_layer = candidate
+                    effective_layer_upper = candidate.upper() if candidate else ""
                 if kind in {"TEXT", "MTEXT", "ATTRIB", "ATTDEF"}:
                     coords = _extract_coords(entity)
                     text_height = _extract_text_height(entity)
-                    layer_name = _extract_layer(entity)
                     for fragment, is_mtext in _iter_entity_text_fragments(entity):
                         normalized = _normalize_table_fragment(fragment)
                         if not normalized:
@@ -2688,11 +2790,20 @@ def read_text_table(
                             "from_block": from_block,
                             "height": text_height,
                             "layer": layer_name,
-                            "layer_upper": layer_name.upper() if layer_name else "",
+                            "layer_upper": layer_upper,
+                            "effective_layer": effective_layer,
+                            "effective_layer_upper": effective_layer_upper,
+                            "block_name": active_block,
                         }
                         counter += 1
                         collected_entries.append(entry)
                         kept_count += 1
+                        if (
+                            active_block
+                            and isinstance(text_height, (int, float))
+                            and float(text_height) > 0
+                        ):
+                            block_height_samples[active_block].append(float(text_height))
                         if is_mtext:
                             mtext_fragments += 1
                         else:
@@ -2715,9 +2826,41 @@ def read_text_table(
                         virtual_entities = list(entity.virtual_entities())
                     except Exception:
                         virtual_entities = []
+                    child_parent_layer = effective_layer or parent_effective_layer
+                    is_preferred_block = False
+                    if name_str:
+                        name_upper = name_str.upper()
+                        if name_upper in normalized_block_allow:
+                            is_preferred_block = True
+                        elif any(pattern.search(name_str) for pattern in block_regex_patterns):
+                            is_preferred_block = True
+                        elif _PREFERRED_BLOCK_NAME_RE.search(name_str):
+                            is_preferred_block = True
+                    if is_preferred_block and name_str:
+                        if name_str not in preferred_block_names:
+                            preferred_block_names.append(name_str)
+                        bbox = _compute_entity_bbox(
+                            entity,
+                            include_virtual=True,
+                            virtual_entities=virtual_entities,
+                        )
+                        if bbox is not None:
+                            preferred_block_rois.append(
+                                {
+                                    "name": name_str,
+                                    "layer": effective_layer or layer_name,
+                                    "bbox": bbox,
+                                }
+                            )
                     if virtual_entities:
                         for child in virtual_entities:
-                            _process_entity(child, depth=depth + 1, from_block=True)
+                            _process_entity(
+                                child,
+                                depth=depth + 1,
+                                from_block=True,
+                                parent_effective_layer=child_parent_layer,
+                                active_block=name_str or active_block,
+                            )
                     else:
                         blocks = getattr(doc, "blocks", None)
                         block_layout = None
@@ -2730,9 +2873,21 @@ def read_text_table(
                                     block_layout = None
                         if block_layout is not None and depth + 1 <= _MAX_INSERT_DEPTH:
                             for child in block_layout:
-                                _process_entity(child, depth=depth + 1, from_block=True)
+                                _process_entity(
+                                    child,
+                                    depth=depth + 1,
+                                    from_block=True,
+                                    parent_effective_layer=child_parent_layer,
+                                    active_block=name_str or active_block,
+                                )
                     for attribute in _iter_insert_attributes(entity):
-                        _process_entity(attribute, depth=depth + 1, from_block=True)
+                        _process_entity(
+                            attribute,
+                            depth=depth + 1,
+                            from_block=True,
+                            parent_effective_layer=child_parent_layer,
+                            active_block=name_str or active_block,
+                        )
                     if name_str:
                         visited_blocks.discard(name_str)
 
@@ -2741,40 +2896,107 @@ def read_text_table(
                 if marker in seen_entities:
                     continue
                 seen_entities.add(marker)
-                _process_entity(entity, depth=0, from_block=False)
+                _process_entity(
+                    entity,
+                    depth=0,
+                    from_block=False,
+                    parent_effective_layer=None,
+                    active_block=None,
+                )
 
             print(
                 f"[TEXT-SCAN] layout={layout_name} text={text_fragments} "
                 f"mtext={mtext_fragments} kept={kept_count} from_blocks={from_blocks_count}"
             )
 
+        if preferred_block_names:
+            print(f"[TEXT-SCAN] preferred_blocks={preferred_block_names}")
+        _LAST_TEXT_TABLE_DEBUG["preferred_blocks"] = list(preferred_block_names)
         print(
             f"[TEXT-SCAN] attrib_lines={attrib_count} depth_max={_MAX_INSERT_DEPTH} "
             f"allow_layers={allowlist_display}"
         )
 
+        def _format_layer_summary(counts: Mapping[str, int]) -> str:
+            if not counts:
+                return "{}"
+            top = sorted(counts.items(), key=lambda item: (-item[1], item[0]))[:5]
+            return "{" + ", ".join(f"{name or '-'}:{count}" for name, count in top) + "}"
+
+        layer_counts_pre: dict[str, int] = defaultdict(int)
+        for entry in collected_entries:
+            layer_key = str(
+                entry.get("effective_layer")
+                or entry.get("layer")
+                or ""
+            ).strip()
+            layer_counts_pre[layer_key] += 1
+        print(f"[TEXT-SCAN] kept_by_layer(pre)={_format_layer_summary(layer_counts_pre)}")
+
         if resolved_allowlist is not None:
             filtered_entries = [
                 entry
                 for entry in collected_entries
-                if not (entry.get("layer_upper") or "")
-                or (entry.get("layer_upper") or "") in resolved_allowlist
+                if not (entry.get("effective_layer_upper") or "")
+                or (entry.get("effective_layer_upper") or "") in resolved_allowlist
             ]
         else:
             filtered_entries = list(collected_entries)
 
-        layer_counts: dict[str, int] = defaultdict(int)
+        if (
+            resolved_allowlist is not None
+            and not filtered_entries
+            and collected_entries
+        ):
+            print("[TEXT-SCAN] layer-allowlist emptied set; falling back to no layer filter")
+            filtered_entries = list(collected_entries)
+
+        layer_counts_post: dict[str, int] = defaultdict(int)
         for entry in filtered_entries:
-            layer_key = str(entry.get("layer") or "").strip()
-            layer_counts[layer_key] += 1
-        top_layers = sorted(layer_counts.items(), key=lambda item: (-item[1], item[0]))[:5]
-        if top_layers:
-            summary = "{" + ", ".join(f"{name or '-'}:{count}" for name, count in top_layers) + "}"
-        else:
-            summary = "{}"
-        print(f"[TEXT-SCAN] kept_by_layer={summary}")
+            layer_key = str(
+                entry.get("effective_layer")
+                or entry.get("layer")
+                or ""
+            ).strip()
+            layer_counts_post[layer_key] += 1
+        print(
+            f"[TEXT-SCAN] kept_by_layer(post-allow)={_format_layer_summary(layer_counts_post)}"
+        )
 
         collected_entries = filtered_entries
+
+        if roi_hint_effective is None and preferred_block_rois:
+            block_hint: Mapping[str, Any] | None = None
+            for block_info in preferred_block_rois:
+                bbox = block_info.get("bbox")
+                if not bbox:
+                    continue
+                name = block_info.get("name")
+                layer = block_info.get("layer")
+                heights = block_height_samples.get(str(name) if name else "")
+                median_height = (
+                    statistics.median(heights)
+                    if heights
+                    else 0.0
+                )
+                pad = 2.0 * median_height if median_height > 0 else 6.0
+                block_hint = {
+                    "source": "BLOCK",
+                    "name": name,
+                    "layer": layer,
+                    "bbox": [
+                        float(bbox[0]),
+                        float(bbox[1]),
+                        float(bbox[2]),
+                        float(bbox[3]),
+                    ],
+                    "pad": pad,
+                    "median_height": median_height,
+                }
+                break
+            if block_hint is not None:
+                roi_hint_effective = block_hint
+                _LAST_TEXT_TABLE_DEBUG["roi_hint"] = dict(block_hint)
 
         if not collected_entries:
             table_lines = []
@@ -3092,7 +3314,7 @@ def read_text_table(
             )
             if raw_lines:
                 table_candidate, debug_payload = _build_columnar_table_from_entries(
-                    raw_lines, roi_hint=roi_hint
+                    raw_lines, roi_hint=roi_hint_effective
                 )
                 columnar_table_info = table_candidate
                 columnar_debug_info = debug_payload
@@ -3663,6 +3885,8 @@ def read_geo(
     prefer_table: bool = True,
     feature_flags: Mapping[str, Any] | None = None,
     layer_allowlist: Iterable[str] | None = _DEFAULT_LAYER_ALLOWLIST,
+    block_name_allowlist: Iterable[str] | None = None,
+    block_name_regex: Iterable[str] | str | None = None,
 ) -> dict[str, Any]:
     """Process a loaded DXF/DWG document into GEO payload details."""
 
@@ -3717,6 +3941,8 @@ def read_geo(
             doc,
             layer_allowlist=layer_allowlist,
             roi_hint=acad_roi_hint,
+            block_name_allowlist=block_name_allowlist,
+            block_name_regex=block_name_regex,
         ) or {}
     except TypeError as exc:
         if "layer_allowlist" in str(exc) or "roi_hint" in str(exc):
@@ -3856,6 +4082,8 @@ def extract_geo_from_path(
     use_oda: bool = True,
     feature_flags: Mapping[str, Any] | None = None,
     layer_allowlist: Iterable[str] | None = _DEFAULT_LAYER_ALLOWLIST,
+    block_name_allowlist: Iterable[str] | None = None,
+    block_name_regex: Iterable[str] | str | None = None,
 ) -> dict[str, Any]:
     """Load DWG/DXF at ``path`` and return a GEO dictionary."""
 
@@ -3871,6 +4099,8 @@ def extract_geo_from_path(
         prefer_table=prefer_table,
         feature_flags=feature_flags,
         layer_allowlist=layer_allowlist,
+        block_name_allowlist=block_name_allowlist,
+        block_name_regex=block_name_regex,
     )
     geo = payload.get("geo")
     if isinstance(geo, dict):
@@ -3885,6 +4115,8 @@ def extract_geo_from_path(
     use_oda: bool = True,
     feature_flags: Mapping[str, Any] | None = None,
     layer_allowlist: Iterable[str] | None = _DEFAULT_LAYER_ALLOWLIST,
+    block_name_allowlist: Iterable[str] | None = None,
+    block_name_regex: Iterable[str] | str | None = None,
 ) -> dict[str, Any]:
     """Load DWG/DXF at ``path`` and return a GEO dictionary."""
 
@@ -3900,6 +4132,8 @@ def extract_geo_from_path(
         prefer_table=prefer_table,
         feature_flags=feature_flags,
         layer_allowlist=layer_allowlist,
+        block_name_allowlist=block_name_allowlist,
+        block_name_regex=block_name_regex,
     )
 
 

@@ -60,6 +60,18 @@ def main(argv: Sequence[str] | None = None) -> int:
         action="append",
         help="Restrict table/text scans to the specified layer (repeatable; use ALL to disable filtering)",
     )
+    parser.add_argument(
+        "--block-allow",
+        dest="block_allow",
+        action="append",
+        help="Treat INSERTs with these block names as preferred ROI seeds (repeatable)",
+    )
+    parser.add_argument(
+        "--block-regex",
+        dest="block_regex",
+        action="append",
+        help="Regex pattern to match INSERT block names for ROI seeding (repeatable)",
+    )
     args = parser.parse_args(argv)
 
     path = (args.path or os.environ.get("GEO_DUMP_PATH") or "").strip()
@@ -119,6 +131,26 @@ def main(argv: Sequence[str] | None = None) -> int:
             if allowlist_set:
                 read_kwargs["layer_allowlist"] = allowlist_set
                 print(f"[geo_dump] layer_allow={sorted(allowlist_set)}")
+    block_allow_args = args.block_allow or []
+    if block_allow_args:
+        normalized_blocks = [
+            value.strip()
+            for value in block_allow_args
+            if isinstance(value, str) and value.strip()
+        ]
+        if normalized_blocks:
+            read_kwargs["block_name_allowlist"] = normalized_blocks
+            print(f"[geo_dump] block_allow={normalized_blocks}")
+    block_regex_args = args.block_regex or []
+    if block_regex_args:
+        normalized_patterns = [
+            value.strip()
+            for value in block_regex_args
+            if isinstance(value, str) and value.strip()
+        ]
+        if normalized_patterns:
+            read_kwargs["block_name_regex"] = normalized_patterns
+            print(f"[geo_dump] block_regex={normalized_patterns}")
     payload = read_geo(doc, **read_kwargs)
     if not isinstance(payload, Mapping):
         payload = {}
