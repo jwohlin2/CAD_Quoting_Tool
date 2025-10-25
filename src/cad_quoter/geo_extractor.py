@@ -117,8 +117,13 @@ _COLUMN_TOKEN_RE = re.compile(
     r"(TAP|DRILL|THRU|C['’]?BORE|COUNTER\s*BORE|N\.?P\.?T|NPT|Ø|JIG)",
     re.IGNORECASE,
 )
+_QSTRIPE_CANDIDATE_RE = re.compile(
+    r"(^\(?\d{1,3}\)?$|^\d{1,3}[x×]$|^QTY[:.]?$)",
+    re.IGNORECASE,
+)
 _ROI_ANCHOR_RE = re.compile(
-    r"(TAP|DRILL|THRU|C['’]?BORE|CBORE|COUNTER\s*BORE|N\.?P\.?T|NPT|JIG\s*GRIND|Ø)",
+    r"(HOLE\s+CHART|HOLE\s+TABLE|QTY|SIZE|DIA|Ø|⌀|TAP|DRILL|THRU|C['’]?BORE|"
+    r"COUNTER\s*BORE|N\.?P\.?T|JIG)",
     re.IGNORECASE,
 )
 _TITLE_AXIS_DROP_RE = re.compile(
@@ -553,10 +558,10 @@ def _build_columnar_table_from_entries(
                     y_anchor_eps = 1.8 * median_height if median_height > 0 else 0.0
                 elif anchor_y_diffs:
                     median_diff = statistics.median(anchor_y_diffs)
-                    y_anchor_eps = 1.8 * median_diff if median_diff > 0 else 0.0
+                    y_anchor_eps = 0.5 * median_diff if median_diff > 0 else 0.0
                 else:
                     y_anchor_eps = 0.0
-                y_anchor_eps = max(8.0, y_anchor_eps)
+                y_anchor_eps = max(6.0, y_anchor_eps)
                 current_cluster: list[dict[str, Any]] | None = None
                 prev_anchor: dict[str, Any] | None = None
                 for anchor in sorted_anchors:
@@ -598,39 +603,42 @@ def _build_columnar_table_from_entries(
         cluster_xmax = max(rec["x"] for rec in chosen_cluster)
         cluster_ymin = min(rec["y"] for rec in chosen_cluster)
         cluster_ymax = max(rec["y"] for rec in chosen_cluster)
-        dx = 60.0
-        dy = 80.0
-        expanded_box = [cluster_xmin - dx, cluster_xmax + dx, cluster_ymin - dy, cluster_ymax + dy]
-        roi_records = [
+        dx = 40.0
+        dy = 50.0
+        expanded_xmin = cluster_xmin - dx
+        expanded_xmax = cluster_xmax + dx
+        expanded_ymin = cluster_ymin - dy
+        expanded_ymax = cluster_ymax + dy
+        filtered_records = [
             rec
             for rec in records_all
-            if expanded_box[0] <= rec["x"] <= expanded_box[1]
-            and expanded_box[2] <= rec["y"] <= expanded_box[3]
+            if expanded_xmin <= rec["x"] <= expanded_xmax
+            and expanded_ymin <= rec["y"] <= expanded_ymax
         ]
-        cluster_count = len(clusters)
+        clusters_count = len(clusters) or 1
         print(
             "[ROI] anchors={count} clusters={clusters} chosen_span=[{ymax:.1f}..{ymin:.1f}] "
-            "expanded=[{xmin:.1f}..{xmax:.1f}, {eymin:.1f}..{eymax:.1f}]".format(
+            "bbox=[{xmin:.1f}..{xmax:.1f}] expanded=[{xmin_exp:.1f}..{xmax_exp:.1f},{ymin_exp:.1f}..{ymax_exp:.1f}]".format(
                 count=anchor_count,
-                clusters=cluster_count,
+                clusters=clusters_count,
                 ymax=cluster_ymax,
                 ymin=cluster_ymin,
-                xmin=expanded_box[0],
-                xmax=expanded_box[1],
-                eymin=expanded_box[2],
-                eymax=expanded_box[3],
+                xmin=cluster_xmin,
+                xmax=cluster_xmax,
+                xmin_exp=expanded_xmin,
+                xmax_exp=expanded_xmax,
+                ymin_exp=expanded_ymin,
+                ymax_exp=expanded_ymax,
             )
         )
-        if roi_records:
-            filtered_records = roi_records
         print(
             f"[ROI] raw_lines -> roi_lines: {len(records_all)} -> {len(filtered_records)}"
         )
         roi_info = {
             "anchors": anchor_count,
-            "clusters": cluster_count,
+            "clusters": clusters_count,
             "bbox": [cluster_xmin, cluster_xmax, cluster_ymin, cluster_ymax],
-            "expanded": expanded_box,
+            "expanded": [expanded_xmin, expanded_xmax, expanded_ymin, expanded_ymax],
             "total": len(records_all),
             "kept": len(filtered_records),
         }
@@ -717,6 +725,94 @@ def _build_columnar_table_from_entries(
             )
             continue
         bands.append(band)
+
+    qty_x: float | None = None
+    qty_groups: list[dict[str, Any]] = []
+    selected_qty_group: dict[str, Any] | None = None
+    qty_candidates: list[dict[str, Any]] = []
+    for band in bands:
+        for item in band:
+            text_candidate = (item.get("text") or "").strip()
+            if not text_candidate:
+                continue
+            if _QSTRIPE_CANDIDATE_RE.match(text_candidate):
+                qty_candidates.append({"x": item.get("x"), "text": text_candidate})
+
+    if qty_candidates:
+        valid_candidates = [
+            {"x": float(candidate["x"]), "text": candidate["text"]}
+            for candidate in qty_candidates
+            if isinstance(candidate.get("x"), (int, float))
+        ]
+        sorted_candidates = sorted(valid_candidates, key=lambda rec: rec["x"])
+        x_diffs = [
+            abs(sorted_candidates[idx]["x"] - sorted_candidates[idx - 1]["x"])
+            for idx in range(1, len(sorted_candidates))
+            if abs(sorted_candidates[idx]["x"] - sorted_candidates[idx - 1]["x"]) > 0
+        ]
+        if x_diffs:
+            median_diff = statistics.median(x_diffs)
+            x_stripe_eps = 0.6 * median_diff if median_diff > 0 else 0.0
+        else:
+            x_stripe_eps = 0.0
+        x_stripe_eps = max(4.0, x_stripe_eps)
+        for candidate in sorted_candidates:
+            x_pos = candidate["x"]
+            if not qty_groups:
+                qty_groups.append(
+                    {
+                        "items": [candidate],
+                        "count": 1,
+                        "sum_x": x_pos,
+                        "center": x_pos,
+                    }
+                )
+                continue
+            group = qty_groups[-1]
+            if abs(x_pos - group["center"]) <= x_stripe_eps:
+                group["items"].append(candidate)
+                group["count"] += 1
+                group["sum_x"] += x_pos
+                group["center"] = group["sum_x"] / group["count"]
+            else:
+                qty_groups.append(
+                    {
+                        "items": [candidate],
+                        "count": 1,
+                        "sum_x": x_pos,
+                        "center": x_pos,
+                    }
+                )
+        if qty_groups:
+            chosen_group = max(
+                qty_groups,
+                key=lambda group: (
+                    group.get("count", 0),
+                    -group.get("center", float("inf")),
+                ),
+            )
+            qty_x = chosen_group.get("center")
+            selected_qty_group = chosen_group
+    qty_groups_count = len(qty_groups)
+    qty_group_size = 0
+    qty_x_display = "-"
+    if qty_groups:
+        if selected_qty_group is None:
+            selected_qty_group = max(
+                qty_groups,
+                key=lambda group: (
+                    group.get("count", 0),
+                    -group.get("center", 0.0),
+                ),
+            )
+        qty_group_size = selected_qty_group.get("count", 0)
+        if qty_x is None:
+            qty_x = selected_qty_group.get("center")
+        if isinstance(qty_x, (int, float)):
+            qty_x_display = f"{float(qty_x):.1f}"
+    print(
+        f"[QSTRIPE] groups={qty_groups_count} chosen_x≈{qty_x_display} count={qty_group_size}"
+    )
 
     if not bands:
         return (
@@ -810,7 +906,15 @@ def _build_columnar_table_from_entries(
             preview_body = " | ".join(preview_parts)
             print(f"[TABLE-X] band#{band_index} cols={len(columns)} | {preview_body}")
 
-        band_results.append({"cells": cell_texts, "y_mean": mean_y, "line_count": len(band)})
+        band_results.append(
+            {
+                "cells": cell_texts,
+                "y_mean": mean_y,
+                "line_count": len(band),
+                "centers": [column["center_x"] for column in columns],
+                "x_eps": x_eps,
+            }
+        )
 
     if not band_results:
         return (
@@ -879,21 +983,23 @@ def _build_columnar_table_from_entries(
             }
         )
 
+    fallback_qty_col: int | None = None
     qty_candidates = [
         idx
         for idx, info in enumerate(metrics)
         if info["header_qty"] or (info["non_empty"] > 0 and info["numeric_ratio"] >= 0.6)
     ]
-    qty_col = min(qty_candidates) if qty_candidates else None
+    if qty_candidates:
+        fallback_qty_col = min(qty_candidates)
 
-    if qty_col is None:
+    if fallback_qty_col is None:
         relaxed_candidates = [
             idx
             for idx, info in enumerate(metrics)
             if info["non_empty"] > 0 and info["numeric_ratio"] >= 0.4
         ]
         if relaxed_candidates:
-            qty_col = min(relaxed_candidates)
+            fallback_qty_col = min(relaxed_candidates)
         else:
             numericish_candidates = [
                 idx
@@ -901,9 +1007,65 @@ def _build_columnar_table_from_entries(
                 if info["numeric_hits"] > 0 or info["numeric_ratio"] > 0
             ]
             if numericish_candidates:
-                qty_col = min(numericish_candidates)
+                fallback_qty_col = min(numericish_candidates)
             elif column_count > 0:
-                qty_col = 0
+                fallback_qty_col = 0
+
+    qty_votes: dict[int, int] = defaultdict(int)
+    qty_index_counts: dict[int, int] = defaultdict(int)
+    for band_idx, band in enumerate(band_results):
+        cells = band.get("cells", [])
+        centers = band.get("centers") or []
+        x_eps_band = float(band.get("x_eps") or 0.0)
+        qty_idx: int | None = None
+        qty_cell_text = ""
+        if qty_x is not None and centers:
+            center_pairs = [
+                (col_index, float(center))
+                for col_index, center in enumerate(centers)
+                if isinstance(center, (int, float))
+            ]
+            if center_pairs:
+                closest_index, closest_center = min(
+                    center_pairs,
+                    key=lambda pair: (abs(pair[1] - qty_x), pair[0]),
+                )
+                qty_idx = closest_index
+                if qty_idx < len(cells):
+                    qty_cell_text = cells[qty_idx].strip()
+                if not integer_re.match(qty_cell_text):
+                    within_eps: list[tuple[int, float]] = []
+                    for col_index, center_value in center_pairs:
+                        if abs(center_value - qty_x) <= x_eps_band + 1e-6:
+                            if col_index < len(cells):
+                                candidate_text = cells[col_index].strip()
+                                if integer_re.match(candidate_text):
+                                    within_eps.append(
+                                        (col_index, abs(center_value - qty_x))
+                                    )
+                    if within_eps:
+                        best_index, _ = min(
+                            within_eps, key=lambda pair: (pair[1], pair[0])
+                        )
+                        qty_idx = best_index
+                        qty_cell_text = cells[qty_idx].strip() if qty_idx < len(cells) else ""
+        if qty_idx is None and fallback_qty_col is not None:
+            if fallback_qty_col < len(cells):
+                qty_idx = fallback_qty_col
+                qty_cell_text = cells[qty_idx].strip()
+        band["qty_index"] = qty_idx
+        if qty_idx is not None:
+            qty_index_counts[qty_idx] += 1
+            if band_idx < len(bands_for_stats) and integer_re.match(qty_cell_text or ""):
+                qty_votes[qty_idx] += 1
+
+    qty_col: int | None = None
+    if qty_votes:
+        qty_col = max(qty_votes.items(), key=lambda item: (item[1], -item[0]))[0]
+    elif qty_index_counts:
+        qty_col = max(qty_index_counts.items(), key=lambda item: (item[1], -item[0]))[0]
+    else:
+        qty_col = fallback_qty_col
 
     ref_candidates = [
         idx
@@ -923,7 +1085,8 @@ def _build_columnar_table_from_entries(
     desc_col = max(desc_candidates, key=_desc_score)
 
     print(
-        "[TABLE-ID] qty_col={qty} ref_col={ref} desc_col={desc} bands_checked={bands}".format(
+        "[TABLE-ID] qty_x≈{qx} qty_col={qty} ref_col={ref} desc_col={desc} bands_checked={bands}".format(
+            qx=qty_x_display,
             qty=qty_col if qty_col is not None else "None",
             ref=ref_col if ref_col is not None else "None",
             desc=desc_col,
@@ -942,24 +1105,33 @@ def _build_columnar_table_from_entries(
     families: dict[str, int] = {}
     for band_index, band in enumerate(band_results):
         cells = band.get("cells", [])
-        qty_text = _cell_at(cells, qty_col)
+        qty_idx = band.get("qty_index")
+        if qty_idx is None:
+            qty_idx = qty_col
+        qty_text = _cell_at(cells, qty_idx)
         if not qty_text:
             continue
-        qty_match = re.match(r"^\s*(\d{1,3})\b", qty_text)
-        if not qty_match:
+        qty_clean = qty_text.strip().upper()
+        if not qty_clean:
+            continue
+        qty_clean = re.sub(r"^QTY[:.]?", "", qty_clean).strip()
+        qty_clean = qty_clean.strip("()")
+        qty_clean = qty_clean.rstrip("X×").strip()
+        if not qty_clean or not integer_re.match(qty_clean):
             continue
         try:
-            qty_val = int(qty_match.group(1))
+            qty_val = int(qty_clean)
         except Exception:
             continue
         if qty_val <= 0:
             continue
         desc_text = _cell_at(cells, desc_col)
         if not desc_text:
+            exclude_index = qty_idx if qty_idx is not None else qty_col
             fallback_parts = [
                 cell.strip()
                 for idx, cell in enumerate(cells)
-                if idx != qty_col and cell.strip()
+                if idx != exclude_index and cell.strip()
             ]
             desc_text = " ".join(fallback_parts)
         desc_text = " ".join((desc_text or "").split())
@@ -1073,6 +1245,7 @@ def _build_columnar_table_from_entries(
         "desc_col": desc_col,
         "y_eps": y_eps,
         "bands_checked": len(bands_for_stats),
+        "qty_x": qty_x,
     }
     if roi_info is not None:
         debug_info["roi"] = roi_info
@@ -1873,7 +2046,7 @@ def read_text_table(doc) -> dict[str, Any]:
             qty_sum = fallback_score[0]
             print(
                 f"[EXTRACT] promoted table rows={rows_count} qty_sum={qty_sum} "
-                "source=text_table (column-mode)"
+                "source=text_table (column-mode+stripe)"
             )
             primary_result = columnar_result
             column_selected = True
