@@ -70,11 +70,11 @@ def test_read_text_table_uses_internal_fallback(monkeypatch: pytest.MonkeyPatch,
     rows = info["rows"]
     assert len(rows) == 2
     assert rows[0]["qty"] == 3
-    assert rows[0]["desc"] == "(3) Ø0.375 THRU FROM BACK"
+    assert rows[0]["desc"] == "Ø0.375 THRU FROM BACK"
     assert rows[0]["ref"] == '0.3750"'
     assert rows[0].get("side") == "back"
     assert rows[1]["qty"] == 2
-    assert rows[1]["desc"] == "A | Ø0.500 | 2 | (2) DRILL THRU"
+    assert rows[1]["desc"] == "Ø0.500 | 2 | DRILL THRU"
     assert rows[1]["ref"] == '0.5000"'
     families = info.get("hole_diam_families_in")
     assert families == {"0.375": 3, "0.5": 2}
@@ -175,3 +175,69 @@ def test_build_column_table_falls_back_when_qty_column_missing() -> None:
     assert rows[0]["desc"].startswith("Ø0.250 TAP")
     assert rows[0]["ref"] == '0.2500"'
     assert rows[1]["ref"] == '0.3750"'
+
+
+def test_extract_row_quantity_handles_parenthetical_tap() -> None:
+    qty, remainder = geo_extractor._extract_row_quantity_and_remainder(
+        "(2) 5/8-11 TAP THRU FROM BACK"
+    )
+
+    assert qty == 2
+    assert remainder == "5/8-11 TAP THRU FROM BACK"
+
+
+def test_build_column_table_splits_semicolons_and_detects_operations() -> None:
+    def _entry(text: str, x: float, y: float) -> dict[str, object]:
+        return {"text": text, "x": x, "y": y, "height": 0.1}
+
+    entries = [
+        _entry("QTY", 60.0, 360.0),
+        _entry("DESC", 120.0, 360.0),
+        _entry("REF", 180.0, 360.0),
+        _entry("", 60.0, 300.0),
+        _entry(
+            "(2) 5/8-11 TAP THRU FROM BACK; Ø0.812 C'BORE .5 DEEP; 17/32 DRILL THRU",
+            120.0,
+            300.0,
+        ),
+        _entry("5/8-11", 180.0, 300.0),
+        _entry("", 60.0, 280.0),
+        _entry("(3) 1/4-18 NPT TAP THRU", 120.0, 280.0),
+        _entry("1/4-18 NPT", 180.0, 280.0),
+    ]
+
+    table_info, _debug = geo_extractor._build_columnar_table_from_entries(entries)
+
+    assert table_info is not None
+    rows = table_info["rows"]
+    assert len(rows) == 4
+    qty_sum = table_info.get("sum_qty")
+    if qty_sum is None:
+        qty_sum = geo_extractor._sum_qty(rows)
+    assert qty_sum == sum(row["qty"] for row in rows) == 9
+
+    desc_map = {row["desc"]: row for row in rows}
+    assert "Ø0.812 C'BORE .5 DEEP" in desc_map
+    assert any("DRILL THRU" in desc for desc in desc_map)
+    tap_desc = next(desc for desc in desc_map if "5/8-11 TAP" in desc)
+    drill_desc = next(desc for desc in desc_map if "DRILL THRU" in desc and "C'BORE" not in desc)
+    npt_desc = next(desc for desc in desc_map if "NPT TAP" in desc)
+
+    tap_tokens = {token.upper() for token in geo_extractor._CANDIDATE_TOKEN_RE.findall(tap_desc)}
+    cbore_tokens = {
+        token.upper() for token in geo_extractor._CANDIDATE_TOKEN_RE.findall("Ø0.812 C'BORE .5 DEEP")
+    }
+    drill_tokens = {
+        token.upper() for token in geo_extractor._CANDIDATE_TOKEN_RE.findall(drill_desc)
+    }
+    npt_tokens = {
+        token.upper() for token in geo_extractor._CANDIDATE_TOKEN_RE.findall(npt_desc)
+    }
+
+    assert "TAP" in tap_tokens
+    assert "C'BORE" in cbore_tokens
+    assert "DRILL" in drill_tokens
+    assert "NPT" in npt_tokens
+
+    tap_row = desc_map[tap_desc]
+    assert tap_row.get("side") == "back"
