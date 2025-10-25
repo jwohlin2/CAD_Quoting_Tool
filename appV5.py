@@ -21689,6 +21689,15 @@ def extract_2d_features_from_dxf_or_dwg(path: str | Path) -> dict[str, Any]:
 
     geo = _build_geo_from_ezdxf_doc(doc)
 
+    try:
+        acad_info = hole_count_from_acad_table(doc) or {}
+    except Exception:
+        acad_info = {}
+    try:
+        text_info = extract_hole_table_from_text(doc) or {}
+    except Exception:
+        text_info = {}
+
     table_info: dict[str, Any] = {}
     geo_rows_payload: Mapping[str, Any] | None = None
     rows_from_geo: list[dict[str, Any]] = []

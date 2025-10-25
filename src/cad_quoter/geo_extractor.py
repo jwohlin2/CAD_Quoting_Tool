@@ -2464,6 +2464,8 @@ def read_geo(
     if not isinstance(geo, dict):
         geo = {}
 
+    use_tables = bool(prefer_table)
+
     existing_ops_summary = geo.get("ops_summary") if isinstance(geo, Mapping) else {}
     provenance = geo.get("provenance") if isinstance(geo, Mapping) else {}
     provenance_holes = None
