@@ -17485,6 +17485,7 @@ def compute_quote_from_df(  # type: ignore[reportGeneralTypeIssues]
 
     drilling_rate = _lookup_rate("DrillingRate", rates, params, default_rates, fallback=75.0)
     drill_total_minutes: float | None = None
+    fallback_groups: list[dict[str, Any]] | None = None
     drilling_meta_container = breakdown.setdefault("drilling_meta", {})
     if isinstance(drilling_meta_container, dict):
         if material_display:
