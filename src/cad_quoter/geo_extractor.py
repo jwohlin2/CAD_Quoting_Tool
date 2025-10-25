@@ -590,14 +590,38 @@ def promote_table_to_geo(geo: dict[str, Any], table_info: Mapping[str, Any], sou
             pass
     if not isinstance(table_info, Mapping):
         return
-    rows = table_info.get("rows") or []
-    if not rows:
+    new_rows = table_info.get("rows") or []
+    if isinstance(new_rows, Iterable) and not isinstance(new_rows, list):
+        new_rows = list(new_rows)
+    elif not isinstance(new_rows, list):
+        new_rows = list(new_rows) if isinstance(new_rows, Iterable) else []
+
+    existing_ops_summary = geo.get("ops_summary")
+    if isinstance(existing_ops_summary, Mapping):
+        existing_rows = existing_ops_summary.get("rows") or []
+    else:
+        existing_rows = []
+    if isinstance(existing_rows, Iterable) and not isinstance(existing_rows, list):
+        existing_rows = list(existing_rows)
+    elif not isinstance(existing_rows, list):
+        existing_rows = list(existing_rows) if isinstance(existing_rows, Iterable) else []
+
+    new_qty_sum = _sum_qty(new_rows)
+    current_qty_sum = _sum_qty(existing_rows)
+    new_score = (new_qty_sum, len(new_rows))
+    current_score = (current_qty_sum, len(existing_rows))
+
+    if new_score <= current_score:
+        print(
+            f"[EXTRACT] kept existing table rows={len(existing_rows)} qty_sum={current_qty_sum}"
+        )
         return
-    ops_summary = geo.setdefault("ops_summary", {})
-    ops_summary["rows"] = list(rows)
+
+    ops_summary = _ensure_ops_summary_map(existing_ops_summary)
+    ops_summary["rows"] = list(new_rows)
     ops_summary["source"] = source_tag
     totals = defaultdict(int)
-    for row in rows:
+    for row in new_rows:
         if not isinstance(row, Mapping):
             continue
         try:
@@ -637,15 +661,22 @@ def promote_table_to_geo(geo: dict[str, Any], table_info: Mapping[str, Any], sou
             totals["spot"] += qty
     if totals:
         ops_summary["totals"] = dict(totals)
+    else:
+        ops_summary.pop("totals", None)
     hole_count = table_info.get("hole_count")
     if hole_count is None:
-        hole_count = _sum_qty(rows)
+        hole_count = new_qty_sum
     try:
         geo["hole_count"] = int(hole_count)
     except Exception:
         pass
     provenance = geo.setdefault("provenance", {})
     provenance["holes"] = "HOLE TABLE"
+    geo["ops_summary"] = ops_summary
+    print(
+        f"[EXTRACT] promoted table rows={len(new_rows)} qty_sum={new_qty_sum} "
+        f"source={source_tag}"
+    )
 
 
 def extract_geometry(doc) -> dict[str, Any]:
