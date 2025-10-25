@@ -331,6 +331,8 @@ def read_acad_table(
 
     layouts_scanned: set[str] = set()
     blocks_scanned: set[str] = set()
+    layout_total_count = 0
+    block_total_count = 0
     seen_table_handles: set[str] = set()
     tables_found = 0
     table_candidates: list[dict[str, Any]] = []
@@ -345,6 +347,39 @@ def read_acad_table(
             "tables": [],
         }
         return {}
+
+    if doc is not None:
+        layouts_attr = getattr(doc, "layouts", None)
+        if layouts_attr is not None:
+            try:
+                layout_total_count = len(layouts_attr)  # type: ignore[arg-type]
+            except Exception:
+                layout_total_count = 0
+                names_attr = getattr(layouts_attr, "names", None)
+                try:
+                    if callable(names_attr):
+                        layout_total_count = len(list(names_attr()))
+                    elif names_attr is not None:
+                        layout_total_count = len(list(names_attr))
+                except Exception:
+                    layout_total_count = 0
+        blocks_attr = getattr(doc, "blocks", None)
+        if blocks_attr is not None:
+            try:
+                block_total_count = len(blocks_attr)  # type: ignore[arg-type]
+            except Exception:
+                block_total_count = 0
+                keys_attr = getattr(blocks_attr, "keys", None)
+                try:
+                    if callable(keys_attr):
+                        block_total_count = len(list(keys_attr()))
+                    elif keys_attr is not None:
+                        block_total_count = len(list(keys_attr))
+                except Exception:
+                    try:
+                        block_total_count = len(list(blocks_attr))
+                    except Exception:
+                        block_total_count = 0
 
     def _iter_layout_containers() -> Iterable[tuple[str, Any, bool]]:
         seen_layouts: set[int] = set()
@@ -530,6 +565,25 @@ def read_acad_table(
 
     def _cell_text(entity: Any, row: int, col: int) -> str:
         text_value = ""
+        for method_name in ("text_cell_content", "cell_content"):
+            method = getattr(entity, method_name, None)
+            if not callable(method):
+                continue
+            try:
+                candidate = method(row, col)
+            except Exception:
+                continue
+            if candidate is None:
+                continue
+            if isinstance(candidate, (list, tuple)):
+                candidate = " ".join(str(part) for part in candidate if part is not None)
+            try:
+                text_value = str(candidate)
+            except Exception:
+                text_value = candidate if isinstance(candidate, str) else ""
+            if text_value:
+                return _normalize_table_fragment(text_value)
+
         get_cell = getattr(entity, "get_cell", None)
         cell_obj = None
         if callable(get_cell):
@@ -538,17 +592,32 @@ def read_acad_table(
             except Exception:
                 cell_obj = None
         if cell_obj is not None:
-            get_text = getattr(cell_obj, "get_text", None)
-            if callable(get_text):
+            for attr in ("get_text", "get_plain_text", "get_text_string"):
+                method = getattr(cell_obj, attr, None)
+                if not callable(method):
+                    continue
                 try:
-                    text_value = get_text() or ""
+                    candidate = method() or ""
                 except Exception:
-                    text_value = ""
+                    continue
+                if isinstance(candidate, (list, tuple)):
+                    candidate = " ".join(str(part) for part in candidate if part is not None)
+                try:
+                    text_value = str(candidate)
+                except Exception:
+                    text_value = candidate if isinstance(candidate, str) else ""
+                if text_value:
+                    break
             if not text_value:
                 for attr in ("text", "plain_text", "value", "content"):
                     raw = getattr(cell_obj, attr, None)
                     if raw is None:
                         continue
+                    if callable(raw):
+                        try:
+                            raw = raw()
+                        except Exception:
+                            continue
                     try:
                         text_value = str(raw)
                     except Exception:
@@ -567,9 +636,15 @@ def read_acad_table(
                 if not callable(method):
                     continue
                 try:
-                    text_value = method(row, col) or ""
+                    candidate = method(row, col) or ""
                 except Exception:
                     continue
+                if isinstance(candidate, (list, tuple)):
+                    candidate = " ".join(str(part) for part in candidate if part is not None)
+                try:
+                    text_value = str(candidate)
+                except Exception:
+                    text_value = candidate if isinstance(candidate, str) else ""
                 if text_value:
                     break
         return _normalize_table_fragment(text_value)
@@ -681,15 +756,6 @@ def read_acad_table(
                 "header_tokens": False,
             }
             scan_tables.append(table_entry)
-            print(
-                "[ACAD-TABLE] hit owner={owner} layer={layer} handle={handle} rows={rows} cols={cols}".format(
-                    owner=owner_label,
-                    layer=layer_name or "-",
-                    handle=handle_str,
-                    rows=int(n_rows or 0),
-                    cols=int(n_cols or 0),
-                )
-            )
             if not n_rows or not n_cols:
                 continue
             try:
@@ -697,19 +763,115 @@ def read_acad_table(
                     continue
             except Exception:
                 continue
+
+            get_cell_extents = getattr(table_entity, "get_cell_extents", None)
+            get_column_width = getattr(table_entity, "get_column_width", None)
+            get_row_height = getattr(table_entity, "get_row_height", None)
+            base_insert = getattr(dxf_obj, "insert", None) if dxf_obj is not None else None
+            base_x: float | None = None
+            base_y: float | None = None
+            if base_insert is not None:
+                try:
+                    base_x = float(getattr(base_insert, "x", None))
+                except Exception:
+                    base_x = None
+                try:
+                    base_y = float(getattr(base_insert, "y", None))
+                except Exception:
+                    base_y = None
+
+            fallback_col_edges: list[float] | None = None
+            fallback_row_edges: list[float] | None = None
+            if not callable(get_cell_extents):
+                if callable(get_column_width):
+                    edges: list[float] = [0.0]
+                    total = 0.0
+                    for col_idx in range(int(n_cols)):
+                        width_val = 0.0
+                        try:
+                            width_val = float(get_column_width(col_idx) or 0.0)
+                        except Exception:
+                            width_val = 0.0
+                        if not math.isfinite(width_val) or width_val < 0:
+                            width_val = 0.0
+                        total += width_val
+                        edges.append(total)
+                    fallback_col_edges = edges if len(edges) == int(n_cols) + 1 else None
+                if callable(get_row_height):
+                    edges_y: list[float] = [0.0]
+                    total_y = 0.0
+                    for row_idx in range(int(n_rows)):
+                        height_val = 0.0
+                        try:
+                            height_val = float(get_row_height(row_idx) or 0.0)
+                        except Exception:
+                            height_val = 0.0
+                        if not math.isfinite(height_val) or height_val < 0:
+                            height_val = 0.0
+                        total_y += height_val
+                        edges_y.append(total_y)
+                    fallback_row_edges = edges_y if len(edges_y) == int(n_rows) + 1 else None
+
+            def _cell_center_from_extents(row_idx: int, col_idx: int) -> tuple[float, float] | None:
+                if callable(get_cell_extents):
+                    try:
+                        extents = get_cell_extents(row_idx, col_idx)
+                    except Exception:
+                        extents = None
+                    if extents and len(extents) >= 4:
+                        try:
+                            x_min = float(extents[0])
+                            y_min = float(extents[1])
+                            x_max = float(extents[2])
+                            y_max = float(extents[3])
+                        except Exception:
+                            pass
+                        else:
+                            if math.isfinite(x_min) and math.isfinite(x_max) and math.isfinite(y_min) and math.isfinite(y_max):
+                                return ((x_min + x_max) / 2.0, (y_min + y_max) / 2.0)
+                if (
+                    base_x is not None
+                    and base_y is not None
+                    and fallback_col_edges
+                    and fallback_row_edges
+                    and col_idx + 1 < len(fallback_col_edges)
+                    and row_idx + 1 < len(fallback_row_edges)
+                ):
+                    x_min = fallback_col_edges[col_idx]
+                    x_max = fallback_col_edges[col_idx + 1]
+                    y_top = fallback_row_edges[row_idx]
+                    y_bottom = fallback_row_edges[row_idx + 1]
+                    if math.isfinite(x_min) and math.isfinite(x_max) and math.isfinite(y_top) and math.isfinite(y_bottom):
+                        x_center = base_x + (x_min + x_max) / 2.0
+                        y_center = base_y - (y_top + y_bottom) / 2.0
+                        if math.isfinite(x_center) and math.isfinite(y_center):
+                            return (x_center, y_center)
+                return None
+
             table_cells: list[list[str]] = []
-            for row_idx in range(n_rows):
+            table_centers: list[list[tuple[float, float] | None]] = []
+            for row_idx in range(int(n_rows)):
                 row_cells: list[str] = []
-                for col_idx in range(n_cols):
+                row_centers: list[tuple[float, float] | None] = []
+                for col_idx in range(int(n_cols)):
                     try:
                         text_value = _cell_text(table_entity, row_idx, col_idx)
                     except Exception:
                         text_value = ""
                     row_cells.append(text_value)
+                    try:
+                        center_val = _cell_center_from_extents(row_idx, col_idx)
+                    except Exception:
+                        center_val = None
+                    row_centers.append(center_val)
                 if any(cell.strip() for cell in row_cells):
                     table_cells.append(row_cells)
+                    table_centers.append(row_centers)
             if not table_cells:
                 continue
+            if table_centers:
+                table_entry["cell_centers"] = table_centers
+            table_entry["row_count"] = len(table_cells)
 
             header_map: dict[str, int] = {}
             header_row_idx: int | None = None
@@ -787,11 +949,16 @@ def read_acad_table(
                 )
                 ref_cell_ref = _extract_row_reference(ref_cell_text) if ref_cell_text else ("", None)
                 hole_idx = header_map.get("hole")
-                hole_text = (
-                    row_cells[hole_idx].strip()
-                    if hole_idx is not None and hole_idx < len(row_cells)
-                    else ""
-                )
+                hole_text = ""
+                if hole_idx is not None and hole_idx < len(row_cells):
+                    raw_hole = row_cells[hole_idx]
+                    if isinstance(raw_hole, str):
+                        upper_hole = raw_hole.upper()
+                        match = re.search(r"\b([A-Z]{1,3})\b", upper_hole)
+                        if match:
+                            hole_text = match.group(1)
+                        else:
+                            hole_text = raw_hole.strip()
                 side_idx = header_map.get("side")
                 side_cell_text = (
                     row_cells[side_idx]
@@ -865,6 +1032,7 @@ def read_acad_table(
                 "roi_hint": roi_hint,
                 "median_height": median_height,
                 "header_tokens": header_tokens_hit,
+                "cell_centers": table_entry.get("cell_centers"),
             }
             table_candidates.append(candidate)
 
@@ -874,12 +1042,43 @@ def read_acad_table(
         "tables_found": tables_found,
         "tables": scan_tables,
         "allow_layers": None if allowlist is None else sorted(allowlist),
+        "layouts_total": layout_total_count,
+        "blocks_total": block_total_count,
     }
 
+    layouts_display = layout_total_count or len(layouts_scanned)
+    blocks_display = block_total_count or len(blocks_scanned)
     print(
-        f"[ACAD-TABLE] scanned layouts={len(layouts_scanned)} blocks={len(blocks_scanned)} "
+        f"[ACAD-TABLE] scanned layouts={layouts_display} blocks={blocks_display} "
         f"tables_found={tables_found}"
     )
+    preview_limit = 8
+    for entry in scan_tables[:preview_limit]:
+        owner = str(entry.get("owner") or "-")
+        layer = str(entry.get("layer") or "-")
+        handle = str(entry.get("handle") or "-")
+        try:
+            rows_val = int(entry.get("rows") or entry.get("row_count") or 0)
+        except Exception:
+            rows_val = 0
+        try:
+            cols_val = int(entry.get("cols") or 0)
+        except Exception:
+            cols_val = 0
+        try:
+            qty_val = int(entry.get("sum_qty") or 0)
+        except Exception:
+            qty_val = 0
+        print(
+            "[ACAD-TABLE] hit owner={owner} layer={layer} handle={handle} rows={rows} cols={cols} qty_sum={qty}".format(
+                owner=owner,
+                layer=layer,
+                handle=handle,
+                rows=rows_val,
+                cols=cols_val,
+                qty=qty_val,
+            )
+        )
 
     if not table_candidates:
         return {}
@@ -902,11 +1101,11 @@ def read_acad_table(
         header_bonus = 1 if candidate.get("header_tokens") else 0
         return (
             allow_hit,
+            int(candidate.get("sum_qty") or 0),
+            int(candidate.get("row_count") or 0),
             header_bonus,
             int(candidate.get("n_rows") or 0),
             int(candidate.get("n_cols") or 0),
-            int(candidate.get("sum_qty") or 0),
-            int(candidate.get("row_count") or 0),
         )
 
     best_candidate = max(preferred_candidates, key=_priority)
@@ -920,7 +1119,8 @@ def read_acad_table(
     result: dict[str, Any] = {
         "rows": best_rows,
         "hole_count": hole_count,
-        "provenance_holes": "HOLE TABLE (ACAD_TABLE)",
+        "sum_qty": hole_count,
+        "provenance_holes": "HOLE TABLE",
         "layer": best_candidate.get("layer"),
         "owner": best_candidate.get("owner"),
         "handle": best_candidate.get("handle"),
@@ -933,6 +1133,9 @@ def read_acad_table(
     roi_hint = best_candidate.get("roi_hint")
     if isinstance(roi_hint, Mapping):
         result["roi_hint"] = dict(roi_hint)
+    centers_value = best_candidate.get("cell_centers")
+    if isinstance(centers_value, list) and centers_value:
+        result["cell_centers"] = centers_value
 
     print(
         "[ACAD-TABLE] chosen handle={handle} layer={layer} owner={owner} rows={rows} qty_sum={qty}".format(
@@ -1632,25 +1835,33 @@ def _build_columnar_table_from_entries(
             prev_y = y_val
             continue
         band_center = current_sum_y / len(current_band)
-        within_center = abs(y_val - band_center) <= y_gap_limit
-        if within_center:
-            proposed_sum = current_sum_y + y_val
-            proposed_count = len(current_band) + 1
-            proposed_center = proposed_sum / proposed_count
-            if (
-                abs(proposed_center - band_center) <= y_gap_limit
-                and abs(y_val - proposed_center) <= y_gap_limit
-            ):
-                current_band.append(record)
-                current_sum_y = proposed_sum
-            else:
-                raw_bands.append(current_band)
-                current_band = [record]
-                current_sum_y = y_val
-        else:
+        direct_gap = abs(y_val - prev_y) if prev_y is not None else 0.0
+        if direct_gap > y_gap_limit:
             raw_bands.append(current_band)
             current_band = [record]
             current_sum_y = y_val
+            prev_y = y_val
+            continue
+        if abs(y_val - band_center) > y_gap_limit:
+            raw_bands.append(current_band)
+            current_band = [record]
+            current_sum_y = y_val
+            prev_y = y_val
+            continue
+        proposed_sum = current_sum_y + y_val
+        proposed_count = len(current_band) + 1
+        proposed_center = proposed_sum / proposed_count
+        if (
+            abs(proposed_center - band_center) > y_gap_limit
+            or abs(y_val - proposed_center) > y_gap_limit
+        ):
+            raw_bands.append(current_band)
+            current_band = [record]
+            current_sum_y = y_val
+            prev_y = y_val
+            continue
+        current_band.append(record)
+        current_sum_y = proposed_sum
         prev_y = y_val
     if current_band:
         raw_bands.append(current_band)
@@ -1710,6 +1921,199 @@ def _build_columnar_table_from_entries(
         bands.append(band)
 
     print(f"[TABLE-Y] bands_total={len(bands)} median_h={median_h:.2f}")
+
+    header_token_patterns = [
+        (re.compile(r"\bHOLE\b", re.IGNORECASE), "hole"),
+        (re.compile(r"\bQTY\b|\bQUANTITY\b", re.IGNORECASE), "qty"),
+        (re.compile(r"\bDESC(?:RIPTION)?\b", re.IGNORECASE), "desc"),
+        (re.compile(r"\bSIDE\b|\bFACE\b", re.IGNORECASE), "side"),
+        (re.compile(r"\bREF\b", re.IGNORECASE), "ref"),
+        (re.compile(r"Ø|⌀|DIA|DIAM", re.IGNORECASE), "ref"),
+    ]
+
+    def _header_windows_from_band(
+        band_items: list[dict[str, Any]]
+    ) -> tuple[list[dict[str, Any]], dict[str, dict[str, Any]]]:
+        positions: list[float] = []
+        field_positions: dict[str, list[float]] = defaultdict(list)
+        for item in band_items:
+            text_value = str(item.get("text") or "")
+            if not text_value:
+                continue
+            try:
+                x_val = float(item.get("x"))
+            except Exception:
+                continue
+            positions.append(x_val)
+            upper_text = text_value.upper()
+            for pattern, field in header_token_patterns:
+                if pattern.search(upper_text):
+                    field_positions.setdefault(field, []).append(x_val)
+        if not positions:
+            return ([], {})
+        unique_positions = sorted({float(pos) for pos in positions})
+        diffs = [
+            abs(unique_positions[idx + 1] - unique_positions[idx])
+            for idx in range(len(unique_positions) - 1)
+            if abs(unique_positions[idx + 1] - unique_positions[idx]) > 0
+        ]
+        gap_baseline = statistics.median(diffs) if diffs else 0.0
+        if not gap_baseline or gap_baseline <= 0:
+            gap_baseline = 6.0 * median_h if median_h > 0 else 12.0
+        default_half = max(6.0, 0.5 * gap_baseline)
+        windows: list[dict[str, Any]] = []
+        for idx, center in enumerate(unique_positions):
+            if idx == 0:
+                left = center - default_half
+            else:
+                left = (unique_positions[idx - 1] + center) / 2.0
+            if idx + 1 < len(unique_positions):
+                right = (center + unique_positions[idx + 1]) / 2.0
+            else:
+                right = center + default_half
+            windows.append({"center": center, "left": left, "right": right, "field": None})
+
+        field_centers = {
+            field: statistics.mean(values)
+            for field, values in field_positions.items()
+            if values
+        }
+        assigned_fields: set[str] = set()
+        used_indices: set[int] = set()
+        for field, center_val in sorted(field_centers.items(), key=lambda item: item[1]):
+            if field in assigned_fields:
+                continue
+            candidate_indices = list(range(len(windows)))
+            best_idx = min(
+                candidate_indices,
+                key=lambda idx: (abs(windows[idx]["center"] - center_val), idx),
+            )
+            if windows[best_idx].get("field") not in (None, field):
+                free_candidates = [
+                    idx
+                    for idx in candidate_indices
+                    if idx not in used_indices
+                    and windows[idx].get("field") in (None, field)
+                ]
+                if free_candidates:
+                    best_idx = min(
+                        free_candidates,
+                        key=lambda idx: (abs(windows[idx]["center"] - center_val), idx),
+                    )
+            windows[best_idx]["field"] = field
+            assigned_fields.add(field)
+            used_indices.add(best_idx)
+
+        for idx, window in enumerate(windows):
+            if window.get("field"):
+                continue
+            if idx == 0:
+                window["field"] = "hole"
+            elif idx == len(windows) - 1:
+                window["field"] = "desc"
+            elif idx == 1:
+                window["field"] = "ref"
+            elif idx == 2:
+                window["field"] = "qty"
+            else:
+                window["field"] = "desc"
+        if windows and not windows[-1].get("field"):
+            windows[-1]["field"] = "desc"
+
+        seed_info: dict[str, dict[str, Any]] = {}
+        for idx, window in enumerate(windows):
+            field = window.get("field")
+            if isinstance(field, str) and field not in seed_info:
+                seed_info[field] = {
+                    "col": idx,
+                    "center": window.get("center"),
+                    "span": (window.get("left"), window.get("right")),
+                }
+        return (windows, seed_info)
+
+    column_windows: list[dict[str, Any]] = []
+    header_seed_info: dict[str, dict[str, Any]] = {}
+    header_band_index: int | None = None
+
+    for idx, band in enumerate(bands):
+        combined_upper = " ".join(
+            str(item.get("text") or "").upper() for item in band if item.get("text")
+        )
+        if (
+            "HOLE" in combined_upper
+            and ("DESC" in combined_upper or "DESCRIPTION" in combined_upper)
+            and any(
+                token in combined_upper
+                for token in ("REF", "Ø", "⌀", "DIA", "QUANTITY", "QTY")
+            )
+        ):
+            header_band_index = idx
+            column_windows, header_seed_info = _header_windows_from_band(band)
+            break
+
+    if header_band_index is None:
+        for idx, band in enumerate(bands):
+            non_empty = [
+                item
+                for item in band
+                if str(item.get("text") or "").strip()
+            ]
+            if len(non_empty) >= 3:
+                header_band_index = idx
+                column_windows, header_seed_info = _header_windows_from_band(band)
+                if column_windows:
+                    break
+        if header_band_index is None:
+            header_band_index = 0 if bands else None
+
+    if column_windows:
+        if "hole" not in header_seed_info and column_windows:
+            header_seed_info["hole"] = {
+                "col": 0,
+                "center": column_windows[0].get("center"),
+                "span": (
+                    column_windows[0].get("left"),
+                    column_windows[0].get("right"),
+                ),
+            }
+        if "ref" not in header_seed_info and len(column_windows) >= 2:
+            header_seed_info["ref"] = {
+                "col": 1,
+                "center": column_windows[1].get("center"),
+                "span": (
+                    column_windows[1].get("left"),
+                    column_windows[1].get("right"),
+                ),
+            }
+        if "qty" not in header_seed_info and len(column_windows) >= 3:
+            qty_idx = 2 if len(column_windows) >= 3 else len(column_windows) - 2
+            qty_idx = max(1, min(qty_idx, len(column_windows) - 2))
+            header_seed_info["qty"] = {
+                "col": qty_idx,
+                "center": column_windows[qty_idx].get("center"),
+                "span": (
+                    column_windows[qty_idx].get("left"),
+                    column_windows[qty_idx].get("right"),
+                ),
+            }
+        if "desc" not in header_seed_info and column_windows:
+            last_idx = len(column_windows) - 1
+            header_seed_info["desc"] = {
+                "col": last_idx,
+                "center": column_windows[last_idx].get("center"),
+                "span": (
+                    column_windows[last_idx].get("left"),
+                    column_windows[last_idx].get("right"),
+                ),
+            }
+
+    header_initial_field_info: dict[str, dict[str, Any]] = {}
+    if header_seed_info and header_band_index is not None:
+        for field, info in header_seed_info.items():
+            info_copy = dict(info)
+            info_copy["band"] = header_band_index
+            header_initial_field_info[field] = info_copy
+
     y_eps = y_gap_limit
 
     qty_x: float | None = None
@@ -1812,6 +2216,8 @@ def _build_columnar_table_from_entries(
                 "desc_col": None,
                 "y_eps": y_eps,
                 "roi": roi_info,
+                "column_windows": column_windows,
+                "header_band": header_band_index,
             },
         )
 
@@ -1822,6 +2228,10 @@ def _build_columnar_table_from_entries(
     band_summaries: list[dict[str, Any]] = []
     band_cells_dump: list[dict[str, Any]] = []
     band_results: list[dict[str, Any]] = []
+    window_fields_master = [
+        window.get("field") if isinstance(window, Mapping) else None
+        for window in column_windows
+    ] if column_windows else []
 
     for band_index, band in enumerate(bands):
         mean_y = sum(item["y"] for item in band) / len(band)
@@ -1829,24 +2239,137 @@ def _build_columnar_table_from_entries(
             {"index": band_index, "y_mean": mean_y, "line_count": len(band)}
         )
         sorted_band = sorted(band, key=lambda item: item["x"])
-        x_values = [item["x"] for item in sorted_band]
-        x_gaps = [
-            abs(x_values[pos + 1] - x_values[pos])
-            for pos in range(len(x_values) - 1)
-            if abs(x_values[pos + 1] - x_values[pos]) > 0
-        ]
-        gap_med = statistics.median(x_gaps) if x_gaps else 0.0
-        gap_p75 = _percentile(x_gaps, 0.75) if x_gaps else gap_med
-        if gap_p75 <= 0:
-            gap_p75 = gap_med
-        x_eps = max(6.0, 0.8 * gap_p75 if gap_p75 > 0 else 0.0)
-        if x_eps <= 0:
-            x_eps = 6.0
-
         columns: list[dict[str, Any]] = []
-        for item in sorted_band:
-            x_pos = item["x"]
-            if not columns:
+        x_eps_value = y_eps
+        if column_windows:
+            assignments: list[list[dict[str, Any]]] = [
+                [] for _ in column_windows
+            ]
+            for item in sorted_band:
+                x_val = item.get("x")
+                try:
+                    x_float = float(x_val)
+                except Exception:
+                    continue
+                best_idx: int | None = None
+                best_score: tuple[int, float, int] | None = None
+                for col_idx, window in enumerate(column_windows):
+                    center_val = float(window.get("center") or 0.0)
+                    left_val = window.get("left")
+                    right_val = window.get("right")
+                    try:
+                        left_float = float(left_val)
+                    except Exception:
+                        left_float = center_val
+                    try:
+                        right_float = float(right_val)
+                    except Exception:
+                        right_float = center_val
+                    width = abs(right_float - left_float)
+                    margin = max(1.0, 0.1 * width, 0.4 * median_h)
+                    if margin <= 0:
+                        margin = max(1.0, 0.4 * median_h, 2.0)
+                    in_window = (left_float - margin) <= x_float <= (right_float + margin)
+                    distance = abs(x_float - center_val)
+                    score = (0 if in_window else 1, distance, col_idx)
+                    if best_score is None or score < best_score:
+                        best_score = score
+                        best_idx = col_idx
+                if best_idx is None:
+                    continue
+                assignments[best_idx].append(item)
+            for col_idx, window in enumerate(column_windows):
+                col_items = sorted(assignments[col_idx], key=lambda itm: itm["x"])
+                if col_items:
+                    text_parts = [
+                        str(itm.get("text") or "").strip()
+                        for itm in col_items
+                        if str(itm.get("text") or "").strip()
+                    ]
+                    cell_text = " ".join(text_parts).strip()
+                    sum_x = sum(float(itm["x"]) for itm in col_items)
+                    sum_y = sum(float(itm["y"]) for itm in col_items)
+                    count = len(col_items)
+                    center_x = sum_x / count if count else float(window.get("center") or 0.0)
+                    center_y = sum_y / count if count else mean_y
+                    min_x = min(float(itm["x"]) for itm in col_items)
+                    max_x = max(float(itm["x"]) for itm in col_items)
+                else:
+                    cell_text = ""
+                    center_x = float(window.get("center") or 0.0)
+                    center_y = mean_y
+                    try:
+                        min_x = float(window.get("left"))
+                    except Exception:
+                        min_x = center_x
+                    try:
+                        max_x = float(window.get("right"))
+                    except Exception:
+                        max_x = center_x
+                columns.append(
+                    {
+                        "items": col_items,
+                        "center_x": center_x,
+                        "center_y": center_y,
+                        "min_x": min_x,
+                        "max_x": max_x,
+                        "text": cell_text,
+                        "field": window_fields_master[col_idx]
+                        if col_idx < len(window_fields_master)
+                        else None,
+                        "span_hint": (
+                            float(column_windows[col_idx].get("left"))
+                            if column_windows[col_idx].get("left") is not None
+                            else min_x,
+                            float(column_windows[col_idx].get("right"))
+                            if column_windows[col_idx].get("right") is not None
+                            else max_x,
+                        ),
+                    }
+                )
+        else:
+            x_values = [item["x"] for item in sorted_band]
+            x_gaps = [
+                abs(x_values[pos + 1] - x_values[pos])
+                for pos in range(len(x_values) - 1)
+                if abs(x_values[pos + 1] - x_values[pos]) > 0
+            ]
+            gap_med = statistics.median(x_gaps) if x_gaps else 0.0
+            gap_p75 = _percentile(x_gaps, 0.75) if x_gaps else gap_med
+            if gap_p75 <= 0:
+                gap_p75 = gap_med
+            x_eps = max(6.0, 0.8 * gap_p75 if gap_p75 > 0 else 0.0)
+            if x_eps <= 0:
+                x_eps = 6.0
+            x_eps_value = x_eps
+            for item in sorted_band:
+                x_pos = item["x"]
+                if not columns:
+                    columns.append(
+                        {
+                            "items": [item],
+                            "sum_x": x_pos,
+                            "sum_y": item["y"],
+                            "count": 1,
+                            "center_x": x_pos,
+                            "center_y": item["y"],
+                            "min_x": x_pos,
+                            "max_x": x_pos,
+                            "field": None,
+                        }
+                    )
+                    continue
+                column = columns[-1]
+                if abs(x_pos - column["center_x"]) <= x_eps:
+                    column["items"].append(item)
+                    column["sum_x"] += x_pos
+                    column["sum_y"] += item["y"]
+                    column["count"] += 1
+                    column["center_x"] = column["sum_x"] / column["count"]
+                    column["center_y"] = column["sum_y"] / column["count"]
+                    column["min_x"] = min(column.get("min_x", x_pos), x_pos)
+                    column["max_x"] = max(column.get("max_x", x_pos), x_pos)
+                    continue
                 columns.append(
                     {
                         "items": [item],
@@ -1857,48 +2380,39 @@ def _build_columnar_table_from_entries(
                         "center_y": item["y"],
                         "min_x": x_pos,
                         "max_x": x_pos,
+                        "field": None,
                     }
                 )
-                continue
-            column = columns[-1]
-            if abs(x_pos - column["center_x"]) <= x_eps:
-                column["items"].append(item)
-                column["sum_x"] += x_pos
-                column["sum_y"] += item["y"]
-                column["count"] += 1
-                column["center_x"] = column["sum_x"] / column["count"]
-                column["center_y"] = column["sum_y"] / column["count"]
-                column["min_x"] = min(column.get("min_x", x_pos), x_pos)
-                column["max_x"] = max(column.get("max_x", x_pos), x_pos)
-                continue
-            columns.append(
-                {
-                    "items": [item],
-                    "sum_x": x_pos,
-                    "sum_y": item["y"],
-                    "count": 1,
-                    "center_x": x_pos,
-                    "center_y": item["y"],
-                    "min_x": x_pos,
-                    "max_x": x_pos,
-                }
-            )
+            for column in columns:
+                column.setdefault("span_hint", (
+                    float(column.get("min_x", column.get("center_x", 0.0))),
+                    float(column.get("max_x", column.get("center_x", 0.0))),
+                ))
 
         cell_texts: list[str] = []
         preview_parts: list[str] = []
         for col_index, column in enumerate(columns):
-            sorted_items = sorted(column["items"], key=lambda itm: itm["x"])
-            cell_text = " ".join(item["text"] for item in sorted_items).strip()
+            if column.get("items") is not None and "sum_x" in column:
+                # legacy path; recompute text
+                sorted_items = sorted(column.get("items", []), key=lambda itm: itm["x"])
+                cell_text = " ".join(item["text"] for item in sorted_items).strip()
+            else:
+                cell_text = column.get("text", "") or ""
+            if not isinstance(cell_text, str):
+                cell_text = str(cell_text)
+            cell_text = cell_text.strip()
             cell_texts.append(cell_text)
-            band_cells_dump.append(
-                {
-                    "band": band_index,
-                    "col": col_index,
-                    "x_center": column["center_x"],
-                    "y_center": column["center_y"],
-                    "text": cell_text,
-                }
-            )
+            cell_entry = {
+                "band": band_index,
+                "col": col_index,
+                "x_center": column.get("center_x"),
+                "y_center": column.get("center_y"),
+                "text": cell_text,
+            }
+            field_name = column.get("field")
+            if field_name:
+                cell_entry["field"] = field_name
+            band_cells_dump.append(cell_entry)
             preview_parts.append(
                 f'C{col_index}="{_truncate_cell_preview(cell_text)}"'
             )
@@ -1907,20 +2421,30 @@ def _build_columnar_table_from_entries(
             preview_body = " | ".join(preview_parts)
             print(f"[TABLE-X] band#{band_index} cols={len(columns)} | {preview_body}")
 
+        spans = []
+        for column in columns:
+            span_hint = column.get("span_hint")
+            if isinstance(span_hint, tuple) and len(span_hint) == 2:
+                try:
+                    span_min = float(span_hint[0])
+                    span_max = float(span_hint[1])
+                except Exception:
+                    span_min = float(column.get("min_x", column.get("center_x", 0.0)))
+                    span_max = float(column.get("max_x", column.get("center_x", 0.0)))
+            else:
+                span_min = float(column.get("min_x", column.get("center_x", 0.0)))
+                span_max = float(column.get("max_x", column.get("center_x", 0.0)))
+            spans.append((span_min, span_max))
+
         band_results.append(
             {
                 "cells": cell_texts,
                 "y_mean": mean_y,
                 "line_count": len(band),
-                "centers": [column["center_x"] for column in columns],
-                "x_eps": x_eps,
-                "spans": [
-                    (
-                        float(column.get("min_x", column["center_x"])),
-                        float(column.get("max_x", column["center_x"])),
-                    )
-                    for column in columns
-                ],
+                "centers": [column.get("center_x") for column in columns],
+                "x_eps": x_eps_value,
+                "spans": spans,
+                "window_fields": window_fields_master if column_windows else None,
             }
         )
 
@@ -1936,11 +2460,17 @@ def _build_columnar_table_from_entries(
                 "desc_col": None,
                 "y_eps": y_eps,
                 "roi": roi_info,
+                "column_windows": column_windows,
+                "header_band": header_band_index,
             },
         )
 
-    header_field_info: dict[str, dict[str, Any]] = {}
-    header_band_indices: set[int] = set()
+    header_field_info: dict[str, dict[str, Any]] = dict(header_initial_field_info)
+    header_band_indices: set[int] = {
+        int(info.get("band"))
+        for info in header_initial_field_info.values()
+        if isinstance(info.get("band"), int)
+    }
 
     def _header_hits(cells: list[str]) -> dict[str, int]:
         hits: dict[str, int] = {}
@@ -2065,6 +2595,20 @@ def _build_columnar_table_from_entries(
             value = header_field_info.get(key, {}).get("col")
             if isinstance(value, int) and 0 <= value < column_count:
                 header_cols[key] = value
+    if column_windows:
+        window_fields = [
+            window.get("field") if isinstance(window, Mapping) else None
+            for window in column_windows
+        ]
+        for key in ("hole", "ref", "qty", "side", "desc"):
+            if key in header_cols:
+                continue
+            try:
+                idx = window_fields.index(key)  # type: ignore[arg-type]
+            except ValueError:
+                continue
+            if isinstance(idx, int) and 0 <= idx < column_count:
+                header_cols[key] = idx
     qty_digit_re = re.compile(r"^\d{1,3}$")
     qty_suffix_re = re.compile(r"\b(REQD|REQUIRED|RE'?D|EA|EACH|HOLES?)\b$", re.IGNORECASE)
 
@@ -2482,6 +3026,8 @@ def _build_columnar_table_from_entries(
         "desc_col": desc_col,
         "y_eps": y_eps,
         "median_h": median_h,
+        "column_windows": column_windows,
+        "header_band": header_band_index,
         "bands_checked": len(bands_for_stats),
         "qty_x": qty_x,
     }
@@ -4164,12 +4710,22 @@ def _read_geo_payload_from_path(
     except Exception:
         tables_found = 0
     if tables_found == 0 and path_obj.suffix.lower() == ".dwg":
-        print("[ACAD-TABLE] none found; trying DXF2000 fallback conversion")
-        try:
-            fallback_doc = _load_doc_for_path(path_obj, use_oda=use_oda, out_ver="ACAD2000")
-        except Exception as exc:
-            print(f"[ACAD-TABLE] DXF2000 fallback failed: {exc}")
-        else:
+        fallback_versions = [
+            "ACAD2000",
+            "ACAD2004",
+            "ACAD2007",
+            "ACAD2013",
+            "ACAD2018",
+        ]
+        for version in fallback_versions:
+            print(f"[ACAD-TABLE] trying DXF fallback version={version}")
+            try:
+                fallback_doc = _load_doc_for_path(
+                    path_obj, use_oda=use_oda, out_ver=version
+                )
+            except Exception as exc:
+                print(f"[ACAD-TABLE] DXF fallback {version} failed: {exc}")
+                continue
             payload = read_geo(
                 fallback_doc,
                 prefer_table=prefer_table,
@@ -4178,6 +4734,13 @@ def _read_geo_payload_from_path(
                 block_name_allowlist=block_name_allowlist,
                 block_name_regex=block_name_regex,
             )
+            scan_info = get_last_acad_table_scan() or {}
+            try:
+                tables_found = int(scan_info.get("tables_found", 0))
+            except Exception:
+                tables_found = 0
+            if tables_found:
+                break
     return payload
 
 

@@ -164,16 +164,30 @@ def main(argv: Sequence[str] | None = None) -> int:
     except Exception:
         tables_found = 0
     if tables_found == 0 and Path(path).suffix.lower() == ".dwg":
-        print("[ACAD-TABLE] none found; trying DXF2000 fallback conversion")
-        try:
-            fallback_doc = geo_extractor._load_doc_for_path(
-                Path(path), use_oda=args.use_oda, out_ver="ACAD2000"
-            )
-        except Exception as exc:
-            print(f"[ACAD-TABLE] DXF2000 fallback failed: {exc}")
-        else:
+        fallback_versions = [
+            "ACAD2000",
+            "ACAD2004",
+            "ACAD2007",
+            "ACAD2013",
+            "ACAD2018",
+        ]
+        for version in fallback_versions:
+            print(f"[ACAD-TABLE] trying DXF fallback version={version}")
+            try:
+                fallback_doc = geo_extractor._load_doc_for_path(
+                    Path(path), use_oda=args.use_oda, out_ver=version
+                )
+            except Exception as exc:
+                print(f"[ACAD-TABLE] DXF fallback {version} failed: {exc}")
+                continue
             payload = read_geo(fallback_doc, **read_kwargs)
             scan_info = geo_extractor.get_last_acad_table_scan() or {}
+            try:
+                tables_found = int(scan_info.get("tables_found", 0))  # type: ignore[arg-type]
+            except Exception:
+                tables_found = 0
+            if tables_found:
+                break
     if not isinstance(payload, Mapping):
         payload = {}
     else:
@@ -199,12 +213,17 @@ def main(argv: Sequence[str] | None = None) -> int:
                     cols_val = int(entry.get("cols") or 0)
                 except Exception:
                     cols_val = 0
+                try:
+                    qty_val = int(entry.get("sum_qty") or entry.get("row_count") or 0)
+                except Exception:
+                    qty_val = 0
                 print(
-                    "[ACAD-TABLE] owner={owner} layer={layer} rows={rows} cols={cols} handle={handle}".format(
+                    "[ACAD-TABLE] owner={owner} layer={layer} rows={rows} cols={cols} qty_sum={qty} handle={handle}".format(
                         owner=owner,
                         layer=layer,
                         rows=rows_val,
                         cols=cols_val,
+                        qty=qty_val,
                         handle=handle,
                     )
                 )
