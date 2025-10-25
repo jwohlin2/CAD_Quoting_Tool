@@ -16892,6 +16892,7 @@ def compute_quote_from_df(  # type: ignore[reportGeneralTypeIssues]
         geo_context = dict(geo_context)
     elif not isinstance(geo_context, dict):
         geo_context = {}
+    _ensure_geo_context_fields(geo_context, value_map, cfg=cfg)
     planner_inputs = dict(ui_vars or {})
     rates = dict(rates or {})
     geo_payload: dict[str, Any] = geo_context
@@ -16951,7 +16952,15 @@ def compute_quote_from_df(  # type: ignore[reportGeneralTypeIssues]
     if speeds_feeds_csv_path:
         planner_inputs.setdefault("speeds_feeds_loaded", bool(speeds_feeds_loaded))
 
-    qty = _coerce_float_or_none(value_map.get("Qty")) or 1.0
+    qty = _coerce_float_or_none(geo_context.get("qty"))
+    if qty is None:
+        qty = _coerce_float_or_none(value_map.get("Qty"))
+    qty = qty or 1.0
+    try:
+        if "qty" not in geo_context and qty is not None:
+            geo_context["qty"] = int(round(float(qty)))
+    except Exception:
+        pass
     material_text = material_display
 
     scrap_value = value_map.get("Scrap Percent (%)")
@@ -17460,13 +17469,19 @@ def compute_quote_from_df(  # type: ignore[reportGeneralTypeIssues]
                 if coerced:
                     hole_diams.append(float(coerced))
 
-    thickness_in = _coerce_float_or_none(value_map.get("Thickness (in)"))
+    thickness_in = _coerce_float_or_none(geo_payload.get("thickness_in")) if isinstance(
+        geo_payload, _MappingABC
+    ) else None
     if thickness_in is None and isinstance(geo_payload, _MappingABC):
-        thickness_in = _coerce_float_or_none(geo_payload.get("thickness_in"))
+        thickness_mm = _coerce_float_or_none(geo_payload.get("thickness_mm"))
+        if thickness_mm:
+            thickness_in = float(thickness_mm) / 25.4
+    if thickness_in is None:
+        thickness_in = _coerce_float_or_none(value_map.get("Thickness (in)"))
         if thickness_in is None:
-            thickness_mm = _coerce_float_or_none(geo_payload.get("thickness_mm"))
-            if thickness_mm:
-                thickness_in = float(thickness_mm) / 25.4
+            thickness_mm_value = _coerce_float_or_none(value_map.get("Thickness (mm)"))
+            if thickness_mm_value:
+                thickness_in = float(thickness_mm_value) / 25.4
 
     drilling_rate = _lookup_rate("DrillingRate", rates, params, default_rates, fallback=75.0)
     drill_total_minutes: float | None = None
