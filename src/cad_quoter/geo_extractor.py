@@ -4,8 +4,11 @@ from __future__ import annotations
 
 from collections import defaultdict
 from collections.abc import Iterable, Mapping
+from fractions import Fraction
+import inspect
 from functools import lru_cache
 from pathlib import Path
+import re
 from typing import Any, Callable
 
 from cad_quoter import geometry
@@ -29,6 +32,36 @@ def _resolve_app_callable(name: str) -> Callable[..., Any] | None:
     except Exception:
         return None
     return getattr(module, name, None)
+
+
+def _describe_helper(helper: Any) -> str:
+    if helper is None:
+        return "None"
+    name = getattr(helper, "__name__", None)
+    if isinstance(name, str):
+        return name
+    return repr(helper)
+
+
+def _print_helper_debug(tag: str, helper: Any) -> None:
+    try:
+        helper_desc = _describe_helper(helper)
+    except Exception:
+        helper_desc = repr(helper)
+    print(f"[EXTRACT] {tag} helper: {helper_desc}")
+
+
+_ROW_START_RE = re.compile(r"\(\s*\d+\s*\)")
+_DIAMETER_PREFIX_RE = re.compile(
+    r"(?:Ø|⌀|DIA(?:\.\b|\b))\s*(\d+\s*/\s*\d+|\d*\.\d+|\.\d+|\d+)",
+    re.IGNORECASE,
+)
+_DIAMETER_SUFFIX_RE = re.compile(
+    r"(\d+\s*/\s*\d+|\d*\.\d+|\.\d+|\d+)\s*(?:Ø|⌀|DIA(?:\.\b|\b))",
+    re.IGNORECASE,
+)
+_MTEXT_ALIGN_RE = re.compile(r"\\A\d;", re.IGNORECASE)
+_MTEXT_BREAK_RE = re.compile(r"\\P", re.IGNORECASE)
 
 
 def _score_table(info: Mapping[str, Any] | None) -> tuple[int, int]:
@@ -55,27 +88,246 @@ def _sum_qty(rows: Iterable[Mapping[str, Any]] | None) -> int:
 
 def read_acad_table(doc) -> dict[str, Any]:
     helper = _resolve_app_callable("hole_count_from_acad_table")
+    _print_helper_debug("acad", helper)
     if callable(helper):
         try:
             result = helper(doc) or {}
-        except Exception:
-            return {}
+        except Exception as exc:
+            print(f"[EXTRACT] acad helper error: {exc}")
+            raise
         if isinstance(result, Mapping):
             return dict(result)
         return {}
     return {}
 
 
+def _collect_table_text_lines(doc: Any) -> list[str]:
+    lines: list[str] = []
+    if doc is None:
+        return lines
+
+    spaces: list[Any] = []
+    modelspace = getattr(doc, "modelspace", None)
+    if callable(modelspace):
+        try:
+            space = modelspace()
+        except Exception:
+            space = None
+        if space is not None:
+            spaces.append(space)
+
+    for space in spaces:
+        query = getattr(space, "query", None)
+        if not callable(query):
+            continue
+        try:
+            entities = list(query("TEXT, MTEXT"))
+        except Exception:
+            continue
+        for entity in entities:
+            raw_text = ""
+            dxftype = None
+            try:
+                dxftype = entity.dxftype()
+            except Exception:
+                dxftype = None
+            if dxftype == "MTEXT":
+                plain_text = getattr(entity, "plain_text", None)
+                if callable(plain_text):
+                    try:
+                        raw_text = plain_text()
+                    except Exception:
+                        raw_text = ""
+                if not raw_text:
+                    raw_text = getattr(entity, "text", "")
+            elif dxftype == "TEXT":
+                dxf_obj = getattr(entity, "dxf", None)
+                raw_text = getattr(dxf_obj, "text", "") if dxf_obj is not None else ""
+            else:
+                raw_text = getattr(entity, "text", "")
+
+            if not raw_text:
+                continue
+            for line in str(raw_text).splitlines():
+                normalized = _normalize_table_fragment(line)
+                if normalized:
+                    lines.append(normalized)
+    return lines
+
+
+def _normalize_table_fragment(fragment: str) -> str:
+    if not isinstance(fragment, str):
+        fragment = str(fragment)
+    cleaned = fragment.replace("%%C", "Ø").replace("%%c", "Ø")
+    cleaned = _MTEXT_ALIGN_RE.sub("", cleaned)
+    cleaned = _MTEXT_BREAK_RE.sub(" ", cleaned)
+    cleaned = cleaned.replace("|", " |")
+    cleaned = cleaned.replace("\\~", "~")
+    cleaned = cleaned.replace("\\`", "`")
+    cleaned = cleaned.replace("\\", " ")
+    return " ".join(cleaned.split())
+
+
+def _parse_number_token(token: str) -> float | None:
+    text = (token or "").strip()
+    if not text:
+        return None
+    if "/" in text:
+        try:
+            return float(Fraction(text))
+        except Exception:
+            return None
+    if text.startswith("."):
+        text = "0" + text
+    try:
+        return float(text)
+    except Exception:
+        return None
+
+
+def _merge_table_lines(lines: Iterable[str]) -> list[str]:
+    merged: list[str] = []
+    current: list[str] | None = None
+    for raw_line in lines:
+        line = raw_line.strip()
+        if not line:
+            continue
+        has_row_start = bool(_ROW_START_RE.search(line))
+        if has_row_start:
+            if current:
+                merged.append(" ".join(current))
+            current = [line]
+        elif current:
+            current.append(line)
+    if current:
+        merged.append(" ".join(current))
+    return merged
+
+
+def _extract_diameter(text: str) -> float | None:
+    search_space = text or ""
+    match = _DIAMETER_PREFIX_RE.search(search_space)
+    if not match:
+        match = _DIAMETER_SUFFIX_RE.search(search_space)
+    if not match:
+        return None
+    return _parse_number_token(match.group(1))
+
+
+def _fallback_text_table(lines: Iterable[str]) -> dict[str, Any]:
+    merged = _merge_table_lines(lines)
+    rows: list[dict[str, Any]] = []
+    families: dict[str, int] = {}
+    total_qty = 0
+
+    for entry in merged:
+        qty_match = _ROW_START_RE.search(entry)
+        if not qty_match:
+            continue
+        qty_text = qty_match.group(0).strip("() ")
+        try:
+            qty = int(qty_text)
+        except Exception:
+            continue
+        prefix = entry[: qty_match.start()].strip()
+        suffix = entry[qty_match.end() :].strip()
+        combined = " ".join(part for part in (prefix, suffix) if part)
+        combined = combined.replace("|", " ")
+        desc = " ".join(combined.split())
+        if not desc:
+            continue
+        rows.append({"hole": "", "ref": "", "qty": qty, "desc": desc})
+        total_qty += qty
+
+        diameter = _extract_diameter(prefix + " " + suffix)
+        if diameter is not None:
+            key = f"{diameter:.4f}".rstrip("0").rstrip(".")
+            families[key] = families.get(key, 0) + qty
+
+    if not rows:
+        return {}
+
+    result: dict[str, Any] = {"rows": rows, "hole_count": total_qty}
+    if families:
+        result["hole_diam_families_in"] = families
+    result["provenance_holes"] = "HOLE TABLE (TEXT_FALLBACK)"
+    return result
+
+
 def read_text_table(doc) -> dict[str, Any]:
     helper = _resolve_app_callable("extract_hole_table_from_text")
+    _print_helper_debug("text", helper)
+    table_lines: list[str] | None = None
+    fallback_candidate: Mapping[str, Any] | None = None
+
+    def ensure_lines() -> list[str]:
+        nonlocal table_lines
+        if table_lines is None:
+            table_lines = _collect_table_text_lines(doc)
+        return table_lines
+
     if callable(helper):
         try:
             result = helper(doc) or {}
-        except Exception:
-            return {}
+        except Exception as exc:
+            print(f"[EXTRACT] text helper error: {exc}")
+            raise
         if isinstance(result, Mapping):
-            return dict(result)
-        return {}
+            result_map = dict(result)
+            if result_map.get("rows"):
+                return result_map
+            fallback_candidate = result_map
+        else:
+            fallback_candidate = {}
+
+    legacy_helper = _resolve_app_callable("hole_count_from_text_table")
+    _print_helper_debug("text_alt", legacy_helper)
+    if callable(legacy_helper):
+        needs_lines = False
+        try:
+            signature = inspect.signature(legacy_helper)
+        except (TypeError, ValueError):
+            signature = None
+        if signature is not None:
+            required = [
+                param
+                for param in signature.parameters.values()
+                if param.kind in (param.POSITIONAL_ONLY, param.POSITIONAL_OR_KEYWORD)
+                and param.default is param.empty
+            ]
+            needs_lines = len(required) >= 2
+
+        try:
+            if needs_lines:
+                lines = ensure_lines()
+                result = legacy_helper(doc, lines) or {}
+            else:
+                result = legacy_helper(doc) or {}
+        except TypeError as exc:
+            print(f"[EXTRACT] text helper error: {exc}")
+            lines = ensure_lines()
+            result = legacy_helper(doc, lines) or {}
+        except Exception as exc:
+            print(f"[EXTRACT] text helper error: {exc}")
+            raise
+
+        if isinstance(result, Mapping):
+            result_map = dict(result)
+            if result_map.get("rows"):
+                return result_map
+            if fallback_candidate is None:
+                fallback_candidate = result_map
+    else:
+        if fallback_candidate is None:
+            fallback_candidate = {}
+
+    lines = ensure_lines()
+    fallback = _fallback_text_table(lines)
+    if fallback:
+        return fallback
+
+    if isinstance(fallback_candidate, Mapping):
+        return dict(fallback_candidate)
     return {}
 
 
@@ -239,7 +491,30 @@ def extract_geo_from_path(
     if not isinstance(geo, dict):
         geo = {}
 
-    acad_info = read_acad_table(doc) or {}
+    existing_ops_summary = geo.get("ops_summary") if isinstance(geo, Mapping) else {}
+    provenance = geo.get("provenance") if isinstance(geo, Mapping) else {}
+    provenance_holes = None
+    if isinstance(provenance, Mapping):
+        provenance_holes = provenance.get("holes")
+    existing_source = ""
+    if isinstance(existing_ops_summary, Mapping):
+        existing_source = str(existing_ops_summary.get("source") or "")
+    existing_is_table = bool(
+        (existing_source and "table" in existing_source.lower())
+        or (isinstance(provenance_holes, str) and provenance_holes.upper() == "HOLE TABLE")
+    )
+    if existing_is_table and isinstance(existing_ops_summary, Mapping):
+        current_table_info = dict(existing_ops_summary)
+        rows = current_table_info.get("rows")
+        if isinstance(rows, Iterable) and not isinstance(rows, list):
+            current_table_info["rows"] = list(rows)
+    else:
+        current_table_info = {}
+
+    try:
+        acad_info = read_acad_table(doc) or {}
+    except Exception:
+        acad_info = {}
     try:
         text_info = read_text_table(doc) or {}
     except Exception:
@@ -254,7 +529,9 @@ def extract_geo_from_path(
     score_b = _score_table(text_info)
     table_used = False
     source_tag = None
-    if isinstance(best_table, Mapping) and best_table.get("rows"):
+    existing_score = _score_table(current_table_info)
+    best_score = _score_table(best_table)
+    if isinstance(best_table, Mapping) and best_table.get("rows") and best_score > existing_score:
         source_tag = "acad_table" if score_a >= score_b else "text_table"
         promote_table_to_geo(geo, best_table, source_tag)
         table_used = True
@@ -267,6 +544,8 @@ def extract_geo_from_path(
             rows = list(rows)
         else:
             rows = []
+    if not table_used and existing_is_table:
+        table_used = bool(rows)
     if table_used:
         qty_sum = _sum_qty(rows)
     else:
