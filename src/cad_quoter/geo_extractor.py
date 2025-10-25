@@ -25,6 +25,8 @@ _DEFAULT_LAYER_ALLOWLIST = frozenset({"BALLOON"})
 _PREFERRED_BLOCK_NAME_RE = re.compile(r"HOLE.*(?:CHART|TABLE)", re.IGNORECASE)
 
 _LAST_ACAD_TABLE_SCAN: dict[str, Any] | None = None
+_TRACE_ACAD = False
+_LAST_DXF_FALLBACK_INFO: dict[str, Any] | None = None
 
 
 @dataclass(slots=True)
@@ -100,6 +102,23 @@ def _entity_handle(entity: Any) -> str:
 
 
 
+def _entity_owner_handle(entity: Any) -> str:
+    dxf_obj = getattr(entity, "dxf", None)
+    for source in (entity, dxf_obj):
+        if source is None:
+            continue
+        owner = getattr(source, "owner", None)
+        if owner is None:
+            continue
+        try:
+            text = str(owner).strip()
+        except Exception:
+            continue
+        if text:
+            return text
+    return ""
+
+
 
 def _normalize_oda_version(version: str | None) -> str | None:
     if version is None:
@@ -119,6 +138,35 @@ def _normalize_oda_version(version: str | None) -> str | None:
         "ACAD2018": "ACAD2018",
     }
     return mapping.get(normalized, normalized)
+
+
+def set_trace_acad(enabled: bool) -> None:
+    """Toggle verbose tracing for AutoCAD table discovery helpers."""
+
+    global _TRACE_ACAD
+    _TRACE_ACAD = bool(enabled)
+
+
+def log_last_dxf_fallback(tables_found: Any) -> None:
+    """Emit DXF fallback diagnostics if tracing is enabled."""
+
+    global _LAST_DXF_FALLBACK_INFO
+    info = _LAST_DXF_FALLBACK_INFO
+    _LAST_DXF_FALLBACK_INFO = None
+    if not info or not _TRACE_ACAD:
+        return
+    version = str(info.get("version") or "").strip() or "-"
+    path = str(info.get("path") or "").strip() or "-"
+    tables_count = 0
+    if isinstance(tables_found, (int, float)):
+        tables_count = int(tables_found)
+    else:
+        try:
+            tables_count = int(float(tables_found))
+        except Exception:
+            tables_count = 0
+    print(f"[DXF-FALLBACK] version={version} path={path} tables={tables_count}")
+
 
 def scan_tables_everywhere(doc) -> list[TableHit]:
     """Enumerate AutoCAD tables across layouts, paper space, and blocks."""
@@ -257,6 +305,7 @@ def scan_tables_everywhere(doc) -> list[TableHit]:
             seen_entities.add(marker)
             layer_name = _entity_layer(entity) or ""
             handle = _entity_handle(entity)
+            owner_handle = _entity_owner_handle(entity)
             rows = _get_table_dimension(
                 entity,
                 ("n_rows", "row_count", "nrows", "rows"),
@@ -276,6 +325,20 @@ def scan_tables_everywhere(doc) -> list[TableHit]:
                 "type": dxftype or "",
             }
             scan_tables.append(scan_entry)
+            if _TRACE_ACAD:
+                layout_label = name or owner_label
+                layout_display = str(layout_label or "").strip() or owner_label
+                owner_display = owner_handle or handle or "-"
+                layer_display = layer_name or "-"
+                print(
+                    "[ACAD-TABLE] layout={layout} owner={owner} rows={rows} cols={cols} layer={layer}".format(
+                        layout=layout_display,
+                        owner=owner_display,
+                        rows=rows_val,
+                        cols=cols_val,
+                        layer=layer_display,
+                    )
+                )
             hit = TableHit(
                 owner=owner_label,
                 layer=layer_name or "",
@@ -3306,6 +3369,32 @@ def read_text_table(
         preferred_block_names: list[str] = []
         preferred_block_rois: list[dict[str, Any]] = []
         block_height_samples: defaultdict[str, list[float]] = defaultdict(list)
+        table_counts_by_owner: dict[str, int] = {}
+        if _TRACE_ACAD:
+            scan_info = get_last_acad_table_scan() or {}
+            tables_meta = scan_info.get("tables")
+            if isinstance(tables_meta, list):
+                for table_entry in tables_meta:
+                    if not isinstance(table_entry, Mapping):
+                        continue
+                    owner_label = table_entry.get("owner")
+                    if not isinstance(owner_label, str):
+                        continue
+                    owner_key = owner_label.strip().upper()
+                    if not owner_key:
+                        continue
+                    table_counts_by_owner[owner_key] = table_counts_by_owner.get(owner_key, 0) + 1
+        block_stats: dict[str, dict[str, int]] = {}
+
+        def _block_stats_entry(name: str | None) -> dict[str, int]:
+            text = name if isinstance(name, str) else str(name or "")
+            normalized = text.strip()
+            key = normalized or text or "-"
+            entry = block_stats.get(key)
+            if entry is None:
+                entry = {"texts": 0, "att": 0, "nested_inserts": 0}
+                block_stats[key] = entry
+            return entry
 
         if doc is None:
             table_lines = []
@@ -3420,6 +3509,20 @@ def read_text_table(
         debug_enabled = _debug_entities_enabled()
 
         for layout_index, (layout_name, layout_obj) in enumerate(_iter_layouts()):
+            layout_raw = layout_name if isinstance(layout_name, str) else str(layout_name or "")
+            layout_trimmed = layout_raw.strip()
+            layout_label = layout_trimmed or layout_raw or f"Layout{layout_index}"
+            if isinstance(layout_label, str) and not layout_label.strip():
+                layout_label = f"Layout{layout_index}"
+            owner_keys: list[str] = []
+            base_key = layout_trimmed or layout_label
+            if base_key.upper() == "MODEL":
+                owner_keys.append("MODEL")
+            elif base_key:
+                owner_keys.append(f"PAPER:{base_key}".upper())
+            layout_tables = 0
+            for candidate in owner_keys:
+                layout_tables += table_counts_by_owner.get(candidate.upper(), 0)
             query = getattr(layout_obj, "query", None)
             base_entities: list[Any] = []
             if callable(query):
@@ -3439,6 +3542,8 @@ def read_text_table(
                 except Exception:
                     base_entities = []
             if not base_entities:
+                if _TRACE_ACAD:
+                    print(f"[LAYOUT] {layout_label} texts=0/0 tables={layout_tables}")
                 continue
 
             seen_entities: set[int] = set()
@@ -3507,10 +3612,20 @@ def read_text_table(
                 if kind in {"TEXT", "MTEXT", "ATTRIB", "ATTDEF"}:
                     coords = _extract_coords(entity)
                     text_height = _extract_text_height(entity)
+                    counted_block_text = False
+                    counted_block_attr = False
                     for fragment, is_mtext in _iter_entity_text_fragments(entity):
                         normalized = _normalize_table_fragment(fragment)
                         if not normalized:
                             continue
+                        if _TRACE_ACAD and active_block:
+                            stats_entry = _block_stats_entry(active_block)
+                            if not counted_block_text and kind in {"TEXT", "MTEXT"}:
+                                stats_entry["texts"] += 1
+                                counted_block_text = True
+                            if not counted_block_attr and kind in {"ATTRIB", "ATTDEF"}:
+                                stats_entry["att"] += 1
+                                counted_block_attr = True
                         if kind in {"ATTRIB", "ATTDEF"}:
                             attrib_count += 1
                         if (
@@ -3559,6 +3674,12 @@ def read_text_table(
                     if block_name is None:
                         block_name = getattr(entity, "name", None)
                     name_str = block_name if isinstance(block_name, str) else None
+                    if _TRACE_ACAD:
+                        if active_block:
+                            parent_entry = _block_stats_entry(active_block)
+                            parent_entry["nested_inserts"] += 1
+                        if name_str:
+                            _block_stats_entry(name_str)
                     if name_str and name_str in visited_blocks:
                         return
                     if name_str:
@@ -3659,6 +3780,19 @@ def read_text_table(
                 f"[TEXT-SCAN] layout={layout_name} text={text_fragments} "
                 f"mtext={mtext_fragments} kept={kept_count} from_blocks={from_blocks_count}"
             )
+            if _TRACE_ACAD:
+                print(
+                    f"[LAYOUT] {layout_label} texts={text_fragments}/{mtext_fragments} "
+                    f"tables={layout_tables}"
+                )
+
+        if _TRACE_ACAD and block_stats:
+            for block_name, stats in block_stats.items():
+                display_name = block_name or "-"
+                print(
+                    f"[BLOCK] {display_name} texts={stats['texts']} "
+                    f"att={stats['att']} nested_inserts={stats['nested_inserts']}"
+                )
 
         if preferred_block_names:
             print(f"[TEXT-SCAN] preferred_blocks={preferred_block_names}")
@@ -4618,6 +4752,8 @@ def extract_geometry(doc) -> dict[str, Any]:
 
 
 def _load_doc_for_path(path: Path, *, use_oda: bool, out_ver: str | None = None) -> Any:
+    global _LAST_DXF_FALLBACK_INFO
+    _LAST_DXF_FALLBACK_INFO = None
     ezdxf_mod = geometry.require_ezdxf()
     readfile = getattr(ezdxf_mod, "readfile", None)
     if not callable(readfile):
@@ -4643,6 +4779,7 @@ def _load_doc_for_path(path: Path, *, use_oda: bool, out_ver: str | None = None)
                 )
             )
             dxf_path = convert_dwg_to_dxf(str(path), out_ver=oda_version)
+            _LAST_DXF_FALLBACK_INFO = {"version": oda_version, "path": str(dxf_path)}
         else:
             dxf_path = convert_dwg_to_dxf(str(path))
         return readfile(dxf_path)
@@ -4894,6 +5031,7 @@ def _read_geo_payload_from_path(
         tables_found = int(scan_info.get("tables_found", 0))  # type: ignore[arg-type]
     except Exception:
         tables_found = 0
+    log_last_dxf_fallback(tables_found)
     if tables_found == 0 and path_obj.suffix.lower() == ".dwg":
         fallback_versions = [
             "ACAD2000",
@@ -4925,6 +5063,7 @@ def _read_geo_payload_from_path(
                 tables_found = int(scan_info.get("tables_found", 0))
             except Exception:
                 tables_found = 0
+            log_last_dxf_fallback(tables_found)
             if tables_found:
                 break
     return payload
@@ -5020,4 +5159,6 @@ __all__ = [
     "read_geo",
     "get_last_text_table_debug",
     "get_last_acad_table_scan",
+    "set_trace_acad",
+    "log_last_dxf_fallback",
 ]
