@@ -1086,6 +1086,140 @@ _BAND_QTY_FALLBACK_PATTERNS = [
 ]
 
 _LAST_TEXT_TABLE_DEBUG: dict[str, Any] | None = None
+_PROMOTED_ROWS_LOGGED = False
+
+
+def _promoted_rows_preview_limit() -> int:
+    raw_value = os.environ.get("CAD_QUOTER_SHOW_ROWS")
+    if raw_value in (None, ""):
+        return 0
+    try:
+        limit = int(float(str(raw_value).strip()))
+    except Exception:
+        return 0
+    return max(limit, 0)
+
+
+def _clean_cell_text(value: Any) -> str:
+    if value is None:
+        return ""
+    return " ".join(str(value).split())
+
+
+def _normalize_for_dedupe(value: Any) -> str:
+    return _clean_cell_text(value).upper()
+
+
+def _classify_promoted_row(desc_upper: str) -> str:
+    if not desc_upper:
+        return "note"
+    tap_tokens = ("TAP", "THREAD", "NPT", "N.P.T", "NPTF", "NPS")
+    counterbore_tokens = ("COUNTERBORE", "COUNTER BORE", "C'BORE", "CBORE", "SPOTFACE", "SPOT FACE")
+    drill_tokens = (
+        "DRILL",
+        "THRU",
+        "Ø",
+        "⌀",
+        "DIA",
+        "CSK",
+        "C'SINK",
+        "COUNTERSINK",
+        "SPOT",
+        "REAM",
+        "JIG GRIND",
+        "CENTER DRILL",
+        "C DRILL",
+        "C’DRILL",
+    )
+    if any(token in desc_upper for token in tap_tokens):
+        return "tap"
+    if any(token in desc_upper for token in counterbore_tokens):
+        return "counterbore"
+    drill_hit = any(token in desc_upper for token in drill_tokens)
+    if ("NOTE" in desc_upper or desc_upper.startswith("SEE ")) and not drill_hit:
+        return "note"
+    return "drill"
+
+
+def _prepare_columnar_promoted_rows(
+    table_info: Mapping[str, Any] | None,
+) -> tuple[list[dict[str, Any]], int]:
+    rows_raw = _normalize_table_rows(table_info.get("rows") if isinstance(table_info, Mapping) else None)
+    seen: set[tuple[int, str, str, str]] = set()
+    grouped: dict[str, list[dict[str, Any]]] = {
+        "tap": [],
+        "counterbore": [],
+        "drill": [],
+    }
+    for row in rows_raw:
+        if not isinstance(row, Mapping):
+            continue
+        qty_raw = row.get("qty")
+        try:
+            qty_val = int(float(qty_raw or 0))
+        except Exception:
+            qty_val = 0
+        if qty_val <= 0:
+            continue
+        desc_clean = _clean_cell_text(row.get("desc"))
+        ref_clean = _clean_cell_text(row.get("ref"))
+        side_clean = _clean_cell_text(row.get("side"))
+        dedupe_key = (
+            qty_val,
+            _normalize_for_dedupe(ref_clean),
+            _normalize_for_dedupe(side_clean),
+            _normalize_for_dedupe(desc_clean),
+        )
+        if dedupe_key in seen:
+            continue
+        seen.add(dedupe_key)
+        prepared_row: dict[str, Any] = dict(row)
+        prepared_row["qty"] = qty_val
+        prepared_row["desc"] = desc_clean
+        prepared_row["ref"] = ref_clean
+        if side_clean:
+            prepared_row["side"] = side_clean
+        elif "side" in prepared_row:
+            prepared_row.pop("side")
+        prepared_row["hole"] = _clean_cell_text(row.get("hole"))
+        row_type = _classify_promoted_row(_normalize_for_dedupe(desc_clean))
+        if row_type == "note":
+            continue
+        grouped[row_type].append(prepared_row)
+    ordered_rows: list[dict[str, Any]] = []
+    for kind in ("tap", "counterbore", "drill"):
+        ordered_rows.extend(grouped[kind])
+    qty_sum = sum(row.get("qty", 0) for row in ordered_rows if isinstance(row.get("qty"), int))
+    return (ordered_rows, qty_sum)
+
+
+def _print_promoted_rows_once(rows: Iterable[Mapping[str, Any]]) -> None:
+    global _PROMOTED_ROWS_LOGGED
+    if _PROMOTED_ROWS_LOGGED:
+        return
+    limit = _promoted_rows_preview_limit()
+    if limit <= 0:
+        return
+    materialized = [dict(row) for row in rows if isinstance(row, Mapping)]
+    if not materialized:
+        return
+    count = min(limit, len(materialized))
+    print(f"[EXTRACT] promoted rows preview_count={count}")
+    for idx, row in enumerate(materialized[:count]):
+        qty_display = row.get("qty")
+        ref_display = row.get("ref") or "-"
+        side_display = row.get("side") or "-"
+        desc_display = row.get("desc") or ""
+        print(
+            "[EXTRACT] promoted row[{idx:02d}] qty={qty} ref={ref} side={side} desc={desc}".format(
+                idx=idx,
+                qty=qty_display,
+                ref=ref_display,
+                side=side_display,
+                desc=desc_display,
+            )
+        )
+    _PROMOTED_ROWS_LOGGED = True
 
 
 def _score_table(info: Mapping[str, Any] | None) -> tuple[int, int, int]:
@@ -3232,7 +3366,7 @@ def read_text_table(
 ) -> dict[str, Any]:
     helper = _resolve_app_callable("extract_hole_table_from_text")
     _print_helper_debug("text", helper)
-    global _LAST_TEXT_TABLE_DEBUG
+    global _LAST_TEXT_TABLE_DEBUG, _PROMOTED_ROWS_LOGGED
     _LAST_TEXT_TABLE_DEBUG = {
         "candidates": [],
         "band_cells": [],
@@ -4236,23 +4370,25 @@ def read_text_table(
     elif isinstance(fallback_candidate, Mapping):
         primary_result = dict(fallback_candidate)
 
+    _PROMOTED_ROWS_LOGGED = False
+
     columnar_result: dict[str, Any] | None = None
     if isinstance(columnar_table_info, Mapping):
         columnar_result = dict(columnar_table_info)
+        promoted_rows, promoted_qty_sum = _prepare_columnar_promoted_rows(columnar_result)
+        columnar_result["rows"] = promoted_rows
+        if promoted_qty_sum > 0:
+            columnar_result["hole_count"] = promoted_qty_sum
+        columnar_result["source_label"] = "text_table (column-mode+stripe)"
 
     column_selected = False
     if columnar_result:
         existing_score = _score_table(primary_result)
         fallback_score = _score_table(columnar_result)
         if fallback_score[1] > 0 and fallback_score > existing_score:
-            rows_count = fallback_score[1]
-            qty_sum = fallback_score[0]
-            print(
-                f"[EXTRACT] promoted table rows={rows_count} qty_sum={qty_sum} "
-                "source=text_table (column-mode+stripe)"
-            )
             primary_result = columnar_result
             column_selected = True
+            _print_promoted_rows_once(columnar_result.get("rows", []))
 
     if primary_result is None:
         fallback = _fallback_text_table(lines)
@@ -4264,10 +4400,6 @@ def read_text_table(
 
     if column_selected:
         primary_result.setdefault("source", "text_table")
-        _LAST_TEXT_TABLE_DEBUG["rows"] = list(primary_result.get("rows", []))
-        return primary_result
-
-    primary_result.setdefault("source", "text_table")
     _LAST_TEXT_TABLE_DEBUG["rows"] = list(primary_result.get("rows", []))
     return primary_result
 
@@ -4551,7 +4683,12 @@ def promote_table_to_geo(geo: dict[str, Any], table_info: Mapping[str, Any], sou
         return
     ops_summary = geo.setdefault("ops_summary", {})
     ops_summary["rows"] = list(rows)
-    ops_summary["source"] = source_tag
+    source_label = source_tag
+    if isinstance(table_info, Mapping):
+        label_candidate = table_info.get("source_label") or table_info.get("source")
+        if isinstance(label_candidate, str) and label_candidate.strip():
+            source_label = label_candidate
+    ops_summary["source"] = source_label
     totals = defaultdict(int)
     for row in rows:
         if not isinstance(row, Mapping):
