@@ -624,41 +624,113 @@ def promote_table_to_geo(geo: dict[str, Any], table_info: Mapping[str, Any], sou
     for row in new_rows:
         if not isinstance(row, Mapping):
             continue
+        normalized = dict(entry)
+        normalized["hole"] = str(entry.get("hole") or "")
+        normalized["ref"] = str(entry.get("ref") or "")
+        normalized["desc"] = str(entry.get("desc") or "")
         try:
-            qty = int(float(row.get("qty") or 0))
+            normalized["qty"] = int(float(entry.get("qty") or 0))
         except Exception:
-            qty = 0
-        desc = str(row.get("desc") or "").upper()
+            normalized["qty"] = 0
+        normalized_rows.append(normalized)
+
+    normalized_rows = [row for row in normalized_rows if int(row.get("qty", 0) or 0) > 0]
+    if not normalized_rows:
+        return
+
+    def _detect_sides(text: str) -> set[str]:
+        if not text:
+            return {"front"}
+        upper = text.upper()
+        if any(
+            token in upper
+            for token in (
+                "FRONT & BACK",
+                "FRONT AND BACK",
+                "FRONT/BACK",
+                "BOTH SIDES",
+                "DOUBLE SIDED",
+                "DOUBLE-SIDED",
+            )
+        ):
+            return {"front", "back"}
+        has_front = "FRONT" in upper
+        has_back = any(
+            marker in upper
+            for marker in ("BACK", "BACKSIDE", "FROM BACK", "BACK SIDE", "BACK-", "(BACK)")
+        )
+        if has_front and has_back:
+            return {"front", "back"}
+        if has_back:
+            return {"back"}
+        return {"front"}
+
+    def _increment_with_sides(base_key: str, qty: int, sides: set[str]) -> None:
+        if qty <= 0:
+            return
+        totals[base_key] += qty
+        if "front" in sides:
+            totals[f"{base_key}_front"] += qty
+        if "back" in sides:
+            totals[f"{base_key}_back"] += qty
+
+    totals = defaultdict(int)
+    for row in normalized_rows:
+        qty = int(row.get("qty") or 0)
         if qty <= 0:
             continue
-        if "TAP" in desc:
-            totals["tap"] += qty
+        desc_upper = row.get("desc", "").upper()
+        sides = _detect_sides(desc_upper)
+        has_tap = "TAP" in desc_upper
+        has_cbore = any(
+            marker in desc_upper
+            for marker in ("CBORE", "C'BORE", "C’BORE", "COUNTERBORE", "COUNTER BORE", "C-BORE", "C BORE")
+        )
+        has_csk = any(marker in desc_upper for marker in ("C'SINK", "C’SINK", "CSK", "COUNTERSINK"))
+        has_counterdrill = any(
+            marker in desc_upper
+            for marker in (
+                "COUNTERDRILL",
+                "COUNTER DRILL",
+                "C DRILL",
+                "C-DRILL",
+                "C'DRILL",
+                "C’DRILL",
+                "CENTER DRILL",
+            )
+        )
+        has_spot = (
+            "SPOT" in desc_upper
+            and "SPOTFACE" not in desc_upper
+            and "SPOT FACE" not in desc_upper
+        ) or has_counterdrill
+        has_drill = (
+            (" DRILL" in desc_upper or desc_upper.startswith("DRILL"))
+            and not has_counterdrill
+        )
+        has_thru = "THRU" in desc_upper or "THROUGH" in desc_upper
+
+        if has_tap:
+            _increment_with_sides("tap", qty, sides)
             totals["drill"] += qty
-            if "BACK" in desc and "FRONT" not in desc:
-                totals["tap_back"] += qty
-            elif "FRONT" in desc and "BACK" in desc:
-                totals["tap_front"] += qty
-                totals["tap_back"] += qty
-            else:
-                totals["tap_front"] += qty
-        if any(marker in desc for marker in ("CBORE", "COUNTERBORE", "C'BORE")):
-            totals["counterbore"] += qty
-            if "BACK" in desc and "FRONT" not in desc:
-                totals["counterbore_back"] += qty
-            elif "FRONT" in desc and "BACK" in desc:
-                totals["counterbore_front"] += qty
-                totals["counterbore_back"] += qty
-            else:
-                totals["counterbore_front"] += qty
-        if "JIG GRIND" in desc:
+        elif has_drill or (has_thru and not has_counterdrill):
+            totals["drill"] += qty
+
+        if has_cbore:
+            _increment_with_sides("cbore", qty, sides)
+
+        if has_csk:
+            _increment_with_sides("csk", qty, sides)
+
+        if has_counterdrill:
+            _increment_with_sides("counterdrill", qty, sides)
+
+        if has_spot:
+            _increment_with_sides("spot", qty, sides)
+
+        if "JIG GRIND" in desc_upper:
             totals["jig_grind"] += qty
-        if (
-            "SPOT" in desc
-            or "CENTER DRILL" in desc
-            or "C DRILL" in desc
-            or "C’DRILL" in desc
-        ) and "TAP" not in desc and "THRU" not in desc:
-            totals["spot"] += qty
+
     if totals:
         ops_summary["totals"] = dict(totals)
     else:
@@ -843,15 +915,29 @@ def extract_geo_from_path(
         if not isinstance(rows_for_log, list) and isinstance(rows_for_log, Iterable):
             rows_for_log = list(rows_for_log)
         qty_sum = _sum_qty(rows_for_log)
-    print(
-        f"[EXTRACT] published rows={len(rows_for_log)} qty_sum={qty_sum} "
-        f"source={ops_summary.get('source')}"
-    )
     provenance_holes = None
     provenance = geo.get("provenance")
     if isinstance(provenance, Mapping):
         provenance_holes = provenance.get("holes")
-    print(f"[EXTRACT] provenance={provenance_holes}")
+
+    hole_count_value = geo.get("hole_count")
+    hole_count_repr = ""
+    if hole_count_value is not None:
+        try:
+            hole_count_repr = str(int(float(hole_count_value)))
+        except Exception:
+            hole_count_repr = str(hole_count_value)
+
+    details = [
+        f"rows={len(rows_for_log)}",
+        f"qty_sum={qty_sum}",
+        f"source={ops_summary.get('source')}",
+    ]
+    if hole_count_repr:
+        details.append(f"hole_count={hole_count_repr}")
+    if provenance_holes:
+        details.append(f"provenance={provenance_holes}")
+    print("[EXTRACT] published " + " ".join(details))
 
     return geo
 
