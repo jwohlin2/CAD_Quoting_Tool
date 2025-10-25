@@ -23,6 +23,7 @@ _HAS_ODAFC = bool(getattr(geometry, "HAS_ODAFC", False))
 
 _DEFAULT_LAYER_ALLOWLIST = frozenset({"BALLOON"})
 _PREFERRED_BLOCK_NAME_RE = re.compile(r"HOLE.*(?:CHART|TABLE)", re.IGNORECASE)
+_FOLLOW_SHEET_DIRECTIVE_RE = re.compile(r"SEE\s+SHEET\s+(?P<target>[A-Z0-9]+)", re.IGNORECASE)
 
 _LAST_ACAD_TABLE_SCAN: dict[str, Any] | None = None
 
@@ -1308,6 +1309,84 @@ def _collect_table_text_lines(doc: Any) -> list[str]:
                 if normalized:
                     lines.append(normalized)
     return lines
+
+
+def _resolve_follow_sheet_layout(
+    token: str, layout_names: Iterable[str]
+) -> tuple[str, str | None, bool]:
+    normalized = re.sub(r"[^A-Z0-9]", "", str(token or "")).upper()
+    if not normalized:
+        target_label = "SHEET ()"
+        return (target_label, None, False)
+
+    target_label = f"SHEET ({normalized})"
+
+    lookup: dict[str, str] = {}
+    for name in layout_names:
+        if not isinstance(name, str):
+            continue
+        stripped = name.strip()
+        if not stripped:
+            continue
+        lookup.setdefault(stripped.upper(), stripped)
+
+    target_upper = target_label.upper()
+    if target_upper in lookup:
+        return (target_label, lookup[target_upper], True)
+
+    alt_labels: list[str] = []
+    if normalized.isdigit():
+        trimmed = normalized.lstrip("0") or "0"
+        if trimmed != normalized:
+            alt_labels.append(f"SHEET ({trimmed})")
+        alt_labels.append(f"SHEET {normalized}")
+        if trimmed != normalized:
+            alt_labels.append(f"SHEET {trimmed}")
+        alt_labels.append(trimmed)
+    else:
+        alt_labels.append(f"SHEET {normalized}")
+        alt_labels.append(normalized)
+
+    seen: set[str] = set()
+    for candidate in alt_labels:
+        candidate_upper = candidate.upper()
+        if candidate_upper in seen:
+            continue
+        seen.add(candidate_upper)
+        if candidate_upper in lookup:
+            return (target_label, lookup[candidate_upper], True)
+
+    for upper_name, original in lookup.items():
+        if normalized and normalized in upper_name:
+            return (target_label, original, True)
+
+    return (target_label, None, False)
+
+
+def _count_tables_for_layout_name(layout_name: str) -> int:
+    layout_upper = str(layout_name or "").strip().upper()
+    if not layout_upper:
+        return 0
+    snapshot = _LAST_ACAD_TABLE_SCAN
+    if not isinstance(snapshot, Mapping):
+        return 0
+    raw_tables = snapshot.get("tables")
+    if not isinstance(raw_tables, list):
+        return 0
+    suffixes = (f":{layout_upper}",)
+    count = 0
+    for entry in raw_tables:
+        if not isinstance(entry, Mapping):
+            continue
+        owner_upper = str(entry.get("owner") or "").strip().upper()
+        if not owner_upper:
+            continue
+        if owner_upper == layout_upper:
+            count += 1
+            continue
+        if any(owner_upper.endswith(suffix) for suffix in suffixes):
+            count += 1
+    return count
 
 
 def _normalize_table_fragment(fragment: str) -> str:
@@ -3306,6 +3385,9 @@ def read_text_table(
         preferred_block_names: list[str] = []
         preferred_block_rois: list[dict[str, Any]] = []
         block_height_samples: defaultdict[str, list[float]] = defaultdict(list)
+        layout_names_seen: list[str] = []
+        follow_sheet_directive: dict[str, Any] | None = None
+        follow_sheet_target_layout: str | None = None
 
         if doc is None:
             table_lines = []
@@ -3420,6 +3502,9 @@ def read_text_table(
         debug_enabled = _debug_entities_enabled()
 
         for layout_index, (layout_name, layout_obj) in enumerate(_iter_layouts()):
+            layout_names_seen.append(
+                layout_name if isinstance(layout_name, str) else str(layout_name)
+            )
             query = getattr(layout_obj, "query", None)
             base_entities: list[Any] = []
             if callable(query):
@@ -3488,6 +3573,7 @@ def read_text_table(
                 nonlocal text_fragments, mtext_fragments, kept_count, from_blocks_count, counter
                 nonlocal attrib_count
                 nonlocal hint_logged
+                nonlocal follow_sheet_directive
                 if depth > _MAX_INSERT_DEPTH:
                     return
                 dxftype = None
@@ -3511,11 +3597,20 @@ def read_text_table(
                         normalized = _normalize_table_fragment(fragment)
                         if not normalized:
                             continue
+                        normalized_upper = normalized.upper()
                         if kind in {"ATTRIB", "ATTDEF"}:
                             attrib_count += 1
+                        directive_match = _FOLLOW_SHEET_DIRECTIVE_RE.search(
+                            normalized_upper
+                        )
+                        if directive_match and follow_sheet_directive is None:
+                            follow_sheet_directive = {
+                                "token": directive_match.group("target"),
+                                "layout": layout_name,
+                            }
                         if (
                             not hint_logged
-                            and "SEE SHEET 2 FOR HOLE CHART" in normalized.upper()
+                            and "SEE SHEET 2 FOR HOLE CHART" in normalized_upper
                         ):
                             print(
                                 "[HINT] Chart may live on an alternate sheet/block; ensure its INSERT is present and not on a frozen/off layer."
@@ -3765,6 +3860,35 @@ def read_text_table(
                         )
                     )
 
+        if follow_sheet_directive is not None:
+            target_label, resolved_layout, resolved_found = _resolve_follow_sheet_layout(
+                follow_sheet_directive.get("token", ""), layout_names_seen
+            )
+            follow_sheet_target_layout = resolved_layout if resolved_found else None
+            print(f"[HINT] follow-sheet target=\"{target_label}\" found={resolved_found}")
+            info_map = {
+                "target": target_label,
+                "resolved": resolved_layout if resolved_found else None,
+                "texts": 0,
+                "tables": 0,
+            }
+            if resolved_found and resolved_layout:
+                target_upper = str(resolved_layout).strip().upper()
+                texts_count = sum(
+                    1
+                    for entry in collected_entries
+                    if str(entry.get("layout_name") or "").strip().upper()
+                    == target_upper
+                )
+                tables_count = _count_tables_for_layout_name(resolved_layout)
+                print(
+                    f"[LAYOUT] {resolved_layout} texts={texts_count} tables={tables_count}"
+                )
+                info_map["texts"] = texts_count
+                info_map["tables"] = tables_count
+            if isinstance(_LAST_TEXT_TABLE_DEBUG, dict):
+                _LAST_TEXT_TABLE_DEBUG["follow_sheet_info"] = info_map
+
         if not collected_entries:
             table_lines = []
             print("[TEXT-SCAN] rows_txt count=0")
@@ -3920,16 +4044,38 @@ def read_text_table(
                 if not fragments:
                     base_fragment = remainder.strip() or text_value
                     fragments = [base_fragment]
+                original_text = text_value
                 for fragment in fragments:
                     fragment_clean = " ".join(fragment.split())
                     if not fragment_clean:
                         continue
                     ref_text, ref_value = _extract_row_reference(fragment_clean)
                     side = _detect_row_side(fragment_clean) or side_hint
+                    desc_value = fragment_clean
+                    qty_int: int | None = None
+                    qty_token: str | None = None
+                    if qty_val is not None:
+                        try:
+                            qty_int = int(qty_val)
+                        except Exception:
+                            qty_int = None
+                    if qty_int is not None:
+                        qty_token = f"({qty_int})"
+                    if (
+                        qty_token
+                        and original_text.startswith("(")
+                        and not fragment_clean.startswith("(")
+                    ):
+                        desc_value = f"{qty_token} {fragment_clean}".strip()
+                    letter_match = _LETTER_CODE_ROW_RE.match(original_text)
+                    if letter_match and not desc_value.startswith(letter_match.group(0)):
+                        desc_value = original_text
+                    elif qty_token and qty_token in original_text and qty_token not in desc_value:
+                        desc_value = original_text
                     row_dict: dict[str, Any] = {
                         "hole": "",
                         "qty": qty_val,
-                        "desc": fragment_clean,
+                        "desc": desc_value,
                         "ref": ref_text,
                     }
                     if side:
@@ -3942,6 +4088,43 @@ def read_text_table(
             return (parsed, families, total)
 
         parsed_rows, families, total_qty = _parse_rows(merged_rows)
+
+        if follow_sheet_target_layout:
+            target_upper = str(follow_sheet_target_layout).strip().upper()
+            follow_entries: list[dict[str, Any]] = []
+            for entry in collected_entries:
+                layout_value = str(entry.get("layout_name") or "").strip()
+                if layout_value.upper() != target_upper:
+                    continue
+                text_value = str(entry.get("text") or "").strip()
+                if not text_value:
+                    continue
+                follow_entries.append(
+                    {
+                        "layout_name": layout_value,
+                        "from_block": bool(entry.get("from_block")),
+                        "x": entry.get("x"),
+                        "y": entry.get("y"),
+                        "height": entry.get("height"),
+                        "text": text_value,
+                        "normalized_text": text_value,
+                    }
+                )
+            if follow_entries:
+                follow_candidate, follow_debug_payload = _build_columnar_table_from_entries(
+                    follow_entries, roi_hint=roi_hint_effective
+                )
+                if isinstance(follow_debug_payload, Mapping):
+                    follow_debug_entry = dict(follow_debug_payload)
+                    follow_debug_entry["layout"] = follow_sheet_target_layout
+                    if isinstance(_LAST_TEXT_TABLE_DEBUG, dict):
+                        _LAST_TEXT_TABLE_DEBUG["follow_sheet_debug"] = follow_debug_entry
+                candidate_score = _score_table(follow_candidate)
+                existing_score = _score_table(columnar_table_info)
+                if candidate_score > existing_score:
+                    columnar_table_info = follow_candidate
+                    if isinstance(follow_debug_payload, Mapping):
+                        columnar_debug_info = dict(follow_debug_payload)
 
         def _cluster_entries_by_y(
             entries: list[dict[str, Any]]
