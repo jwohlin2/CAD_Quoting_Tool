@@ -72,6 +72,11 @@ def main(argv: Sequence[str] | None = None) -> int:
         action="append",
         help="Regex pattern to match INSERT block names for ROI seeding (repeatable)",
     )
+    parser.add_argument(
+        "--scan-acad-tables",
+        action="store_true",
+        help="Print ACAD_TABLE inventory details",
+    )
     args = parser.parse_args(argv)
 
     path = (args.path or os.environ.get("GEO_DUMP_PATH") or "").strip()
@@ -152,10 +157,59 @@ def main(argv: Sequence[str] | None = None) -> int:
             read_kwargs["block_name_regex"] = normalized_patterns
             print(f"[geo_dump] block_regex={normalized_patterns}")
     payload = read_geo(doc, **read_kwargs)
+    scan_info = geo_extractor.get_last_acad_table_scan() or {}
+    tables_found = 0
+    try:
+        tables_found = int(scan_info.get("tables_found", 0))  # type: ignore[arg-type]
+    except Exception:
+        tables_found = 0
+    if tables_found == 0 and Path(path).suffix.lower() == ".dwg":
+        print("[ACAD-TABLE] none found; trying DXF2000 fallback conversion")
+        try:
+            fallback_doc = geo_extractor._load_doc_for_path(
+                Path(path), use_oda=args.use_oda, out_ver="ACAD2000"
+            )
+        except Exception as exc:
+            print(f"[ACAD-TABLE] DXF2000 fallback failed: {exc}")
+        else:
+            payload = read_geo(fallback_doc, **read_kwargs)
+            scan_info = geo_extractor.get_last_acad_table_scan() or {}
     if not isinstance(payload, Mapping):
         payload = {}
     else:
         payload = dict(payload)
+
+    final_scan = geo_extractor.get_last_acad_table_scan() or scan_info
+    if args.scan_acad_tables:
+        tables: list[Mapping[str, object]] = []
+        if isinstance(final_scan, Mapping):
+            raw_tables = final_scan.get("tables")
+            if isinstance(raw_tables, list):
+                tables = [entry for entry in raw_tables if isinstance(entry, Mapping)]
+        if tables:
+            for entry in tables:
+                owner = str(entry.get("owner") or "-")
+                layer = str(entry.get("layer") or "-")
+                handle = str(entry.get("handle") or "-")
+                try:
+                    rows_val = int(entry.get("rows") or 0)
+                except Exception:
+                    rows_val = 0
+                try:
+                    cols_val = int(entry.get("cols") or 0)
+                except Exception:
+                    cols_val = 0
+                print(
+                    "[ACAD-TABLE] owner={owner} layer={layer} rows={rows} cols={cols} handle={handle}".format(
+                        owner=owner,
+                        layer=layer,
+                        rows=rows_val,
+                        cols=cols_val,
+                        handle=handle,
+                    )
+                )
+        else:
+            print("[ACAD-TABLE] owner=<none> layer=- rows=0 cols=0 handle=-")
 
     geo = payload.get("geo")
     if not isinstance(geo, Mapping):
