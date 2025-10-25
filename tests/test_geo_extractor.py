@@ -55,7 +55,8 @@ def fallback_doc() -> _DummyDoc:
 def test_collect_table_text_lines_normalizes_entities(fallback_doc: _DummyDoc) -> None:
     lines = geo_extractor._collect_table_text_lines(fallback_doc)
 
-    assert "(3) Ø0.375 THRU" in lines
+    assert "(3) Ø0.375" in lines
+    assert "THRU" in lines
     assert "FROM BACK" in lines
     assert "A | Ø0.500 | 2 | (2) DRILL THRU" in lines
 
@@ -69,7 +70,10 @@ def test_read_text_table_uses_internal_fallback(monkeypatch: pytest.MonkeyPatch,
     rows = info["rows"]
     assert len(rows) == 2
     assert rows[0]["qty"] == 3
-    assert rows[0]["desc"].startswith("Ø0.375")
+    assert rows[0]["desc"] == "Ø0.375 THRU FROM BACK"
+    assert rows[0]["ref"] == '0.3750"'
+    assert rows[0].get("side") == "back"
+    assert rows[1]["ref"] == '0.5000"'
     families = info.get("hole_diam_families_in")
     assert families == {"0.375": 3, "0.5": 2}
-    assert info.get("provenance_holes") == "HOLE TABLE (TEXT_FALLBACK)"
+    assert info.get("provenance_holes") == "HOLE TABLE"
