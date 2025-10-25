@@ -11,6 +11,8 @@ from typing import Callable, Iterable, Union
 
 import pytest
 
+from cad_quoter.app import hole_ops
+
 
 CaseRunner = Callable[[pytest.FixtureRequest], None]
 
@@ -605,7 +607,7 @@ def _run_ops_summary_rows(_: pytest.FixtureRequest) -> None:
         appV5._parse_hole_line("QTY 4 0.201 1/4-20 TAP THRU", 1.0, source="TABLE")
     ]
 
-    summary = appV5.aggregate_ops(rows, ops_entries=ops_entries)
+    summary = hole_ops.aggregate_ops(rows, ops_entries=ops_entries)
 
     assert summary["rows"] == [
         {"hole": "H1", "ref": "0.201", "qty": 4, "desc": "4X TAP 1/4-20 THRU"}
@@ -756,7 +758,7 @@ def _run_aggregate_ops_sets_built(_: pytest.FixtureRequest) -> None:
         appV5._parse_hole_line("QTY 2 1/4-20 TAP THRU", 1.0, source="TABLE"),
     ]
 
-    summary = appV5.aggregate_ops(rows, ops_entries=ops_entries)
+    summary = hole_ops.aggregate_ops(rows, ops_entries=ops_entries)
 
     assert summary.get("built_rows") == 2
 
@@ -790,7 +792,7 @@ def test_parser_rules_v2_ops_summary_and_minutes(monkeypatch: pytest.MonkeyPatch
         {"type": "spot", "qty": 10, "depth_in": 0.1, "ref": "Ø0.531"},
     ]
 
-    summary = appV5.aggregate_ops(rows, ops_entries=ops_entries)
+    summary = hole_ops.aggregate_ops(rows, ops_entries=ops_entries)
     totals = summary["totals"]
 
     assert totals["drill"] == 85
@@ -855,7 +857,7 @@ def test_aggregate_ops_tap_pilot_claims() -> None:
         },
     ]
 
-    summary = appV5.aggregate_ops(rows, ops_entries=ops_entries)
+    summary = hole_ops.aggregate_ops(rows, ops_entries=ops_entries)
 
     totals = summary["totals"]
     assert totals["drill"] == 0
