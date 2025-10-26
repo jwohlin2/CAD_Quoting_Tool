@@ -4723,7 +4723,14 @@ from cad_quoter.geometry.dxf_enrich import (
     iter_table_text as _shared_iter_table_text,
 )
 
-from cad_quoter.pricing.process_buckets import BUCKET_ROLE, PROCESS_BUCKETS, bucketize
+from cad_quoter.pricing.process_buckets import (
+    BUCKET_ROLE,
+    PROCESS_BUCKETS,
+    bucketize,
+    flatten_rates,
+    lookup_rate,
+)
+from cad_quoter.pricing.process_cost_renderer import render_process_costs
 
 if typing.TYPE_CHECKING:  # pragma: no cover - expose rich geometry types to analysers
     from cad_quoter import geometry as geometry
@@ -12305,175 +12312,88 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
                 geometry_for_explainer = typing.cast(Mapping[str, Any], candidate)
                 break
 
-    def _norm(s: Any) -> str:
-        return re.sub(r"[^a-z0-9]+", "_", str(s or "").lower()).strip("_")
+    flat_rate_lookup, normalized_rate_lookup = flatten_rates(rates)
 
-    laborish_aliases: set[str] = set()
-    for bucket_key, role in BUCKET_ROLE.items():
-        if bucket_key == "_default" or role != "labor_only":
-            continue
-        for alias in PROCESS_BUCKETS.aliases(bucket_key):
-            laborish_aliases.add(alias)
-    LABORISH = {_norm(alias) for alias in laborish_aliases if alias}
-
-    RATE_KEYS = {
-        "milling": ["MillingRate"],
-        "drilling": ["DrillingRate"],
-        "counterbore": ["CounterboreRate", "DrillingRate"],
-        "tapping": ["TappingRate", "DrillingRate"],
-        "grinding": [
-            "GrindingRate",
-            "SurfaceGrindRate",
-            "ODIDGrindRate",
-            "JigGrindRate",
-        ],
-        "finishing_deburr": ["FinishingRate", "DeburrRate"],
-        "saw_waterjet": ["SawWaterjetRate", "SawRate", "WaterjetRate"],
-        "inspection": ["InspectionRate"],
-        "wire_edm": ["WireEDMRate", "EDMRate"],
-        "sinker_edm": ["SinkerEDMRate", "EDMRate"],
-    }
-
-    def _rate_for_bucket(key: str, rates: Mapping[str, Any] | dict) -> float:
-        k = _norm(key)
-        rates_dict = dict(rates) if not isinstance(rates, dict) else rates
-        for rk in RATE_KEYS.get(k, []):
-            v = rates_dict.get(rk) or rates_dict.get(_norm(rk))
-            if isinstance(v, (int, float)) and v > 0:
-                return float(v)
-        fallback_key = "LaborRate" if k in LABORISH else "MachineRate"
-        return float(rates_dict.get(fallback_key) or rates_dict.get(_norm(fallback_key)) or 0.0)
-
-    def _rows_from_bucket_view(
+    def _aggregate_bucket_metrics(
         view: Mapping[str, Any] | None,
-    ) -> tuple[
-        list[str],
-        dict[str, dict[str, float]],
-        list[tuple[str, float, float, float, float]],
-        dict[str, str],
-        dict[str, str],
-    ]:
+    ) -> tuple[list[str], dict[str, dict[str, float]]]:
         if not isinstance(view, _MappingABC):
-            return ([], {}, [], {}, {})
-
+            return ([], {})
         buckets_obj = view.get("buckets")
         if not isinstance(buckets_obj, _MappingABC):
-            return ([], {}, [], {}, {})
-
+            return ([], {})
         order_obj = view.get("order")
         if isinstance(order_obj, Sequence):
             ordered_keys = list(order_obj)
         else:
             ordered_keys = list(_preferred_order_then_alpha(buckets_obj.keys()))
-
-        if isinstance(rates, dict):
-            rates_map_local: Mapping[str, Any] = rates
-        elif isinstance(rates, _MappingABC):
-            rates_map_local = dict(rates)
-        else:
-            rates_map_local = {}
-
-        drill_rate_local = _rate_for_bucket("drilling", rates_map_local)
-
         canonical_order_local: list[str] = []
-        canonical_summary_local: dict[str, dict[str, float]] = {}
-        label_map_local: dict[str, str] = {}
-        canon_label_map_local: dict[str, str] = {}
-        rows_local: list[tuple[str, float, float, float, float]] = []
-        raw_key_by_canon: dict[str, str] = {}
-
+        aggregated: dict[str, dict[str, float]] = {}
         for raw_key in ordered_keys:
-            lookup_candidates: Sequence[Any]
-            if isinstance(buckets_obj, dict) and raw_key not in buckets_obj:
-                lookup_candidates = (raw_key, str(raw_key))
-            else:
-                lookup_candidates = (raw_key,)
-
-            info: Mapping[str, Any] | None = None
-            key_text = str(raw_key)
-            for candidate_key in lookup_candidates:
-                candidate_info = (
-                    buckets_obj.get(candidate_key)
-                    if isinstance(buckets_obj, _MappingABC)
-                    else None
-                )
-                if isinstance(candidate_info, _MappingABC):
-                    info = candidate_info
-                    key_text = str(candidate_key)
-                    break
-
-            if not isinstance(info, _MappingABC):
+            candidate = buckets_obj.get(raw_key)
+            if not isinstance(candidate, _MappingABC) and isinstance(buckets_obj, dict):
+                candidate = buckets_obj.get(str(raw_key))
+            if not isinstance(candidate, _MappingABC):
                 continue
-
-            minutes_val = _safe_float(info.get("minutes"), default=0.0)
-            if minutes_val < 0.0:
-                minutes_val = 0.0
-            hours_val = _minutes_to_hours(minutes_val) if minutes_val else 0.0
-            labor_val = _safe_float(info.get("labor$"), default=0.0)
-            machine_val = _safe_float(info.get("machine$"), default=0.0)
-            total_val = _safe_float(info.get("total$"), default=0.0)
+            canon_key = _canonical_bucket_key(raw_key) or _normalize_bucket_key(raw_key)
+            if not canon_key:
+                canon_key = str(raw_key)
+            canon_str = str(canon_key)
+            entry = aggregated.setdefault(
+                canon_str,
+                {"minutes": 0.0, "labor": 0.0, "machine": 0.0, "total": 0.0},
+            )
+            minutes_val = max(0.0, _safe_float(candidate.get("minutes"), default=0.0))
+            labor_val = max(0.0, _safe_float(candidate.get("labor$"), default=0.0))
+            machine_val = max(0.0, _safe_float(candidate.get("machine$"), default=0.0))
+            total_val = _safe_float(candidate.get("total$"), default=0.0)
             if total_val <= 0.0:
                 total_val = labor_val + machine_val
+            entry["minutes"] += minutes_val
+            entry["labor"] += labor_val
+            entry["machine"] += machine_val
+            entry["total"] += max(0.0, total_val)
+            if canon_str not in canonical_order_local:
+                canonical_order_local.append(canon_str)
+        return canonical_order_local, aggregated
 
-            canon_key = _canonical_bucket_key(key_text)
-            if not canon_key:
-                canon_key = _normalize_bucket_key(key_text)
-            if not canon_key:
-                canon_key = key_text
+    aggregated_order, aggregated_metrics = _aggregate_bucket_metrics(bucket_view_struct)
 
-            norm_key = _norm(key_text)
-            rate_val = drill_rate_local if norm_key == "drilling" else _rate_for_bucket(
-                key_text, rates_map_local
-            )
-            if rate_val <= 0.0:
-                rate_val = 0.0
+    canonical_bucket_order = list(getattr(bucket_state, "canonical_order", ()))
+    canonical_bucket_summary = dict(getattr(bucket_state, "canonical_summary", {}))
+    bucket_table_rows = list(getattr(bucket_state, "table_rows", ()))
+    bucket_label_map = dict(getattr(bucket_state, "label_to_canon", {}))
+    bucket_canon_label_map = dict(getattr(bucket_state, "canon_to_display_label", {}))
 
-            summary_entry = canonical_summary_local.setdefault(
-                canon_key,
-                {
-                    "minutes": 0.0,
-                    "hours": 0.0,
-                    "labor": 0.0,
-                    "machine": 0.0,
-                    "total": 0.0,
-                },
-            )
-            summary_entry["minutes"] += minutes_val
-            summary_entry["hours"] += hours_val
-            summary_entry["labor"] += labor_val
-            summary_entry["machine"] += machine_val
-            summary_entry["total"] += total_val
-
-            if canon_key not in canonical_order_local:
-                canonical_order_local.append(canon_key)
-            raw_key_by_canon.setdefault(canon_key, key_text)
-
-        for canon_key in canonical_order_local:
-            metrics = canonical_summary_local.get(canon_key) or {}
-            minutes_total = _safe_float(metrics.get("minutes"), default=0.0)
-            hours_total = _safe_float(metrics.get("hours"), default=0.0)
-            if hours_total <= 0.0 and minutes_total > 0.0:
-                hours_total = _minutes_to_hours(minutes_total)
-            labor_total = _safe_float(metrics.get("labor"), default=0.0)
-            machine_total = _safe_float(metrics.get("machine"), default=0.0)
-            total_cost = _safe_float(metrics.get("total"), default=0.0)
-            source_key = raw_key_by_canon.get(canon_key, canon_key)
-            norm_key = _norm(source_key)
-            rate_val = (
-                drill_rate_local
-                if norm_key == "drilling"
-                else _rate_for_bucket(source_key, rates_map_local)
-            )
-            if rate_val <= 0.0:
-                rate_val = 0.0
-
+    if aggregated_order:
+        for canon_key in aggregated_order:
+            if canon_key not in canonical_bucket_order:
+                canonical_bucket_order.append(canon_key)
+    if aggregated_metrics:
+        bucket_row_specs.clear()
+        for canon_key, metrics in aggregated_metrics.items():
+            minutes_total = metrics.get("minutes", 0.0)
+            hours_total = minutes_total / 60.0 if minutes_total > 0.0 else 0.0
+            labor_total = metrics.get("labor", 0.0)
+            machine_total = metrics.get("machine", 0.0)
+            total_cost = metrics.get("total", 0.0)
+            summary_entry = canonical_bucket_summary.setdefault(canon_key, {})
+            summary_entry["minutes"] = minutes_total
+            summary_entry["hours"] = hours_total
+            summary_entry["labor"] = labor_total
+            summary_entry["machine"] = machine_total
+            summary_entry["total"] = total_cost
             if total_cost <= 0.0 and hours_total <= 0.0:
                 continue
-
-            display_label = _display_bucket_label(canon_key, label_overrides)
+            rate_val = 0.0
+            if hours_total > 0.0 and total_cost > 0.0:
+                rate_val = total_cost / hours_total
+            if hours_total > 0.0 and (rate_val <= 0.0 or not math.isfinite(rate_val)):
+                rate_val = lookup_rate(canon_key, flat_rate_lookup, normalized_rate_lookup)
+            label = _display_bucket_label(canon_key, label_overrides)
             bucket_row_specs.append(
                 _BucketRowSpec(
-                    label=display_label,
+                    label=label,
                     hours=hours_total,
                     rate=rate_val,
                     total=total_cost,
@@ -12483,33 +12403,8 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
                     minutes=minutes_total,
                 )
             )
-            rows_local.append(
-                (
-                    display_label,
-                    round(hours_total, 2),
-                    round(labor_total, 2),
-                    round(machine_total, 2),
-                    round(total_cost, 2),
-                )
-            )
-            label_map_local[display_label] = canon_key
-            canon_label_map_local.setdefault(canon_key, display_label)
-
-        return (
-            canonical_order_local,
-            canonical_summary_local,
-            rows_local,
-            label_map_local,
-            canon_label_map_local,
-        )
-
-    (
-        canonical_bucket_order,
-        canonical_bucket_summary,
-        bucket_table_rows,
-        bucket_label_map,
-        bucket_canon_label_map,
-    ) = _rows_from_bucket_view(bucket_view_struct)
+            bucket_label_map.setdefault(label, canon_key)
+            bucket_canon_label_map.setdefault(canon_key, label)
 
     def _row_component(value: Any) -> float:
         try:
@@ -12792,7 +12687,7 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
         if hours_val > 0.0 and amount_val > 0.0:
             rate_val = amount_val / hours_val
         elif hours_val > 0.0:
-            rate_val = _rate_for_bucket(canon_key, rates or {})
+            rate_val = lookup_rate(canon_key, flat_rate_lookup, normalized_rate_lookup)
             if rate_val < 0.0:
                 rate_val = 0.0
         new_spec = _BucketRowSpec(
@@ -12842,7 +12737,7 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
             else:
                 rate_val = 0.0
             if hours_val > 0 and rate_val <= 0.0:
-                rate_val = _rate_for_bucket(canon_key, rates or {})
+                rate_val = lookup_rate(canon_key, flat_rate_lookup, normalized_rate_lookup)
             bucket_row_specs.append(
                 _BucketRowSpec(
                     label=_display_bucket_label(canon_key, label_overrides),
@@ -12888,7 +12783,7 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
         minutes = float(meta.get("minutes") or 0.0)
         have_amount = float(process_costs_for_render.get(k) or 0.0)
         if minutes > 0 and have_amount <= 0.0:
-            r = _rate_for_bucket(k, rates or {})
+            r = lookup_rate(k, flat_rate_lookup, normalized_rate_lookup)
             if r > 0:
                 process_costs_for_render[k] = round((minutes / 60.0) * r, 2)
                 bucket_minutes_detail[k] = minutes
@@ -12921,10 +12816,7 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
         or 0.0
     )
     if drill_rate <= 0.0:
-        try:
-            drill_rate = float(_rate_for_bucket("drilling", rates or {}))
-        except Exception:
-            drill_rate = 0.0
+        drill_rate = float(lookup_rate("drilling", flat_rate_lookup, normalized_rate_lookup) or 0.0)
     drill_cost = round((bill_min / 60.0) * drill_rate, 2) if bill_min > 0 else 0.0
     if bill_min > 0:
         process_costs_for_render["drilling"] = drill_cost
@@ -16416,11 +16308,6 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
             }
         )
 
-    if quote_qty <= 1:
-        for entry in processes_entries:
-            if str(entry.get("label")) == PROGRAMMING_PER_PART_LABEL:
-                entry["label"] = PROGRAMMING_AMORTIZED_LABEL
-
     def _process_table_rows_from_view(
         view: Mapping[str, Any] | None,
     ) -> list[list[str]]:
@@ -16430,81 +16317,107 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
         if not isinstance(buckets_obj, _MappingABC):
             return []
 
-        def _as_float(value: Any) -> float:
-            try:
-                return float(value or 0.0)
-            except Exception:
-                return 0.0
+        metrics_by_canon: dict[str, dict[str, float]] = {}
+        costs: dict[str, float] = {}
+        label_lookup: dict[str, str] = {}
 
-        normalized: dict[str, Mapping[str, Any]] = {}
         for raw_key, raw_entry in buckets_obj.items():
             if not isinstance(raw_entry, _MappingABC):
                 continue
-            key_text = str(raw_key or "").strip()
-            if not key_text:
+            canon_key = _canonical_bucket_key(raw_key) or _normalize_bucket_key(raw_key)
+            if not canon_key:
                 continue
-            key_lower = key_text.lower()
-            normalized.setdefault(key_lower, raw_entry)
-            normalized.setdefault(key_lower.replace(" ", "_"), raw_entry)
-            canon = _canonical_bucket_key(key_text)
-            if canon:
-                normalized.setdefault(str(canon).lower(), raw_entry)
+            canon_str = str(canon_key)
 
-        pretty_labels = {
-            "programming_amortized": PROGRAMMING_AMORTIZED_LABEL,
-            "programming": PROGRAMMING_PER_PART_LABEL,
-            "milling": "Milling",
-            "drilling": "Drilling",
-            "tapping": "Tapping",
-            "inspection": "Inspection",
+            minutes_val = _safe_float(raw_entry.get("minutes"), default=0.0)
+            labor_val = _safe_float(raw_entry.get("labor$"), default=0.0)
+            machine_val = _safe_float(raw_entry.get("machine$"), default=0.0)
+            total_val = _safe_float(raw_entry.get("total$"), default=0.0)
+            if total_val <= 0.0:
+                total_val = labor_val + machine_val
+
+            entry = metrics_by_canon.setdefault(
+                canon_str,
+                {"minutes": 0.0, "labor": 0.0, "machine": 0.0},
+            )
+            entry["minutes"] += minutes_val
+            entry["labor"] += labor_val
+            entry["machine"] += machine_val
+            costs[canon_str] = costs.get(canon_str, 0.0) + total_val
+
+            for candidate in (
+                PROCESS_BUCKETS.label(canon_str),
+                _display_bucket_label(canon_str, label_overrides),
+                str(raw_key),
+                canon_str,
+            ):
+                if not candidate:
+                    continue
+                label_lookup.setdefault(str(candidate).strip().lower(), canon_str)
+
+        if not costs:
+            return []
+
+        minutes_detail = {
+            key: max(0.0, metrics.get("minutes", 0.0))
+            for key, metrics in metrics_by_canon.items()
         }
-        order = (
-            "programming_amortized",
-            "milling",
-            "drilling",
-            "tapping",
-            "inspection",
+
+        process_plan_candidate = view.get("process_plan")
+        if not isinstance(process_plan_candidate, _MappingABC):
+            process_plan_candidate = None
+
+        class _TableCapture:
+            def __init__(self) -> None:
+                self.rows: list[list[str]] = []
+
+            def add_row(self, *args, **kwargs) -> None:
+                if kwargs:
+                    label = kwargs.get("label")
+                    hours = kwargs.get("hours")
+                    cost = kwargs.get("cost")
+                else:
+                    label, hours, _, cost = (list(args) + [None] * 4)[:4]
+                label_str = str(label or "").strip()
+                if not label_str:
+                    return
+                canon = label_lookup.get(label_str.lower())
+                if canon is None:
+                    inferred = _canonical_bucket_key(label_str) or _normalize_bucket_key(label_str)
+                    if inferred:
+                        canon = str(inferred)
+                display_label = (
+                    _display_bucket_label(canon, label_overrides) if canon else label_str
+                ).strip()
+                if not display_label:
+                    return
+                hours_val = float(_safe_float(hours, default=0.0))
+                cost_val = round(float(_safe_float(cost, default=0.0)), 2)
+                metrics = metrics_by_canon.get(canon or "")
+                minutes_val = float(metrics.get("minutes", 0.0)) if metrics else 0.0
+                if minutes_val <= 0.0 and hours_val:
+                    minutes_val = hours_val * 60.0
+                labor_val = float(metrics.get("labor", 0.0)) if metrics else 0.0
+                machine_val = float(metrics.get("machine", 0.0)) if metrics else 0.0
+                self.rows.append(
+                    [
+                        display_label,
+                        f"{minutes_val:.2f}",
+                        f"${machine_val:.2f}",
+                        f"${labor_val:.2f}",
+                        f"${cost_val:.2f}",
+                    ]
+                )
+
+        table_capture = _TableCapture()
+        render_process_costs(
+            table_capture,
+            costs,
+            rates,
+            minutes_detail,
+            process_plan=typing.cast(Mapping[str, Any] | None, process_plan_candidate),
         )
-
-        def _lookup_entry(key: str) -> Mapping[str, Any] | None:
-            candidate = normalized.get(key)
-            if candidate is not None:
-                return candidate
-            alt = key.replace("_", " ")
-            return normalized.get(alt)
-
-        rows: list[list[str]] = []
-        for canon_key in order:
-            entry = _lookup_entry(canon_key)
-            label_key = canon_key
-            if entry is None and canon_key == "programming_amortized":
-                entry = _lookup_entry("programming")
-                label_key = "programming"
-            if not isinstance(entry, _MappingABC):
-                continue
-            minutes_val = _as_float(entry.get("minutes"))
-            if minutes_val <= 0.0:
-                continue
-            machine_val = _as_float(entry.get("machine$"))
-            labor_val = _as_float(entry.get("labor$"))
-            total_val = entry.get("total$")
-            total_float = _as_float(total_val)
-            if total_float <= 0.0:
-                total_float = machine_val + labor_val
-            label = pretty_labels.get(
-                label_key,
-                str(label_key).replace("_", " ").title(),
-            )
-            rows.append(
-                [
-                    label,
-                    f"{minutes_val:.2f}",
-                    f"${machine_val:.2f}",
-                    f"${labor_val:.2f}",
-                    f"${total_float:.2f}",
-                ]
-            )
-        return rows
+        return table_capture.rows
 
     render_payload = {
         "summary": summary_payload,
@@ -16528,7 +16441,48 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
     if not process_table_rows_payload:
         process_table_rows_payload = _process_table_rows_from_view(bucket_view_obj)
     if process_table_rows_payload:
+        rebuilt_processes: list[dict[str, Any]] = []
+        seen_labels_from_table: set[str] = set()
+        for row in process_table_rows_payload:
+            if not isinstance(row, (list, tuple)) or len(row) < 5:
+                continue
+            label_val, minutes_val_text, machine_val_text, labor_val_text, total_val_text = row[:5]
+            label_str = str(label_val or "").strip()
+            if not label_str:
+                continue
+            total_val = _safe_float(str(total_val_text).replace("$", "").replace(",", ""), default=0.0)
+            if not show_zeros and total_val <= 0.0:
+                continue
+            if label_str in seen_labels_from_table:
+                continue
+            minutes_val = _safe_float(minutes_val_text, default=0.0)
+            machine_val = _safe_float(str(machine_val_text).replace("$", "").replace(",", ""), default=0.0)
+            labor_val = _safe_float(str(labor_val_text).replace("$", "").replace(",", ""), default=0.0)
+            hours_val = minutes_val / 60.0 if minutes_val else 0.0
+            rate_val = 0.0
+            if hours_val > 0.0 and total_val > 0.0:
+                rate_val = total_val / hours_val
+            rebuilt_processes.append(
+                {
+                    "label": label_str,
+                    "amount": round(total_val, 2),
+                    "hours": round(hours_val, 2),
+                    "minutes": round(minutes_val, 2),
+                    "labor_amount": round(labor_val, 2),
+                    "machine_amount": round(machine_val, 2),
+                    "rate": round(rate_val, 2) if rate_val > 0.0 else 0.0,
+                }
+            )
+            seen_labels_from_table.add(label_str)
+        processes_entries = rebuilt_processes
+        render_payload["processes"] = processes_entries
         render_payload["process_table"] = process_table_rows_payload
+
+    if quote_qty <= 1:
+        for entry in processes_entries:
+            if str(entry.get("label")) == PROGRAMMING_PER_PART_LABEL:
+                entry["label"] = PROGRAMMING_AMORTIZED_LABEL
+    render_payload["processes"] = processes_entries
 
     if quick_what_if_entries:
         render_payload["quick_what_ifs"] = quick_what_if_entries
