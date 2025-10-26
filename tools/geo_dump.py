@@ -99,6 +99,11 @@ def main(argv: Sequence[str] | None = None) -> int:
         metavar="N",
         help="Print the first N rows as qty | ref | side | desc",
     )
+    parser.add_argument(
+        "--force-text",
+        action="store_true",
+        help="Force publishing text fallback rows when available",
+    )
     args = parser.parse_args(argv)
 
     if args.show_rows is not None:
@@ -193,6 +198,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         if normalized_patterns:
             read_kwargs["block_name_regex"] = normalized_patterns
             print(f"[geo_dump] block_regex={normalized_patterns}")
+    if args.force_text:
+        read_kwargs["force_text"] = True
     payload = read_geo(doc, **read_kwargs)
     scan_info = geo_extractor.get_last_acad_table_scan() or {}
     tables_found = 0

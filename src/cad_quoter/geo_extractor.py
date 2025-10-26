@@ -3472,6 +3472,7 @@ def _build_columnar_table_from_entries(
         qty_val = None
         if qty_text:
             qty_val = _parse_qty_cell_value(qty_text)
+        qty_token_text: str | None = None
         used_qty_fallback = False
         fallback_desc = ""
         combined_row_text = " ".join(
@@ -4019,6 +4020,76 @@ def _fallback_text_table(lines: Iterable[str]) -> dict[str, Any]:
         result["hole_diam_families_in"] = families
     result["provenance_holes"] = "HOLE TABLE (TEXT_FALLBACK)"
     result["source"] = "text_table"
+    return result
+
+
+def _publish_fallback_from_rows_txt(rows_txt: Iterable[Any]) -> dict[str, Any]:
+    parsed_rows: list[dict[str, Any]] = []
+    families: dict[str, int] = {}
+    total_qty = 0
+
+    for raw_line in rows_txt:
+        try:
+            base_text = str(raw_line)
+        except Exception:
+            base_text = ""
+        normalized = " ".join(base_text.split())
+        if not normalized:
+            continue
+        qty_val, remainder = _extract_row_quantity_and_remainder(normalized)
+        qty_int = None
+        if qty_val is not None and qty_val > 0:
+            try:
+                qty_int = int(qty_val)
+            except Exception:
+                qty_int = None
+        if qty_int is None or qty_int <= 0:
+            qty_int = 1
+        side_hint = _detect_row_side(normalized)
+        fragments = [frag.strip() for frag in _FRAGMENT_SPLIT_RE.split(remainder) if frag.strip()]
+        if not fragments:
+            fragments = [remainder.strip() or normalized]
+        qty_prefix = None
+        if _ROW_QUANTITY_PATTERNS[0].match(normalized):
+            qty_prefix = f"({qty_int})"
+        for index, fragment in enumerate(fragments):
+            fragment_clean = " ".join(fragment.split())
+            if not fragment_clean:
+                continue
+            ref_text, ref_value = _extract_row_reference(fragment_clean)
+            has_action = bool(_HOLE_ACTION_TOKEN_RE.search(fragment_clean))
+            has_reference = bool(ref_text or (ref_value is not None))
+            if not has_action and not has_reference:
+                continue
+            desc_value = fragment_clean
+            if index == 0 and qty_prefix and not desc_value.startswith(qty_prefix):
+                desc_value = f"{qty_prefix} {desc_value}".strip()
+            side_value = _detect_row_side(fragment_clean) or side_hint
+            row: dict[str, Any] = {
+                "hole": "",
+                "qty": qty_int,
+                "desc": desc_value,
+                "ref": ref_text or "",
+            }
+            if side_value:
+                row["side"] = side_value
+            parsed_rows.append(row)
+            total_qty += qty_int
+            if ref_value is not None:
+                key = f"{ref_value:.4f}".rstrip("0").rstrip(".")
+                families[key] = families.get(key, 0) + qty_int
+
+    if not parsed_rows:
+        return {}
+
+    result: dict[str, Any] = {
+        "rows": parsed_rows,
+        "hole_count": total_qty,
+        "provenance_holes": "HOLE TABLE (fallback)",
+        "source": "text_table",
+    }
+    if families:
+        result["hole_diam_families_in"] = families
     return result
 
 
@@ -4809,6 +4880,7 @@ def read_text_table(
 
         rows_txt_initial = len(merged_rows)
         _LAST_TEXT_TABLE_DEBUG["rows_txt_count"] = rows_txt_initial
+        _LAST_TEXT_TABLE_DEBUG["rows_txt_lines"] = list(merged_rows)
         print(f"[TEXT-SCAN] rows_txt count={len(merged_rows)}")
         for idx, row_text in enumerate(merged_rows[:10]):
             print(f"  [{idx:02d}] {row_text}")
@@ -4821,6 +4893,7 @@ def read_text_table(
                 text_value = " ".join((row_text or "").split()).strip()
                 if not text_value:
                     continue
+                original_text = text_value
                 qty_val, remainder = _extract_row_quantity_and_remainder(text_value)
                 remainder_clean = remainder.strip()
                 remainder_normalized = " ".join(remainder_clean.split())
@@ -4843,9 +4916,7 @@ def read_text_table(
                     if not fragment_clean:
                         continue
                     display_fragment = fragment_clean
-                    if len(fragments) == 1 and fragment_clean == remainder_normalized:
-                        display_fragment = text_value
-                    elif qty_prefix:
+                    if qty_prefix and len(fragments) > 1:
                         prefix = qty_prefix
                         qty_prefix = None
                         if not display_fragment.startswith(prefix):
@@ -5033,6 +5104,19 @@ def read_text_table(
                     continue
                 current_desc = str(parsed_rows[idx].get("desc") or "")
                 if len(fallback_clean) > len(current_desc):
+                    if (
+                        _RE_TEXT_ROW_START.match(fallback_clean)
+                        and not _RE_TEXT_ROW_START.match(current_desc)
+                    ):
+                        continue
+                    leading_token = fallback_clean.split("|", 1)[0].strip()
+                    if (
+                        leading_token
+                        and len(leading_token) == 1
+                        and leading_token.isalpha()
+                        and not current_desc.startswith(f"{leading_token} |")
+                    ):
+                        continue
                     parsed_rows[idx]["desc"] = fallback_clean
 
         if rows_txt_initial > 0 and not parsed_rows:
@@ -5753,6 +5837,7 @@ def read_geo(
     *,
     prefer_table: bool = True,
     feature_flags: Mapping[str, Any] | None = None,
+    force_text: bool = False,
     layer_allowlist: Iterable[str] | None = _DEFAULT_LAYER_ALLOWLIST,
     block_name_allowlist: Iterable[str] | None = None,
     block_name_regex: Iterable[str] | str | None = None,
@@ -5850,21 +5935,66 @@ def read_geo(
             rows_txt_debug = int(float(debug_snapshot.get("rows_txt_count") or 0))
         except Exception:
             rows_txt_debug = 0
+    rows_txt_lines: list[str] = []
+    if isinstance(debug_snapshot, Mapping):
+        raw_rows_txt = debug_snapshot.get("rows_txt_lines")
+        candidates: Iterable[Any]
+        if isinstance(raw_rows_txt, list):
+            candidates = raw_rows_txt
+        elif isinstance(raw_rows_txt, Iterable) and not isinstance(
+            raw_rows_txt, (str, bytes, bytearray)
+        ):
+            candidates = list(raw_rows_txt)
+        else:
+            candidates = []
+        for item in candidates:
+            try:
+                text_candidate = str(item)
+            except Exception:
+                text_candidate = ""
+            normalized_candidate = " ".join(text_candidate.split())
+            if normalized_candidate:
+                rows_txt_lines.append(normalized_candidate)
     print(f"[PATH] text=run (rows_txt={rows_txt_debug})")
     print(f"[EXTRACT] acad_rows={acad_rows} text_rows={text_rows}")
 
     publish_info: dict[str, Any] | None = None
     publish_source_tag: str | None = None
-    if acad_rows_list:
+    fallback_info: dict[str, Any] | None = None
+    fallback_rows_list: list[dict[str, Any]] = []
+    fallback_qty_sum = 0
+    if rows_txt_lines:
+        fallback_candidate = _publish_fallback_from_rows_txt(rows_txt_lines)
+        if isinstance(fallback_candidate, Mapping) and fallback_candidate.get("rows"):
+            fallback_info = dict(fallback_candidate)
+            fallback_rows_list = _normalize_table_rows(fallback_info.get("rows"))
+            fallback_info["rows"] = fallback_rows_list
+            fallback_qty_sum = _sum_qty(fallback_rows_list)
+    force_text_mode = bool(force_text and fallback_info and fallback_rows_list)
+    fallback_selected = False
+    if force_text_mode:
+        publish_info = fallback_info
+        publish_source_tag = "text_table"
+        fallback_selected = True
+    elif acad_rows_list:
         publish_info = acad_info
         publish_source_tag = "acad_table"
     elif text_rows_list:
         publish_info = text_info
         publish_source_tag = "text_table"
+    elif fallback_info and fallback_rows_list:
+        publish_info = fallback_info
+        publish_source_tag = "text_table"
+        fallback_selected = True
 
     score_a = _score_table(acad_info)
     score_b = _score_table(text_info)
+    score_c = _score_table(fallback_info)
     best_table = publish_info or choose_better_table(acad_info, text_info)
+    if fallback_info and fallback_rows_list:
+        best_score = _score_table(best_table) if isinstance(best_table, Mapping) else (0, 0, 0)
+        if score_c > best_score:
+            best_table = fallback_info
     if publish_info is None and isinstance(best_table, Mapping) and best_table.get("rows"):
         publish_info = dict(best_table)
         publish_info["rows"] = _normalize_table_rows(publish_info.get("rows"))
@@ -5872,6 +6002,11 @@ def read_geo(
     publish_rows: list[dict[str, Any]] = []
     if isinstance(publish_info, Mapping):
         publish_rows = list(publish_info.get("rows") or [])
+    if fallback_selected and fallback_rows_list:
+        print(
+            f"[TEXT-FALLBACK] promoted rows={len(fallback_rows_list)} "
+            f"qty_sum={fallback_qty_sum} source=text_table"
+        )
 
     table_used = False
     source_tag = publish_source_tag
@@ -6061,6 +6196,7 @@ def _read_geo_payload_from_path(
     prefer_table: bool = True,
     use_oda: bool = True,
     feature_flags: Mapping[str, Any] | None = None,
+    force_text: bool = False,
     layer_allowlist: Iterable[str] | None = _DEFAULT_LAYER_ALLOWLIST,
     block_name_allowlist: Iterable[str] | None = None,
     block_name_regex: Iterable[str] | str | None = None,
@@ -6075,6 +6211,7 @@ def _read_geo_payload_from_path(
         doc,
         prefer_table=prefer_table,
         feature_flags=feature_flags,
+        force_text=force_text,
         layer_allowlist=layer_allowlist,
         block_name_allowlist=block_name_allowlist,
         block_name_regex=block_name_regex,
@@ -6110,6 +6247,7 @@ def _read_geo_payload_from_path(
                 fallback_doc,
                 prefer_table=prefer_table,
                 feature_flags=feature_flags,
+                force_text=force_text,
                 layer_allowlist=layer_allowlist,
                 block_name_allowlist=block_name_allowlist,
                 block_name_regex=block_name_regex,
@@ -6179,6 +6317,7 @@ def extract_geo_from_path(
     prefer_table: bool = True,
     use_oda: bool = True,
     feature_flags: Mapping[str, Any] | None = None,
+    force_text: bool = False,
     layer_allowlist: Iterable[str] | None = _DEFAULT_LAYER_ALLOWLIST,
     block_name_allowlist: Iterable[str] | None = None,
     block_name_regex: Iterable[str] | str | None = None,
@@ -6191,6 +6330,7 @@ def extract_geo_from_path(
         prefer_table=prefer_table,
         use_oda=use_oda,
         feature_flags=feature_flags,
+        force_text=force_text,
         layer_allowlist=layer_allowlist,
         block_name_allowlist=block_name_allowlist,
         block_name_regex=block_name_regex,
@@ -6209,6 +6349,7 @@ def extract_geo_from_path(
     prefer_table: bool = True,
     use_oda: bool = True,
     feature_flags: Mapping[str, Any] | None = None,
+    force_text: bool = False,
     layer_allowlist: Iterable[str] | None = _DEFAULT_LAYER_ALLOWLIST,
     block_name_allowlist: Iterable[str] | None = None,
     block_name_regex: Iterable[str] | str | None = None,
@@ -6221,6 +6362,7 @@ def extract_geo_from_path(
         prefer_table=prefer_table,
         use_oda=use_oda,
         feature_flags=feature_flags,
+        force_text=force_text,
         layer_allowlist=layer_allowlist,
         block_name_allowlist=block_name_allowlist,
         block_name_regex=block_name_regex,
