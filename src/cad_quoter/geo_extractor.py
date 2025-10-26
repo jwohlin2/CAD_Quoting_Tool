@@ -20,6 +20,378 @@ from cad_quoter import geometry
 from cad_quoter.geometry import convert_dwg_to_dxf
 from cad_quoter.vendors import ezdxf as _ezdxf_vendor
 
+
+TransformMatrix = tuple[float, float, float, float, float, float]
+
+
+@dataclass(slots=True)
+class FlattenedEntity:
+    """Metadata wrapper for entities yielded by :func:`flatten_entities`."""
+
+    entity: Any
+    transform: TransformMatrix
+    from_block: bool
+    block_name: str | None
+    block_stack: tuple[str, ...]
+    depth: int
+    layer: str
+    layer_upper: str
+    effective_layer: str
+    effective_layer_upper: str
+
+
+_IDENTITY_TRANSFORM: TransformMatrix = (1.0, 0.0, 0.0, 0.0, 1.0, 0.0)
+
+
+def _matrix_multiply(a: TransformMatrix, b: TransformMatrix) -> TransformMatrix:
+    """Return the matrix product ``a @ b`` for affine 2D transforms."""
+
+    a00, a01, a02, a10, a11, a12 = a
+    b00, b01, b02, b10, b11, b12 = b
+    return (
+        a00 * b00 + a01 * b10,
+        a00 * b01 + a01 * b11,
+        a00 * b02 + a01 * b12 + a02,
+        a10 * b00 + a11 * b10,
+        a10 * b01 + a11 * b11,
+        a10 * b02 + a11 * b12 + a12,
+    )
+
+
+def _matrix_chain(*matrices: TransformMatrix) -> TransformMatrix:
+    """Compose ``matrices`` left→right into a single transform."""
+
+    transform = _IDENTITY_TRANSFORM
+    for matrix in matrices:
+        transform = _matrix_multiply(transform, matrix)
+    return transform
+
+
+def _matrix_translate(tx: float, ty: float) -> TransformMatrix:
+    return (1.0, 0.0, float(tx), 0.0, 1.0, float(ty))
+
+
+def _matrix_scale(sx: float, sy: float) -> TransformMatrix:
+    return (float(sx), 0.0, 0.0, 0.0, float(sy), 0.0)
+
+
+def _matrix_rotate(rad: float) -> TransformMatrix:
+    cos_a = math.cos(rad)
+    sin_a = math.sin(rad)
+    return (cos_a, -sin_a, 0.0, sin_a, cos_a, 0.0)
+
+
+def _apply_transform_point(
+    matrix: TransformMatrix, point: tuple[float | None, float | None]
+) -> tuple[float | None, float | None]:
+    x_val, y_val = point
+    if not isinstance(x_val, (int, float)) or not isinstance(y_val, (int, float)):
+        return (None, None)
+    x = float(x_val)
+    y = float(y_val)
+    m00, m01, m02, m10, m11, m12 = matrix
+    return (m00 * x + m01 * y + m02, m10 * x + m11 * y + m12)
+
+
+def _transform_scale_hint(matrix: TransformMatrix) -> float:
+    """Return an approximate scale factor encoded by ``matrix``."""
+
+    m00, m01, _m02, m10, m11, _m12 = matrix
+    scale_x = math.hypot(m00, m10)
+    scale_y = math.hypot(m01, m11)
+    candidates = [value for value in (scale_x, scale_y) if value > 0]
+    if not candidates:
+        return 1.0
+    try:
+        return float(statistics.median(candidates))
+    except Exception:
+        return candidates[0]
+
+
+def _coerce_float(value: Any, default: float = 0.0) -> float:
+    try:
+        return float(value)
+    except Exception:
+        return float(default)
+
+
+def _point2d(value: Any) -> tuple[float, float] | None:
+    if value is None:
+        return None
+    if hasattr(value, "xyz"):
+        try:
+            x_val, y_val, _ = value.xyz
+            return (float(x_val), float(y_val))
+        except Exception:
+            return None
+    for accessor in (("x", "y"), (0, 1)):
+        try:
+            x_candidate = getattr(value, accessor[0]) if isinstance(accessor[0], str) else value[accessor[0]]
+        except Exception:
+            x_candidate = None
+        try:
+            y_candidate = getattr(value, accessor[1]) if isinstance(accessor[1], str) else value[accessor[1]]
+        except Exception:
+            y_candidate = None
+        if x_candidate is None and y_candidate is None:
+            continue
+        try:
+            x_float = float(x_candidate) if x_candidate is not None else 0.0
+            y_float = float(y_candidate) if y_candidate is not None else 0.0
+        except Exception:
+            continue
+        return (x_float, y_float)
+    try:
+        sequence = list(value)
+    except Exception:
+        return None
+    if len(sequence) >= 2:
+        try:
+            return (float(sequence[0]), float(sequence[1]))
+        except Exception:
+            return None
+    return None
+
+
+def _iter_insert_attributes(entity: Any) -> Iterable[Any]:
+    attr_seen: set[int] = set()
+    for attr_name in ("attribs", "attribs_raw"):
+        attr_value = getattr(entity, attr_name, None)
+        if attr_value is None:
+            continue
+        if callable(attr_value):
+            try:
+                attr_iterable = attr_value()
+            except Exception:
+                continue
+        else:
+            attr_iterable = attr_value
+        if attr_iterable is None:
+            continue
+        try:
+            iterator = list(attr_iterable)
+        except Exception:
+            iterator = [attr_iterable]
+        for attr_entity in iterator:
+            if attr_entity is None:
+                continue
+            marker = id(attr_entity)
+            if marker in attr_seen:
+                continue
+            attr_seen.add(marker)
+            yield attr_entity
+
+
+def flatten_entities(layout: Any, depth: int = 5) -> Iterable[FlattenedEntity]:
+    """Yield entities from ``layout`` with accumulated block transforms."""
+
+    if layout is None:
+        return
+
+    max_depth = max(int(depth), 0)
+    doc = getattr(layout, "doc", None)
+
+    def _iter_container(container: Any) -> list[Any]:
+        if container is None:
+            return []
+        try:
+            return list(container)
+        except Exception:
+            result: list[Any] = []
+            try:
+                iterator = iter(container)
+            except Exception:
+                return result
+            for item in iterator:
+                result.append(item)
+            return result
+
+    def _extract_block_name(entity: Any) -> str | None:
+        dxf_obj = getattr(entity, "dxf", None)
+        name = None
+        if dxf_obj is not None:
+            name = getattr(dxf_obj, "name", None)
+        if name is None:
+            name = getattr(entity, "name", None)
+        if not isinstance(name, str):
+            return None
+        text = name.strip()
+        return text or None
+
+    def _resolve_block_layout(entity: Any) -> Any | None:
+        block_layout = None
+        block_attr = getattr(entity, "block", None)
+        if callable(block_attr):
+            try:
+                block_layout = block_attr()
+            except Exception:
+                block_layout = None
+        if block_layout is not None:
+            return block_layout
+        name = _extract_block_name(entity)
+        if not name:
+            return None
+        candidates: list[Any] = []
+        for source in (getattr(entity, "doc", None), doc):
+            if source is None:
+                continue
+            blocks = getattr(source, "blocks", None)
+            if blocks is None:
+                continue
+            get_block = getattr(blocks, "get", None)
+            if callable(get_block):
+                try:
+                    layout_obj = get_block(name)
+                except Exception:
+                    layout_obj = None
+                if layout_obj is not None:
+                    candidates.append(layout_obj)
+        return candidates[0] if candidates else None
+
+    def _block_base_point(block_layout: Any) -> tuple[float, float] | None:
+        if block_layout is None:
+            return None
+        for source in (
+            getattr(block_layout, "block", None),
+            getattr(block_layout, "dxf", None),
+            block_layout,
+        ):
+            if source is None:
+                continue
+            for attr in ("base_point", "insert", "origin"):
+                coords = _point2d(getattr(source, attr, None))
+                if coords is not None:
+                    return coords
+        return None
+
+    def _insert_local_transform(entity: Any, block_layout: Any) -> TransformMatrix:
+        dxf_obj = getattr(entity, "dxf", None)
+        insert_point = None
+        if dxf_obj is not None:
+            insert_point = getattr(dxf_obj, "insert", None)
+        if insert_point is None:
+            insert_point = getattr(entity, "insert", None)
+        insert_xy = _point2d(insert_point) or (0.0, 0.0)
+
+        rotation_deg = 0.0
+        if dxf_obj is not None:
+            rotation_deg = _coerce_float(getattr(dxf_obj, "rotation", 0.0), 0.0)
+        else:
+            rotation_deg = _coerce_float(getattr(entity, "rotation", 0.0), 0.0)
+
+        scale_uniform = 1.0
+        if dxf_obj is not None:
+            scale_uniform = _coerce_float(getattr(dxf_obj, "scale", 1.0), 1.0)
+        else:
+            scale_uniform = _coerce_float(getattr(entity, "scale", 1.0), 1.0)
+        if scale_uniform == 0.0:
+            scale_uniform = 1.0
+
+        sx = scale_uniform
+        sy = scale_uniform
+        if dxf_obj is not None:
+            sx_raw = getattr(dxf_obj, "xscale", None)
+            sy_raw = getattr(dxf_obj, "yscale", None)
+        else:
+            sx_raw = getattr(entity, "xscale", None)
+            sy_raw = getattr(entity, "yscale", None)
+        if sx_raw not in (None, 0):
+            sx *= _coerce_float(sx_raw, 1.0)
+        if sy_raw not in (None, 0):
+            sy *= _coerce_float(sy_raw, sx)
+        if sx == 0.0:
+            sx = 1.0
+        if sy == 0.0:
+            sy = sx
+
+        base_point = _block_base_point(block_layout)
+        if base_point is None:
+            base_point = _point2d(getattr(dxf_obj, "block_base_point", None))
+
+        transform_local = _matrix_chain(
+            _matrix_translate(insert_xy[0], insert_xy[1]),
+            _matrix_rotate(math.radians(rotation_deg)),
+            _matrix_scale(sx, sy),
+        )
+        if base_point is not None:
+            transform_local = _matrix_multiply(
+                transform_local, _matrix_translate(-base_point[0], -base_point[1])
+            )
+        return transform_local
+
+    def _flatten(
+        entity: Any,
+        transform: TransformMatrix,
+        block_stack: tuple[str, ...],
+        parent_effective_layer: str | None,
+        level: int,
+    ) -> Iterable[FlattenedEntity]:
+        layer_name = _entity_layer(entity)
+        layer_upper = layer_name.upper() if layer_name else ""
+        effective_layer = layer_name or ""
+        effective_layer_upper = layer_upper
+        if not effective_layer_upper or effective_layer_upper == "0":
+            candidate = parent_effective_layer or layer_name or ""
+            effective_layer = candidate
+            effective_layer_upper = candidate.upper() if candidate else ""
+
+        flattened = FlattenedEntity(
+            entity=entity,
+            transform=transform,
+            from_block=bool(block_stack),
+            block_name=block_stack[-1] if block_stack else None,
+            block_stack=block_stack,
+            depth=level,
+            layer=layer_name,
+            layer_upper=layer_upper,
+            effective_layer=effective_layer,
+            effective_layer_upper=effective_layer_upper,
+        )
+        yield flattened
+
+        dxftype = None
+        try:
+            dxftype = entity.dxftype()
+        except Exception:
+            dxftype = None
+        kind = str(dxftype or "").upper()
+        if kind != "INSERT" or level >= max_depth:
+            return
+
+        block_name = _extract_block_name(entity)
+        if block_name and block_name in block_stack:
+            return
+
+        block_layout = _resolve_block_layout(entity)
+        local_transform = _insert_local_transform(entity, block_layout)
+        child_transform = _matrix_multiply(transform, local_transform)
+        child_stack = block_stack + (block_name,) if block_name else block_stack
+        child_parent_layer = effective_layer or parent_effective_layer
+
+        nested_entities: list[Any] = []
+        use_local_transform = True
+        if block_layout is not None:
+            entity_space = getattr(block_layout, "entity_space", None)
+            nested_entities = _iter_container(entity_space if entity_space is not None else block_layout)
+        if not nested_entities:
+            try:
+                nested_entities = list(entity.virtual_entities())
+            except Exception:
+                nested_entities = []
+            else:
+                use_local_transform = False
+
+        for child in nested_entities:
+            next_transform = child_transform if use_local_transform else transform
+            yield from _flatten(child, next_transform, child_stack, child_parent_layer, level + 1)
+
+        for attribute in _iter_insert_attributes(entity):
+            yield from _flatten(attribute, child_transform, child_stack, child_parent_layer, level + 1)
+
+    base_entities = _iter_container(layout)
+    for entity in base_entities:
+        yield from _flatten(entity, _IDENTITY_TRANSFORM, tuple(), None, 0)
+
 _HAS_ODAFC = bool(getattr(geometry, "HAS_ODAFC", False))
 
 _DEFAULT_LAYER_ALLOWLIST = frozenset({"BALLOON"})
@@ -45,6 +417,9 @@ class TableHit:
     source: str
     name: str | None
     scan_index: int
+    transform: TransformMatrix = _IDENTITY_TRANSFORM
+    block_stack: tuple[str, ...] = ()
+    from_block: bool = False
 
 
 def _get_table_dimension(entity: Any, names: tuple[str, ...]) -> int | None:
@@ -285,27 +660,9 @@ def scan_tables_everywhere(doc) -> list[TableHit]:
     for scan_index, (owner_label, source, container, name) in enumerate(containers):
         if container is None:
             continue
-        tables: list[Any] = []
-        query = getattr(container, "query", None)
-        if callable(query):
-            try:
-                tables = list(query("ACAD_TABLE,TABLE"))
-            except Exception:
-                tables = []
-            if not tables:
-                for spec in ("ACAD_TABLE", "TABLE"):
-                    try:
-                        tables.extend(list(query(spec)))
-                    except Exception:
-                        continue
-        if not tables:
-            try:
-                tables = list(container)
-            except Exception:
-                tables = []
-        for entity in tables:
-            if entity is None:
-                continue
+        layout_label = name or owner_label
+        for flattened in flatten_entities(container, depth=_MAX_INSERT_DEPTH):
+            entity = flattened.entity
             try:
                 dxftype = str(entity.dxftype()).upper()
             except Exception:
@@ -316,7 +673,7 @@ def scan_tables_everywhere(doc) -> list[TableHit]:
             if marker in seen_entities:
                 continue
             seen_entities.add(marker)
-            layer_name = _entity_layer(entity) or ""
+            layer_name = flattened.layer or ""
             handle = _entity_handle(entity)
             owner_handle = _entity_owner_handle(entity)
             rows = _get_table_dimension(
@@ -336,10 +693,11 @@ def scan_tables_everywhere(doc) -> list[TableHit]:
                 "rows": rows_val,
                 "cols": cols_val,
                 "type": dxftype or "",
+                "from_block": flattened.from_block,
+                "block_stack": list(flattened.block_stack),
             }
             scan_tables.append(scan_entry)
             if _TRACE_ACAD:
-                layout_label = name or owner_label
                 layout_display = str(layout_label or "").strip() or owner_label
                 owner_display = owner_handle or handle or "-"
                 layer_display = layer_name or "-"
@@ -363,6 +721,9 @@ def scan_tables_everywhere(doc) -> list[TableHit]:
                 source=source,
                 name=name,
                 scan_index=len(scan_tables) - 1,
+                transform=flattened.transform,
+                block_stack=flattened.block_stack,
+                from_block=flattened.from_block,
             )
             hits.append(hit)
 
@@ -549,7 +910,9 @@ def _detect_header_hits(cells: list[str]) -> dict[str, int]:
     return hits
 
 
-def _compute_table_bbox(entity: Any) -> tuple[float, float, float, float] | None:
+def _compute_table_bbox(
+    entity: Any, *, transform: TransformMatrix | None = None
+) -> tuple[float, float, float, float] | None:
     try:
         virtual_entities = list(entity.virtual_entities())
     except Exception:
@@ -558,6 +921,7 @@ def _compute_table_bbox(entity: Any) -> tuple[float, float, float, float] | None
         entity,
         include_virtual=True,
         virtual_entities=virtual_entities,
+        transform=transform,
     )
 
 
@@ -603,7 +967,9 @@ def _estimate_text_height(entity: Any, n_rows: int) -> float:
     return 0.0
 
 
-def _rows_from_acad_table_with_info(entity: Any) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+def _rows_from_acad_table_with_info(
+    entity: Any, *, transform: TransformMatrix | None = None
+) -> tuple[list[dict[str, Any]], dict[str, Any]]:
     info: dict[str, Any] = {}
     if entity is None:
         return ([], info)
@@ -751,7 +1117,23 @@ def _rows_from_acad_table_with_info(entity: Any) -> tuple[list[dict[str, Any]], 
             table_centers.append(row_centers)
 
     if table_centers:
-        info["cell_centers"] = table_centers
+        if transform is not None:
+            transformed_centers: list[list[tuple[float, float] | None]] = []
+            for row_centers in table_centers:
+                transformed_row: list[tuple[float, float] | None] = []
+                for center in row_centers:
+                    if center is None:
+                        transformed_row.append(None)
+                        continue
+                    tx, ty = _apply_transform_point(transform, center)
+                    if tx is None or ty is None:
+                        transformed_row.append(None)
+                    else:
+                        transformed_row.append((tx, ty))
+                transformed_centers.append(transformed_row)
+            info["cell_centers"] = transformed_centers
+        else:
+            info["cell_centers"] = table_centers
     info["table_cells"] = table_cells
     info["row_count_raw"] = len(table_cells)
 
@@ -887,7 +1269,7 @@ def _rows_from_acad_table_with_info(entity: Any) -> tuple[list[dict[str, Any]], 
     sum_qty = _sum_qty(rows)
     info["sum_qty"] = sum_qty
 
-    bbox = _compute_table_bbox(entity)
+    bbox = _compute_table_bbox(entity, transform=transform)
     if bbox is not None:
         info["bbox"] = bbox
     median_height = _estimate_text_height(entity, n_rows)
@@ -896,8 +1278,10 @@ def _rows_from_acad_table_with_info(entity: Any) -> tuple[list[dict[str, Any]], 
     return (rows, info)
 
 
-def rows_from_acad_table(entity: Any) -> list[dict[str, Any]]:
-    rows, _info = _rows_from_acad_table_with_info(entity)
+def rows_from_acad_table(
+    entity: Any, *, transform: TransformMatrix | None = None
+) -> list[dict[str, Any]]:
+    rows, _info = _rows_from_acad_table_with_info(entity, transform=transform)
     return rows
 
 
@@ -991,6 +1375,7 @@ def _compute_entity_bbox(
     *,
     include_virtual: bool = False,
     virtual_entities: Iterable[Any] | None = None,
+    transform: TransformMatrix | None = None,
 ) -> tuple[float, float, float, float] | None:
     points = _gather_entity_points(entity)
     if include_virtual:
@@ -1001,6 +1386,19 @@ def _compute_entity_bbox(
                 virtual_entities = []
         for child in virtual_entities or []:
             points.extend(_gather_entity_points(child))
+    if transform is not None and points:
+        transformed: list[tuple[float, float]] = []
+        for x_val, y_val in points:
+            try:
+                x_float = float(x_val)
+                y_float = float(y_val)
+            except Exception:
+                continue
+            tx, ty = _apply_transform_point(transform, (x_float, y_float))
+            if tx is None or ty is None:
+                continue
+            transformed.append((tx, ty))
+        points = transformed
     if not points:
         return None
     xs = [pt[0] for pt in points if isinstance(pt[0], (int, float))]
@@ -1459,7 +1857,9 @@ def read_acad_table(
     table_candidates: list[dict[str, Any]] = []
 
     for hit in hits:
-        rows, table_info = _rows_from_acad_table_with_info(hit.table)
+        rows, table_info = _rows_from_acad_table_with_info(
+            hit.table, transform=hit.transform
+        )
         row_count = int(table_info.get("row_count") or len(rows) or 0)
         sum_qty_val = table_info.get("sum_qty")
         try:
@@ -1612,14 +2012,16 @@ def _collect_table_text_lines(doc: Any) -> list[str]:
             spaces.append(space)
 
     for space in spaces:
-        query = getattr(space, "query", None)
-        if not callable(query):
-            continue
-        try:
-            entities = list(query("TEXT, MTEXT"))
-        except Exception:
-            continue
-        for entity in entities:
+        for flattened in flatten_entities(space, depth=_MAX_INSERT_DEPTH):
+            entity = flattened.entity
+            dxftype = None
+            try:
+                dxftype = entity.dxftype()
+            except Exception:
+                dxftype = None
+            kind = str(dxftype or "").upper()
+            if kind not in {"TEXT", "MTEXT", "MLEADER", "ATTRIB", "ATTDEF"}:
+                continue
             fragments = list(_iter_entity_text_fragments(entity))
             for fragment, _ in fragments:
                 normalized = _normalize_table_fragment(fragment)
@@ -4316,51 +4718,26 @@ def read_text_table(
                     return value
             return None
 
-        def _extract_layer(entity: Any) -> str:
-            dxf_obj = getattr(entity, "dxf", None)
-            candidates: list[Any] = []
-            if dxf_obj is not None:
-                candidates.append(getattr(dxf_obj, "layer", None))
-            candidates.append(getattr(entity, "layer", None))
-            for candidate in candidates:
-                if candidate is None:
-                    continue
-                try:
-                    text = str(candidate).strip()
-                except Exception:
-                    continue
-                if text:
-                    return text
-            return ""
-
         debug_enabled = _debug_entities_enabled()
+
+        block_stats: dict[str, dict[str, int]] = {}
+
+        def _block_stats_entry(name: str | None) -> dict[str, int]:
+            key = (name or "").strip()
+            entry = block_stats.get(key)
+            if entry is None:
+                entry = {"texts": 0, "att": 0, "nested_inserts": 0}
+                block_stats[key] = entry
+            return entry
 
         for layout_index, (layout_name, layout_obj) in enumerate(_iter_layouts()):
             layout_names[layout_index] = layout_name
             if layout_index not in layout_order:
                 layout_order.append(layout_index)
-            query = getattr(layout_obj, "query", None)
-            base_entities: list[Any] = []
-            if callable(query):
-                try:
-                    base_entities = list(query("TEXT, MTEXT, MLEADER, INSERT"))
-                except Exception:
-                    base_entities = []
-                if not base_entities:
-                    for spec in ("TEXT", "MTEXT", "MLEADER", "INSERT"):
-                        try:
-                            base_entities.extend(list(query(spec)))
-                        except Exception:
-                            continue
-            if not base_entities:
-                try:
-                    base_entities = list(layout_obj)
-                except Exception:
-                    base_entities = []
-            if not base_entities:
-                if _TRACE_ACAD:
-                    print(f"[LAYOUT] {layout_label} texts=0/0 tables={layout_tables}")
-                continue
+            layout_label = layout_name or f"Layout#{layout_index}"
+            layout_tables = _count_tables_for_layout_name(layout_name)
+            if layout_label not in layout_names_seen:
+                layout_names_seen.append(layout_label)
 
             seen_entities: set[int] = set()
             text_fragments = 0
@@ -4368,67 +4745,32 @@ def read_text_table(
             kept_count = 0
             from_blocks_count = 0
             counter = 0
-            visited_blocks: set[str] = set()
 
-            def _iter_insert_attributes(entity: Any) -> Iterable[Any]:
-                attr_seen: set[int] = set()
-                for attr_name in ("attribs", "attribs_raw"):
-                    attr_value = getattr(entity, attr_name, None)
-                    if attr_value is None:
-                        continue
-                    if callable(attr_value):
-                        try:
-                            attr_iterable = attr_value()
-                        except Exception:
-                            continue
-                    else:
-                        attr_iterable = attr_value
-                    if attr_iterable is None:
-                        continue
-                    try:
-                        iterator = list(attr_iterable)
-                    except Exception:
-                        iterator = [attr_iterable]
-                    for attr_entity in iterator:
-                        if attr_entity is None:
-                            continue
-                        marker = id(attr_entity)
-                        if marker in attr_seen:
-                            continue
-                        attr_seen.add(marker)
-                        yield attr_entity
-
-            def _process_entity(
-                entity: Any,
-                *,
-                depth: int,
-                from_block: bool,
-                parent_effective_layer: str | None,
-                active_block: str | None,
-            ) -> None:
-                nonlocal text_fragments, mtext_fragments, kept_count, from_blocks_count, counter
-                nonlocal attrib_count, mleader_count
-                nonlocal hint_logged
-                nonlocal follow_sheet_directive
-                if depth > _MAX_INSERT_DEPTH:
-                    return
-                dxftype = None
+            for flattened in flatten_entities(layout_obj, depth=_MAX_INSERT_DEPTH):
+                entity = flattened.entity
+                marker = id(entity)
+                if marker in seen_entities:
+                    continue
+                seen_entities.add(marker)
                 try:
                     dxftype = entity.dxftype()
                 except Exception:
                     dxftype = None
                 kind = str(dxftype or "").upper()
-                layer_name = _extract_layer(entity)
-                layer_upper = layer_name.upper() if layer_name else ""
-                effective_layer = layer_name
-                effective_layer_upper = layer_upper
-                if not effective_layer_upper or effective_layer_upper == "0":
-                    candidate = parent_effective_layer or layer_name or ""
-                    effective_layer = candidate
-                    effective_layer_upper = candidate.upper() if candidate else ""
+
+                layer_name = flattened.layer
+                layer_upper = flattened.layer_upper
+                effective_layer = flattened.effective_layer
+                effective_layer_upper = flattened.effective_layer_upper
+                active_block = flattened.block_name
+                from_block = flattened.from_block
+
                 if kind in {"TEXT", "MTEXT", "ATTRIB", "ATTDEF", "MLEADER"}:
                     coords = _extract_coords(entity)
+                    coords = _apply_transform_point(flattened.transform, coords)
                     text_height = _extract_text_height(entity)
+                    if isinstance(text_height, (int, float)):
+                        text_height = float(text_height) * _transform_scale_hint(flattened.transform)
                     counted_block_text = False
                     counted_block_attr = False
                     for fragment, is_mtext in _iter_entity_text_fragments(entity):
@@ -4438,8 +4780,14 @@ def read_text_table(
                         normalized_upper = normalized.upper()
                         if kind in {"ATTRIB", "ATTDEF"}:
                             attrib_count += 1
+                            if active_block and not counted_block_attr:
+                                _block_stats_entry(active_block)["att"] += 1
+                                counted_block_attr = True
                         elif kind == "MLEADER":
                             mleader_count += 1
+                        if active_block and not counted_block_text and kind not in {"ATTRIB", "ATTDEF"}:
+                            _block_stats_entry(active_block)["texts"] += 1
+                            counted_block_text = True
                         if (
                             not hint_logged
                             and "SEE SHEET 2 FOR HOLE CHART" in normalized_upper
@@ -4448,6 +4796,14 @@ def read_text_table(
                                 "[HINT] Chart may live on an alternate sheet/block; ensure its INSERT is present and not on a frozen/off layer."
                             )
                             hint_logged = True
+                        if follow_sheet_directive is None:
+                            match = _FOLLOW_SHEET_DIRECTIVE_RE.search(normalized)
+                            if match:
+                                follow_sheet_directive = {
+                                    "layout": layout_name,
+                                    "token": match.group("target"),
+                                    "text": normalized,
+                                }
                         entry = {
                             "layout_index": layout_index,
                             "layout_name": layout_name,
@@ -4462,6 +4818,7 @@ def read_text_table(
                             "effective_layer": effective_layer,
                             "effective_layer_upper": effective_layer_upper,
                             "block_name": active_block,
+                            "block_stack": list(flattened.block_stack),
                         }
                         counter += 1
                         collected_entries.append(entry)
@@ -4479,31 +4836,18 @@ def read_text_table(
                             text_fragments += 1
                         if from_block:
                             from_blocks_count += 1
-                elif kind == "INSERT" and depth < _MAX_INSERT_DEPTH:
-                    attrib_before = attrib_count
-                    mleader_before = mleader_count
-                    block_name = None
+                elif kind == "INSERT":
                     dxf_obj = getattr(entity, "dxf", None)
+                    block_name = None
                     if dxf_obj is not None:
                         block_name = getattr(dxf_obj, "name", None)
                     if block_name is None:
                         block_name = getattr(entity, "name", None)
-                    name_str = block_name if isinstance(block_name, str) else None
-                    if _TRACE_ACAD:
-                        if active_block:
-                            parent_entry = _block_stats_entry(active_block)
-                            parent_entry["nested_inserts"] += 1
-                        if name_str:
-                            _block_stats_entry(name_str)
-                    if name_str and name_str in visited_blocks:
-                        return
+                    name_str = block_name.strip() if isinstance(block_name, str) else None
+                    if active_block:
+                        _block_stats_entry(active_block)["nested_inserts"] += 1
                     if name_str:
-                        visited_blocks.add(name_str)
-                    try:
-                        virtual_entities = list(entity.virtual_entities())
-                    except Exception:
-                        virtual_entities = []
-                    child_parent_layer = effective_layer or parent_effective_layer
+                        _block_stats_entry(name_str)
                     is_preferred_block = False
                     if name_str:
                         name_upper = name_str.upper()
@@ -4519,7 +4863,7 @@ def read_text_table(
                         bbox = _compute_entity_bbox(
                             entity,
                             include_virtual=True,
-                            virtual_entities=virtual_entities,
+                            transform=flattened.transform,
                         )
                         if bbox is not None:
                             try:
@@ -4537,68 +4881,19 @@ def read_text_table(
                                     "name": name_str,
                                     "layer": effective_layer or layer_name,
                                     "bbox": bbox_entry,
+                                    "block_stack": list(flattened.block_stack),
+                                    "from_block": flattened.from_block,
                                 }
                             )
-                    if virtual_entities:
-                        for child in virtual_entities:
-                            _process_entity(
-                                child,
-                                depth=depth + 1,
-                                from_block=True,
-                                parent_effective_layer=child_parent_layer,
-                                active_block=name_str or active_block,
-                            )
-                    else:
-                        blocks = getattr(doc, "blocks", None)
-                        block_layout = None
-                        if blocks is not None and name_str:
-                            get_block = getattr(blocks, "get", None)
-                            if callable(get_block):
-                                try:
-                                    block_layout = get_block(name_str)
-                                except Exception:
-                                    block_layout = None
-                        if block_layout is not None and depth + 1 <= _MAX_INSERT_DEPTH:
-                            for child in block_layout:
-                                _process_entity(
-                                    child,
-                                    depth=depth + 1,
-                                    from_block=True,
-                                    parent_effective_layer=child_parent_layer,
-                                    active_block=name_str or active_block,
-                                )
-                    for attribute in _iter_insert_attributes(entity):
-                        _process_entity(
-                            attribute,
-                            depth=depth + 1,
-                            from_block=True,
-                            parent_effective_layer=child_parent_layer,
-                            active_block=name_str or active_block,
-                        )
-                    if name_str:
-                        visited_blocks.discard(name_str)
-                    attrib_delta = attrib_count - attrib_before
-                    mleader_delta = mleader_count - mleader_before
-                    print(
-                        "[INSERT] name={name} depth={depth} attrib={attrib} mleader={mleader}".format(
-                            name=name_str or "-",
-                            depth=depth,
-                            attrib=attrib_delta,
-                            mleader=mleader_delta,
-                        )
-                    )
 
-            for entity in base_entities:
-                marker = id(entity)
-                if marker in seen_entities:
-                    continue
-                seen_entities.add(marker)
-                _process_entity(
-                    entity,
-                    depth=0,
-                    from_block=False,
-                    parent_effective_layer=None,
-                    active_block=None,
+            print(
+                f"[TEXT-SCAN] layout={layout_name} text={text_fragments} "
+                f"mtext={mtext_fragments} kept={kept_count} from_blocks={from_blocks_count}"
+            )
+            if _TRACE_ACAD:
+                print(
+                    f"[LAYOUT] {layout_label} texts={text_fragments}/{mtext_fragments} "
+                    f"tables={layout_tables}"
                 )
 
             print(
