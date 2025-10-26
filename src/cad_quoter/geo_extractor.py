@@ -5819,7 +5819,7 @@ def _load_doc_for_path(path: Path, *, use_oda: bool, out_ver: str | None = None)
             if oda_version:
                 dxf_path = convert_dwg_to_dxf(str(path), out_ver=oda_version)
             else:
-                dxf_path = convert_dwg_to_dxf(str(path))
+                dxf_path = convert_dwg_to_dxf(str(path), quiet=True)
         except Exception as exc:
             out_display = dxf_path or "-"
             error_text = str(exc)
@@ -5835,12 +5835,15 @@ def _load_doc_for_path(path: Path, *, use_oda: bool, out_ver: str | None = None)
             raise
         ok = bool(dxf_path) and os.path.exists(dxf_path)
         out_display = dxf_path or "-"
-        print(f"[DXF-FALLBACK] try={target_version} ok={ok} out={out_display}")
-        _LAST_DXF_FALLBACK_INFO = {
-            "version": target_version,
-            "path": str(out_display),
-            "ok": ok,
-        }
+        if oda_version or not ok:
+            print(f"[DXF-FALLBACK] try={target_version} ok={ok} out={out_display}")
+            _LAST_DXF_FALLBACK_INFO = {
+                "version": target_version,
+                "path": str(out_display),
+                "ok": ok,
+            }
+        else:
+            _LAST_DXF_FALLBACK_INFO = None
         if not ok:
             raise AssertionError(
                 f"ODA fallback {target_version} did not produce a DXF at {out_display}"
@@ -6292,19 +6295,37 @@ def _read_geo_payload_from_path(
     except Exception:
         tables_found = 0
     log_last_dxf_fallback(tables_found)
-    published_rows_obj = payload.get("rows") if isinstance(payload, Mapping) else None
-    if isinstance(published_rows_obj, Iterable) and not isinstance(
-        published_rows_obj, list
-    ):
-        published_rows_list = list(published_rows_obj)
-    elif isinstance(published_rows_obj, list):
-        published_rows_list = published_rows_obj
-    else:
-        published_rows_list = []
-    source_marker = ""
+    published_rows_list: list[Any] = []
+    published = False
     if isinstance(payload, Mapping):
-        source_marker = str(payload.get("source") or "")
-    if published_rows_list and "text" in source_marker.lower():
+        def _collect_rows(candidate: Any) -> list[Any]:
+            if isinstance(candidate, list):
+                return candidate
+            if isinstance(candidate, tuple):
+                return list(candidate)
+            if isinstance(candidate, Iterable) and not isinstance(
+                candidate, (str, bytes, Mapping)
+            ):
+                return list(candidate)
+            return []
+
+        published_rows_list = _collect_rows(payload.get("rows"))
+        if published_rows_list:
+            published = True
+        else:
+            ops_summary_obj = payload.get("ops_summary")
+            if isinstance(ops_summary_obj, Mapping):
+                summary_rows = _collect_rows(ops_summary_obj.get("rows"))
+                if summary_rows:
+                    published_rows_list = summary_rows
+                    published = True
+        if not published:
+            qty_sum_val = payload.get("qty_sum")
+            if isinstance(qty_sum_val, (int, float)) and qty_sum_val > 0:
+                published = True
+        if not published and payload.get("table_used"):
+            published = True
+    if published:
         return payload
     if tables_found == 0 and path_obj.suffix.lower() == ".dwg":
         fallback_versions = [
