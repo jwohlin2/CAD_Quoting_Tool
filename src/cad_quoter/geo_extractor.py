@@ -1616,7 +1616,7 @@ def _collect_table_text_lines(doc: Any) -> list[str]:
         if not callable(query):
             continue
         try:
-            entities = list(query("TEXT, MTEXT"))
+            entities = list(query("TEXT, MTEXT, RTEXT"))
         except Exception:
             continue
         for entity in entities:
@@ -1799,6 +1799,104 @@ def _iter_entity_text_fragments(entity: Any) -> Iterable[tuple[str, bool]]:
             for piece in text_value.splitlines():
                 if piece.strip():
                     yield (piece, False)
+    elif kind == "RTEXT":
+        def _flatten_text_values(value: Any) -> Iterable[str]:
+            if value is None:
+                return []
+            if isinstance(value, str):
+                return [value]
+            if isinstance(value, (bytes, bytearray)):
+                try:
+                    return [value.decode("utf-8")]
+                except Exception:
+                    try:
+                        return [value.decode("latin-1")]
+                    except Exception:
+                        return []
+            if isinstance(value, Mapping):
+                results: list[str] = []
+                for candidate in value.values():
+                    results.extend(_flatten_text_values(candidate))
+                return results
+            if isinstance(value, Iterable) and not isinstance(value, (str, bytes, bytearray)):
+                results: list[str] = []
+                for item in value:
+                    if isinstance(item, tuple) and len(item) >= 2:
+                        results.extend(_flatten_text_values(item[1]))
+                    else:
+                        results.extend(_flatten_text_values(item))
+                return results
+            try:
+                text = str(value)
+            except Exception:
+                return []
+            return [text]
+
+        seen_fragments: set[str] = set()
+        collected: list[str] = []
+
+        def _collect_text(value: Any) -> None:
+            for fragment in _flatten_text_values(value):
+                cleaned = fragment.strip()
+                if not cleaned:
+                    continue
+                if cleaned in seen_fragments:
+                    continue
+                seen_fragments.add(cleaned)
+                collected.append(cleaned)
+
+        dxf_obj = getattr(entity, "dxf", None)
+        for source in (entity, dxf_obj):
+            if source is None:
+                continue
+            for attr in (
+                "raw_content",
+                "raw_text",
+                "stored_text",
+                "text",
+                "value",
+                "content",
+                "string",
+            ):
+                _collect_text(getattr(source, attr, None))
+            plain_text = getattr(source, "plain_text", None)
+            if callable(plain_text):
+                try:
+                    _collect_text(plain_text())
+                except Exception:
+                    pass
+
+        get_xdata = getattr(entity, "get_xdata", None)
+        if callable(get_xdata):
+            for app in ("RTEXT", "ACAD_RTEXT", "ACAD_REACTORS", "ACAD"):
+                try:
+                    _collect_text(get_xdata(app))
+                except Exception:
+                    continue
+
+        for attr_name in ("xdata", "extended_data", "appdata"):
+            _collect_text(getattr(entity, attr_name, None))
+
+        if not collected:
+            raw_text = getattr(entity, "text", "")
+            if not raw_text and dxf_obj is not None:
+                raw_text = getattr(dxf_obj, "text", "")
+            _collect_text(raw_text)
+
+        if not collected:
+            return
+
+        longest = max(collected, key=len, default="")
+        if not longest:
+            return
+
+        pieces = _split_mtext_plain_text(longest)
+        if not pieces:
+            pieces = [longest]
+        for piece in pieces:
+            cleaned_piece = piece.strip()
+            if cleaned_piece:
+                yield (cleaned_piece, True)
     else:
         raw_text = getattr(entity, "text", "")
         if not raw_text:
@@ -3876,7 +3974,7 @@ def _extract_mechanical_table_from_blocks(doc: Any) -> Mapping[str, Any] | None:
                 kind = entity.dxftype()
             except Exception:
                 kind = None
-            if str(kind or "").upper() not in {"TEXT", "MTEXT"}:
+            if str(kind or "").upper() not in {"TEXT", "MTEXT", "RTEXT"}:
                 continue
             text_value = _extract_text(entity)
             if not text_value:
@@ -4382,11 +4480,11 @@ def read_text_table(
             base_entities: list[Any] = []
             if callable(query):
                 try:
-                    base_entities = list(query("TEXT, MTEXT, MLEADER, INSERT"))
+                    base_entities = list(query("TEXT, MTEXT, RTEXT, MLEADER, INSERT"))
                 except Exception:
                     base_entities = []
                 if not base_entities:
-                    for spec in ("TEXT", "MTEXT", "MLEADER", "INSERT"):
+                    for spec in ("TEXT", "MTEXT", "RTEXT", "MLEADER", "INSERT"):
                         try:
                             base_entities.extend(list(query(spec)))
                         except Exception:
@@ -4465,7 +4563,7 @@ def read_text_table(
                     candidate = parent_effective_layer or layer_name or ""
                     effective_layer = candidate
                     effective_layer_upper = candidate.upper() if candidate else ""
-                if kind in {"TEXT", "MTEXT", "ATTRIB", "ATTDEF", "MLEADER"}:
+                if kind in {"TEXT", "MTEXT", "ATTRIB", "ATTDEF", "MLEADER", "RTEXT"}:
                     coords = _extract_coords(entity)
                     text_height = _extract_text_height(entity)
                     counted_block_text = False
