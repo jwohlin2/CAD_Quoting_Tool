@@ -195,6 +195,18 @@ def main(argv: Sequence[str] | None = None) -> int:
         help="Print reconstructed [TABLE-X] band previews (first 30)",
     )
     parser.add_argument(
+        "--all-layouts",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Process text tables from all layouts (use --no-all-layouts to restrict)",
+    )
+    parser.add_argument(
+        "--layouts",
+        dest="layouts",
+        action="append",
+        help="Regex pattern to match layout names (repeatable; case-insensitive)",
+    )
+    parser.add_argument(
         "--layer-allow",
         dest="layer_allow",
         action="append",
