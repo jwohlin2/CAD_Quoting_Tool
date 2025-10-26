@@ -1234,6 +1234,19 @@ def _clean_cell_text(value: Any) -> str:
     return " ".join(str(value).split())
 
 
+_QTY_PREFIX = re.compile(r"^\(\d+\)\s*")
+
+
+def _clean_desc_text(value: Any) -> str:
+    if value is None:
+        return ""
+    text = str(value)
+    cleaned = _QTY_PREFIX.sub("", text)
+    cleaned = cleaned.rstrip("; ")
+    cleaned = re.sub(r"\s+", " ", cleaned).strip()
+    return cleaned
+
+
 def _normalize_for_dedupe(value: Any) -> str:
     return _clean_cell_text(value).upper()
 
@@ -1289,7 +1302,7 @@ def _prepare_columnar_promoted_rows(
             qty_val = 0
         if qty_val <= 0:
             continue
-        desc_clean = _clean_cell_text(row.get("desc"))
+        desc_clean = _clean_desc_text(row.get("desc"))
         ref_clean = _clean_cell_text(row.get("ref"))
         side_clean = _clean_cell_text(row.get("side"))
         dedupe_key = (
@@ -6046,6 +6059,11 @@ def read_geo(
     publish_rows: list[dict[str, Any]] = []
     if isinstance(publish_info, Mapping):
         publish_rows = list(publish_info.get("rows") or [])
+    skip_acad = bool(
+        publish_rows
+        and publish_source_tag
+        and "text" in str(publish_source_tag).lower()
+    )
     if fallback_selected and fallback_rows_list:
         print(
             f"[TEXT-FALLBACK] promoted rows={len(fallback_rows_list)} "
@@ -6142,6 +6160,8 @@ def read_geo(
             rows_for_log = list(text_rows_list)
     source_display = ops_summary.get("source") if isinstance(ops_summary, Mapping) else None
     source_lower = str(source_display or "").lower()
+    if "text" in source_lower:
+        skip_acad = True
     if "acad" in source_lower:
         publish_path = "acad"
     elif "text" in source_lower:
@@ -6226,6 +6246,7 @@ def read_geo(
         "source": ops_summary.get("source") if isinstance(ops_summary, Mapping) else None,
         "debug_payload": debug_payload,
         "chart_lines": chart_lines,
+        "skip_acad": skip_acad,
     }
 
     if families_map is not None:
@@ -6260,6 +6281,9 @@ def _read_geo_payload_from_path(
         block_name_allowlist=block_name_allowlist,
         block_name_regex=block_name_regex,
     )
+
+    if isinstance(payload, Mapping) and payload.get("skip_acad"):
+        return payload
 
     scan_info = get_last_acad_table_scan() or {}
     tables_found = 0
