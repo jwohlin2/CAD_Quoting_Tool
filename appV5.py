@@ -4838,6 +4838,8 @@ from cad_quoter.ui.planner_render import (
     _normalize_bucket_key,
     _op_role_for_name,
     _planner_bucket_key_for_name,
+    _pick_drill_minutes as _planner_pick_drill_minutes,
+    _clamp_minutes as _planner_clamp_minutes,
     _preferred_order_then_alpha,
     _prepare_bucket_view,
     _extract_bucket_map,
@@ -4849,6 +4851,7 @@ from cad_quoter.ui.planner_render import (
     _build_planner_bucket_render_state,
     _FINAL_BUCKET_HIDE_KEYS,
     SHOW_BUCKET_DIAGNOSTICS_OVERRIDE,
+    sane_minutes_or_zero,
     canonicalize_costs,
 )
 from cad_quoter.ui.services import QuoteConfiguration
@@ -17338,6 +17341,7 @@ def compute_quote_from_df(  # type: ignore[reportGeneralTypeIssues]
         geo_context = {}
     _ensure_geo_context_fields(geo_context, value_map, cfg=cfg)
     planner_inputs = dict(ui_vars or {})
+    ops_claims_map: Mapping[str, Any] | None = None
     rates = dict(rates or {})
     geo_payload: dict[str, Any] = geo_context
     if isinstance(geo_payload, dict):
@@ -17973,7 +17977,6 @@ def compute_quote_from_df(  # type: ignore[reportGeneralTypeIssues]
             )
         return normalized_groups
 
-    ops_claims_map: Mapping[str, Any] | None = None
     if isinstance(geo_payload, _MappingABC):
         claims_candidate = geo_payload.get("ops_claims")
         if isinstance(claims_candidate, _MappingABC):
@@ -18885,6 +18888,37 @@ def compute_quote_from_df(  # type: ignore[reportGeneralTypeIssues]
     effective_snapshot = dict(getattr(state_for_render, "effective", {}) or {})
     effective_sources_snapshot = dict(getattr(state_for_render, "effective_sources", {}) or {})
 
+    def _extract_final_price(*sources: Any) -> float | None:
+        """Best-effort lookup for the final price across breakdown/baseline structures."""
+
+        for source in sources:
+            if not isinstance(source, _MappingABC):
+                continue
+            direct_val = source.get("final_price")
+            if direct_val is not None:
+                try:
+                    return float(direct_val)
+                except Exception:
+                    pass
+            totals_candidate = source.get("totals")
+            if isinstance(totals_candidate, _MappingABC):
+                for key in ("price", "with_margin", "with_expedite"):
+                    value = totals_candidate.get(key)
+                    if value is None:
+                        continue
+                    try:
+                        return float(value)
+                    except Exception:
+                        continue
+        return None
+
+    final_price_value = _extract_final_price(breakdown, baseline)
+    if final_price_value is None:
+        try:
+            final_price_value = float(getattr(state_for_render, "price", 0.0))
+        except Exception:
+            final_price_value = None
+
     result = {
         "decision_state": {
             "baseline": baseline,
@@ -18899,6 +18933,11 @@ def compute_quote_from_df(  # type: ignore[reportGeneralTypeIssues]
         "app_meta": dict(app_meta),
         "quote_state": state_for_render.to_dict(),
     }
+    if final_price_value is not None and math.isfinite(final_price_value):
+        result["price"] = final_price_value
+    else:
+        # Fallback to zero so the UI message remains consistent with previous behaviour.
+        result["price"] = 0.0
 
     return result
 
