@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections import defaultdict
+from collections import Counter, defaultdict
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from fractions import Fraction
@@ -2090,7 +2090,7 @@ def _cell_has_ref_marker(text: str) -> bool:
     return False
 
 
-def _build_columnar_table_from_entries(
+def _build_columnar_table_from_panel_entries(
     entries: list[dict[str, Any]],
     *,
     roi_hint: Mapping[str, Any] | None = None,
@@ -5551,6 +5551,474 @@ def read_text_table(
             primary_result["header_validated"] = True
     _LAST_TEXT_TABLE_DEBUG["rows"] = rows_materialized
     return primary_result
+
+
+def _cluster_panel_entries(
+    entries: list[dict[str, Any]],
+    *,
+    roi_hint: Mapping[str, Any] | None = None,
+) -> list[dict[str, Any]]:
+    if not entries:
+        return []
+
+    usable_records: list[dict[str, Any]] = []
+    for idx, entry in enumerate(entries):
+        text_value = (entry.get("normalized_text") or entry.get("text") or "").strip()
+        if not text_value:
+            continue
+        x_val = entry.get("x")
+        y_val = entry.get("y")
+        try:
+            x_float = float(x_val)
+            y_float = float(y_val)
+        except Exception:
+            continue
+        record = {
+            "index": idx,
+            "layout": entry.get("layout_name"),
+            "from_block": bool(entry.get("from_block")),
+            "block_name": entry.get("block_name"),
+            "x": x_float,
+            "y": y_float,
+            "text": text_value,
+            "height": entry.get("height"),
+        }
+        usable_records.append(record)
+
+    if not usable_records:
+        return []
+
+    def _filter_entries(bounds: Mapping[str, float]) -> list[dict[str, Any]]:
+        xmin = float(bounds.get("xmin", 0.0))
+        xmax = float(bounds.get("xmax", 0.0))
+        ymin = float(bounds.get("ymin", 0.0))
+        ymax = float(bounds.get("ymax", 0.0))
+        dx = float(bounds.get("dx", 0.0) or 0.0)
+        dy = float(bounds.get("dy", 0.0) or 0.0)
+        expanded_xmin = xmin - dx
+        expanded_xmax = xmax + dx
+        expanded_ymin = ymin - dy
+        expanded_ymax = ymax + dy
+        filtered: list[dict[str, Any]] = []
+        for entry in entries:
+            x_val = entry.get("x")
+            y_val = entry.get("y")
+            try:
+                x_float = float(x_val)
+                y_float = float(y_val)
+            except Exception:
+                continue
+            if (
+                expanded_xmin <= x_float <= expanded_xmax
+                and expanded_ymin <= y_float <= expanded_ymax
+            ):
+                filtered.append(entry)
+        return filtered
+
+    all_heights = [
+        float(rec["height"])
+        for rec in usable_records
+        if isinstance(rec.get("height"), (int, float)) and float(rec["height"]) > 0
+    ]
+    median_height_all = statistics.median(all_heights) if all_heights else 0.0
+
+    def _compute_bounds(
+        cluster: list[dict[str, Any]],
+        *,
+        median_hint: float = 0.0,
+    ) -> tuple[dict[str, float], float]:
+        xs = [rec["x"] for rec in cluster]
+        ys = [rec["y"] for rec in cluster]
+        xmin = min(xs)
+        xmax = max(xs)
+        ymin = min(ys)
+        ymax = max(ys)
+        base_dx = 18.0 * median_height_all if median_height_all > 0 else 0.0
+        base_dy = 24.0 * median_height_all if median_height_all > 0 else 0.0
+        dx = max(40.0, base_dx)
+        dy = max(50.0, base_dy)
+        if median_hint and median_hint > 0:
+            dx = max(dx, 18.0 * median_hint)
+            dy = max(dy, 24.0 * median_hint)
+        bounds = {
+            "xmin": xmin,
+            "xmax": xmax,
+            "ymin": ymin,
+            "ymax": ymax,
+            "dx": dx,
+            "dy": dy,
+        }
+        return bounds, median_hint
+
+    def _summarize_meta(panel_entries: list[dict[str, Any]]) -> tuple[str | None, str | None]:
+        layout_counter: Counter[str] = Counter()
+        block_counter: Counter[str] = Counter()
+        for item in panel_entries:
+            layout_value = str(item.get("layout_name") or "").strip()
+            block_value = str(item.get("block_name") or "").strip()
+            if layout_value:
+                layout_counter[layout_value] += 1
+            if block_value:
+                block_counter[block_value] += 1
+        layout_name = layout_counter.most_common(1)[0][0] if layout_counter else None
+        block_name = block_counter.most_common(1)[0][0] if block_counter else None
+        return layout_name, block_name
+
+    panels: list[dict[str, Any]] = []
+    seen_keys: set[tuple[Any, ...]] = set()
+
+    def _register_panel(
+        *,
+        source: str,
+        bounds: Mapping[str, float],
+        entries_subset: list[dict[str, Any]],
+        roi_info: Mapping[str, Any] | None = None,
+        metadata: Mapping[str, Any] | None = None,
+        median_hint: float = 0.0,
+    ) -> None:
+        if not entries_subset:
+            return
+        key = (
+            source,
+            round(float(bounds.get("xmin", 0.0)), 1),
+            round(float(bounds.get("xmax", 0.0)), 1),
+            round(float(bounds.get("ymin", 0.0)), 1),
+            round(float(bounds.get("ymax", 0.0)), 1),
+        )
+        if key in seen_keys:
+            return
+        seen_keys.add(key)
+        layout_name, block_name = _summarize_meta(entries_subset)
+        meta_payload = {
+            "source": source,
+            "layout": layout_name,
+            "block": block_name,
+        }
+        if metadata:
+            for k, v in metadata.items():
+                if v is None or v == "":
+                    continue
+                meta_payload.setdefault(k, v)
+        pad_val = max(float(bounds.get("dx", 0.0) or 0.0), float(bounds.get("dy", 0.0) or 0.0))
+        roi_hint_payload: dict[str, Any] = {
+            "source": source,
+            "bbox": [
+                float(bounds.get("xmin", 0.0)),
+                float(bounds.get("xmax", 0.0)),
+                float(bounds.get("ymin", 0.0)),
+                float(bounds.get("ymax", 0.0)),
+            ],
+            "pad": pad_val,
+        }
+        if median_hint and median_hint > 0:
+            roi_hint_payload["median_height"] = median_hint
+        panel_entry = {
+            "entries": list(entries_subset),
+            "meta": meta_payload,
+            "bounds": dict(bounds),
+            "roi_info": dict(roi_info) if isinstance(roi_info, Mapping) else None,
+            "roi_hint": roi_hint_payload,
+        }
+        panels.append(panel_entry)
+
+    roi_median_height = 0.0
+    if isinstance(roi_hint, Mapping):
+        bbox = roi_hint.get("bbox")
+        if isinstance(bbox, (list, tuple)) and len(bbox) == 4:
+            try:
+                xmin = float(bbox[0])
+                xmax = float(bbox[1])
+                ymin = float(bbox[2])
+                ymax = float(bbox[3])
+            except Exception:
+                xmin = xmax = ymin = ymax = 0.0
+            try:
+                pad_val = float(roi_hint.get("pad") or 0.0)
+            except Exception:
+                pad_val = 0.0
+            bounds = {
+                "xmin": xmin,
+                "xmax": xmax,
+                "ymin": ymin,
+                "ymax": ymax,
+                "dx": pad_val,
+                "dy": pad_val,
+            }
+            roi_median_height = 0.0
+            try:
+                roi_median_height = float(roi_hint.get("median_height") or 0.0)
+            except Exception:
+                roi_median_height = 0.0
+            subset = _filter_entries(bounds)
+            if subset:
+                source_label = str(roi_hint.get("source") or "ROI_HINT")
+                roi_info = {
+                    "source": source_label,
+                    "bbox": [xmin, xmax, ymin, ymax],
+                    "pad": pad_val,
+                    "kept": len(subset),
+                }
+                metadata = {
+                    "block": roi_hint.get("name"),
+                    "layer": roi_hint.get("layer"),
+                }
+                _register_panel(
+                    source=source_label,
+                    bounds=bounds,
+                    entries_subset=subset,
+                    roi_info=roi_info,
+                    metadata=metadata,
+                    median_hint=roi_median_height,
+                )
+
+    anchor_lines = [rec for rec in usable_records if _ROI_ANCHOR_RE.search(rec["text"])]
+    if anchor_lines:
+        sorted_anchors = sorted(anchor_lines, key=lambda rec: -rec["y"])
+        anchor_count = len(sorted_anchors)
+        clusters: list[list[dict[str, Any]]] = []
+        if sorted_anchors:
+            height_values = [
+                float(rec["height"])
+                for rec in sorted_anchors
+                if isinstance(rec.get("height"), (int, float)) and float(rec["height"]) > 0
+            ]
+            anchor_y_diffs = [
+                abs(sorted_anchors[idx]["y"] - sorted_anchors[idx - 1]["y"])
+                for idx in range(1, len(sorted_anchors))
+                if abs(sorted_anchors[idx]["y"] - sorted_anchors[idx - 1]["y"]) > 0
+            ]
+            if height_values:
+                median_height = statistics.median(height_values)
+                roi_median_height = median_height
+                y_anchor_eps = 1.8 * median_height if median_height > 0 else 0.0
+            elif anchor_y_diffs:
+                median_diff = statistics.median(anchor_y_diffs)
+                y_anchor_eps = 0.5 * median_diff if median_diff > 0 else 0.0
+            else:
+                y_anchor_eps = 0.0
+            y_anchor_eps = max(6.0, y_anchor_eps)
+            current_cluster: list[dict[str, Any]] | None = None
+            prev_anchor: dict[str, Any] | None = None
+            for anchor in sorted_anchors:
+                if current_cluster is None:
+                    current_cluster = [anchor]
+                    clusters.append(current_cluster)
+                    prev_anchor = anchor
+                    continue
+                prev_y = prev_anchor["y"] if prev_anchor is not None else None
+                if prev_y is not None and abs(anchor["y"] - prev_y) <= y_anchor_eps:
+                    current_cluster.append(anchor)
+                else:
+                    current_cluster = [anchor]
+                    clusters.append(current_cluster)
+                prev_anchor = anchor
+        for cluster_index, cluster in enumerate(clusters):
+            if not cluster:
+                continue
+            bounds, median_hint = _compute_bounds(cluster, median_hint=roi_median_height)
+            entries_subset = _filter_entries(bounds)
+            roi_info = {
+                "anchors": len(cluster),
+                "clusters": len(clusters),
+                "bbox": [
+                    bounds["xmin"],
+                    bounds["xmax"],
+                    bounds["ymin"],
+                    bounds["ymax"],
+                ],
+                "total": len(usable_records),
+                "cluster_index": cluster_index,
+            }
+            metadata = {
+                "anchors": len(cluster),
+                "cluster_index": cluster_index,
+            }
+            _register_panel(
+                source="ANCHOR_CLUSTER",
+                bounds=bounds,
+                entries_subset=entries_subset,
+                roi_info=roi_info,
+                metadata=metadata,
+                median_hint=median_hint,
+            )
+
+    block_groups: defaultdict[tuple[str, str], list[dict[str, Any]]] = defaultdict(list)
+    for rec in usable_records:
+        if not rec.get("from_block"):
+            continue
+        block_name = str(rec.get("block_name") or "").strip()
+        if not block_name:
+            continue
+        layout_name = str(rec.get("layout") or "").strip()
+        block_groups[(layout_name, block_name)].append(rec)
+    for (layout_name, block_name), records_block in block_groups.items():
+        if not records_block:
+            continue
+        heights = [
+            float(rec.get("height"))
+            for rec in records_block
+            if isinstance(rec.get("height"), (int, float)) and float(rec.get("height")) > 0
+        ]
+        median_hint = statistics.median(heights) if heights else median_height_all
+        bounds, median_val = _compute_bounds(records_block, median_hint=median_hint)
+        entries_subset = _filter_entries(bounds)
+        if not entries_subset:
+            continue
+        roi_info = {
+            "source": "BLOCK_GROUP",
+            "bbox": [
+                bounds["xmin"],
+                bounds["xmax"],
+                bounds["ymin"],
+                bounds["ymax"],
+            ],
+            "block": block_name,
+            "layout": layout_name,
+            "count": len(entries_subset),
+        }
+        metadata = {
+            "block": block_name,
+            "layout": layout_name,
+        }
+        _register_panel(
+            source="BLOCK_GROUP",
+            bounds=bounds,
+            entries_subset=entries_subset,
+            roi_info=roi_info,
+            metadata=metadata,
+            median_hint=median_val,
+        )
+
+    if not panels:
+        layout_name, block_name = _summarize_meta(entries)
+        fallback_meta = {
+            "source": "FALLBACK",
+            "layout": layout_name,
+            "block": block_name,
+        }
+        fallback_hint = roi_hint if isinstance(roi_hint, Mapping) else None
+        panels.append(
+            {
+                "entries": list(entries),
+                "meta": fallback_meta,
+                "bounds": None,
+                "roi_info": None,
+                "roi_hint": dict(fallback_hint) if isinstance(fallback_hint, Mapping) else None,
+            }
+        )
+
+    return panels
+
+
+def _build_columnar_table_from_entries(
+    entries: list[dict[str, Any]],
+    *,
+    roi_hint: Mapping[str, Any] | None = None,
+) -> tuple[dict[str, Any] | None, dict[str, Any]]:
+    panels = _cluster_panel_entries(entries, roi_hint=roi_hint)
+    if len(panels) <= 1:
+        sole_panel = panels[0] if panels else None
+        panel_hint = sole_panel.get("roi_hint") if sole_panel else roi_hint
+        panel_entries = sole_panel.get("entries") if sole_panel else entries
+        return _build_columnar_table_from_panel_entries(
+            list(panel_entries or []),
+            roi_hint=panel_hint,
+        )
+
+    panel_results: list[dict[str, Any]] = []
+    for idx, panel in enumerate(panels):
+        panel_entries = list(panel.get("entries") or [])
+        panel_hint = panel.get("roi_hint")
+        candidate, debug_payload = _build_columnar_table_from_panel_entries(
+            panel_entries,
+            roi_hint=panel_hint,
+        )
+        normalized_rows = _normalize_table_rows(candidate.get("rows")) if candidate else []
+        panel_debug = {
+            "index": idx,
+            "rows": len(normalized_rows),
+        }
+        meta = panel.get("meta") or {}
+        panel_debug.update({k: v for k, v in meta.items() if v not in (None, "")})
+        if isinstance(debug_payload, Mapping):
+            panel_debug["roi"] = debug_payload.get("roi") or panel.get("roi_info")
+        elif panel.get("roi_info") is not None:
+            panel_debug["roi"] = panel.get("roi_info")
+        panel_results.append(
+            {
+                "candidate": candidate,
+                "debug": debug_payload,
+                "rows": normalized_rows,
+                "panel": panel,
+                "panel_debug": panel_debug,
+            }
+        )
+
+    best_candidate: dict[str, Any] | None = None
+    best_debug: dict[str, Any] | None = None
+    for result in panel_results:
+        candidate = result.get("candidate")
+        debug_payload = result.get("debug")
+        if candidate is None:
+            if best_candidate is None and isinstance(debug_payload, Mapping):
+                best_debug = dict(debug_payload)
+            continue
+        if best_candidate is None or _score_table(candidate) > _score_table(best_candidate):
+            best_candidate = candidate
+            best_debug = dict(debug_payload) if isinstance(debug_payload, Mapping) else None
+
+    merged_rows: list[dict[str, Any]] = []
+    seen_row_keys: set[tuple[Any, ...]] = set()
+    for result in panel_results:
+        for row in result.get("rows", []):
+            qty_val = row.get("qty")
+            try:
+                qty_key = int(qty_val) if qty_val is not None else None
+            except Exception:
+                qty_key = None
+            desc_value = " ".join(str(row.get("desc") or "").split())
+            ref_value = " ".join(str(row.get("ref") or "").split())
+            side_value = str(row.get("side") or "").strip().lower()
+            hole_value = " ".join(str(row.get("hole") or "").split())
+            key = (qty_key, desc_value.lower(), ref_value.lower(), side_value, hole_value.lower())
+            if key in seen_row_keys:
+                continue
+            seen_row_keys.add(key)
+            merged_rows.append(dict(row))
+
+    if best_candidate is None:
+        # Fallback to the highest scoring panel even if no candidate produced rows
+        for result in panel_results:
+            candidate = result.get("candidate")
+            if candidate is not None:
+                best_candidate = candidate
+                best_debug = dict(result.get("debug") or {})
+                break
+
+    if best_candidate is None:
+        return _build_columnar_table_from_panel_entries(entries, roi_hint=roi_hint)
+
+    combined_candidate = dict(best_candidate)
+    if merged_rows:
+        combined_candidate["rows"] = merged_rows
+        qty_total = 0
+        for row in merged_rows:
+            qty_val = row.get("qty")
+            try:
+                qty_int = int(qty_val)
+            except Exception:
+                qty_int = 0
+            if qty_int > 0:
+                qty_total += qty_int
+        if qty_total > 0:
+            combined_candidate["hole_count"] = qty_total
+
+    aggregated_debug: dict[str, Any] = {}
+    if isinstance(best_debug, Mapping):
+        aggregated_debug.update(best_debug)
+    aggregated_debug["panels"] = [result["panel_debug"] for result in panel_results]
+
+    return combined_candidate, aggregated_debug
 
 
 def _normalize_table_rows(rows_value: Any) -> list[dict[str, Any]]:
