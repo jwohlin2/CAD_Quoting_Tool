@@ -59,11 +59,7 @@ from cad_quoter.app.quote_doc import (
     _sanitize_render_text,
 )
 from cad_quoter.pricing.machining_report import _drill_time_model
-from cad_quoter.ui.planner_render import (
-    _clamp_minutes as _planner_clamp_minutes,
-    _pick_drill_minutes as _planner_pick_drill_minutes,
-    sane_minutes_or_zero,
-)
+from cad_quoter.utils.render_utils.tables import ascii_table
 
 
 
@@ -15888,15 +15884,15 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
         return f"{base}{'.' * spacing} {value_text}"
 
     section_counter = 0
-    quick_section_lines: list[str] = []
+    quick_sections: list[list[str]] = []
 
-    def _append_section_heading(title: str) -> None:
+    def _start_section(title: str) -> list[str]:
         nonlocal section_counter
-        if section_counter > 0 and (not quick_section_lines or quick_section_lines[-1] != ""):
-            quick_section_lines.append("")
         heading = f"{chr(ord('A') + section_counter)}) {title}"
         section_counter += 1
-        quick_section_lines.append(heading)
+        block: list[str] = [heading]
+        quick_sections.append(block)
+        return block
 
     if slider_sample_points:
         qty_display: str
@@ -15904,7 +15900,7 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
             qty_display = str(qty)
         else:
             qty_display = str(max(1, int(round(_safe_float(qty, 1.0)))))
-        _append_section_heading(f"Margin Slider (Qty = {qty_display})")
+        section_lines = _start_section(f"Margin Slider (Qty = {qty_display})")
         for point in sorted(slider_sample_points, key=lambda p: p.get("margin_pct", 0.0)):
             label_text = f"{str(point.get('label') or '')} margin".strip()
             if not label_text:
@@ -15912,7 +15908,7 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
             if point.get("is_current"):
                 label_text = f"{label_text} (current)"
             amount_text = fmt_money(_safe_float(point.get("unit_price"), 0.0), point.get("currency", currency))
-            quick_section_lines.append(_format_dotted_line(label_text, amount_text))
+            section_lines.append(_format_dotted_line(label_text, amount_text))
 
     current_qty = qty if isinstance(qty, int) and qty > 0 else max(1, int(round(_safe_float(qty, 1.0))))
     direct_per_part = max(0.0, _safe_float(directs, 0.0))
@@ -15952,17 +15948,32 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
         if expedite_pct_value > 0:
             heading_text += f"; expedite {_pct_label(expedite_pct_value)}"
         heading_text += ")"
-        _append_section_heading(heading_text)
-        quick_section_lines.append("  Qty, Labor $/part, Directs $/part, Subtotal, Final")
-        for row_qty, labor_val, direct_val, subtotal_val, final_val in qty_break_rows:
-            qty_field = str(row_qty).rjust(3)
-            labor_field = fmt_money(labor_val, currency).rjust(12)
-            direct_field = fmt_money(direct_val, currency).rjust(12)
-            subtotal_field = fmt_money(subtotal_val, currency).rjust(12)
-            final_field = fmt_money(final_val, currency).rjust(12)
-            quick_section_lines.append(
-                f"  {qty_field},   {labor_field}, {direct_field}, {subtotal_field}, {final_field}"
-            )
+        section_lines = _start_section(heading_text)
+        qty_headers = [
+            "Qty",
+            "Labor $/part",
+            "Directs $/part",
+            "Subtotal",
+            "Final",
+        ]
+        qty_rows_formatted = [
+            [
+                row_qty,
+                fmt_money(labor_val, currency),
+                fmt_money(direct_val, currency),
+                fmt_money(subtotal_val, currency),
+                fmt_money(final_val, currency),
+            ]
+            for row_qty, labor_val, direct_val, subtotal_val, final_val in qty_break_rows
+        ]
+        qty_table = ascii_table(
+            qty_headers,
+            qty_rows_formatted,
+            col_widths=[5, 16, 16, 15, 15],
+            col_aligns=["R", "R", "R", "R", "R"],
+            header_aligns=["C", "C", "C", "C", "C"],
+        )
+        section_lines.extend(f"  {line}" for line in qty_table.splitlines())
 
     other_quick_entries: list[dict[str, Any]] = []
     if quick_what_if_entries:
@@ -15974,7 +15985,8 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
             other_quick_entries.append(entry)
 
     if other_quick_entries:
-        _append_section_heading("Other quick toggles")
+        section_lines = _start_section("Other quick toggles")
+        quick_toggle_rows: list[list[str]] = []
         for entry in other_quick_entries:
             label_text = str(entry.get("label") or "").strip() or "Scenario"
             amount_val = _safe_float(entry.get("unit_price"), 0.0)
@@ -15989,13 +16001,30 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
                 else:
                     delta_prefix = "+"
                 delta_text = fmt_money(abs(delta_float), entry.get("currency", currency))
-                base_line = f"  {label_text}: {amount_text} ({delta_prefix}{delta_text})"
+                delta_display = f"{delta_prefix}{delta_text}"
             else:
-                base_line = f"  {label_text}: {amount_text}"
+                delta_display = ""
             detail_text = str(entry.get("detail") or "").strip()
-            if detail_text:
-                base_line = f"{base_line} — {detail_text}"
-            quick_section_lines.append(base_line)
+            quick_toggle_rows.append([
+                f"{label_text}:",
+                amount_text,
+                delta_display,
+                detail_text,
+            ])
+        quick_toggle_table = ascii_table(
+            ["Scenario", "Unit price", "Δ", "Notes"],
+            quick_toggle_rows,
+            col_widths=[24, 12, 10, 20],
+            col_aligns=["L", "R", "C", "L"],
+            header_aligns=["L", "C", "C", "L"],
+        )
+        section_lines.extend(f"  {line}" for line in quick_toggle_table.splitlines())
+
+    quick_section_lines: list[str] = []
+    for block in quick_sections:
+        if quick_section_lines and quick_section_lines[-1] != "":
+            quick_section_lines.append("")
+        quick_section_lines.extend(block)
 
     while quick_section_lines and quick_section_lines[-1] == "":
         quick_section_lines.pop()
