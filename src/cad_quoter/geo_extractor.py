@@ -5213,15 +5213,15 @@ def read_text_table(
             if helper_score[1] > 0 and helper_score > best_score:
                 best_candidate = helper_map
                 best_score = helper_score
-        if (
-            helper_score[1] == 0
-            and rows_txt_initial >= 2
-            and confidence_high
-        ):
-            force_columnar = True
-            print(
-                "[PATH-GUARD] helper_rows=0 but rows_txt>=2; forcing band/column fallback"
-            )
+            if (
+                helper_score[1] == 0
+                and rows_txt_initial >= 2
+                and confidence_high
+            ):
+                force_columnar = True
+                print(
+                    "[PATH-GUARD] helper_rows=0 but rows_txt>=2; forcing band/column fallback"
+                )
 
     legacy_helper = _resolve_app_callable("hole_count_from_text_table")
     _print_helper_debug("text_alt", legacy_helper)
