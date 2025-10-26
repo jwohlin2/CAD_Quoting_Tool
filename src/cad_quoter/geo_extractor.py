@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections import defaultdict
+from collections import Counter, defaultdict
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from fractions import Fraction
@@ -2012,16 +2012,14 @@ def _collect_table_text_lines(doc: Any) -> list[str]:
             spaces.append(space)
 
     for space in spaces:
-        for flattened in flatten_entities(space, depth=_MAX_INSERT_DEPTH):
-            entity = flattened.entity
-            dxftype = None
-            try:
-                dxftype = entity.dxftype()
-            except Exception:
-                dxftype = None
-            kind = str(dxftype or "").upper()
-            if kind not in {"TEXT", "MTEXT", "MLEADER", "ATTRIB", "ATTDEF"}:
-                continue
+        query = getattr(space, "query", None)
+        if not callable(query):
+            continue
+        try:
+            entities = list(query("TEXT, MTEXT, RTEXT"))
+        except Exception:
+            continue
+        for entity in entities:
             fragments = list(_iter_entity_text_fragments(entity))
             for fragment, _ in fragments:
                 normalized = _normalize_table_fragment(fragment)
@@ -2201,6 +2199,104 @@ def _iter_entity_text_fragments(entity: Any) -> Iterable[tuple[str, bool]]:
             for piece in text_value.splitlines():
                 if piece.strip():
                     yield (piece, False)
+    elif kind == "RTEXT":
+        def _flatten_text_values(value: Any) -> Iterable[str]:
+            if value is None:
+                return []
+            if isinstance(value, str):
+                return [value]
+            if isinstance(value, (bytes, bytearray)):
+                try:
+                    return [value.decode("utf-8")]
+                except Exception:
+                    try:
+                        return [value.decode("latin-1")]
+                    except Exception:
+                        return []
+            if isinstance(value, Mapping):
+                results: list[str] = []
+                for candidate in value.values():
+                    results.extend(_flatten_text_values(candidate))
+                return results
+            if isinstance(value, Iterable) and not isinstance(value, (str, bytes, bytearray)):
+                results: list[str] = []
+                for item in value:
+                    if isinstance(item, tuple) and len(item) >= 2:
+                        results.extend(_flatten_text_values(item[1]))
+                    else:
+                        results.extend(_flatten_text_values(item))
+                return results
+            try:
+                text = str(value)
+            except Exception:
+                return []
+            return [text]
+
+        seen_fragments: set[str] = set()
+        collected: list[str] = []
+
+        def _collect_text(value: Any) -> None:
+            for fragment in _flatten_text_values(value):
+                cleaned = fragment.strip()
+                if not cleaned:
+                    continue
+                if cleaned in seen_fragments:
+                    continue
+                seen_fragments.add(cleaned)
+                collected.append(cleaned)
+
+        dxf_obj = getattr(entity, "dxf", None)
+        for source in (entity, dxf_obj):
+            if source is None:
+                continue
+            for attr in (
+                "raw_content",
+                "raw_text",
+                "stored_text",
+                "text",
+                "value",
+                "content",
+                "string",
+            ):
+                _collect_text(getattr(source, attr, None))
+            plain_text = getattr(source, "plain_text", None)
+            if callable(plain_text):
+                try:
+                    _collect_text(plain_text())
+                except Exception:
+                    pass
+
+        get_xdata = getattr(entity, "get_xdata", None)
+        if callable(get_xdata):
+            for app in ("RTEXT", "ACAD_RTEXT", "ACAD_REACTORS", "ACAD"):
+                try:
+                    _collect_text(get_xdata(app))
+                except Exception:
+                    continue
+
+        for attr_name in ("xdata", "extended_data", "appdata"):
+            _collect_text(getattr(entity, attr_name, None))
+
+        if not collected:
+            raw_text = getattr(entity, "text", "")
+            if not raw_text and dxf_obj is not None:
+                raw_text = getattr(dxf_obj, "text", "")
+            _collect_text(raw_text)
+
+        if not collected:
+            return
+
+        longest = max(collected, key=len, default="")
+        if not longest:
+            return
+
+        pieces = _split_mtext_plain_text(longest)
+        if not pieces:
+            pieces = [longest]
+        for piece in pieces:
+            cleaned_piece = piece.strip()
+            if cleaned_piece:
+                yield (cleaned_piece, True)
     else:
         raw_text = getattr(entity, "text", "")
         if not raw_text:
@@ -2492,7 +2588,7 @@ def _cell_has_ref_marker(text: str) -> bool:
     return False
 
 
-def _build_columnar_table_from_entries(
+def _build_columnar_table_from_panel_entries(
     entries: list[dict[str, Any]],
     *,
     roi_hint: Mapping[str, Any] | None = None,
@@ -4278,7 +4374,7 @@ def _extract_mechanical_table_from_blocks(doc: Any) -> Mapping[str, Any] | None:
                 kind = entity.dxftype()
             except Exception:
                 kind = None
-            if str(kind or "").upper() not in {"TEXT", "MTEXT"}:
+            if str(kind or "").upper() not in {"TEXT", "MTEXT", "RTEXT"}:
                 continue
             text_value = _extract_text(entity)
             if not text_value:
@@ -4537,6 +4633,9 @@ def read_text_table(
     roi_hint: Mapping[str, Any] | None = None,
     block_name_allowlist: Iterable[str] | None = None,
     block_name_regex: Iterable[str] | str | None = None,
+    layer_include_regex: Iterable[str] | str | None = None,
+    layer_exclude_regex: Iterable[str] | str | None = None,
+    debug_layouts: bool = False,
 ) -> dict[str, Any]:
     helper = _resolve_app_callable("extract_hole_table_from_text")
     _print_helper_debug("text", helper)
@@ -4555,11 +4654,42 @@ def read_text_table(
     resolved_allowlist = _normalize_layer_allowlist(layer_allowlist)
     normalized_block_allow = _normalize_block_allowlist(block_name_allowlist)
     block_regex_patterns = _compile_block_name_patterns(block_name_regex)
+
+    def _compile_layer_patterns(
+        patterns: Iterable[str] | str | None,
+    ) -> list[re.Pattern[str]]:
+        compiled: list[re.Pattern[str]] = []
+        if isinstance(patterns, str):
+            pattern_iter: Iterable[str] = [patterns]
+        elif patterns is None:
+            pattern_iter = []
+        else:
+            pattern_iter = patterns
+        for candidate in pattern_iter:
+            if not isinstance(candidate, str):
+                continue
+            text = candidate.strip()
+            if not text:
+                continue
+            try:
+                compiled.append(re.compile(text, re.IGNORECASE))
+            except re.error as exc:
+                print(f"[TEXT-SCAN] layer regex error pattern={text!r} err={exc}")
+        return compiled
+
+    include_patterns = _compile_layer_patterns(layer_include_regex)
+    exclude_patterns = _compile_layer_patterns(layer_exclude_regex)
+    include_display = [pattern.pattern for pattern in include_patterns]
+    exclude_display = [pattern.pattern for pattern in exclude_patterns]
     allowlist_display = (
         "None"
         if resolved_allowlist is None
         else "{" + ",".join(sorted(resolved_allowlist) or []) + "}"
     )
+    if isinstance(_LAST_TEXT_TABLE_DEBUG, dict):
+        _LAST_TEXT_TABLE_DEBUG["layer_regex_include"] = list(include_display)
+        _LAST_TEXT_TABLE_DEBUG["layer_regex_exclude"] = list(exclude_display)
+        _LAST_TEXT_TABLE_DEBUG["debug_layouts_requested"] = bool(debug_layouts)
     table_lines: list[str] | None = None
     fallback_candidate: Mapping[str, Any] | None = None
     best_candidate: Mapping[str, Any] | None = None
@@ -4622,6 +4752,8 @@ def read_text_table(
         preferred_block_rois: list[dict[str, Any]] = []
         block_height_samples: defaultdict[str, list[float]] = defaultdict(list)
         layout_names_seen: list[str] = []
+        layout_names_seen_set: set[str] = set()
+        scanned_layers_map: dict[str, str] = {}
         follow_sheet_directive: dict[str, Any] | None = None
         follow_sheet_target_layout: str | None = None
 
@@ -4732,12 +4864,33 @@ def read_text_table(
 
         for layout_index, (layout_name, layout_obj) in enumerate(_iter_layouts()):
             layout_names[layout_index] = layout_name
+            if layout_name not in layout_names_seen_set:
+                layout_names_seen_set.add(layout_name)
+                layout_names_seen.append(layout_name)
             if layout_index not in layout_order:
                 layout_order.append(layout_index)
-            layout_label = layout_name or f"Layout#{layout_index}"
-            layout_tables = _count_tables_for_layout_name(layout_name)
-            if layout_label not in layout_names_seen:
-                layout_names_seen.append(layout_label)
+            query = getattr(layout_obj, "query", None)
+            base_entities: list[Any] = []
+            if callable(query):
+                try:
+                    base_entities = list(query("TEXT, MTEXT, RTEXT, MLEADER, INSERT"))
+                except Exception:
+                    base_entities = []
+                if not base_entities:
+                    for spec in ("TEXT", "MTEXT", "RTEXT", "MLEADER", "INSERT"):
+                        try:
+                            base_entities.extend(list(query(spec)))
+                        except Exception:
+                            continue
+            if not base_entities:
+                try:
+                    base_entities = list(layout_obj)
+                except Exception:
+                    base_entities = []
+            if not base_entities:
+                if _TRACE_ACAD:
+                    print(f"[LAYOUT] {layout_label} texts=0/0 tables={layout_tables}")
+                continue
 
             seen_entities: set[int] = set()
             text_fragments = 0
@@ -4757,15 +4910,15 @@ def read_text_table(
                 except Exception:
                     dxftype = None
                 kind = str(dxftype or "").upper()
-
-                layer_name = flattened.layer
-                layer_upper = flattened.layer_upper
-                effective_layer = flattened.effective_layer
-                effective_layer_upper = flattened.effective_layer_upper
-                active_block = flattened.block_name
-                from_block = flattened.from_block
-
-                if kind in {"TEXT", "MTEXT", "ATTRIB", "ATTDEF", "MLEADER"}:
+                layer_name = _extract_layer(entity)
+                layer_upper = layer_name.upper() if layer_name else ""
+                effective_layer = layer_name
+                effective_layer_upper = layer_upper
+                if not effective_layer_upper or effective_layer_upper == "0":
+                    candidate = parent_effective_layer or layer_name or ""
+                    effective_layer = candidate
+                    effective_layer_upper = candidate.upper() if candidate else ""
+                if kind in {"TEXT", "MTEXT", "ATTRIB", "ATTDEF", "MLEADER", "RTEXT"}:
                     coords = _extract_coords(entity)
                     coords = _apply_transform_point(flattened.transform, coords)
                     text_height = _extract_text_height(entity)
@@ -4823,6 +4976,11 @@ def read_text_table(
                         counter += 1
                         collected_entries.append(entry)
                         entries_by_layout[layout_index].append(entry)
+                        layer_token = effective_layer or layer_name
+                        if layer_token:
+                            upper_token = layer_token.upper()
+                            if upper_token and upper_token not in scanned_layers_map:
+                                scanned_layers_map[upper_token] = layer_token
                         kept_count += 1
                         if (
                             active_block
@@ -4930,15 +5088,84 @@ def read_text_table(
             top = sorted(counts.items(), key=lambda item: (-item[1], item[0]))[:5]
             return "{" + ", ".join(f"{name or '-'}:{count}" for name, count in top) + "}"
 
-        layer_counts_pre: dict[str, int] = defaultdict(int)
-        for entry in collected_entries:
-            layer_key = str(
-                entry.get("effective_layer")
-                or entry.get("layer")
-                or ""
-            ).strip()
-            layer_counts_pre[layer_key] += 1
+        def _count_layers(entries: Iterable[Mapping[str, Any]]) -> dict[str, int]:
+            counts: dict[str, int] = defaultdict(int)
+            for entry in entries:
+                layer_key = str(
+                    entry.get("effective_layer")
+                    or entry.get("layer")
+                    or "",
+                ).strip()
+                counts[layer_key] += 1
+            return dict(counts)
+
+        def _count_layouts(entries: Iterable[Mapping[str, Any]]) -> dict[str, int]:
+            counts: dict[str, int] = defaultdict(int)
+            for entry in entries:
+                layout_key = str(
+                    entry.get("layout_name")
+                    or entry.get("layout_index")
+                    or "",
+                ).strip()
+                counts[layout_key] += 1
+            return dict(counts)
+
+        layer_counts_pre = _count_layers(collected_entries)
+        layout_counts_pre = _count_layouts(collected_entries)
         print(f"[TEXT-SCAN] kept_by_layer(pre)={_format_layer_summary(layer_counts_pre)}")
+        if isinstance(_LAST_TEXT_TABLE_DEBUG, dict):
+            _LAST_TEXT_TABLE_DEBUG["layer_counts_pre"] = dict(layer_counts_pre)
+            _LAST_TEXT_TABLE_DEBUG["layout_counts_pre"] = dict(layout_counts_pre)
+            _LAST_TEXT_TABLE_DEBUG["scanned_layers"] = sorted(
+                scanned_layers_map.values(), key=lambda value: value.upper()
+            )
+            _LAST_TEXT_TABLE_DEBUG["scanned_layouts"] = list(layout_names_seen)
+
+        if include_patterns or exclude_patterns:
+            def _matches_any(patterns: list[re.Pattern[str]], values: list[str]) -> bool:
+                for pattern in patterns:
+                    for value in values:
+                        if value and pattern.search(value):
+                            return True
+                return False
+
+            regex_filtered: list[dict[str, Any]] = []
+            for entry in collected_entries:
+                layer_text = str(
+                    entry.get("effective_layer")
+                    or entry.get("layer")
+                    or "",
+                )
+                upper_text = str(
+                    entry.get("effective_layer_upper")
+                    or entry.get("layer_upper")
+                    or layer_text.upper()
+                )
+                values = [layer_text, upper_text]
+                include_ok = True
+                if include_patterns:
+                    include_ok = _matches_any(include_patterns, values)
+                exclude_hit = False
+                if include_ok and exclude_patterns:
+                    exclude_hit = _matches_any(exclude_patterns, values)
+                if include_ok and not exclude_hit:
+                    regex_filtered.append(entry)
+            kept = len(regex_filtered)
+            dropped = len(collected_entries) - kept
+            print(
+                "[LAYER] regex include={incl} exclude={excl} kept={kept} dropped={dropped}".format(
+                    incl=include_display or "-",
+                    excl=exclude_display or "-",
+                    kept=kept,
+                    dropped=dropped,
+                )
+            )
+            collected_entries = regex_filtered
+            layer_counts_regex = _count_layers(collected_entries)
+            layout_counts_regex = _count_layouts(collected_entries)
+            if isinstance(_LAST_TEXT_TABLE_DEBUG, dict):
+                _LAST_TEXT_TABLE_DEBUG["layer_counts_post_regex"] = dict(layer_counts_regex)
+                _LAST_TEXT_TABLE_DEBUG["layout_counts_post_regex"] = dict(layout_counts_regex)
 
         if resolved_allowlist is not None:
             filtered_entries: list[dict[str, Any]] = []
@@ -4977,19 +5204,16 @@ def read_text_table(
         else:
             filtered_entries = list(collected_entries)
 
-        layer_counts_post: dict[str, int] = defaultdict(int)
-        for entry in filtered_entries:
-            layer_key = str(
-                entry.get("effective_layer")
-                or entry.get("layer")
-                or ""
-            ).strip()
-            layer_counts_post[layer_key] += 1
+        layer_counts_post = _count_layers(filtered_entries)
+        layout_counts_post = _count_layouts(filtered_entries)
         print(
             f"[TEXT-SCAN] kept_by_layer(post-allow)={_format_layer_summary(layer_counts_post)}"
         )
 
         collected_entries = filtered_entries
+        if isinstance(_LAST_TEXT_TABLE_DEBUG, dict):
+            _LAST_TEXT_TABLE_DEBUG["layer_counts_post_allow"] = dict(layer_counts_post)
+            _LAST_TEXT_TABLE_DEBUG["layout_counts_post_allow"] = dict(layout_counts_post)
 
         if roi_hint_effective is None and preferred_block_rois:
             block_hint: Mapping[str, Any] | None = None
@@ -5738,6 +5962,474 @@ def read_text_table(
     return primary_result
 
 
+def _cluster_panel_entries(
+    entries: list[dict[str, Any]],
+    *,
+    roi_hint: Mapping[str, Any] | None = None,
+) -> list[dict[str, Any]]:
+    if not entries:
+        return []
+
+    usable_records: list[dict[str, Any]] = []
+    for idx, entry in enumerate(entries):
+        text_value = (entry.get("normalized_text") or entry.get("text") or "").strip()
+        if not text_value:
+            continue
+        x_val = entry.get("x")
+        y_val = entry.get("y")
+        try:
+            x_float = float(x_val)
+            y_float = float(y_val)
+        except Exception:
+            continue
+        record = {
+            "index": idx,
+            "layout": entry.get("layout_name"),
+            "from_block": bool(entry.get("from_block")),
+            "block_name": entry.get("block_name"),
+            "x": x_float,
+            "y": y_float,
+            "text": text_value,
+            "height": entry.get("height"),
+        }
+        usable_records.append(record)
+
+    if not usable_records:
+        return []
+
+    def _filter_entries(bounds: Mapping[str, float]) -> list[dict[str, Any]]:
+        xmin = float(bounds.get("xmin", 0.0))
+        xmax = float(bounds.get("xmax", 0.0))
+        ymin = float(bounds.get("ymin", 0.0))
+        ymax = float(bounds.get("ymax", 0.0))
+        dx = float(bounds.get("dx", 0.0) or 0.0)
+        dy = float(bounds.get("dy", 0.0) or 0.0)
+        expanded_xmin = xmin - dx
+        expanded_xmax = xmax + dx
+        expanded_ymin = ymin - dy
+        expanded_ymax = ymax + dy
+        filtered: list[dict[str, Any]] = []
+        for entry in entries:
+            x_val = entry.get("x")
+            y_val = entry.get("y")
+            try:
+                x_float = float(x_val)
+                y_float = float(y_val)
+            except Exception:
+                continue
+            if (
+                expanded_xmin <= x_float <= expanded_xmax
+                and expanded_ymin <= y_float <= expanded_ymax
+            ):
+                filtered.append(entry)
+        return filtered
+
+    all_heights = [
+        float(rec["height"])
+        for rec in usable_records
+        if isinstance(rec.get("height"), (int, float)) and float(rec["height"]) > 0
+    ]
+    median_height_all = statistics.median(all_heights) if all_heights else 0.0
+
+    def _compute_bounds(
+        cluster: list[dict[str, Any]],
+        *,
+        median_hint: float = 0.0,
+    ) -> tuple[dict[str, float], float]:
+        xs = [rec["x"] for rec in cluster]
+        ys = [rec["y"] for rec in cluster]
+        xmin = min(xs)
+        xmax = max(xs)
+        ymin = min(ys)
+        ymax = max(ys)
+        base_dx = 18.0 * median_height_all if median_height_all > 0 else 0.0
+        base_dy = 24.0 * median_height_all if median_height_all > 0 else 0.0
+        dx = max(40.0, base_dx)
+        dy = max(50.0, base_dy)
+        if median_hint and median_hint > 0:
+            dx = max(dx, 18.0 * median_hint)
+            dy = max(dy, 24.0 * median_hint)
+        bounds = {
+            "xmin": xmin,
+            "xmax": xmax,
+            "ymin": ymin,
+            "ymax": ymax,
+            "dx": dx,
+            "dy": dy,
+        }
+        return bounds, median_hint
+
+    def _summarize_meta(panel_entries: list[dict[str, Any]]) -> tuple[str | None, str | None]:
+        layout_counter: Counter[str] = Counter()
+        block_counter: Counter[str] = Counter()
+        for item in panel_entries:
+            layout_value = str(item.get("layout_name") or "").strip()
+            block_value = str(item.get("block_name") or "").strip()
+            if layout_value:
+                layout_counter[layout_value] += 1
+            if block_value:
+                block_counter[block_value] += 1
+        layout_name = layout_counter.most_common(1)[0][0] if layout_counter else None
+        block_name = block_counter.most_common(1)[0][0] if block_counter else None
+        return layout_name, block_name
+
+    panels: list[dict[str, Any]] = []
+    seen_keys: set[tuple[Any, ...]] = set()
+
+    def _register_panel(
+        *,
+        source: str,
+        bounds: Mapping[str, float],
+        entries_subset: list[dict[str, Any]],
+        roi_info: Mapping[str, Any] | None = None,
+        metadata: Mapping[str, Any] | None = None,
+        median_hint: float = 0.0,
+    ) -> None:
+        if not entries_subset:
+            return
+        key = (
+            source,
+            round(float(bounds.get("xmin", 0.0)), 1),
+            round(float(bounds.get("xmax", 0.0)), 1),
+            round(float(bounds.get("ymin", 0.0)), 1),
+            round(float(bounds.get("ymax", 0.0)), 1),
+        )
+        if key in seen_keys:
+            return
+        seen_keys.add(key)
+        layout_name, block_name = _summarize_meta(entries_subset)
+        meta_payload = {
+            "source": source,
+            "layout": layout_name,
+            "block": block_name,
+        }
+        if metadata:
+            for k, v in metadata.items():
+                if v is None or v == "":
+                    continue
+                meta_payload.setdefault(k, v)
+        pad_val = max(float(bounds.get("dx", 0.0) or 0.0), float(bounds.get("dy", 0.0) or 0.0))
+        roi_hint_payload: dict[str, Any] = {
+            "source": source,
+            "bbox": [
+                float(bounds.get("xmin", 0.0)),
+                float(bounds.get("xmax", 0.0)),
+                float(bounds.get("ymin", 0.0)),
+                float(bounds.get("ymax", 0.0)),
+            ],
+            "pad": pad_val,
+        }
+        if median_hint and median_hint > 0:
+            roi_hint_payload["median_height"] = median_hint
+        panel_entry = {
+            "entries": list(entries_subset),
+            "meta": meta_payload,
+            "bounds": dict(bounds),
+            "roi_info": dict(roi_info) if isinstance(roi_info, Mapping) else None,
+            "roi_hint": roi_hint_payload,
+        }
+        panels.append(panel_entry)
+
+    roi_median_height = 0.0
+    if isinstance(roi_hint, Mapping):
+        bbox = roi_hint.get("bbox")
+        if isinstance(bbox, (list, tuple)) and len(bbox) == 4:
+            try:
+                xmin = float(bbox[0])
+                xmax = float(bbox[1])
+                ymin = float(bbox[2])
+                ymax = float(bbox[3])
+            except Exception:
+                xmin = xmax = ymin = ymax = 0.0
+            try:
+                pad_val = float(roi_hint.get("pad") or 0.0)
+            except Exception:
+                pad_val = 0.0
+            bounds = {
+                "xmin": xmin,
+                "xmax": xmax,
+                "ymin": ymin,
+                "ymax": ymax,
+                "dx": pad_val,
+                "dy": pad_val,
+            }
+            roi_median_height = 0.0
+            try:
+                roi_median_height = float(roi_hint.get("median_height") or 0.0)
+            except Exception:
+                roi_median_height = 0.0
+            subset = _filter_entries(bounds)
+            if subset:
+                source_label = str(roi_hint.get("source") or "ROI_HINT")
+                roi_info = {
+                    "source": source_label,
+                    "bbox": [xmin, xmax, ymin, ymax],
+                    "pad": pad_val,
+                    "kept": len(subset),
+                }
+                metadata = {
+                    "block": roi_hint.get("name"),
+                    "layer": roi_hint.get("layer"),
+                }
+                _register_panel(
+                    source=source_label,
+                    bounds=bounds,
+                    entries_subset=subset,
+                    roi_info=roi_info,
+                    metadata=metadata,
+                    median_hint=roi_median_height,
+                )
+
+    anchor_lines = [rec for rec in usable_records if _ROI_ANCHOR_RE.search(rec["text"])]
+    if anchor_lines:
+        sorted_anchors = sorted(anchor_lines, key=lambda rec: -rec["y"])
+        anchor_count = len(sorted_anchors)
+        clusters: list[list[dict[str, Any]]] = []
+        if sorted_anchors:
+            height_values = [
+                float(rec["height"])
+                for rec in sorted_anchors
+                if isinstance(rec.get("height"), (int, float)) and float(rec["height"]) > 0
+            ]
+            anchor_y_diffs = [
+                abs(sorted_anchors[idx]["y"] - sorted_anchors[idx - 1]["y"])
+                for idx in range(1, len(sorted_anchors))
+                if abs(sorted_anchors[idx]["y"] - sorted_anchors[idx - 1]["y"]) > 0
+            ]
+            if height_values:
+                median_height = statistics.median(height_values)
+                roi_median_height = median_height
+                y_anchor_eps = 1.8 * median_height if median_height > 0 else 0.0
+            elif anchor_y_diffs:
+                median_diff = statistics.median(anchor_y_diffs)
+                y_anchor_eps = 0.5 * median_diff if median_diff > 0 else 0.0
+            else:
+                y_anchor_eps = 0.0
+            y_anchor_eps = max(6.0, y_anchor_eps)
+            current_cluster: list[dict[str, Any]] | None = None
+            prev_anchor: dict[str, Any] | None = None
+            for anchor in sorted_anchors:
+                if current_cluster is None:
+                    current_cluster = [anchor]
+                    clusters.append(current_cluster)
+                    prev_anchor = anchor
+                    continue
+                prev_y = prev_anchor["y"] if prev_anchor is not None else None
+                if prev_y is not None and abs(anchor["y"] - prev_y) <= y_anchor_eps:
+                    current_cluster.append(anchor)
+                else:
+                    current_cluster = [anchor]
+                    clusters.append(current_cluster)
+                prev_anchor = anchor
+        for cluster_index, cluster in enumerate(clusters):
+            if not cluster:
+                continue
+            bounds, median_hint = _compute_bounds(cluster, median_hint=roi_median_height)
+            entries_subset = _filter_entries(bounds)
+            roi_info = {
+                "anchors": len(cluster),
+                "clusters": len(clusters),
+                "bbox": [
+                    bounds["xmin"],
+                    bounds["xmax"],
+                    bounds["ymin"],
+                    bounds["ymax"],
+                ],
+                "total": len(usable_records),
+                "cluster_index": cluster_index,
+            }
+            metadata = {
+                "anchors": len(cluster),
+                "cluster_index": cluster_index,
+            }
+            _register_panel(
+                source="ANCHOR_CLUSTER",
+                bounds=bounds,
+                entries_subset=entries_subset,
+                roi_info=roi_info,
+                metadata=metadata,
+                median_hint=median_hint,
+            )
+
+    block_groups: defaultdict[tuple[str, str], list[dict[str, Any]]] = defaultdict(list)
+    for rec in usable_records:
+        if not rec.get("from_block"):
+            continue
+        block_name = str(rec.get("block_name") or "").strip()
+        if not block_name:
+            continue
+        layout_name = str(rec.get("layout") or "").strip()
+        block_groups[(layout_name, block_name)].append(rec)
+    for (layout_name, block_name), records_block in block_groups.items():
+        if not records_block:
+            continue
+        heights = [
+            float(rec.get("height"))
+            for rec in records_block
+            if isinstance(rec.get("height"), (int, float)) and float(rec.get("height")) > 0
+        ]
+        median_hint = statistics.median(heights) if heights else median_height_all
+        bounds, median_val = _compute_bounds(records_block, median_hint=median_hint)
+        entries_subset = _filter_entries(bounds)
+        if not entries_subset:
+            continue
+        roi_info = {
+            "source": "BLOCK_GROUP",
+            "bbox": [
+                bounds["xmin"],
+                bounds["xmax"],
+                bounds["ymin"],
+                bounds["ymax"],
+            ],
+            "block": block_name,
+            "layout": layout_name,
+            "count": len(entries_subset),
+        }
+        metadata = {
+            "block": block_name,
+            "layout": layout_name,
+        }
+        _register_panel(
+            source="BLOCK_GROUP",
+            bounds=bounds,
+            entries_subset=entries_subset,
+            roi_info=roi_info,
+            metadata=metadata,
+            median_hint=median_val,
+        )
+
+    if not panels:
+        layout_name, block_name = _summarize_meta(entries)
+        fallback_meta = {
+            "source": "FALLBACK",
+            "layout": layout_name,
+            "block": block_name,
+        }
+        fallback_hint = roi_hint if isinstance(roi_hint, Mapping) else None
+        panels.append(
+            {
+                "entries": list(entries),
+                "meta": fallback_meta,
+                "bounds": None,
+                "roi_info": None,
+                "roi_hint": dict(fallback_hint) if isinstance(fallback_hint, Mapping) else None,
+            }
+        )
+
+    return panels
+
+
+def _build_columnar_table_from_entries(
+    entries: list[dict[str, Any]],
+    *,
+    roi_hint: Mapping[str, Any] | None = None,
+) -> tuple[dict[str, Any] | None, dict[str, Any]]:
+    panels = _cluster_panel_entries(entries, roi_hint=roi_hint)
+    if len(panels) <= 1:
+        sole_panel = panels[0] if panels else None
+        panel_hint = sole_panel.get("roi_hint") if sole_panel else roi_hint
+        panel_entries = sole_panel.get("entries") if sole_panel else entries
+        return _build_columnar_table_from_panel_entries(
+            list(panel_entries or []),
+            roi_hint=panel_hint,
+        )
+
+    panel_results: list[dict[str, Any]] = []
+    for idx, panel in enumerate(panels):
+        panel_entries = list(panel.get("entries") or [])
+        panel_hint = panel.get("roi_hint")
+        candidate, debug_payload = _build_columnar_table_from_panel_entries(
+            panel_entries,
+            roi_hint=panel_hint,
+        )
+        normalized_rows = _normalize_table_rows(candidate.get("rows")) if candidate else []
+        panel_debug = {
+            "index": idx,
+            "rows": len(normalized_rows),
+        }
+        meta = panel.get("meta") or {}
+        panel_debug.update({k: v for k, v in meta.items() if v not in (None, "")})
+        if isinstance(debug_payload, Mapping):
+            panel_debug["roi"] = debug_payload.get("roi") or panel.get("roi_info")
+        elif panel.get("roi_info") is not None:
+            panel_debug["roi"] = panel.get("roi_info")
+        panel_results.append(
+            {
+                "candidate": candidate,
+                "debug": debug_payload,
+                "rows": normalized_rows,
+                "panel": panel,
+                "panel_debug": panel_debug,
+            }
+        )
+
+    best_candidate: dict[str, Any] | None = None
+    best_debug: dict[str, Any] | None = None
+    for result in panel_results:
+        candidate = result.get("candidate")
+        debug_payload = result.get("debug")
+        if candidate is None:
+            if best_candidate is None and isinstance(debug_payload, Mapping):
+                best_debug = dict(debug_payload)
+            continue
+        if best_candidate is None or _score_table(candidate) > _score_table(best_candidate):
+            best_candidate = candidate
+            best_debug = dict(debug_payload) if isinstance(debug_payload, Mapping) else None
+
+    merged_rows: list[dict[str, Any]] = []
+    seen_row_keys: set[tuple[Any, ...]] = set()
+    for result in panel_results:
+        for row in result.get("rows", []):
+            qty_val = row.get("qty")
+            try:
+                qty_key = int(qty_val) if qty_val is not None else None
+            except Exception:
+                qty_key = None
+            desc_value = " ".join(str(row.get("desc") or "").split())
+            ref_value = " ".join(str(row.get("ref") or "").split())
+            side_value = str(row.get("side") or "").strip().lower()
+            hole_value = " ".join(str(row.get("hole") or "").split())
+            key = (qty_key, desc_value.lower(), ref_value.lower(), side_value, hole_value.lower())
+            if key in seen_row_keys:
+                continue
+            seen_row_keys.add(key)
+            merged_rows.append(dict(row))
+
+    if best_candidate is None:
+        # Fallback to the highest scoring panel even if no candidate produced rows
+        for result in panel_results:
+            candidate = result.get("candidate")
+            if candidate is not None:
+                best_candidate = candidate
+                best_debug = dict(result.get("debug") or {})
+                break
+
+    if best_candidate is None:
+        return _build_columnar_table_from_panel_entries(entries, roi_hint=roi_hint)
+
+    combined_candidate = dict(best_candidate)
+    if merged_rows:
+        combined_candidate["rows"] = merged_rows
+        qty_total = 0
+        for row in merged_rows:
+            qty_val = row.get("qty")
+            try:
+                qty_int = int(qty_val)
+            except Exception:
+                qty_int = 0
+            if qty_int > 0:
+                qty_total += qty_int
+        if qty_total > 0:
+            combined_candidate["hole_count"] = qty_total
+
+    aggregated_debug: dict[str, Any] = {}
+    if isinstance(best_debug, Mapping):
+        aggregated_debug.update(best_debug)
+    aggregated_debug["panels"] = [result["panel_debug"] for result in panel_results]
+
+    return combined_candidate, aggregated_debug
+
+
 def _normalize_table_rows(rows_value: Any) -> list[dict[str, Any]]:
     if isinstance(rows_value, list):
         source = rows_value
@@ -6174,6 +6866,9 @@ def read_geo(
     layer_allowlist: Iterable[str] | None = _DEFAULT_LAYER_ALLOWLIST,
     block_name_allowlist: Iterable[str] | None = None,
     block_name_regex: Iterable[str] | str | None = None,
+    layer_include_regex: Iterable[str] | str | None = None,
+    layer_exclude_regex: Iterable[str] | str | None = None,
+    debug_layouts: bool = False,
 ) -> dict[str, Any]:
     """Process a loaded DXF/DWG document into GEO payload details."""
 
@@ -6241,6 +6936,9 @@ def read_geo(
             roi_hint=acad_roi_hint,
             block_name_allowlist=block_name_allowlist,
             block_name_regex=block_name_regex,
+            layer_include_regex=layer_include_regex,
+            layer_exclude_regex=layer_exclude_regex,
+            debug_layouts=debug_layouts,
         ) or {}
     except TypeError as exc:
         if "layer_allowlist" in str(exc) or "roi_hint" in str(exc):
@@ -6563,6 +7261,9 @@ def _read_geo_payload_from_path(
     layer_allowlist: Iterable[str] | None = _DEFAULT_LAYER_ALLOWLIST,
     block_name_allowlist: Iterable[str] | None = None,
     block_name_regex: Iterable[str] | str | None = None,
+    layer_include_regex: Iterable[str] | str | None = None,
+    layer_exclude_regex: Iterable[str] | str | None = None,
+    debug_layouts: bool = False,
 ) -> dict[str, Any]:
     try:
         doc = _load_doc_for_path(path_obj, use_oda=use_oda)
@@ -6578,6 +7279,9 @@ def _read_geo_payload_from_path(
         layer_allowlist=layer_allowlist,
         block_name_allowlist=block_name_allowlist,
         block_name_regex=block_name_regex,
+        layer_include_regex=layer_include_regex,
+        layer_exclude_regex=layer_exclude_regex,
+        debug_layouts=debug_layouts,
     )
 
     if isinstance(payload, Mapping) and payload.get("skip_acad"):
@@ -6698,6 +7402,9 @@ def extract_geo_from_path(
     layer_allowlist: Iterable[str] | None = _DEFAULT_LAYER_ALLOWLIST,
     block_name_allowlist: Iterable[str] | None = None,
     block_name_regex: Iterable[str] | str | None = None,
+    layer_include_regex: Iterable[str] | str | None = None,
+    layer_exclude_regex: Iterable[str] | str | None = None,
+    debug_layouts: bool = False,
 ) -> dict[str, Any]:
     """Load DWG/DXF at ``path`` and return a GEO dictionary."""
 
@@ -6711,6 +7418,9 @@ def extract_geo_from_path(
         layer_allowlist=layer_allowlist,
         block_name_allowlist=block_name_allowlist,
         block_name_regex=block_name_regex,
+        layer_include_regex=layer_include_regex,
+        layer_exclude_regex=layer_exclude_regex,
+        debug_layouts=debug_layouts,
     )
     if "error" in payload:
         return {"error": payload["error"]}
@@ -6730,6 +7440,9 @@ def extract_geo_from_path(
     layer_allowlist: Iterable[str] | None = _DEFAULT_LAYER_ALLOWLIST,
     block_name_allowlist: Iterable[str] | None = None,
     block_name_regex: Iterable[str] | str | None = None,
+    layer_include_regex: Iterable[str] | str | None = None,
+    layer_exclude_regex: Iterable[str] | str | None = None,
+    debug_layouts: bool = False,
 ) -> dict[str, Any]:
     """Load DWG/DXF at ``path`` and return a GEO dictionary."""
 
@@ -6743,6 +7456,9 @@ def extract_geo_from_path(
         layer_allowlist=layer_allowlist,
         block_name_allowlist=block_name_allowlist,
         block_name_regex=block_name_regex,
+        layer_include_regex=layer_include_regex,
+        layer_exclude_regex=layer_exclude_regex,
+        debug_layouts=debug_layouts,
     )
 
 
