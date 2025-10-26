@@ -13082,6 +13082,18 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
     elif isinstance(bucket_view_struct, (_MutableMappingABC, dict)):
         _normalize_buckets(typing.cast(MutableMapping[str, Any], bucket_view_struct))
 
+    if isinstance(bucket_view_for_render, Mapping):
+        if isinstance(bucket_view_for_render, (_MutableMappingABC, dict)):
+            # ``bucket_view_for_render`` already references a mutable structure
+            # that has been normalised in-place above.
+            pass
+        else:
+            # Planner payloads are sometimes stored in read-only mapping
+            # proxies.  Clone and normalise those views so downstream helpers
+            # do not encounter unlabeled buckets (which would emit generic
+            # rate lines like ``0.21 hr @ $89.98/hr``).
+            bucket_view_for_render = _prepare_bucket_view(bucket_view_for_render)
+
     process_section_start = len(lines)
 
     bucket_entries_for_totals: Mapping[str, Any] | None = None
