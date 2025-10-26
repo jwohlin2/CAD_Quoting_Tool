@@ -4135,6 +4135,9 @@ def read_text_table(
     roi_hint: Mapping[str, Any] | None = None,
     block_name_allowlist: Iterable[str] | None = None,
     block_name_regex: Iterable[str] | str | None = None,
+    layer_include_regex: Iterable[str] | str | None = None,
+    layer_exclude_regex: Iterable[str] | str | None = None,
+    debug_layouts: bool = False,
 ) -> dict[str, Any]:
     helper = _resolve_app_callable("extract_hole_table_from_text")
     _print_helper_debug("text", helper)
@@ -4153,11 +4156,42 @@ def read_text_table(
     resolved_allowlist = _normalize_layer_allowlist(layer_allowlist)
     normalized_block_allow = _normalize_block_allowlist(block_name_allowlist)
     block_regex_patterns = _compile_block_name_patterns(block_name_regex)
+
+    def _compile_layer_patterns(
+        patterns: Iterable[str] | str | None,
+    ) -> list[re.Pattern[str]]:
+        compiled: list[re.Pattern[str]] = []
+        if isinstance(patterns, str):
+            pattern_iter: Iterable[str] = [patterns]
+        elif patterns is None:
+            pattern_iter = []
+        else:
+            pattern_iter = patterns
+        for candidate in pattern_iter:
+            if not isinstance(candidate, str):
+                continue
+            text = candidate.strip()
+            if not text:
+                continue
+            try:
+                compiled.append(re.compile(text, re.IGNORECASE))
+            except re.error as exc:
+                print(f"[TEXT-SCAN] layer regex error pattern={text!r} err={exc}")
+        return compiled
+
+    include_patterns = _compile_layer_patterns(layer_include_regex)
+    exclude_patterns = _compile_layer_patterns(layer_exclude_regex)
+    include_display = [pattern.pattern for pattern in include_patterns]
+    exclude_display = [pattern.pattern for pattern in exclude_patterns]
     allowlist_display = (
         "None"
         if resolved_allowlist is None
         else "{" + ",".join(sorted(resolved_allowlist) or []) + "}"
     )
+    if isinstance(_LAST_TEXT_TABLE_DEBUG, dict):
+        _LAST_TEXT_TABLE_DEBUG["layer_regex_include"] = list(include_display)
+        _LAST_TEXT_TABLE_DEBUG["layer_regex_exclude"] = list(exclude_display)
+        _LAST_TEXT_TABLE_DEBUG["debug_layouts_requested"] = bool(debug_layouts)
     table_lines: list[str] | None = None
     fallback_candidate: Mapping[str, Any] | None = None
     best_candidate: Mapping[str, Any] | None = None
@@ -4220,6 +4254,8 @@ def read_text_table(
         preferred_block_rois: list[dict[str, Any]] = []
         block_height_samples: defaultdict[str, list[float]] = defaultdict(list)
         layout_names_seen: list[str] = []
+        layout_names_seen_set: set[str] = set()
+        scanned_layers_map: dict[str, str] = {}
         follow_sheet_directive: dict[str, Any] | None = None
         follow_sheet_target_layout: str | None = None
 
@@ -4337,6 +4373,9 @@ def read_text_table(
 
         for layout_index, (layout_name, layout_obj) in enumerate(_iter_layouts()):
             layout_names[layout_index] = layout_name
+            if layout_name not in layout_names_seen_set:
+                layout_names_seen_set.add(layout_name)
+                layout_names_seen.append(layout_name)
             if layout_index not in layout_order:
                 layout_order.append(layout_index)
             query = getattr(layout_obj, "query", None)
@@ -4466,6 +4505,11 @@ def read_text_table(
                         counter += 1
                         collected_entries.append(entry)
                         entries_by_layout[layout_index].append(entry)
+                        layer_token = effective_layer or layer_name
+                        if layer_token:
+                            upper_token = layer_token.upper()
+                            if upper_token and upper_token not in scanned_layers_map:
+                                scanned_layers_map[upper_token] = layer_token
                         kept_count += 1
                         if (
                             active_block
@@ -4635,15 +4679,84 @@ def read_text_table(
             top = sorted(counts.items(), key=lambda item: (-item[1], item[0]))[:5]
             return "{" + ", ".join(f"{name or '-'}:{count}" for name, count in top) + "}"
 
-        layer_counts_pre: dict[str, int] = defaultdict(int)
-        for entry in collected_entries:
-            layer_key = str(
-                entry.get("effective_layer")
-                or entry.get("layer")
-                or ""
-            ).strip()
-            layer_counts_pre[layer_key] += 1
+        def _count_layers(entries: Iterable[Mapping[str, Any]]) -> dict[str, int]:
+            counts: dict[str, int] = defaultdict(int)
+            for entry in entries:
+                layer_key = str(
+                    entry.get("effective_layer")
+                    or entry.get("layer")
+                    or "",
+                ).strip()
+                counts[layer_key] += 1
+            return dict(counts)
+
+        def _count_layouts(entries: Iterable[Mapping[str, Any]]) -> dict[str, int]:
+            counts: dict[str, int] = defaultdict(int)
+            for entry in entries:
+                layout_key = str(
+                    entry.get("layout_name")
+                    or entry.get("layout_index")
+                    or "",
+                ).strip()
+                counts[layout_key] += 1
+            return dict(counts)
+
+        layer_counts_pre = _count_layers(collected_entries)
+        layout_counts_pre = _count_layouts(collected_entries)
         print(f"[TEXT-SCAN] kept_by_layer(pre)={_format_layer_summary(layer_counts_pre)}")
+        if isinstance(_LAST_TEXT_TABLE_DEBUG, dict):
+            _LAST_TEXT_TABLE_DEBUG["layer_counts_pre"] = dict(layer_counts_pre)
+            _LAST_TEXT_TABLE_DEBUG["layout_counts_pre"] = dict(layout_counts_pre)
+            _LAST_TEXT_TABLE_DEBUG["scanned_layers"] = sorted(
+                scanned_layers_map.values(), key=lambda value: value.upper()
+            )
+            _LAST_TEXT_TABLE_DEBUG["scanned_layouts"] = list(layout_names_seen)
+
+        if include_patterns or exclude_patterns:
+            def _matches_any(patterns: list[re.Pattern[str]], values: list[str]) -> bool:
+                for pattern in patterns:
+                    for value in values:
+                        if value and pattern.search(value):
+                            return True
+                return False
+
+            regex_filtered: list[dict[str, Any]] = []
+            for entry in collected_entries:
+                layer_text = str(
+                    entry.get("effective_layer")
+                    or entry.get("layer")
+                    or "",
+                )
+                upper_text = str(
+                    entry.get("effective_layer_upper")
+                    or entry.get("layer_upper")
+                    or layer_text.upper()
+                )
+                values = [layer_text, upper_text]
+                include_ok = True
+                if include_patterns:
+                    include_ok = _matches_any(include_patterns, values)
+                exclude_hit = False
+                if include_ok and exclude_patterns:
+                    exclude_hit = _matches_any(exclude_patterns, values)
+                if include_ok and not exclude_hit:
+                    regex_filtered.append(entry)
+            kept = len(regex_filtered)
+            dropped = len(collected_entries) - kept
+            print(
+                "[LAYER] regex include={incl} exclude={excl} kept={kept} dropped={dropped}".format(
+                    incl=include_display or "-",
+                    excl=exclude_display or "-",
+                    kept=kept,
+                    dropped=dropped,
+                )
+            )
+            collected_entries = regex_filtered
+            layer_counts_regex = _count_layers(collected_entries)
+            layout_counts_regex = _count_layouts(collected_entries)
+            if isinstance(_LAST_TEXT_TABLE_DEBUG, dict):
+                _LAST_TEXT_TABLE_DEBUG["layer_counts_post_regex"] = dict(layer_counts_regex)
+                _LAST_TEXT_TABLE_DEBUG["layout_counts_post_regex"] = dict(layout_counts_regex)
 
         if resolved_allowlist is not None:
             filtered_entries: list[dict[str, Any]] = []
@@ -4682,19 +4795,16 @@ def read_text_table(
         else:
             filtered_entries = list(collected_entries)
 
-        layer_counts_post: dict[str, int] = defaultdict(int)
-        for entry in filtered_entries:
-            layer_key = str(
-                entry.get("effective_layer")
-                or entry.get("layer")
-                or ""
-            ).strip()
-            layer_counts_post[layer_key] += 1
+        layer_counts_post = _count_layers(filtered_entries)
+        layout_counts_post = _count_layouts(filtered_entries)
         print(
             f"[TEXT-SCAN] kept_by_layer(post-allow)={_format_layer_summary(layer_counts_post)}"
         )
 
         collected_entries = filtered_entries
+        if isinstance(_LAST_TEXT_TABLE_DEBUG, dict):
+            _LAST_TEXT_TABLE_DEBUG["layer_counts_post_allow"] = dict(layer_counts_post)
+            _LAST_TEXT_TABLE_DEBUG["layout_counts_post_allow"] = dict(layout_counts_post)
 
         if roi_hint_effective is None and preferred_block_rois:
             block_hint: Mapping[str, Any] | None = None
@@ -5879,6 +5989,9 @@ def read_geo(
     layer_allowlist: Iterable[str] | None = _DEFAULT_LAYER_ALLOWLIST,
     block_name_allowlist: Iterable[str] | None = None,
     block_name_regex: Iterable[str] | str | None = None,
+    layer_include_regex: Iterable[str] | str | None = None,
+    layer_exclude_regex: Iterable[str] | str | None = None,
+    debug_layouts: bool = False,
 ) -> dict[str, Any]:
     """Process a loaded DXF/DWG document into GEO payload details."""
 
@@ -5946,6 +6059,9 @@ def read_geo(
             roi_hint=acad_roi_hint,
             block_name_allowlist=block_name_allowlist,
             block_name_regex=block_name_regex,
+            layer_include_regex=layer_include_regex,
+            layer_exclude_regex=layer_exclude_regex,
+            debug_layouts=debug_layouts,
         ) or {}
     except TypeError as exc:
         if "layer_allowlist" in str(exc) or "roi_hint" in str(exc):
@@ -6268,6 +6384,9 @@ def _read_geo_payload_from_path(
     layer_allowlist: Iterable[str] | None = _DEFAULT_LAYER_ALLOWLIST,
     block_name_allowlist: Iterable[str] | None = None,
     block_name_regex: Iterable[str] | str | None = None,
+    layer_include_regex: Iterable[str] | str | None = None,
+    layer_exclude_regex: Iterable[str] | str | None = None,
+    debug_layouts: bool = False,
 ) -> dict[str, Any]:
     try:
         doc = _load_doc_for_path(path_obj, use_oda=use_oda)
@@ -6283,6 +6402,9 @@ def _read_geo_payload_from_path(
         layer_allowlist=layer_allowlist,
         block_name_allowlist=block_name_allowlist,
         block_name_regex=block_name_regex,
+        layer_include_regex=layer_include_regex,
+        layer_exclude_regex=layer_exclude_regex,
+        debug_layouts=debug_layouts,
     )
 
     if isinstance(payload, Mapping) and payload.get("skip_acad"):
@@ -6403,6 +6525,9 @@ def extract_geo_from_path(
     layer_allowlist: Iterable[str] | None = _DEFAULT_LAYER_ALLOWLIST,
     block_name_allowlist: Iterable[str] | None = None,
     block_name_regex: Iterable[str] | str | None = None,
+    layer_include_regex: Iterable[str] | str | None = None,
+    layer_exclude_regex: Iterable[str] | str | None = None,
+    debug_layouts: bool = False,
 ) -> dict[str, Any]:
     """Load DWG/DXF at ``path`` and return a GEO dictionary."""
 
@@ -6416,6 +6541,9 @@ def extract_geo_from_path(
         layer_allowlist=layer_allowlist,
         block_name_allowlist=block_name_allowlist,
         block_name_regex=block_name_regex,
+        layer_include_regex=layer_include_regex,
+        layer_exclude_regex=layer_exclude_regex,
+        debug_layouts=debug_layouts,
     )
     if "error" in payload:
         return {"error": payload["error"]}
@@ -6435,6 +6563,9 @@ def extract_geo_from_path(
     layer_allowlist: Iterable[str] | None = _DEFAULT_LAYER_ALLOWLIST,
     block_name_allowlist: Iterable[str] | None = None,
     block_name_regex: Iterable[str] | str | None = None,
+    layer_include_regex: Iterable[str] | str | None = None,
+    layer_exclude_regex: Iterable[str] | str | None = None,
+    debug_layouts: bool = False,
 ) -> dict[str, Any]:
     """Load DWG/DXF at ``path`` and return a GEO dictionary."""
 
@@ -6448,6 +6579,9 @@ def extract_geo_from_path(
         layer_allowlist=layer_allowlist,
         block_name_allowlist=block_name_allowlist,
         block_name_regex=block_name_regex,
+        layer_include_regex=layer_include_regex,
+        layer_exclude_regex=layer_exclude_regex,
+        debug_layouts=debug_layouts,
     )
 
 
