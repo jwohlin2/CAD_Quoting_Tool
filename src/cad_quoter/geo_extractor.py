@@ -4543,6 +4543,7 @@ def read_text_table(
                 if not layout_entries:
                     continue
                 layout_name = layout_names.get(layout_index, str(layout_index))
+                original_layout_lines = list(layout_entries)
                 kept_for_layout = [
                     entry
                     for entry in layout_entries
@@ -4558,7 +4559,7 @@ def read_text_table(
                             allow=allowlist_display,
                         )
                     )
-                    lines_for_layout = list(layout_entries)
+                    lines_for_layout = original_layout_lines
                 else:
                     print(
                         "[LAYER] layout={layout} allow={allow} kept={count}".format(
@@ -4665,6 +4666,8 @@ def read_text_table(
                 _LAST_TEXT_TABLE_DEBUG["follow_sheet_info"] = info_map
 
         if not collected_entries:
+            _LAST_TEXT_TABLE_DEBUG["rows_txt_count"] = 0
+            _LAST_TEXT_TABLE_DEBUG["text_row_count"] = 0
             table_lines = []
             print("[TEXT-SCAN] rows_txt count=0")
             print("[TEXT-SCAN] parsed rows: 0")
@@ -4802,6 +4805,7 @@ def read_text_table(
             merged_rows.append(" ".join(current_row))
 
         rows_txt_initial = len(merged_rows)
+        _LAST_TEXT_TABLE_DEBUG["rows_txt_count"] = rows_txt_initial
         print(f"[TEXT-SCAN] rows_txt count={len(merged_rows)}")
         for idx, row_text in enumerate(merged_rows[:10]):
             print(f"  [{idx:02d}] {row_text}")
@@ -5028,79 +5032,82 @@ def read_text_table(
                 if len(fallback_clean) > len(current_desc):
                     parsed_rows[idx]["desc"] = fallback_clean
 
-        if rows_txt_initial < 8:
-            chart_lines: list[dict[str, Any]] = []
-            sheet_lines: list[dict[str, Any]] = []
-            model_lines: list[dict[str, Any]] = []
-            other_lines: list[dict[str, Any]] = []
-            for entry in collected_entries:
-                text_value = str(entry.get("text") or "").strip()
-                if not text_value:
-                    continue
-                record = {
-                    "layout_name": entry.get("layout_name"),
-                    "from_block": bool(entry.get("from_block")),
-                    "block_name": entry.get("block_name"),
-                    "x": entry.get("x"),
-                    "y": entry.get("y"),
-                    "height": entry.get("height"),
-                    "text": text_value,
-                    "normalized_text": text_value,
-                }
-                layout_name = str(entry.get("layout_name") or "")
-                lower_name = layout_name.lower()
-                if "chart" in lower_name:
-                    chart_lines.append(record)
-                elif "sheet" in lower_name:
-                    sheet_lines.append(record)
-                elif lower_name == "model":
-                    model_lines.append(record)
-                else:
-                    other_lines.append(record)
-            raw_lines = chart_lines + sheet_lines + model_lines
-            if not raw_lines:
-                raw_lines = list(other_lines)
-            _LAST_TEXT_TABLE_DEBUG["raw_lines"] = [
-                {
-                    "layout": item.get("layout_name"),
-                    "in_block": bool(item.get("from_block")),
-                    "block": item.get("block_name"),
-                    "x": item.get("x"),
-                    "y": item.get("y"),
-                    "text": item.get("text"),
-                }
-                for item in raw_lines
-            ]
-            block_count = sum(1 for item in raw_lines if item.get("from_block"))
-            print(
-                "[COLUMN] raw_lines total={total} (chart={chart} sheet={sheet} "
-                "model={model}) blocks={blocks}".format(
-                    total=len(raw_lines),
-                    chart=len(chart_lines),
-                    sheet=len(sheet_lines),
-                    model=len(model_lines),
-                    blocks=block_count,
-                )
-            )
-            if raw_lines:
-                table_candidate, debug_payload = _build_columnar_table_from_entries(
-                    raw_lines, roi_hint=roi_hint_effective
-                )
-                columnar_table_info = table_candidate
-                columnar_debug_info = debug_payload
-                if isinstance(debug_payload, Mapping):
-                    _LAST_TEXT_TABLE_DEBUG["bands"] = list(
-                        debug_payload.get("bands", [])
-                    )
-                    _LAST_TEXT_TABLE_DEBUG["band_cells"] = list(
-                        debug_payload.get("band_cells", [])
-                    )
-                    _LAST_TEXT_TABLE_DEBUG["rows"] = list(
-                        debug_payload.get("rows_txt_fallback", [])
-                    )
-                    if "roi" in debug_payload:
-                        _LAST_TEXT_TABLE_DEBUG["roi"] = debug_payload.get("roi")
+        if rows_txt_initial > 0 and not parsed_rows:
+            print("[PATH-GUARD] rows_txt>0 but text_rows==0; forcing band/column pass")
 
+        chart_lines: list[dict[str, Any]] = []
+        sheet_lines: list[dict[str, Any]] = []
+        model_lines: list[dict[str, Any]] = []
+        other_lines: list[dict[str, Any]] = []
+        for entry in collected_entries:
+            text_value = str(entry.get("text") or "").strip()
+            if not text_value:
+                continue
+            record = {
+                "layout_name": entry.get("layout_name"),
+                "from_block": bool(entry.get("from_block")),
+                "block_name": entry.get("block_name"),
+                "x": entry.get("x"),
+                "y": entry.get("y"),
+                "height": entry.get("height"),
+                "text": text_value,
+                "normalized_text": text_value,
+            }
+            layout_name = str(entry.get("layout_name") or "")
+            lower_name = layout_name.lower()
+            if "chart" in lower_name:
+                chart_lines.append(record)
+            elif "sheet" in lower_name:
+                sheet_lines.append(record)
+            elif lower_name == "model":
+                model_lines.append(record)
+            else:
+                other_lines.append(record)
+        raw_lines = chart_lines + sheet_lines + model_lines
+        if not raw_lines:
+            raw_lines = list(other_lines)
+        _LAST_TEXT_TABLE_DEBUG["raw_lines"] = [
+            {
+                "layout": item.get("layout_name"),
+                "in_block": bool(item.get("from_block")),
+                "block": item.get("block_name"),
+                "x": item.get("x"),
+                "y": item.get("y"),
+                "text": item.get("text"),
+            }
+            for item in raw_lines
+        ]
+        block_count = sum(1 for item in raw_lines if item.get("from_block"))
+        print(
+            "[COLUMN] raw_lines total={total} (chart={chart} sheet={sheet} "
+            "model={model}) blocks={blocks}".format(
+                total=len(raw_lines),
+                chart=len(chart_lines),
+                sheet=len(sheet_lines),
+                model=len(model_lines),
+                blocks=block_count,
+            )
+        )
+        if raw_lines:
+            table_candidate, debug_payload = _build_columnar_table_from_entries(
+                raw_lines, roi_hint=roi_hint_effective
+            )
+            columnar_table_info = table_candidate
+            columnar_debug_info = debug_payload
+            if isinstance(debug_payload, Mapping):
+                _LAST_TEXT_TABLE_DEBUG["bands"] = list(
+                    debug_payload.get("bands", [])
+                )
+                _LAST_TEXT_TABLE_DEBUG["band_cells"] = list(
+                    debug_payload.get("band_cells", [])
+                )
+                _LAST_TEXT_TABLE_DEBUG["rows"] = list(
+                    debug_payload.get("rows_txt_fallback", [])
+                )
+                if "roi" in debug_payload:
+                    _LAST_TEXT_TABLE_DEBUG["roi"] = debug_payload.get("roi")
+
+        _LAST_TEXT_TABLE_DEBUG["text_row_count"] = len(parsed_rows)
         print(f"[TEXT-SCAN] parsed rows: {len(parsed_rows)}")
         for idx, row in enumerate(parsed_rows[:20]):
             ref_val = row.get("ref") or ""
@@ -5652,37 +5659,39 @@ def _load_doc_for_path(path: Path, *, use_oda: bool, out_ver: str | None = None)
                 odaread = getattr(odafc_mod, "readfile", None)
                 if callable(odaread):
                     return odaread(str(path))
-        if oda_version:
+        target_version = oda_version or "ACAD2018"
+        dxf_path: str | None = None
+        try:
+            if oda_version:
+                dxf_path = convert_dwg_to_dxf(str(path), out_ver=oda_version)
+            else:
+                dxf_path = convert_dwg_to_dxf(str(path))
+        except Exception as exc:
+            out_display = dxf_path or "-"
+            error_text = str(exc)
             print(
-                "[DEBUG] ODA args: convert_dwg_to_dxf(path='{path}', out_ver='{ver}')".format(
-                    path=str(path),
-                    ver=oda_version,
-                )
+                f"[DXF-FALLBACK] try={target_version} ok=False out={out_display} err={error_text}"
             )
-            dxf_path = convert_dwg_to_dxf(str(path), out_ver=oda_version)
-            ok = os.path.exists(dxf_path)
-            if not ok:
-                raise AssertionError(
-                    f"ODA fallback {oda_version} did not produce a DXF at {dxf_path}"
-                )
-            print(f"[DXF-FALLBACK] version={oda_version} path={dxf_path} ok={ok}")
             _LAST_DXF_FALLBACK_INFO = {
-                "version": oda_version,
-                "path": str(dxf_path),
-                "ok": ok,
+                "version": target_version,
+                "path": str(path),
+                "ok": False,
+                "error": error_text,
             }
-        else:
-            dxf_path = convert_dwg_to_dxf(str(path))
-            ok = os.path.exists(dxf_path)
-            print(
-                "[DXF-FALLBACK] version={ver} path={path} ok={ok}".format(
-                    ver="ACAD2018",
-                    path=dxf_path,
-                    ok=ok,
-                )
+            raise
+        ok = bool(dxf_path) and os.path.exists(dxf_path)
+        out_display = dxf_path or "-"
+        print(f"[DXF-FALLBACK] try={target_version} ok={ok} out={out_display}")
+        _LAST_DXF_FALLBACK_INFO = {
+            "version": target_version,
+            "path": str(out_display),
+            "ok": ok,
+        }
+        if not ok:
+            raise AssertionError(
+                f"ODA fallback {target_version} did not produce a DXF at {out_display}"
             )
-            _LAST_DXF_FALLBACK_INFO = {"version": "ACAD2018", "path": str(dxf_path), "ok": ok}
-        return readfile(dxf_path)
+        return readfile(out_display)
     return readfile(str(path))
 
 
@@ -5781,7 +5790,17 @@ def read_geo(
         text_info = {}
 
     acad_rows = len((acad_info.get("rows") or [])) if isinstance(acad_info, Mapping) else 0
+    if acad_rows == 0:
+        print("[PATH] acad=0 (no tables found)")
     text_rows = len((text_info.get("rows") or [])) if isinstance(text_info, Mapping) else 0
+    debug_snapshot = get_last_text_table_debug() or {}
+    rows_txt_debug = 0
+    if isinstance(debug_snapshot, Mapping):
+        try:
+            rows_txt_debug = int(float(debug_snapshot.get("rows_txt_count") or 0))
+        except Exception:
+            rows_txt_debug = 0
+    print(f"[PATH] text=run (rows_txt={rows_txt_debug})")
     print(f"[EXTRACT] acad_rows={acad_rows} text_rows={text_rows}")
 
     best_table = choose_better_table(acad_info, text_info)
@@ -5800,6 +5819,20 @@ def read_geo(
         source_tag = "acad_table" if score_a >= score_b else "text_table"
         promote_table_to_geo(geo, best_table, source_tag)
         table_used = True
+        if source_tag == "text_table":
+            _print_promoted_rows_once(best_table.get("rows", []))
+
+    if (
+        not table_used
+        and acad_rows == 0
+        and text_rows > 0
+        and isinstance(text_info, Mapping)
+        and text_info.get("rows")
+    ):
+        source_tag = "text_table"
+        promote_table_to_geo(geo, text_info, source_tag)
+        table_used = True
+        _print_promoted_rows_once(text_info.get("rows", []))
 
     ops_summary = _ensure_ops_summary_map(geo.get("ops_summary"))
     geo["ops_summary"] = ops_summary
@@ -5844,6 +5877,15 @@ def read_geo(
         if not isinstance(rows_for_log, list) and isinstance(rows_for_log, Iterable):
             rows_for_log = list(rows_for_log)
         qty_sum = _sum_qty(rows_for_log)
+    source_display = ops_summary.get("source") if isinstance(ops_summary, Mapping) else None
+    source_lower = str(source_display or "").lower()
+    if "acad" in source_lower:
+        publish_path = "acad"
+    elif "text" in source_lower:
+        publish_path = "text"
+    else:
+        publish_path = source_lower or "geom"
+    print(f"[PATH] publish={publish_path} rows={len(rows_for_log)} qty_sum={qty_sum}")
     print(
         f"[EXTRACT] published rows={len(rows_for_log)} qty_sum={qty_sum} "
         f"source={ops_summary.get('source')}"
