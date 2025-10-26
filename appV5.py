@@ -7366,7 +7366,7 @@ def _compute_drilling_removal_section(
 
             extras["drill_machine_minutes"] = float(drill_minutes_subtotal)
             extras["drill_labor_minutes"] = float(total_tool_minutes)
-            extras["drill_total_minutes"] = drill_minutes_subtotal
+            extras["drill_total_minutes"] = float(drill_minutes_total)
             logging.info(
                 f"[removal] drill_total_minutes={extras['drill_total_minutes']}"
             )
@@ -8929,7 +8929,7 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
     overrides = (
         ("prefer_removal_drilling_hours", True),
         ("separate_machine_labor", True),
-        ("machine_rate_per_hr", 90.0),
+        ("machine_rate_per_hr", 45.0),
         ("labor_rate_per_hr", 45.0),
         ("milling_attended_fraction", 1.0),
     )
@@ -9497,6 +9497,7 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
             if isinstance(baseline_state, _MappingABC):
                 qty_raw = baseline_state.get("qty")
     qty = int(qty_raw or 1)
+    quote_qty = qty
     price        = float(result.get("price", totals.get("price", 0.0)))
 
     g = (
@@ -10103,10 +10104,6 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
                     rate_key="MillingRate",
                     fallback_keys=("MachineRate", "machine_rate", "machine"),
                 )
-                if machine_rate <= 0.0:
-                    cfg_machine = _cfg_rate_fallback("machine_rate_per_hr")
-                    if cfg_machine > 0.0:
-                        machine_rate = cfg_machine
                 labor_rate = _bucket_rate_value(
                     "milling",
                     mode="labor",
@@ -10114,10 +10111,33 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
                     rate_key="MillingLaborRate",
                     fallback_keys=("LaborRate", "labor_rate", "labor"),
                 )
-                if labor_rate <= 0.0:
-                    cfg_labor = _cfg_rate_fallback("labor_rate_per_hr")
-                    if cfg_labor > 0.0:
-                        labor_rate = cfg_labor
+                cfg_machine = _cfg_rate_fallback("machine_rate_per_hr")
+                cfg_labor = _cfg_rate_fallback("labor_rate_per_hr")
+                if separate_labor_cfg and cfg_machine > 0.0:
+                    machine_rate = cfg_machine
+                elif machine_rate <= 0.0:
+                    machine_rate = cfg_machine if cfg_machine > 0.0 else machine_rate
+                if separate_labor_cfg and cfg_labor > 0.0:
+                    labor_rate = cfg_labor
+                elif labor_rate <= 0.0:
+                    labor_rate = cfg_labor if cfg_labor > 0.0 else labor_rate
+
+                split_machine, split_labor = _split_hours_for_detail("milling")
+                if separate_labor_cfg and (split_machine > 0.0 or split_labor > 0.0):
+                    parts: list[str] = []
+                    if split_machine > 0.0 and machine_rate > 0.0:
+                        parts.append(
+                            f"machine {split_machine:.2f} hr @ ${machine_rate:.2f}/hr"
+                        )
+                    if split_labor > 0.0 and labor_rate > 0.0:
+                        parts.append(
+                            f"labor {split_labor:.2f} hr @ ${labor_rate:.2f}/hr"
+                        )
+                    if parts:
+                        line = f"Milling: {'; '.join(parts)}"
+                        write_line(line, indent)
+                        return
+
                 line = f"Milling: {hours_val:.2f} hr"
                 if machine_rate > 0.0:
                     line += f" @ ${machine_rate:.2f}/hr (machine)"
@@ -10136,10 +10156,6 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
                     rate_key="DrillingRate",
                     fallback_keys=("MachineRate", "machine_rate", "machine"),
                 )
-                if machine_rate <= 0.0:
-                    cfg_machine = _cfg_rate_fallback("machine_rate_per_hr")
-                    if cfg_machine > 0.0:
-                        machine_rate = cfg_machine
                 labor_rate = _bucket_rate_value(
                     "drilling",
                     mode="labor",
@@ -10147,10 +10163,33 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
                     rate_key="DrillingLaborRate",
                     fallback_keys=("LaborRate", "labor_rate", "labor"),
                 )
-                if labor_rate <= 0.0:
-                    cfg_labor = _cfg_rate_fallback("labor_rate_per_hr")
-                    if cfg_labor > 0.0:
-                        labor_rate = cfg_labor
+                cfg_machine = _cfg_rate_fallback("machine_rate_per_hr")
+                cfg_labor = _cfg_rate_fallback("labor_rate_per_hr")
+                if separate_labor_cfg and cfg_machine > 0.0:
+                    machine_rate = cfg_machine
+                elif machine_rate <= 0.0:
+                    machine_rate = cfg_machine if cfg_machine > 0.0 else machine_rate
+                if separate_labor_cfg and cfg_labor > 0.0:
+                    labor_rate = cfg_labor
+                elif labor_rate <= 0.0:
+                    labor_rate = cfg_labor if cfg_labor > 0.0 else labor_rate
+
+                split_machine, split_labor = _split_hours_for_detail("drilling")
+                if separate_labor_cfg and (split_machine > 0.0 or split_labor > 0.0):
+                    parts = []
+                    if split_machine > 0.0 and machine_rate > 0.0:
+                        parts.append(
+                            f"machine {split_machine:.2f} hr @ ${machine_rate:.2f}/hr"
+                        )
+                    if split_labor > 0.0 and labor_rate > 0.0:
+                        parts.append(
+                            f"labor {split_labor:.2f} hr @ ${labor_rate:.2f}/hr"
+                        )
+                    if parts:
+                        line = f"Drilling: {'; '.join(parts)}"
+                        write_line(line, indent)
+                        return
+
                 line = f"Drilling: {hours_val:.2f} hr"
                 if machine_rate > 0.0:
                     line += f" @ ${machine_rate:.2f}/hr (machine)"
@@ -10169,10 +10208,20 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
                     rate_key="InspectionRate",
                     fallback_keys=("LaborRate", "labor_rate", "labor"),
                 )
-                if labor_rate <= 0.0:
-                    cfg_labor = _cfg_rate_fallback("labor_rate_per_hr")
-                    if cfg_labor > 0.0:
-                        labor_rate = cfg_labor
+                cfg_labor = _cfg_rate_fallback("labor_rate_per_hr")
+                if separate_labor_cfg and cfg_labor > 0.0:
+                    labor_rate = cfg_labor
+                elif labor_rate <= 0.0:
+                    labor_rate = cfg_labor if cfg_labor > 0.0 else labor_rate
+
+                _, split_labor = _split_hours_for_detail("inspection")
+                if separate_labor_cfg and split_labor > 0.0 and labor_rate > 0.0:
+                    line = (
+                        f"Inspection: labor {split_labor:.2f} hr @ ${labor_rate:.2f}/hr"
+                    )
+                    write_line(line, indent)
+                    return
+
                 line = f"Inspection: {hours_val:.2f} hr"
                 if labor_rate > 0.0:
                     line += f" @ ${labor_rate:.2f}/hr (labor)"
@@ -12199,6 +12248,30 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
         drill_total_minutes=drill_total_minutes_estimate,
     )
     render_state = bucket_state
+
+    def _split_hours_for_detail(bucket_key: str | None) -> tuple[float, float]:
+        """Look up precomputed machine/labor hours for a process bucket."""
+
+        if not separate_labor_cfg:
+            return (0.0, 0.0)
+        key = _canonical_bucket_key(bucket_key) or _normalize_bucket_key(bucket_key)
+        if not key:
+            key = str(bucket_key or "")
+        if not key:
+            return (0.0, 0.0)
+        extra_payload = getattr(bucket_state, "extra", None)
+        if isinstance(extra_payload, _MappingABC):
+            split_source = extra_payload.get("bucket_hour_split")
+        else:
+            split_source = None
+        if not isinstance(split_source, _MappingABC):
+            return (0.0, 0.0)
+        entry = split_source.get(key)
+        if not isinstance(entry, _MappingABC):
+            return (0.0, 0.0)
+        machine_hours = max(0.0, _safe_float(entry.get("machine_hours"), default=0.0))
+        labor_hours = max(0.0, _safe_float(entry.get("labor_hours"), default=0.0))
+        return (machine_hours, labor_hours)
 
     bucket_state_extra_map = _stash_drill_minutes(bucket_state)
     if (
@@ -16238,13 +16311,13 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
             return default
 
     try:
-        qty_float = float(qty or 0.0)
+        qty_float = float(quote_qty or 0.0)
     except Exception:
         qty_float = 0.0
     if qty_float > 0 and abs(round(qty_float) - qty_float) < 1e-9:
         summary_qty: int | float = int(round(qty_float))
     else:
-        summary_qty = qty_float if qty_float > 0 else qty
+        summary_qty = qty_float if qty_float > 0 else quote_qty
 
     margin_pct_value = _render_as_float(applied_pcts.get("MarginPct"), 0.0)
     expedite_pct_value = _render_as_float(applied_pcts.get("ExpeditePct"), 0.0)
@@ -16343,7 +16416,7 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
             }
         )
 
-    if qty <= 1:
+    if quote_qty <= 1:
         for entry in processes_entries:
             if str(entry.get("label")) == PROGRAMMING_PER_PART_LABEL:
                 entry["label"] = PROGRAMMING_AMORTIZED_LABEL
