@@ -7366,7 +7366,7 @@ def _compute_drilling_removal_section(
 
             extras["drill_machine_minutes"] = float(drill_minutes_subtotal)
             extras["drill_labor_minutes"] = float(total_tool_minutes)
-            extras["drill_total_minutes"] = drill_minutes_subtotal
+            extras["drill_total_minutes"] = float(drill_minutes_total)
             logging.info(
                 f"[removal] drill_total_minutes={extras['drill_total_minutes']}"
             )
@@ -8929,7 +8929,7 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
     overrides = (
         ("prefer_removal_drilling_hours", True),
         ("separate_machine_labor", True),
-        ("machine_rate_per_hr", 90.0),
+        ("machine_rate_per_hr", 45.0),
         ("labor_rate_per_hr", 45.0),
         ("milling_attended_fraction", 1.0),
     )
@@ -9497,6 +9497,7 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
             if isinstance(baseline_state, _MappingABC):
                 qty_raw = baseline_state.get("qty")
     qty = int(qty_raw or 1)
+    quote_qty = qty
     price        = float(result.get("price", totals.get("price", 0.0)))
 
     g = (
@@ -16238,13 +16239,13 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
             return default
 
     try:
-        qty_float = float(qty or 0.0)
+        qty_float = float(quote_qty or 0.0)
     except Exception:
         qty_float = 0.0
     if qty_float > 0 and abs(round(qty_float) - qty_float) < 1e-9:
         summary_qty: int | float = int(round(qty_float))
     else:
-        summary_qty = qty_float if qty_float > 0 else qty
+        summary_qty = qty_float if qty_float > 0 else quote_qty
 
     margin_pct_value = _render_as_float(applied_pcts.get("MarginPct"), 0.0)
     expedite_pct_value = _render_as_float(applied_pcts.get("ExpeditePct"), 0.0)
@@ -16343,7 +16344,7 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
             }
         )
 
-    if qty <= 1:
+    if quote_qty <= 1:
         for entry in processes_entries:
             if str(entry.get("label")) == PROGRAMMING_PER_PART_LABEL:
                 entry["label"] = PROGRAMMING_AMORTIZED_LABEL

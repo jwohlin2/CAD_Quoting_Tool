@@ -510,6 +510,9 @@ BUCKET_ROLE: dict[str, str] = {
     "fixture_build_amortized": "labor_only",
     "inspection": "labor_only",
     "finishing_deburr": "labor_only",
+    "deburr": "labor_only",
+    "deburring": "labor_only",
+    "finishing": "labor_only",
     "toolmaker_support": "labor_only",
     "assembly": "labor_only",
     "ehs_compliance": "labor_only",
@@ -518,7 +521,10 @@ BUCKET_ROLE: dict[str, str] = {
     "grinding": "split",
     "sinker_edm": "split",
     "wire_edm": "machine_only",
+    "wedm": "machine_only",
     "saw_waterjet": "machine_only",
+    "waterjet": "machine_only",
+    "saw": "machine_only",
     "_default": "machine_only",
 }
 
