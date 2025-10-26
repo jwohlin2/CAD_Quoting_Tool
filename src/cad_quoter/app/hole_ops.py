@@ -10,7 +10,8 @@ from collections import Counter, defaultdict
 from collections.abc import Iterable, Mapping, MutableMapping
 from collections.abc import Mapping as _MappingABC, MutableMapping as _MutableMappingABC
 from fractions import Fraction
-from typing import Any, Callable, MutableMapping as TypingMutableMapping, cast
+from statistics import median
+from typing import Any, Callable, Iterator, MutableMapping as TypingMutableMapping, Sequence, NamedTuple, cast
 
 from cad_quoter.utils.number_parse import (
     NUM_DEC_RE,
@@ -19,6 +20,11 @@ from cad_quoter.utils.number_parse import (
     first_inch_value,
 )
 from cad_quoter.utils.numeric import parse_mixed_fraction
+
+try:  # pragma: no cover - optional dependency during limited installs
+    from cad_quoter.geometry.dxf_enrich import iter_spaces as _iter_spaces
+except Exception:  # pragma: no cover - defensive fallback
+    _iter_spaces = None
 
 from cad_quoter.domain_models import (
     coerce_float_or_none as _coerce_float_or_none,
@@ -240,6 +246,559 @@ def _ops_qty_from_value(value: Any) -> int:
     except Exception:
         match = re.search(r"\d+", text)
         return int(match.group()) if match else 0
+
+
+class _TextFragment(NamedTuple):
+    x: float
+    y: float
+    height: float
+    text: str
+
+
+_QTY_ONLY_RE = re.compile(r"^\(?\s*(\d+)\s*\)?$")
+_INLINE_QTY_RE = re.compile(r"^\(\s*(\d+)\s*\)\s*(.*)$")
+_SIDE_TOKENS = {"FRONT", "BACK", "BOTH", "SIDE", "OPP", "OPPOSITE"}
+_HEADER_QTY_TOKENS = {"QTY", "QUANTITY"}
+_HEADER_REF_TOKENS = {"REF", "REFERENCE", "Ø", "DIA", "DIAM"}
+_HEADER_DESC_TOKENS = {"DESC", "DESCRIPTION"}
+_HEADER_SIDE_TOKENS = {"SIDE", "SIDES", "FACE", "FACES"}
+_HEADER_HOLE_TOKENS = {"HOLE", "ID", "NO."}
+
+
+def _normalize_fragment_text(value: Any) -> str:
+    text = "" if value is None else str(value)
+    text = (
+        text.replace("\u00D8", "Ø")
+        .replace("ø", "Ø")
+        .replace("%%C", "Ø")
+        .replace("%%c", "Ø")
+    )
+    return re.sub(r"\s+", " ", text).strip()
+
+
+def _entity_world_point(entity: Any) -> tuple[float, float, float]:
+    dxf = getattr(entity, "dxf", None)
+    point = None
+    for attr in ("insert", "alignment_point", "align_point", "start", "position"):
+        candidate = getattr(dxf, attr, None) if dxf is not None else None
+        if candidate is not None:
+            point = candidate
+            break
+    if point is None:
+        return (0.0, 0.0, 0.0)
+
+    def _coord(value: Any, index: int) -> float:
+        try:
+            return float(value[index])
+        except Exception:
+            try:
+                return float(getattr(value, "xyz"[index]))
+            except Exception:
+                return 0.0
+
+    if hasattr(point, "xyz"):
+        try:
+            x_val, y_val, z_val = point.xyz
+        except Exception:
+            x_val = _coord(point, 0)
+            y_val = _coord(point, 1)
+            z_val = _coord(point, 2)
+    else:
+        x_val = _coord(point, 0)
+        y_val = _coord(point, 1)
+        z_val = _coord(point, 2)
+
+    try:
+        ocs = entity.ocs()
+    except Exception:
+        ocs = None
+    if ocs is not None:
+        try:
+            x_val, y_val, z_val = ocs.to_wcs((x_val, y_val, z_val))
+        except Exception:
+            pass
+
+    return float(x_val), float(y_val), float(z_val)
+
+
+def _entity_text_height(entity: Any) -> float:
+    dxf = getattr(entity, "dxf", None)
+    if dxf is None:
+        return 0.0
+    for attr in ("height", "char_height"):
+        candidate = getattr(dxf, attr, None)
+        if candidate is None:
+            continue
+        try:
+            value = float(candidate)
+        except Exception:
+            continue
+        if value > 0:
+            return value
+    return 0.0
+
+
+def _iter_text_fragments_from_entity(entity: Any) -> Iterator[_TextFragment]:
+    try:
+        kind = entity.dxftype()
+    except Exception:
+        kind = ""
+
+    if kind in {"TEXT", "MTEXT"}:
+        raw_text: str | None = None
+        plain = getattr(entity, "plain_text", None)
+        if callable(plain):
+            try:
+                raw_text = plain()
+            except Exception:
+                raw_text = None
+        if not raw_text:
+            raw_text = getattr(getattr(entity, "dxf", None), "text", None)
+        if not raw_text:
+            return
+        parts = re.split(r"\\P|\r?\n", str(raw_text)) if kind == "MTEXT" else [str(raw_text)]
+        x_val, y_val, _ = _entity_world_point(entity)
+        height = _entity_text_height(entity)
+        for part in parts:
+            normalized = _normalize_fragment_text(part)
+            if not normalized:
+                continue
+            yield _TextFragment(x_val, y_val, height, normalized)
+    elif kind == "INSERT":
+        try:
+            virtuals = entity.virtual_entities()
+        except Exception:
+            virtuals = []
+        for child in virtuals or []:
+            yield from _iter_text_fragments_from_entity(child)
+
+
+def collect_text_table_fragments(doc: Any) -> list[tuple[float, float, float, str]]:
+    """Collect raw text fragments for HOLE TABLE detection using world coordinates."""
+
+    fragments: list[tuple[float, float, float, str]] = []
+    if doc is None:
+        return fragments
+
+    spaces: list[Any] = []
+    if callable(_iter_spaces):  # pragma: no branch - evaluated once
+        try:
+            spaces = list(_iter_spaces(doc))
+        except Exception:
+            spaces = []
+    if not spaces:
+        try:
+            modelspace = doc.modelspace()
+        except Exception:
+            modelspace = None
+        if modelspace is not None:
+            spaces.append(modelspace)
+
+    seen: set[int] = set()
+    for space in spaces:
+        try:
+            entities = space.query("TEXT,MTEXT,INSERT")
+        except Exception:
+            entities = []
+        for entity in entities:
+            key = id(entity)
+            if key in seen:
+                continue
+            seen.add(key)
+            for fragment in _iter_text_fragments_from_entity(entity):
+                fragments.append((fragment.x, fragment.y, fragment.height, fragment.text))
+
+    return fragments
+
+
+def _looks_like_hole_header(text: str) -> bool:
+    upper = text.upper()
+    has_hole = any(token in upper for token in _HEADER_HOLE_TOKENS)
+    has_ref = any(token in upper for token in _HEADER_REF_TOKENS)
+    has_qty = any(token in upper for token in _HEADER_QTY_TOKENS)
+    has_desc = any(token in upper for token in _HEADER_DESC_TOKENS)
+    has_side = any(token in upper for token in _HEADER_SIDE_TOKENS)
+    score = sum(
+        1
+        for flag in (has_ref, has_desc, has_qty or has_side)
+        if flag
+    )
+    return has_hole and score >= 2
+
+
+def _assign_row_breaks(fragments: Sequence[_TextFragment]) -> list[list[_TextFragment]]:
+    if not fragments:
+        return []
+
+    ordered = sorted(fragments, key=lambda frag: (-frag.y, frag.x))
+    heights = [frag.height for frag in ordered if frag.height and frag.height > 0]
+    med = median(heights) if heights else 0.0
+    threshold = 0.75 * med if med > 0 else 0.75
+
+    rows: list[list[_TextFragment]] = []
+    current: list[_TextFragment] = []
+    prev_y: float | None = None
+    for fragment in ordered:
+        if prev_y is None or (prev_y - fragment.y) > threshold:
+            if current:
+                rows.append(current)
+            current = [fragment]
+        else:
+            current.append(fragment)
+        prev_y = fragment.y
+    if current:
+        rows.append(current)
+
+    for row in rows:
+        row.sort(key=lambda frag: frag.x)
+    return rows
+
+
+def _kmeans_1d(points: Sequence[float], clusters: int) -> tuple[list[float], float]:
+    if clusters <= 0:
+        return [], 0.0
+    pts = sorted(points)
+    if not pts:
+        return [], 0.0
+    if len(pts) <= clusters:
+        centers = sorted(set(pts))
+        inertia = sum((pt - centers[min(range(len(centers)), key=lambda idx: abs(pt - centers[idx]))]) ** 2 for pt in pts)
+        return centers, inertia
+
+    step = (len(pts) - 1) / (clusters - 1)
+    centers = [pts[int(round(step * i))] for i in range(clusters)]
+
+    for _ in range(25):
+        buckets: list[list[float]] = [[] for _ in range(clusters)]
+        for pt in pts:
+            idx = min(range(clusters), key=lambda j: abs(pt - centers[j]))
+            buckets[idx].append(pt)
+        new_centers: list[float] = []
+        for idx, bucket in enumerate(buckets):
+            if bucket:
+                new_centers.append(sum(bucket) / len(bucket))
+            else:
+                fallback = max(pts, key=lambda value: min(abs(value - c) for c in centers))
+                new_centers.append(fallback)
+        if all(abs(new - old) < 1e-6 for new, old in zip(new_centers, centers)):
+            centers = new_centers
+            break
+        centers = new_centers
+
+    inertia = 0.0
+    for pt in pts:
+        idx = min(range(clusters), key=lambda j: abs(pt - centers[j]))
+        inertia += (pt - centers[idx]) ** 2
+    centers.sort()
+    return centers, inertia
+
+
+def _best_column_centers(rows: Sequence[Sequence[_TextFragment]]) -> list[float]:
+    if not rows:
+        return []
+    target_row = max(rows, key=lambda row: len(row))
+    xs = [frag.x for frag in target_row]
+    if not xs:
+        return []
+    unique_x = sorted(set(xs))
+    if len(unique_x) <= 1:
+        return unique_x
+
+    best_centers = unique_x
+    best_inertia = float("inf")
+    max_clusters = min(4, len(unique_x))
+    for clusters in range(2, max_clusters + 1):
+        centers, inertia = _kmeans_1d(xs, clusters)
+        if not centers:
+            continue
+        if inertia < best_inertia - 1e-6 or (
+            abs(inertia - best_inertia) <= 1e-6 and len(centers) > len(best_centers)
+        ):
+            best_centers = centers
+            best_inertia = inertia
+    return best_centers
+
+
+def _snap_row_to_centers(row: Sequence[_TextFragment], centers: Sequence[float]) -> dict[int, list[_TextFragment]]:
+    assignments: dict[int, list[_TextFragment]] = {idx: [] for idx in range(len(centers))}
+    if not centers:
+        return assignments
+    for fragment in row:
+        idx = min(range(len(centers)), key=lambda j: abs(fragment.x - centers[j]))
+        assignments[idx].append(fragment)
+    for value in assignments.values():
+        value.sort(key=lambda frag: frag.x)
+    return assignments
+
+
+def _collect_column_texts(
+    snapped_rows: Sequence[dict[int, list[_TextFragment]]],
+    column_count: int,
+    skip_row: int | None = None,
+) -> dict[int, list[str]]:
+    texts: dict[int, list[str]] = {idx: [] for idx in range(column_count)}
+    for row_index, row in enumerate(snapped_rows):
+        if skip_row is not None and row_index == skip_row:
+            continue
+        for idx in range(column_count):
+            fragments = row.get(idx, [])
+            if not fragments:
+                continue
+            cell_text = " ".join(fragment.text for fragment in fragments).strip()
+            if cell_text:
+                texts[idx].append(cell_text)
+    return texts
+
+
+def _score_qty_column(texts: Sequence[str]) -> int:
+    score = 0
+    for text in texts:
+        if _QTY_ONLY_RE.match(text):
+            score += 3
+        elif re.search(r"\b\d+\b", text):
+            score += 1
+    return score
+
+
+def _score_ref_column(texts: Sequence[str]) -> int:
+    score = 0
+    for text in texts:
+        upper = text.upper()
+        if any(token in upper for token in _HEADER_REF_TOKENS):
+            score += 3
+        if re.search(r"\d+\s*/\s*\d+", text):
+            score += 2
+        if re.search(r"\d+(?:\.\d+)?", text):
+            score += 1
+    return score
+
+
+def _score_side_column(texts: Sequence[str]) -> int:
+    score = 0
+    for text in texts:
+        upper = text.upper()
+        if any(token in upper for token in _SIDE_TOKENS):
+            score += 2
+        if "&" in upper and "BACK" in upper:
+            score += 1
+    return score
+
+
+def _assign_column_roles(
+    snapped_rows: Sequence[dict[int, list[_TextFragment]]],
+    centers: Sequence[float],
+    header_index: int,
+) -> dict[int, str]:
+    column_count = len(centers)
+    header_row = snapped_rows[header_index] if 0 <= header_index < len(snapped_rows) else {}
+    header_text_by_col = {
+        idx: " ".join(fragment.text for fragment in header_row.get(idx, [])).strip()
+        for idx in range(column_count)
+    }
+
+    roles: dict[int, str] = {}
+    assigned_roles: set[str] = set()
+
+    def _try_assign(idx: int, role: str) -> None:
+        if idx in roles or role in assigned_roles:
+            return
+        roles[idx] = role
+        assigned_roles.add(role)
+
+    for idx in range(column_count):
+        header_text = header_text_by_col.get(idx, "")
+        if not header_text:
+            continue
+        upper = header_text.upper()
+        if any(token in upper for token in _HEADER_QTY_TOKENS):
+            _try_assign(idx, "qty")
+        elif any(token in upper for token in _HEADER_REF_TOKENS):
+            _try_assign(idx, "ref")
+        elif any(token in upper for token in _HEADER_SIDE_TOKENS):
+            _try_assign(idx, "side")
+        elif any(token in upper for token in _HEADER_DESC_TOKENS):
+            _try_assign(idx, "desc")
+        elif any(token in upper for token in _HEADER_HOLE_TOKENS):
+            _try_assign(idx, "hole")
+
+    column_texts = _collect_column_texts(snapped_rows, column_count, skip_row=header_index)
+    available = [idx for idx in range(column_count) if idx not in roles]
+
+    if "qty" not in assigned_roles:
+        best_idx = None
+        best_score = 0
+        for idx in available:
+            score = _score_qty_column(column_texts.get(idx, []))
+            if score > best_score or (score == best_score and best_idx is not None and idx < best_idx):
+                best_idx = idx
+                best_score = score
+        if best_idx is not None and best_score > 0:
+            _try_assign(best_idx, "qty")
+            available.remove(best_idx)
+
+    if "ref" not in assigned_roles:
+        best_idx = None
+        best_score = 0
+        for idx in available:
+            score = _score_ref_column(column_texts.get(idx, []))
+            if score > best_score or (score == best_score and best_idx is not None and idx < best_idx):
+                best_idx = idx
+                best_score = score
+        if best_idx is not None and best_score > 0:
+            _try_assign(best_idx, "ref")
+            available.remove(best_idx)
+
+    if "side" not in assigned_roles:
+        best_idx = None
+        best_score = 0
+        for idx in available:
+            score = _score_side_column(column_texts.get(idx, []))
+            if score > best_score or (score == best_score and best_idx is not None and idx < best_idx):
+                best_idx = idx
+                best_score = score
+        if best_idx is not None and best_score > 0:
+            _try_assign(best_idx, "side")
+            available.remove(best_idx)
+
+    if "desc" not in assigned_roles and available:
+        idx = max(available)
+        _try_assign(idx, "desc")
+        available = [col for col in available if col != idx]
+
+    if "hole" not in assigned_roles and available:
+        idx = min(available)
+        _try_assign(idx, "hole")
+        available = [col for col in available if col != idx]
+
+    for idx in available:
+        roles[idx] = "desc"
+
+    return roles
+
+
+def _build_row_from_columns(row: dict[int, list[_TextFragment]], roles: Mapping[int, str]) -> dict[str, str]:
+    ordered_indices = sorted(row.keys())
+    segments: dict[str, list[str]] = defaultdict(list)
+    for idx in ordered_indices:
+        fragments = row.get(idx, [])
+        if not fragments:
+            continue
+        text = " ".join(fragment.text for fragment in fragments).strip()
+        if not text:
+            continue
+        role = roles.get(idx, "desc")
+        segments.setdefault(role, []).append(text)
+
+    def _joined(role: str) -> str:
+        return " ".join(segments.get(role, [])).strip()
+
+    qty_text = _joined("qty")
+    if not qty_text:
+        for key in ("hole", "ref", "desc"):
+            items = segments.get(key, [])
+            for pos, item in enumerate(list(items)):
+                match = _INLINE_QTY_RE.match(item)
+                if not match:
+                    continue
+                qty_text = match.group(1)
+                remainder = match.group(2).strip()
+                if remainder:
+                    items[pos] = remainder
+                else:
+                    items.pop(pos)
+                break
+            if qty_text:
+                break
+
+    hole_text = " ".join(segments.get("hole", [])).strip()
+    ref_text = " ".join(segments.get("ref", [])).strip()
+    desc_text = " ".join(segments.get("desc", [])).strip()
+    side_text = " ".join(segments.get("side", [])).strip()
+
+    if side_text:
+        side_upper = side_text.upper()
+        if side_upper in {"FRONT", "BACK"}:
+            desc_text = " ".join(filter(None, [desc_text, f"FROM {side_upper}"])).strip()
+        elif any(token in side_upper for token in _SIDE_TOKENS):
+            desc_text = " ".join(filter(None, [desc_text, side_text])).strip()
+        else:
+            desc_text = " ".join(filter(None, [side_text, desc_text])).strip()
+
+    row_payload: dict[str, str] = {
+        "hole": hole_text,
+        "ref": ref_text,
+        "qty": qty_text,
+        "desc": desc_text,
+    }
+    if side_text:
+        row_payload["side"] = side_text
+    return row_payload
+
+
+def parse_text_table_fragments(
+    fragments: Sequence[tuple[float, float, float, str]] | Sequence[_TextFragment],
+    *,
+    min_rows: int = 5,
+) -> list[dict[str, str]]:
+    """Return HOLE TABLE rows parsed from normalized text fragments."""
+
+    normalized: list[_TextFragment] = []
+    for fragment in fragments:
+        if isinstance(fragment, _TextFragment):
+            text_value = fragment.text
+            entry = fragment
+        else:
+            if len(fragment) != 4:
+                continue
+            x_val, y_val, height_val, text_value = fragment
+            entry = _TextFragment(float(x_val), float(y_val), float(height_val or 0.0), _normalize_fragment_text(text_value))
+        if not entry.text:
+            continue
+        normalized.append(entry)
+
+    if not normalized:
+        return []
+
+    rows = _assign_row_breaks(normalized)
+    if not rows:
+        return []
+
+    header_index = None
+    for idx, row in enumerate(rows):
+        row_text = " ".join(fragment.text for fragment in row)
+        if _looks_like_hole_header(row_text):
+            header_index = idx
+            break
+    if header_index is None:
+        return []
+
+    centers = _best_column_centers(rows)
+    if not centers:
+        return []
+
+    snapped_rows = [_snap_row_to_centers(row, centers) for row in rows]
+    roles = _assign_column_roles(snapped_rows, centers, header_index)
+
+    parsed_rows: list[dict[str, str]] = []
+    for idx, row in enumerate(snapped_rows):
+        if idx <= header_index:
+            continue
+        combined = " ".join(
+            fragment.text for fragments in row.values() for fragment in fragments if fragment.text
+        ).strip()
+        if not combined:
+            continue
+        if _looks_like_hole_header(combined):
+            break
+        parsed = _build_row_from_columns(row, roles)
+        if not any(parsed.get(key) for key in ("hole", "ref", "qty", "desc")):
+            continue
+        parsed_rows.append(parsed)
+
+    if len(parsed_rows) < min_rows:
+        return []
+
+    return parsed_rows
 
 
 def _sanitize_ops_row(row: Mapping[str, Any]) -> dict[str, Any]:
