@@ -126,6 +126,40 @@ def test_read_geo_prefers_text_rows(monkeypatch: pytest.MonkeyPatch, fallback_do
     assert result["chart_lines"] == expected_lines
 
 
+def test_read_geo_promotes_rows_txt_fallback(
+    monkeypatch: pytest.MonkeyPatch, fallback_doc: _DummyDoc
+) -> None:
+    rows_txt_lines = [
+        "(4) Ø0.250 DRILL THRU",
+        "(12) Ø0.339 TAP FROM FRONT",
+    ]
+
+    def fake_acad(_doc: _DummyDoc, **_kwargs: object) -> dict[str, object]:
+        return {}
+
+    def fake_text(_doc: _DummyDoc, **_kwargs: object) -> dict[str, object]:
+        geo_extractor._LAST_TEXT_TABLE_DEBUG = {
+            "rows": [],
+            "rows_txt_count": len(rows_txt_lines),
+            "rows_txt_lines": list(rows_txt_lines),
+        }
+        return {}
+
+    monkeypatch.setattr(geo_extractor, "read_acad_table", fake_acad)
+    monkeypatch.setattr(geo_extractor, "read_text_table", fake_text)
+
+    result = geo_extractor.read_geo(fallback_doc)
+
+    rows = result["rows"]
+    assert len(rows) == 2
+    assert sorted(row["qty"] for row in rows) == [4, 12]
+    assert result["hole_count"] == 16
+    assert result["provenance_holes"] == "HOLE TABLE (fallback)"
+    refs = {row.get("ref") for row in rows}
+    assert '0.2500"' in refs
+    assert '0.3390"' in refs
+
+
 def test_build_column_table_accepts_wrapped_qty_cells() -> None:
     def _entry(text: str, x: float, y: float) -> dict[str, object]:
         return {"text": text, "x": x, "y": y, "height": 0.1}
