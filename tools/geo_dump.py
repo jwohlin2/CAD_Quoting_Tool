@@ -92,6 +92,18 @@ def main(argv: Sequence[str] | None = None) -> int:
         help="Print reconstructed [TABLE-X] band previews (first 30)",
     )
     parser.add_argument(
+        "--all-layouts",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Process text tables from all layouts (use --no-all-layouts to restrict)",
+    )
+    parser.add_argument(
+        "--layouts",
+        dest="layouts",
+        action="append",
+        help="Regex pattern to match layout names (repeatable; case-insensitive)",
+    )
+    parser.add_argument(
         "--layer-allow",
         dest="layer_allow",
         action="append",
@@ -235,6 +247,22 @@ def main(argv: Sequence[str] | None = None) -> int:
         if normalized_patterns:
             read_kwargs["block_name_regex"] = normalized_patterns
             print(f"[geo_dump] block_regex={normalized_patterns}")
+    layout_patterns = [
+        value.strip()
+        for value in (args.layouts or [])
+        if isinstance(value, str) and value.strip()
+    ]
+    layout_filters: dict[str, object] | None = None
+    all_layouts_flag = bool(getattr(args, "all_layouts", True))
+    if layout_patterns or not all_layouts_flag:
+        layout_filters = {"all_layouts": all_layouts_flag, "patterns": layout_patterns}
+    setattr(args, "layout_filters", layout_filters)
+    if layout_filters:
+        read_kwargs["layout_filters"] = layout_filters
+        print(
+            "[geo_dump] layouts filter all=%s patterns=%s"
+            % (layout_filters.get("all_layouts"), layout_patterns)
+        )
     if args.force_text:
         read_kwargs["force_text"] = True
     payload = read_geo(doc, **read_kwargs)

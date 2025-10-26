@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections import defaultdict
+from collections import defaultdict, deque
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from fractions import Fraction
@@ -24,7 +24,9 @@ _HAS_ODAFC = bool(getattr(geometry, "HAS_ODAFC", False))
 
 _DEFAULT_LAYER_ALLOWLIST = frozenset({"BALLOON"})
 _PREFERRED_BLOCK_NAME_RE = re.compile(r"HOLE.*(?:CHART|TABLE)", re.IGNORECASE)
-_FOLLOW_SHEET_DIRECTIVE_RE = re.compile(r"SEE\s+SHEET\s+(?P<target>[A-Z0-9]+)", re.IGNORECASE)
+_FOLLOW_SHEET_DIRECTIVE_RE = re.compile(
+    r"SEE\s+(?:SHEET|SHT)\s+(?P<target>[A-Z0-9]+)", re.IGNORECASE
+)
 
 _LAST_ACAD_TABLE_SCAN: dict[str, Any] | None = None
 _TRACE_ACAD = False
@@ -142,6 +144,63 @@ def _normalize_oda_version(version: str | None) -> str | None:
         "2018": "ACAD2018",
     }
     return mapping.get(normalized, normalized)
+
+
+def _normalize_layout_filters(
+    layout_filters: Mapping[str, Any] | None,
+) -> tuple[bool, list[re.Pattern[str]]]:
+    allow_all = True
+    patterns: list[re.Pattern[str]] = []
+    if isinstance(layout_filters, Mapping):
+        allow_all = bool(layout_filters.get("all_layouts", True))
+        raw_patterns = layout_filters.get("patterns")
+        if isinstance(raw_patterns, str):
+            raw_values = [raw_patterns]
+        elif isinstance(raw_patterns, Iterable):
+            raw_values = list(raw_patterns)
+        else:
+            raw_values = []
+        for candidate in raw_values:
+            if not isinstance(candidate, str):
+                continue
+            text = candidate.strip()
+            if not text:
+                continue
+            try:
+                compiled = re.compile(text, re.IGNORECASE)
+            except re.error:
+                continue
+            patterns.append(compiled)
+    if not patterns:
+        allow_all = True
+    return (allow_all, patterns)
+
+
+def _layout_matches_filter(
+    name: str,
+    allow_all: bool,
+    patterns: Iterable[re.Pattern[str]],
+) -> bool:
+    if allow_all:
+        return True
+    for pattern in patterns:
+        try:
+            if pattern.search(name):
+                return True
+        except Exception:
+            continue
+    return False
+
+
+def _normalize_layout_key(name: str | None) -> str:
+    if name is None:
+        return ""
+    try:
+        text = str(name)
+    except Exception:
+        return ""
+    normalized = re.sub(r"\s+", " ", text).strip()
+    return normalized.upper()
 
 
 def set_trace_acad(enabled: bool) -> None:
@@ -4135,6 +4194,7 @@ def read_text_table(
     roi_hint: Mapping[str, Any] | None = None,
     block_name_allowlist: Iterable[str] | None = None,
     block_name_regex: Iterable[str] | str | None = None,
+    layout_filters: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     helper = _resolve_app_callable("extract_hole_table_from_text")
     _print_helper_debug("text", helper)
@@ -4153,6 +4213,9 @@ def read_text_table(
     resolved_allowlist = _normalize_layer_allowlist(layer_allowlist)
     normalized_block_allow = _normalize_block_allowlist(block_name_allowlist)
     block_regex_patterns = _compile_block_name_patterns(block_name_regex)
+    layout_allow_all, layout_filter_patterns = _normalize_layout_filters(
+        layout_filters
+    )
     allowlist_display = (
         "None"
         if resolved_allowlist is None
@@ -4219,9 +4282,17 @@ def read_text_table(
         preferred_block_names: list[str] = []
         preferred_block_rois: list[dict[str, Any]] = []
         block_height_samples: defaultdict[str, list[float]] = defaultdict(list)
+        block_stats: defaultdict[str, dict[str, Any]] = defaultdict(
+            lambda: {"texts": 0, "att": 0, "nested_inserts": 0}
+        )
         layout_names_seen: list[str] = []
-        follow_sheet_directive: dict[str, Any] | None = None
-        follow_sheet_target_layout: str | None = None
+        follow_sheet_requests: dict[str, dict[str, Any]] = {}
+        follow_sheet_target_layouts: list[str] = []
+
+        def _block_stats_entry(name: str | None) -> dict[str, Any]:
+            key = str(name or "")
+            entry = block_stats[key]
+            return entry
 
         if doc is None:
             table_lines = []
@@ -4335,10 +4406,70 @@ def read_text_table(
 
         debug_enabled = _debug_entities_enabled()
 
-        for layout_index, (layout_name, layout_obj) in enumerate(_iter_layouts()):
+        all_layouts = _iter_layouts()
+        for name, _layout in all_layouts:
+            try:
+                layout_names_seen.append(str(name))
+            except Exception:
+                continue
+
+        layout_lookup: dict[str, tuple[str, Any]] = {}
+        for name, layout_obj in all_layouts:
+            key = _normalize_layout_key(name)
+            if key:
+                layout_lookup[key] = (name, layout_obj)
+
+        layout_queue: deque[tuple[str, Any]] = deque()
+        queued_layout_keys: set[str] = set()
+        for name, layout_obj in all_layouts:
+            name_str = str(name or "")
+            layout_key = _normalize_layout_key(name)
+            if _layout_matches_filter(name_str, layout_allow_all, layout_filter_patterns):
+                layout_queue.append((name, layout_obj))
+                if layout_key:
+                    queued_layout_keys.add(layout_key)
+
+        processed_layout_keys: set[str] = set()
+        layout_index_counter = 0
+
+        def _queue_follow_layout(token_norm: str) -> None:
+            if not token_norm:
+                return
+            request = follow_sheet_requests.get(token_norm)
+            if request is None:
+                request = {"token": token_norm}
+                follow_sheet_requests[token_norm] = request
+            target_label, resolved_layout, resolved_found = _resolve_follow_sheet_layout(
+                token_norm, layout_names_seen
+            )
+            request["target"] = target_label
+            request["resolved"] = resolved_layout if resolved_found else None
+            request["found"] = bool(resolved_found)
+            if resolved_found and resolved_layout:
+                if resolved_layout not in follow_sheet_target_layouts:
+                    follow_sheet_target_layouts.append(resolved_layout)
+                layout_key = _normalize_layout_key(resolved_layout)
+                if layout_key and layout_key not in queued_layout_keys:
+                    queued_layout_keys.add(layout_key)
+                    queued = layout_lookup.get(layout_key)
+                    if queued is not None:
+                        layout_queue.append(queued)
+
+        while layout_queue:
+            layout_name, layout_obj = layout_queue.popleft()
+            layout_key = _normalize_layout_key(layout_name)
+            if layout_key and layout_key in processed_layout_keys:
+                continue
+            if layout_key:
+                processed_layout_keys.add(layout_key)
+            layout_index = layout_index_counter
+            layout_index_counter += 1
             layout_names[layout_index] = layout_name
             if layout_index not in layout_order:
                 layout_order.append(layout_index)
+            layout_str = str(layout_name or "")
+            layout_label = layout_str.strip() or "-"
+            layout_tables = _count_tables_for_layout_name(layout_str)
             query = getattr(layout_obj, "query", None)
             base_entities: list[Any] = []
             if callable(query):
@@ -4409,7 +4540,7 @@ def read_text_table(
                 nonlocal text_fragments, mtext_fragments, kept_count, from_blocks_count, counter
                 nonlocal attrib_count, mleader_count
                 nonlocal hint_logged
-                nonlocal follow_sheet_directive
+                nonlocal follow_sheet_requests, follow_sheet_target_layouts
                 if depth > _MAX_INSERT_DEPTH:
                     return
                 dxftype = None
@@ -4448,6 +4579,15 @@ def read_text_table(
                                 "[HINT] Chart may live on an alternate sheet/block; ensure its INSERT is present and not on a frozen/off layer."
                             )
                             hint_logged = True
+                        if "FOR HOLE CHART" in normalized_upper:
+                            directive_match = _FOLLOW_SHEET_DIRECTIVE_RE.search(
+                                normalized_upper
+                            )
+                            if directive_match:
+                                raw_target = directive_match.group("target") or ""
+                                token_norm = re.sub(r"[^A-Z0-9]", "", raw_target.upper())
+                                if token_norm:
+                                    _queue_follow_layout(token_norm)
                         entry = {
                             "layout_index": layout_index,
                             "layout_name": layout_name,
@@ -4467,6 +4607,12 @@ def read_text_table(
                         collected_entries.append(entry)
                         entries_by_layout[layout_index].append(entry)
                         kept_count += 1
+                        if _TRACE_ACAD and active_block:
+                            stats_entry = _block_stats_entry(active_block)
+                            if kind in {"ATTRIB", "ATTDEF"}:
+                                stats_entry["att"] += 1
+                            else:
+                                stats_entry["texts"] += 1
                         if (
                             active_block
                             and isinstance(text_height, (int, float))
@@ -4745,34 +4891,44 @@ def read_text_table(
                         )
                     )
 
-        if follow_sheet_directive is not None:
-            target_label, resolved_layout, resolved_found = _resolve_follow_sheet_layout(
-                follow_sheet_directive.get("token", ""), layout_names_seen
-            )
-            follow_sheet_target_layout = resolved_layout if resolved_found else None
-            print(f"[HINT] follow-sheet target=\"{target_label}\" found={resolved_found}")
-            info_map = {
-                "target": target_label,
-                "resolved": resolved_layout if resolved_found else None,
-                "texts": 0,
-                "tables": 0,
-            }
-            if resolved_found and resolved_layout:
-                target_upper = str(resolved_layout).strip().upper()
-                texts_count = sum(
-                    1
-                    for entry in collected_entries
-                    if str(entry.get("layout_name") or "").strip().upper()
-                    == target_upper
+        if follow_sheet_requests:
+            info_entries: list[dict[str, Any]] = []
+            for request in follow_sheet_requests.values():
+                token_value = request.get("token")
+                target_label = request.get("target") or (
+                    f"SHEET ({token_value})" if token_value else "SHEET ()"
                 )
-                tables_count = _count_tables_for_layout_name(resolved_layout)
+                resolved_layout = request.get("resolved")
+                resolved_found = bool(request.get("found")) and bool(resolved_layout)
                 print(
-                    f"[LAYOUT] {resolved_layout} texts={texts_count} tables={tables_count}"
+                    f"[HINT] follow-sheet target=\"{target_label}\" found={resolved_found}"
                 )
-                info_map["texts"] = texts_count
-                info_map["tables"] = tables_count
+                info_map = {
+                    "target": target_label,
+                    "resolved": resolved_layout if resolved_found else None,
+                    "texts": 0,
+                    "tables": 0,
+                }
+                if resolved_found and resolved_layout:
+                    target_upper = str(resolved_layout).strip().upper()
+                    texts_count = sum(
+                        1
+                        for entry in collected_entries
+                        if str(entry.get("layout_name") or "").strip().upper()
+                        == target_upper
+                    )
+                    tables_count = _count_tables_for_layout_name(resolved_layout)
+                    print(
+                        f"[LAYOUT] {resolved_layout} texts={texts_count} tables={tables_count}"
+                    )
+                    info_map["texts"] = texts_count
+                    info_map["tables"] = tables_count
+                info_entries.append(info_map)
             if isinstance(_LAST_TEXT_TABLE_DEBUG, dict):
-                _LAST_TEXT_TABLE_DEBUG["follow_sheet_info"] = info_map
+                if len(info_entries) == 1:
+                    _LAST_TEXT_TABLE_DEBUG["follow_sheet_info"] = info_entries[0]
+                else:
+                    _LAST_TEXT_TABLE_DEBUG["follow_sheet_info"] = info_entries
 
         if not collected_entries:
             _LAST_TEXT_TABLE_DEBUG["rows_txt_count"] = 0
@@ -5000,42 +5156,49 @@ def read_text_table(
 
         parsed_rows, families, total_qty = _parse_rows(merged_rows)
 
-        if follow_sheet_target_layout:
-            target_upper = str(follow_sheet_target_layout).strip().upper()
-            follow_entries: list[dict[str, Any]] = []
-            for entry in collected_entries:
-                layout_value = str(entry.get("layout_name") or "").strip()
-                if layout_value.upper() != target_upper:
+        if follow_sheet_target_layouts:
+            follow_debug_entries: list[dict[str, Any]] = []
+            for follow_layout in follow_sheet_target_layouts:
+                target_upper = str(follow_layout).strip().upper()
+                follow_entries: list[dict[str, Any]] = []
+                for entry in collected_entries:
+                    layout_value = str(entry.get("layout_name") or "").strip()
+                    if layout_value.upper() != target_upper:
+                        continue
+                    text_value = str(entry.get("text") or "").strip()
+                    if not text_value:
+                        continue
+                    follow_entries.append(
+                        {
+                            "layout_name": layout_value,
+                            "from_block": bool(entry.get("from_block")),
+                            "x": entry.get("x"),
+                            "y": entry.get("y"),
+                            "height": entry.get("height"),
+                            "text": text_value,
+                            "normalized_text": text_value,
+                        }
+                    )
+                if not follow_entries:
                     continue
-                text_value = str(entry.get("text") or "").strip()
-                if not text_value:
-                    continue
-                follow_entries.append(
-                    {
-                        "layout_name": layout_value,
-                        "from_block": bool(entry.get("from_block")),
-                        "x": entry.get("x"),
-                        "y": entry.get("y"),
-                        "height": entry.get("height"),
-                        "text": text_value,
-                        "normalized_text": text_value,
-                    }
-                )
-            if follow_entries:
                 follow_candidate, follow_debug_payload = _build_columnar_table_from_entries(
                     follow_entries, roi_hint=roi_hint_effective
                 )
                 if isinstance(follow_debug_payload, Mapping):
                     follow_debug_entry = dict(follow_debug_payload)
-                    follow_debug_entry["layout"] = follow_sheet_target_layout
-                    if isinstance(_LAST_TEXT_TABLE_DEBUG, dict):
-                        _LAST_TEXT_TABLE_DEBUG["follow_sheet_debug"] = follow_debug_entry
+                    follow_debug_entry["layout"] = follow_layout
+                    follow_debug_entries.append(follow_debug_entry)
                 candidate_score = _score_table(follow_candidate)
                 existing_score = _score_table(columnar_table_info)
                 if candidate_score > existing_score:
                     columnar_table_info = follow_candidate
                     if isinstance(follow_debug_payload, Mapping):
                         columnar_debug_info = dict(follow_debug_payload)
+            if follow_debug_entries and isinstance(_LAST_TEXT_TABLE_DEBUG, dict):
+                if len(follow_debug_entries) == 1:
+                    _LAST_TEXT_TABLE_DEBUG["follow_sheet_debug"] = follow_debug_entries[0]
+                else:
+                    _LAST_TEXT_TABLE_DEBUG["follow_sheet_debug"] = follow_debug_entries
 
         def _cluster_entries_by_y(
             entries: list[dict[str, Any]]
@@ -5879,6 +6042,7 @@ def read_geo(
     layer_allowlist: Iterable[str] | None = _DEFAULT_LAYER_ALLOWLIST,
     block_name_allowlist: Iterable[str] | None = None,
     block_name_regex: Iterable[str] | str | None = None,
+    layout_filters: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Process a loaded DXF/DWG document into GEO payload details."""
 
@@ -5946,9 +6110,10 @@ def read_geo(
             roi_hint=acad_roi_hint,
             block_name_allowlist=block_name_allowlist,
             block_name_regex=block_name_regex,
+            layout_filters=layout_filters,
         ) or {}
     except TypeError as exc:
-        if "layer_allowlist" in str(exc) or "roi_hint" in str(exc):
+        if "layer_allowlist" in str(exc) or "roi_hint" in str(exc) or "layout_filters" in str(exc):
             try:
                 text_info = read_text_table(doc) or {}
             except Exception:

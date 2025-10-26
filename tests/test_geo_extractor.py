@@ -275,3 +275,51 @@ def test_build_column_table_splits_semicolons_and_detects_operations() -> None:
 
     tap_row = desc_map[tap_desc]
     assert tap_row.get("side") == "back"
+
+
+def test_follow_sheet_layout_processed_even_when_filtered(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(geo_extractor, "_resolve_app_callable", lambda name: None)
+
+    class _CountingLayout:
+        def __init__(self, entities: list[object]) -> None:
+            self._entities = entities
+            self.query_calls = 0
+
+        def query(self, _spec: str) -> list[object]:
+            self.query_calls += 1
+            return list(self._entities)
+
+        def __iter__(self):  # type: ignore[override]
+            self.query_calls += 1
+            return iter(self._entities)
+
+    class _LayoutManager:
+        def __init__(self, mapping: dict[str, _CountingLayout]) -> None:
+            self._mapping = mapping
+
+        def names(self) -> list[str]:
+            return list(self._mapping.keys())
+
+        def get(self, name: str) -> _CountingLayout | None:
+            return self._mapping.get(name)
+
+    model_layout = _CountingLayout([_DummyText("SEE SHT 2 FOR HOLE CHART")])
+    sheet_layout = _CountingLayout([_DummyText("(1) HOLE TABLE")])
+
+    class _DocWithLayouts:
+        def __init__(self) -> None:
+            self.layouts = _LayoutManager({"SHEET 2": sheet_layout})
+
+        def modelspace(self) -> _CountingLayout:
+            return model_layout
+
+    doc = _DocWithLayouts()
+
+    geo_extractor.read_text_table(
+        doc,
+        layout_filters={"all_layouts": False, "patterns": ["Model"]},
+    )
+
+    assert sheet_layout.query_calls > 0
