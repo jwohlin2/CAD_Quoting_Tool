@@ -5835,12 +5835,15 @@ def _load_doc_for_path(path: Path, *, use_oda: bool, out_ver: str | None = None)
             raise
         ok = bool(dxf_path) and os.path.exists(dxf_path)
         out_display = dxf_path or "-"
-        print(f"[DXF-FALLBACK] try={target_version} ok={ok} out={out_display}")
-        _LAST_DXF_FALLBACK_INFO = {
-            "version": target_version,
-            "path": str(out_display),
-            "ok": ok,
-        }
+        if oda_version or not ok:
+            print(f"[DXF-FALLBACK] try={target_version} ok={ok} out={out_display}")
+            _LAST_DXF_FALLBACK_INFO = {
+                "version": target_version,
+                "path": str(out_display),
+                "ok": ok,
+            }
+        else:
+            _LAST_DXF_FALLBACK_INFO = None
         if not ok:
             raise AssertionError(
                 f"ODA fallback {target_version} did not produce a DXF at {out_display}"
