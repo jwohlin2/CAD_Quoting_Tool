@@ -4061,6 +4061,8 @@ def read_text_table(
     parsed_rows: list[dict[str, Any]] = []
     columnar_table_info: dict[str, Any] | None = None
     columnar_debug_info: dict[str, Any] | None = None
+    rows_txt_initial = 0
+    confidence_high = False
 
     def _analyze_helper_signature(func: Callable[..., Any]) -> tuple[bool, bool]:
         needs_lines = False
@@ -4093,6 +4095,7 @@ def read_text_table(
     def ensure_lines() -> list[str]:
         nonlocal table_lines, text_rows_info, merged_rows, parsed_rows
         nonlocal columnar_table_info, columnar_debug_info, roi_hint_effective
+        nonlocal rows_txt_initial
         if table_lines is not None:
             return table_lines
 
@@ -5156,6 +5159,22 @@ def read_text_table(
 
     lines = ensure_lines()
 
+    def _line_confident(text: str) -> bool:
+        stripped = str(text or "").strip()
+        if not stripped:
+            return False
+        if re.match(r"^\(\d+\)|^\d+[xX]?", stripped):
+            return True
+        upper = stripped.upper()
+        if any(token in upper for token in ("Ø", "⌀", "TAP", "C'BORE", "C’BORE", "DRILL", "N.P.T", "NPT")):
+            return True
+        return False
+
+    candidate_lines = merged_rows if merged_rows else lines
+    confidence_high = any(_line_confident(line) for line in candidate_lines)
+    _LAST_TEXT_TABLE_DEBUG["confidence_high"] = bool(confidence_high)
+    force_columnar = False
+
     if isinstance(text_rows_info, Mapping):
         fallback_candidate = text_rows_info
         scan_score = _score_table(text_rows_info)
@@ -5194,6 +5213,15 @@ def read_text_table(
             if helper_score[1] > 0 and helper_score > best_score:
                 best_candidate = helper_map
                 best_score = helper_score
+        if (
+            helper_score[1] == 0
+            and rows_txt_initial >= 2
+            and confidence_high
+        ):
+            force_columnar = True
+            print(
+                "[PATH-GUARD] helper_rows=0 but rows_txt>=2; forcing band/column fallback"
+            )
 
     legacy_helper = _resolve_app_callable("hole_count_from_text_table")
     _print_helper_debug("text_alt", legacy_helper)
@@ -5252,7 +5280,9 @@ def read_text_table(
     if columnar_result:
         existing_score = _score_table(primary_result)
         fallback_score = _score_table(columnar_result)
-        if fallback_score[1] > 0 and fallback_score > existing_score:
+        if fallback_score[1] > 0 and (
+            fallback_score > existing_score or force_columnar
+        ):
             primary_result = columnar_result
             column_selected = True
             _print_promoted_rows_once(columnar_result.get("rows", []))
@@ -5285,7 +5315,12 @@ def read_text_table(
     elif "band_cells" not in _LAST_TEXT_TABLE_DEBUG:
         _LAST_TEXT_TABLE_DEBUG["band_cells"] = []
         _LAST_TEXT_TABLE_DEBUG["bands"] = []
-    _LAST_TEXT_TABLE_DEBUG["rows"] = list(primary_result.get("rows", []))
+    rows_materialized = list(primary_result.get("rows", []))
+    if confidence_high and rows_materialized:
+        primary_result["confidence_high"] = True
+        if len(rows_materialized) >= 3 and not primary_result.get("header_validated"):
+            primary_result["header_validated"] = True
+    _LAST_TEXT_TABLE_DEBUG["rows"] = rows_materialized
     return primary_result
 
 
@@ -5789,10 +5824,25 @@ def read_geo(
     except Exception:
         text_info = {}
 
-    acad_rows = len((acad_info.get("rows") or [])) if isinstance(acad_info, Mapping) else 0
+    acad_rows_list: list[dict[str, Any]] = []
+    if isinstance(acad_info, Mapping):
+        acad_info = dict(acad_info)
+        acad_rows_list = _normalize_table_rows(acad_info.get("rows"))
+        acad_info["rows"] = acad_rows_list
+    else:
+        acad_info = {}
+    acad_rows = len(acad_rows_list)
     if acad_rows == 0:
         print("[PATH] acad=0 (no tables found)")
-    text_rows = len((text_info.get("rows") or [])) if isinstance(text_info, Mapping) else 0
+
+    text_rows_list: list[dict[str, Any]] = []
+    if isinstance(text_info, Mapping):
+        text_info = dict(text_info)
+        text_rows_list = _normalize_table_rows(text_info.get("rows"))
+        text_info["rows"] = text_rows_list
+    else:
+        text_info = {}
+    text_rows = len(text_rows_list)
     debug_snapshot = get_last_text_table_debug() or {}
     rows_txt_debug = 0
     if isinstance(debug_snapshot, Mapping):
@@ -5803,36 +5853,50 @@ def read_geo(
     print(f"[PATH] text=run (rows_txt={rows_txt_debug})")
     print(f"[EXTRACT] acad_rows={acad_rows} text_rows={text_rows}")
 
-    best_table = choose_better_table(acad_info, text_info)
+    publish_info: dict[str, Any] | None = None
+    publish_source_tag: str | None = None
+    if acad_rows_list:
+        publish_info = acad_info
+        publish_source_tag = "acad_table"
+    elif text_rows_list:
+        publish_info = text_info
+        publish_source_tag = "text_table"
+
     score_a = _score_table(acad_info)
     score_b = _score_table(text_info)
-    table_used = False
-    source_tag = None
-    existing_score = _score_table(current_table_info)
-    best_score = _score_table(best_table)
-    if (
-        use_tables
-        and isinstance(best_table, Mapping)
-        and best_table.get("rows")
-        and best_score > existing_score
-    ):
-        source_tag = "acad_table" if score_a >= score_b else "text_table"
-        promote_table_to_geo(geo, best_table, source_tag)
-        table_used = True
-        if source_tag == "text_table":
-            _print_promoted_rows_once(best_table.get("rows", []))
+    best_table = publish_info or choose_better_table(acad_info, text_info)
+    if publish_info is None and isinstance(best_table, Mapping) and best_table.get("rows"):
+        publish_info = dict(best_table)
+        publish_info["rows"] = _normalize_table_rows(publish_info.get("rows"))
+        publish_source_tag = "acad_table" if score_a >= score_b else "text_table"
+    publish_rows: list[dict[str, Any]] = []
+    if isinstance(publish_info, Mapping):
+        publish_rows = list(publish_info.get("rows") or [])
 
-    if (
-        not table_used
-        and acad_rows == 0
-        and text_rows > 0
-        and isinstance(text_info, Mapping)
-        and text_info.get("rows")
-    ):
-        source_tag = "text_table"
-        promote_table_to_geo(geo, text_info, source_tag)
-        table_used = True
-        _print_promoted_rows_once(text_info.get("rows", []))
+    table_used = False
+    source_tag = publish_source_tag
+    existing_score = _score_table(current_table_info)
+    publish_score = _score_table(publish_info) if isinstance(publish_info, Mapping) else (0, 0, 0)
+    if use_tables and publish_info and publish_rows:
+        can_promote = False
+        if not existing_is_table:
+            can_promote = True
+        elif publish_score > existing_score:
+            can_promote = True
+        elif (
+            publish_info is text_info
+            and acad_rows == 0
+            and text_rows > 0
+        ):
+            can_promote = True
+        if can_promote:
+            promote_table_to_geo(geo, publish_info, publish_source_tag or "text_table")
+            table_used = True
+            if publish_source_tag and "text" in publish_source_tag:
+                _print_promoted_rows_once(publish_rows)
+
+    if not isinstance(best_table, Mapping) or not best_table.get("rows"):
+        best_table = publish_info or best_table
 
     ops_summary = _ensure_ops_summary_map(geo.get("ops_summary"))
     geo["ops_summary"] = ops_summary
@@ -5844,39 +5908,59 @@ def read_geo(
             rows = []
     if not table_used and existing_is_table:
         table_used = bool(rows)
+
+    qty_sum = 0
     if table_used:
         qty_sum = _sum_qty(rows)
+    elif publish_rows:
+        qty_sum = _sum_qty(publish_rows)
+        ops_summary["rows"] = list(publish_rows)
+        if publish_source_tag:
+            ops_summary["source"] = publish_source_tag
     else:
         if rows:
             ops_summary.pop("rows", None)
             rows = []
-        qty_sum = 0
         ops_summary["source"] = "geom"
-    if not table_used:
+
+    if not table_used and not publish_rows:
         hole_count = _best_geo_hole_count(geo)
         if hole_count:
             geo["hole_count"] = hole_count
 
-    if table_used and source_tag:
+    if publish_rows and not table_used:
+        try:
+            hole_total = publish_info.get("hole_count") if isinstance(publish_info, Mapping) else None
+            if hole_total in (None, ""):
+                hole_total = qty_sum
+            geo["hole_count"] = int(float(hole_total))
+        except Exception:
+            geo["hole_count"] = qty_sum
+
+    if (table_used or publish_rows) and source_tag:
         ops_summary["source"] = source_tag
     totals = ops_summary.get("totals")
     if isinstance(totals, Mapping):
         ops_summary["totals"] = dict(totals)
 
-    rows_for_log = rows
-    if (not rows_for_log) and text_rows and isinstance(text_info, Mapping):
-        candidate_rows = text_info.get("rows")
-        if isinstance(candidate_rows, list):
-            rows_for_log = list(candidate_rows)
-        elif isinstance(candidate_rows, Iterable) and not isinstance(
-            candidate_rows, (str, bytes, bytearray)
-        ):
-            rows_for_log = list(candidate_rows)
+    rows_for_log: list[Mapping[str, Any]] | list[Any]
     if table_used:
         rows_for_log = ops_summary.get("rows") or []
         if not isinstance(rows_for_log, list) and isinstance(rows_for_log, Iterable):
             rows_for_log = list(rows_for_log)
         qty_sum = _sum_qty(rows_for_log)
+    elif publish_rows:
+        rows_for_log = list(publish_rows)
+        qty_sum = _sum_qty(rows_for_log)
+    else:
+        rows_for_log = rows
+        if not isinstance(rows_for_log, list):
+            if isinstance(rows_for_log, Iterable):
+                rows_for_log = list(rows_for_log)
+            else:
+                rows_for_log = []
+        if not rows_for_log and text_rows:
+            rows_for_log = list(text_rows_list)
     source_display = ops_summary.get("source") if isinstance(ops_summary, Mapping) else None
     source_lower = str(source_display or "").lower()
     if "acad" in source_lower:
@@ -5891,19 +5975,30 @@ def read_geo(
         f"source={ops_summary.get('source')}"
     )
     provenance_holes = None
-    provenance = geo.get("provenance")
-    if isinstance(provenance, Mapping):
-        provenance_holes = provenance.get("holes")
+    if isinstance(publish_info, Mapping):
+        provenance_holes = publish_info.get("provenance_holes")
+    if not provenance_holes:
+        provenance = geo.get("provenance")
+        if isinstance(provenance, Mapping):
+            provenance_holes = provenance.get("holes")
     print(f"[EXTRACT] provenance={provenance_holes}")
 
     debug_payload = get_last_text_table_debug() or {}
-    hole_count_val = None
-    try:
-        hole_count_val = geo.get("hole_count") if isinstance(geo, Mapping) else None
-    except Exception:
-        hole_count_val = None
+    hole_count_val: int | None | float = None
+    if isinstance(publish_info, Mapping):
+        hole_count_val = publish_info.get("hole_count")
+    if hole_count_val in (None, ""):
+        try:
+            hole_count_val = geo.get("hole_count") if isinstance(geo, Mapping) else None
+        except Exception:
+            hole_count_val = None
     if hole_count_val in (None, ""):
         hole_count_val = _best_geo_hole_count(geo) if isinstance(geo, Mapping) else None
+    try:
+        if hole_count_val not in (None, ""):
+            hole_count_val = int(float(hole_count_val))
+    except Exception:
+        pass
 
     payload_rows: list[Mapping[str, Any]] = []
     if isinstance(rows_for_log, list):
@@ -5912,9 +6007,17 @@ def read_geo(
         payload_rows = list(rows_for_log)
 
     families_map: dict[str, int] | None = None
-    for candidate in (best_table, text_info, acad_info, current_table_info):
+    candidates_for_families: list[Mapping[str, Any]] = []
+    seen_ids: set[int] = set()
+    for candidate in (publish_info, best_table, text_info, acad_info, current_table_info):
         if not isinstance(candidate, Mapping):
             continue
+        marker = id(candidate)
+        if marker in seen_ids:
+            continue
+        seen_ids.add(marker)
+        candidates_for_families.append(candidate)
+    for candidate in candidates_for_families:
         families_val = candidate.get("hole_diam_families_in")
         if isinstance(families_val, Mapping) and families_val:
             normalized_families: dict[str, int] = {}
@@ -5930,6 +6033,8 @@ def read_geo(
     chart_lines = [
         _format_chart_line(row) for row in payload_rows if isinstance(row, Mapping)
     ]
+
+    table_used = table_used or bool(publish_rows)
 
     result_payload = {
         "geo": geo,
