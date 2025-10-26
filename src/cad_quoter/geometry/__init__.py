@@ -595,7 +595,7 @@ def _normalize_oda_out_ver(out_ver: object | None) -> str:
     return mapping.get(text, text or default)
 
 
-def convert_dwg_to_dxf(dwg_path: str, *, out_ver="ACAD2018") -> str:
+def convert_dwg_to_dxf(dwg_path: str, *, out_ver="ACAD2018", quiet: bool = False) -> str:
     """
     Robust DWG?DXF wrapper.
     Works with:
@@ -628,7 +628,8 @@ def convert_dwg_to_dxf(dwg_path: str, *, out_ver="ACAD2018") -> str:
         if exe_lower.endswith(".bat") or exe_lower.endswith(".cmd"):
             # ? run batch via cmd.exe so it actually executes
             cmd = ["cmd", "/c", exe, str(dwg), str(out_dxf)]
-            print(f"[ODAFileConverter] Running converter: {cmd}")
+            if not quiet:
+                print(f"[ODAFileConverter] Running converter: {cmd}")
             subprocess.run(
                 cmd,
                 check=True,
@@ -648,7 +649,8 @@ def convert_dwg_to_dxf(dwg_path: str, *, out_ver="ACAD2018") -> str:
                 "0",
                 dwg.name,
             ]
-            print(f"[ODAFileConverter] Running ODAFileConverter: {cmd}")
+            if not quiet:
+                print(f"[ODAFileConverter] Running ODAFileConverter: {cmd}")
             subprocess.run(
                 cmd,
                 check=True,
@@ -688,7 +690,8 @@ def convert_dwg_to_dxf(dwg_path: str, *, out_ver="ACAD2018") -> str:
             f"cmd: {' '.join(cmd)}\n"
             f"checked: {out_dxf} | {produced}"
         )
-    print(f"[ODAFileConverter] produced DXF: {produced}")
+    if not quiet:
+        print(f"[ODAFileConverter] produced DXF: {produced}")
     return str(produced)
 
 

@@ -5819,7 +5819,7 @@ def _load_doc_for_path(path: Path, *, use_oda: bool, out_ver: str | None = None)
             if oda_version:
                 dxf_path = convert_dwg_to_dxf(str(path), out_ver=oda_version)
             else:
-                dxf_path = convert_dwg_to_dxf(str(path))
+                dxf_path = convert_dwg_to_dxf(str(path), quiet=True)
         except Exception as exc:
             out_display = dxf_path or "-"
             error_text = str(exc)
@@ -6301,10 +6301,7 @@ def _read_geo_payload_from_path(
         published_rows_list = published_rows_obj
     else:
         published_rows_list = []
-    source_marker = ""
-    if isinstance(payload, Mapping):
-        source_marker = str(payload.get("source") or "")
-    if published_rows_list and "text" in source_marker.lower():
+    if published_rows_list:
         return payload
     if tables_found == 0 and path_obj.suffix.lower() == ".dwg":
         fallback_versions = [
