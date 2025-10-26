@@ -1135,8 +1135,12 @@ _FRAGMENT_SPLIT_RE = re.compile(r";|(?<=\))\s+(?=\d+\))")
 _INCH_MARK_REF_RE = re.compile(r"\b(\d+(?:\.\d+)?)(?:\s*\"|[ ]?in\b)", re.IGNORECASE)
 _DIA_SYMBOL_INLINE_RE = re.compile(r"[Ø⌀]\s*(\d+(?:\.\d+)?)")
 _LETTER_DRILL_REF_RE = re.compile(r"\b([A-HJ-NP-Z])\"?\b")
+_NUMBERED_THREAD_REF_RE = re.compile(r"#\d+\s*-\s*\d+", re.IGNORECASE)
 _NUMBER_DRILL_REF_RE = re.compile(r"#\d+\b")
-_PIPE_NPT_REF_RE = re.compile(r"\b(\d+\/\d+-\s*N\.?P\.?T\.?)", re.IGNORECASE)
+_PIPE_NPT_REF_RE = re.compile(
+    r"\b((?:\d+\/\d+|\d+(?:\.\d+)?))\s*-\s*(N\.?P\.?T\.?)",
+    re.IGNORECASE,
+)
 _THREAD_CALL_OUT_RE = re.compile(r"\b(\d+\/\d+|M\d+(?:\.\d+)?)-\d+\b", re.IGNORECASE)
 _ROW_QUANTITY_PATTERNS = [
     re.compile(r"^\(\s*(\d+)\s*\)", re.IGNORECASE),
@@ -1151,6 +1155,9 @@ _ROW_QUANTITY_FLEX_PATTERNS = [
     re.compile(r"\b(\d+)\s*(?:REQD|REQUIRED|RE'?D)\b", re.IGNORECASE),
     re.compile(r"\(\s*(\d+)\s*\)"),
 ]
+_FALLBACK_LEADING_QTY_RE = re.compile(r"^\(\d+\)\s*")
+_FALLBACK_JJ_NOISE_RE = re.compile(r"\bJ\s+J\b", re.IGNORECASE)
+_FALLBACK_ETCH_NOISE_RE = re.compile(r"\bETCH ON DETAIL\b(?:\.)?", re.IGNORECASE)
 _RE_TEXT_ROW_START = re.compile(r"^\(\s*(\d+)\s*\)")
 _LETTER_CODE_ROW_RE = re.compile(r"^\s*[A-Z]\s*(?:[-.:|]|$)")
 _HOLE_ACTION_TOKEN_RE = re.compile(_HOLE_ACTION_TOKEN_PATTERN, re.IGNORECASE)
@@ -1964,7 +1971,16 @@ def _extract_row_reference(desc: str) -> tuple[str, float | None]:
 
     pipe_match = _PIPE_NPT_REF_RE.search(search_space)
     if pipe_match:
-        return (pipe_match.group(1).upper().replace(" ", ""), None)
+        numeric_part = pipe_match.group(1)
+        suffix = pipe_match.group(2)
+        compact = f"{numeric_part}-{suffix}".upper().replace(" ", "")
+        return (compact, None)
+
+    numbered_thread = _NUMBERED_THREAD_REF_RE.search(search_space)
+    if numbered_thread:
+        raw_value = numbered_thread.group(0)
+        normalized = raw_value.upper().replace(" ", "")
+        return (normalized, None)
 
     number_drill = _NUMBER_DRILL_REF_RE.search(search_space)
     if number_drill:
@@ -4064,6 +4080,12 @@ def _publish_fallback_from_rows_txt(rows_txt: Iterable[Any]) -> dict[str, Any]:
             desc_value = fragment_clean
             if index == 0 and qty_prefix and not desc_value.startswith(qty_prefix):
                 desc_value = f"{qty_prefix} {desc_value}".strip()
+            desc_value = _FALLBACK_LEADING_QTY_RE.sub("", desc_value)
+            desc_value = _FALLBACK_JJ_NOISE_RE.sub("", desc_value)
+            desc_value = _FALLBACK_ETCH_NOISE_RE.sub("", desc_value)
+            desc_value = " ".join(desc_value.split()).strip()
+            if not desc_value:
+                continue
             side_value = _detect_row_side(fragment_clean) or side_hint
             row: dict[str, Any] = {
                 "hole": "",
@@ -5890,10 +5912,21 @@ def read_geo(
     if isinstance(acad_info, Mapping):
         roi_candidate = acad_info.get("roi_hint")
         acad_roi_hint = roi_candidate if isinstance(roi_candidate, Mapping) else None
+    text_layer_allowlist = layer_allowlist
+    if text_layer_allowlist is _DEFAULT_LAYER_ALLOWLIST:
+        text_layer_allowlist = None
+    elif isinstance(text_layer_allowlist, Iterable) and not isinstance(
+        text_layer_allowlist, (str, bytes, bytearray)
+    ):
+        try:
+            if set(text_layer_allowlist) == set(_DEFAULT_LAYER_ALLOWLIST):
+                text_layer_allowlist = None
+        except TypeError:
+            pass
     try:
         text_info = read_text_table(
             doc,
-            layer_allowlist=layer_allowlist,
+            layer_allowlist=text_layer_allowlist,
             roi_hint=acad_roi_hint,
             block_name_allowlist=block_name_allowlist,
             block_name_regex=block_name_regex,
@@ -5972,7 +6005,18 @@ def read_geo(
             fallback_qty_sum = _sum_qty(fallback_rows_list)
     force_text_mode = bool(force_text and fallback_info and fallback_rows_list)
     fallback_selected = False
-    if force_text_mode:
+    auto_text_fallback = bool(
+        fallback_info
+        and fallback_rows_list
+        and acad_rows == 0
+        and text_rows == 0
+        and rows_txt_lines
+    )
+    if auto_text_fallback:
+        publish_info = fallback_info
+        publish_source_tag = "text_table"
+        fallback_selected = True
+    elif force_text_mode:
         publish_info = fallback_info
         publish_source_tag = "text_table"
         fallback_selected = True
@@ -6224,6 +6268,20 @@ def _read_geo_payload_from_path(
     except Exception:
         tables_found = 0
     log_last_dxf_fallback(tables_found)
+    published_rows_obj = payload.get("rows") if isinstance(payload, Mapping) else None
+    if isinstance(published_rows_obj, Iterable) and not isinstance(
+        published_rows_obj, list
+    ):
+        published_rows_list = list(published_rows_obj)
+    elif isinstance(published_rows_obj, list):
+        published_rows_list = published_rows_obj
+    else:
+        published_rows_list = []
+    source_marker = ""
+    if isinstance(payload, Mapping):
+        source_marker = str(payload.get("source") or "")
+    if published_rows_list and "text" in source_marker.lower():
+        return payload
     if tables_found == 0 and path_obj.suffix.lower() == ".dwg":
         fallback_versions = [
             "ACAD2000",
