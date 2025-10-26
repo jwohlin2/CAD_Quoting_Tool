@@ -59,6 +59,11 @@ from cad_quoter.app.quote_doc import (
     _sanitize_render_text,
 )
 from cad_quoter.pricing.machining_report import _drill_time_model
+from cad_quoter.ui.planner_render import (
+    _clamp_minutes as _planner_clamp_minutes,
+    _pick_drill_minutes as _planner_pick_drill_minutes,
+    sane_minutes_or_zero,
+)
 
 
 
@@ -4196,63 +4201,29 @@ def estimate_milling_minutes_from_geometry(
     }
 
 
-def _clamp_minutes(v: Any, lo: float = 0.0, hi: float = 10000.0) -> float:
-    minutes_val = _as_float(v, 0.0)
-    if not (lo <= minutes_val <= hi):
-        return 0.0
-    return minutes_val
-
-
-def sane_minutes_or_zero(x: Any, cap: float = 24 * 60 * 8) -> float:
-    """Return a float minutes value or 0.0 when outside sane bounds."""
-
-    try:
-        minutes = float(x)
-    except Exception:
-        return 0.0
-
-    if not math.isfinite(minutes):
-        return 0.0
-
-    if minutes < 0 or minutes > cap:
-        print(f"[WARNING] [unit/clamp] minutes out-of-range; dropping. raw={minutes}")
-        return 0.0
-
-    return minutes
-
-
 def _pick_drill_minutes(
     process_plan_summary: Mapping[str, Any] | None,
     extras: Mapping[str, Any] | None,
     lines: list[str] | None = None,
 ) -> float:
-    meta_min = _as_float(
-        (((process_plan_summary or {}).get("drilling") or {}).get("total_minutes_billed")),
-        0.0,
-    )
-    removal_min_raw = _as_float((extras or {}).get("drill_total_minutes"), 0.0)
-    removal_min = sane_minutes_or_zero(removal_min_raw)
+    result = _planner_pick_drill_minutes(process_plan_summary, extras)
 
-    if removal_min > 0:
-        chosen = removal_min
-        src = "removal_card"
-    else:
-        chosen = sane_minutes_or_zero(meta_min)
-        src = "planner_meta"
-
-    chosen_clamped = _clamp_minutes(chosen)
-    try:
-        logger.info(
-            "[drill-pick] meta_min=%.2f removal_min=%.2f -> %.2f (%s%s)",
-            float(meta_min),
-            float(removal_min),
-            float(chosen_clamped),
-            src,
-            " CLAMPED" if chosen_clamped != chosen else "",
-        )
-    except Exception:
-        pass
     if lines is not None:
+        meta_min = _as_float(
+            (((process_plan_summary or {}).get("drilling") or {}).get("total_minutes_billed")),
+            0.0,
+        )
+        removal_min_raw = _as_float((extras or {}).get("drill_total_minutes"), 0.0)
+        removal_min = sane_minutes_or_zero(removal_min_raw)
+
+        if removal_min > 0:
+            chosen = removal_min
+            src = "removal_card"
+        else:
+            chosen = sane_minutes_or_zero(meta_min)
+            src = "planner_meta"
+
+        chosen_clamped = _planner_clamp_minutes(chosen)
         try:
             lines.append(
                 "[drill-pick] meta_min="
@@ -4261,7 +4232,8 @@ def _pick_drill_minutes(
             )
         except Exception:
             pass
-    return chosen_clamped
+
+    return result
 
 
 # --- HOLE TABLE helpers for CBORE / SPOT / JIG --------------------------------
