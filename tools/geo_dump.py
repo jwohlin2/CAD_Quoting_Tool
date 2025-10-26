@@ -1,12 +1,14 @@
 from __future__ import annotations
 
 import argparse
+import csv
 import importlib
+import json
 import os
 import sys
 from collections.abc import Iterable, Mapping
 from pathlib import Path
-from typing import Sequence
+from typing import Any, Sequence
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 if str(REPO_ROOT) not in sys.path:
@@ -16,6 +18,7 @@ from cad_quoter import geo_extractor
 from cad_quoter.geo_extractor import read_geo
 
 DEFAULT_SAMPLE_PATH = REPO_ROOT / "Cad Files" / "301_redacted.dwg"
+ARTIFACT_DIR = REPO_ROOT / "out"
 
 
 def _sum_qty(rows: list[Mapping[str, object]] | None) -> int:
@@ -65,6 +68,106 @@ def _payload_has_rows(payload: Mapping[str, object] | None) -> bool:
             return True
 
     return False
+
+
+def _ordered_hole_row(row: Mapping[str, object]) -> dict[str, object]:
+    ordered: dict[str, object] = {}
+    preferred_order = ("hole", "qty", "ref", "side", "desc")
+    for key in preferred_order:
+        if key in row:
+            ordered[key] = row[key]
+    for key in sorted(row.keys()):
+        if key not in ordered:
+            ordered[key] = row[key]
+    return ordered
+
+
+def _build_hole_rows_artifact(
+    rows: Iterable[Mapping[str, object]] | None,
+    *,
+    qty_sum: int,
+    hole_count: int | None,
+    provenance: object,
+    source: object,
+) -> dict[str, object]:
+    serialized_rows: list[dict[str, object]] = []
+    for row in rows or []:
+        if not isinstance(row, Mapping):
+            continue
+        serialized_rows.append(_ordered_hole_row(row))
+
+    artifact: dict[str, object] = {"rows": serialized_rows, "qty_sum": int(qty_sum)}
+    if hole_count not in (None, ""):
+        try:
+            artifact["hole_count"] = int(float(hole_count))
+        except Exception:
+            artifact["hole_count"] = hole_count
+    if provenance not in (None, ""):
+        artifact["provenance"] = provenance
+    if source not in (None, ""):
+        artifact["source"] = source
+    return artifact
+
+
+def _ordered_totals_map(totals: Mapping[str, Any]) -> dict[str, Any]:
+    ordered: dict[str, Any] = {}
+    preferred = (
+        "tap",
+        "tap_front",
+        "tap_back",
+        "counterbore",
+        "counterbore_front",
+        "counterbore_back",
+        "drill",
+        "spot",
+        "jig_grind",
+    )
+    for key in preferred:
+        if key in totals:
+            ordered[key] = totals[key]
+    for key in sorted(totals.keys()):
+        if key not in ordered:
+            ordered[key] = totals[key]
+    return ordered
+
+
+def _build_ops_totals_artifact(ops_summary: Mapping[str, object] | None) -> dict[str, object] | None:
+    if not isinstance(ops_summary, Mapping):
+        return None
+
+    totals_raw = ops_summary.get("totals") if isinstance(ops_summary, Mapping) else None
+    totals_ordered = _ordered_totals_map(totals_raw) if isinstance(totals_raw, Mapping) else None
+
+    artifact: dict[str, object] = {}
+    if totals_ordered:
+        artifact["totals"] = totals_ordered
+
+    supplemental_keys = (
+        "tap_total",
+        "cbore_total",
+        "csk_total",
+        "actions_total",
+        "back_ops_total",
+        "flip_required",
+    )
+    for key in supplemental_keys:
+        if key in ops_summary:
+            artifact[key] = ops_summary[key]
+
+    if "source" in ops_summary:
+        artifact["source"] = ops_summary["source"]
+
+    return artifact or None
+
+
+def _write_artifact(path: Path, payload: Mapping[str, object]) -> None:
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with path.open("w", encoding="utf-8") as handle:
+            json.dump(payload, handle, indent=2)
+            handle.write("\n")
+    except OSError as exc:  # pragma: no cover - filesystem issues
+        print(f"[geo_dump] failed to write artifact {path}: {exc}")
 
 
 def main(argv: Sequence[str] | None = None) -> int:
@@ -127,6 +230,18 @@ def main(argv: Sequence[str] | None = None) -> int:
         help="Regex pattern to match INSERT block names for ROI seeding (repeatable)",
     )
     parser.add_argument(
+        "--include-layer",
+        dest="include_layer",
+        action="append",
+        help="Regex pattern for layers to include when scanning text (repeatable)",
+    )
+    parser.add_argument(
+        "--exclude-layer",
+        dest="exclude_layer",
+        action="append",
+        help="Regex pattern for layers to exclude when scanning text (repeatable)",
+    )
+    parser.add_argument(
         "--scan-acad-tables",
         action="store_true",
         help="Print ACAD_TABLE inventory details",
@@ -152,6 +267,18 @@ def main(argv: Sequence[str] | None = None) -> int:
         "--force-text",
         action="store_true",
         help="Force publishing text fallback rows when available",
+    )
+    parser.add_argument(
+        "--debug-layouts",
+        action="store_true",
+        help="Print layout and layer summaries after extraction",
+    )
+    parser.add_argument(
+        "--dump-rows-csv",
+        nargs="?",
+        const="debug/rows.csv",
+        default=None,
+        help="Write extracted rows to CSV (optional custom path; default debug/rows.csv)",
     )
     args = parser.parse_args(argv)
 
@@ -247,22 +374,16 @@ def main(argv: Sequence[str] | None = None) -> int:
         if normalized_patterns:
             read_kwargs["block_name_regex"] = normalized_patterns
             print(f"[geo_dump] block_regex={normalized_patterns}")
-    layout_patterns = [
-        value.strip()
-        for value in (args.layouts or [])
-        if isinstance(value, str) and value.strip()
-    ]
-    layout_filters: dict[str, object] | None = None
-    all_layouts_flag = bool(getattr(args, "all_layouts", True))
-    if layout_patterns or not all_layouts_flag:
-        layout_filters = {"all_layouts": all_layouts_flag, "patterns": layout_patterns}
-    setattr(args, "layout_filters", layout_filters)
-    if layout_filters:
-        read_kwargs["layout_filters"] = layout_filters
-        print(
-            "[geo_dump] layouts filter all=%s patterns=%s"
-            % (layout_filters.get("all_layouts"), layout_patterns)
-        )
+    include_layer_patterns = args.include_layer or []
+    if include_layer_patterns:
+        read_kwargs["layer_include_regex"] = list(include_layer_patterns)
+        print(f"[geo_dump] include_layer={include_layer_patterns}")
+    exclude_layer_patterns = args.exclude_layer or []
+    if exclude_layer_patterns:
+        read_kwargs["layer_exclude_regex"] = list(exclude_layer_patterns)
+        print(f"[geo_dump] exclude_layer={exclude_layer_patterns}")
+    if args.debug_layouts:
+        read_kwargs["debug_layouts"] = True
     if args.force_text:
         read_kwargs["force_text"] = True
     payload = read_geo(doc, **read_kwargs)
@@ -411,6 +532,19 @@ def main(argv: Sequence[str] | None = None) -> int:
             prov=holes_source,
         )
     )
+
+    hole_rows_artifact = _build_hole_rows_artifact(
+        rows,
+        qty_sum=qty_sum,
+        hole_count=hole_count,
+        provenance=holes_source,
+        source=source,
+    )
+    _write_artifact(ARTIFACT_DIR / "hole_rows.json", hole_rows_artifact)
+
+    ops_totals_artifact = _build_ops_totals_artifact(ops_summary)
+    if ops_totals_artifact:
+        _write_artifact(ARTIFACT_DIR / "op_totals.json", ops_totals_artifact)
     if args.show_rows and rows:
         limit = max(args.show_rows, 0)
         if limit > 0:
@@ -536,6 +670,83 @@ def main(argv: Sequence[str] | None = None) -> int:
             print(f"[geo_dump] failed to write dumps: {exc}")
         else:
             print(f"[geo_dump] wrote debug dumps to {lines_path} and {bands_path}")
+
+    rows_csv_path: Path | None = None
+    if args.dump_rows_csv:
+        csv_target = Path(args.dump_rows_csv)
+        try:
+            csv_target.parent.mkdir(parents=True, exist_ok=True)
+            with csv_target.open("w", newline="", encoding="utf-8") as handle:
+                writer = csv.writer(handle)
+                writer.writerow(["qty", "ref", "side", "desc", "hole"])
+                for row in rows:
+                    if not isinstance(row, Mapping):
+                        continue
+                    qty_val = row.get("qty")
+                    writer.writerow(
+                        [
+                            "" if qty_val in (None, "") else str(qty_val),
+                            str(row.get("ref") or ""),
+                            str(row.get("side") or ""),
+                            str(row.get("desc") or ""),
+                            str(row.get("hole") or ""),
+                        ]
+                    )
+        except OSError as exc:  # pragma: no cover - filesystem issues
+            print(f"[geo_dump] failed to write rows CSV: {exc}")
+        else:
+            rows_csv_path = csv_target
+            print(f"[geo_dump] wrote rows CSV to {csv_target}")
+
+    debug_info = geo_extractor.get_last_text_table_debug() or {}
+
+    def _format_counts(counts: Mapping[str, int] | None) -> str:
+        if not counts:
+            return "{}"
+        items = sorted(counts.items(), key=lambda item: (-item[1], item[0] or ""))
+        top = ", ".join(f"{name or '-'}:{count}" for name, count in items[:5])
+        if len(items) > 5:
+            top += ", …"
+        return "{" + top + "}"
+
+    scanned_layouts = list(dict.fromkeys(debug_info.get("scanned_layouts") or []))
+    scanned_layers = list(dict.fromkeys(debug_info.get("scanned_layers") or []))
+    layout_summary = ",".join(scanned_layouts) if scanned_layouts else "-"
+    layer_summary = ",".join(scanned_layers) if scanned_layers else "-"
+    csv_display = str(rows_csv_path) if rows_csv_path else "-"
+    print(
+        "[geo_dump] summary layouts={layouts} layers={layers} rows={rows} csv={csv}".format(
+            layouts=layout_summary,
+            layers=layer_summary,
+            rows=len(rows),
+            csv=csv_display,
+        )
+    )
+
+    if args.debug_layouts:
+        layer_pre = debug_info.get("layer_counts_pre")
+        layer_regex = debug_info.get("layer_counts_post_regex")
+        layer_post = debug_info.get("layer_counts_post_allow")
+        layout_pre = debug_info.get("layout_counts_pre")
+        layout_regex = debug_info.get("layout_counts_post_regex")
+        layout_post = debug_info.get("layout_counts_post_allow")
+        include_patterns = debug_info.get("layer_regex_include") or []
+        exclude_patterns = debug_info.get("layer_regex_exclude") or []
+        if include_patterns or exclude_patterns:
+            print(
+                "[geo_dump] layer_regex include={incl} exclude={excl}".format(
+                    incl=include_patterns or "-",
+                    excl=exclude_patterns or "-",
+                )
+            )
+        print(f"[geo_dump] layer_counts_pre={_format_counts(layer_pre)}")
+        if layer_regex is not None:
+            print(f"[geo_dump] layer_counts_regex={_format_counts(layer_regex)}")
+        print(f"[geo_dump] layer_counts_post={_format_counts(layer_post)}")
+        print(f"[geo_dump] layout_counts_pre={_format_counts(layout_pre)}")
+        if layout_regex is not None:
+            print(f"[geo_dump] layout_counts_regex={_format_counts(layout_regex)}")
+        print(f"[geo_dump] layout_counts_post={_format_counts(layout_post)}")
 
     return 0
 

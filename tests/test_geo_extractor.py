@@ -1,10 +1,27 @@
 from __future__ import annotations
 
 import types
+from pathlib import Path
 
 import pytest
 
 from cad_quoter import geo_extractor
+
+
+_RTEXT_FIXTURE_PATH = Path(__file__).resolve().parent / "data" / "rtext_fixture.dxf"
+
+
+def _load_rtext_fixture_text() -> str:
+    data = _RTEXT_FIXTURE_PATH.read_text(encoding="utf-8").splitlines()
+    for idx in range(0, len(data) - 1, 2):
+        code = data[idx].strip()
+        value = data[idx + 1].strip()
+        if code in {"1000", "1"} and value:
+            return value
+    raise AssertionError("rtext fixture did not contain expected text payload")
+
+
+_RTEXT_FIXTURE_TEXT = _load_rtext_fixture_text()
 
 
 class _DummyMText:
@@ -24,6 +41,26 @@ class _DummyText:
 
     def dxftype(self) -> str:
         return "TEXT"
+
+
+class _DummyRText:
+    def __init__(self, text: str) -> None:
+        self._text = text
+        self.dxf = types.SimpleNamespace(text="")
+        payload = [(1000, text)]
+        self._xdata = {"RTEXT": list(payload), "ACAD_RTEXT": list(payload)}
+        self.raw_content = text
+        self.content = text
+        self.text = ""
+
+    def dxftype(self) -> str:
+        return "RTEXT"
+
+    def get_xdata(self, appid: str) -> list[tuple[int, str]]:
+        return list(self._xdata.get(appid, []))
+
+    def has_xdata(self, appid: str) -> bool:
+        return appid in self._xdata
 
 
 class _DummySpace:
@@ -48,8 +85,20 @@ def fallback_doc() -> _DummyDoc:
         _DummyMText(r"\\A1;(3) %%C0.375\\PTHRU"),
         _DummyMText("FROM BACK"),
         _DummyText("A | Ø0.500 | 2 | (2) DRILL THRU"),
+        _DummyRText(_RTEXT_FIXTURE_TEXT),
     ]
     return _DummyDoc(entities)
+
+
+def test_iter_entity_text_fragments_handles_rtext() -> None:
+    entity = _DummyRText(_RTEXT_FIXTURE_TEXT)
+
+    fragments = list(geo_extractor._iter_entity_text_fragments(entity))
+
+    assert fragments, "expected RTEXT fragments"
+    texts = [text for text, _ in fragments]
+    assert _RTEXT_FIXTURE_TEXT in texts
+    assert all(is_mtext for _, is_mtext in fragments)
 
 
 def test_collect_table_text_lines_normalizes_entities(fallback_doc: _DummyDoc) -> None:
@@ -59,6 +108,7 @@ def test_collect_table_text_lines_normalizes_entities(fallback_doc: _DummyDoc) -
     assert "THRU" in lines
     assert "FROM BACK" in lines
     assert "A | Ø0.500 | 2 | (2) DRILL THRU" in lines
+    assert "(4) Ø0.625 DRILL THRU FROM FRONT" in lines
 
 
 def test_read_text_table_uses_internal_fallback(monkeypatch: pytest.MonkeyPatch, fallback_doc: _DummyDoc) -> None:
@@ -66,9 +116,9 @@ def test_read_text_table_uses_internal_fallback(monkeypatch: pytest.MonkeyPatch,
 
     info = geo_extractor.read_text_table(fallback_doc)
 
-    assert info["hole_count"] == 5
+    assert info["hole_count"] == 9
     rows = info["rows"]
-    assert len(rows) == 2
+    assert len(rows) == 3
     assert rows[0]["qty"] == 3
     assert rows[0]["desc"] == "Ø0.375 THRU FROM BACK"
     assert rows[0]["ref"] == '0.3750"'
@@ -76,8 +126,12 @@ def test_read_text_table_uses_internal_fallback(monkeypatch: pytest.MonkeyPatch,
     assert rows[1]["qty"] == 2
     assert rows[1]["desc"] == "Ø0.500 | 2 | DRILL THRU"
     assert rows[1]["ref"] == '0.5000"'
+    assert rows[2]["qty"] == 4
+    assert rows[2]["desc"] == "Ø0.625 DRILL THRU FROM FRONT"
+    assert rows[2]["ref"] == '0.6250"'
+    assert rows[2].get("side") == "front"
     families = info.get("hole_diam_families_in")
-    assert families == {"0.375": 3, "0.5": 2}
+    assert families == {"0.375": 3, "0.5": 2, "0.625": 4}
     assert info.get("provenance_holes") == "HOLE TABLE"
 
 

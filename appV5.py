@@ -1177,6 +1177,8 @@ from cad_quoter.app.hole_ops import (
     RE_TAP,
     RE_THRU,
     TAP_MINUTES_BY_CLASS,
+    collect_text_table_fragments as _collect_text_table_fragments,
+    parse_text_table_fragments as _parse_text_table_fragments,
     build_ops_rows_from_lines_fallback as _build_ops_rows_from_lines_fallback,
     summarize_hole_chart_agreement,
     update_geo_ops_summary_from_hole_rows,
@@ -19693,92 +19695,6 @@ def _iter_table_text(doc):
 # --- Ops parsing from HOLE TABLE DESCRIPTION ---------------------------------
 # (moved to cad_quoter.app.hole_ops)
 
-# --- NEW: parse HOLE TABLE that's drawn with text + lines (no ACAD TABLE)
-def _iter_text_with_xy(doc):
-    if doc is None:
-        return
-
-    def _entity_xy(entity) -> tuple[float, float]:
-        def _get_point(attr: str):
-            try:
-                return getattr(entity.dxf, attr)
-            except Exception:
-                return None
-
-        point = (
-            _get_point("insert")
-            or _get_point("alignment_point")
-            or _get_point("align_point")
-            or _get_point("start")
-            or _get_point("position")
-        )
-        if point is None:
-            return (0.0, 0.0)
-
-        def _coord(value, idx):
-            try:
-                return float(value[idx])
-            except Exception:
-                try:
-                    return float(getattr(value, "xyz"[idx]))
-                except Exception:
-                    return 0.0
-
-        if hasattr(point, "xyz"):
-            x_val, y_val, _ = point.xyz
-            return float(x_val), float(y_val)
-
-        return _coord(point, 0), _coord(point, 1)
-
-    for sp in _spaces(doc):
-        try:
-            entities = sp.query("TEXT,MTEXT,INSERT")
-        except Exception:
-            entities = []
-        for entity in entities:
-            try:
-                kind = entity.dxftype()
-            except Exception:
-                kind = ""
-            if kind in {"TEXT", "MTEXT"}:
-                text = _extract_entity_text(entity)
-                if not text:
-                    continue
-                x, y = _entity_xy(entity)
-                yield text, x, y
-            elif kind == "INSERT":
-                try:
-                    virtuals = entity.virtual_entities()
-                except Exception:
-                    virtuals = []
-                for sub in virtuals:
-                    try:
-                        sub_kind = sub.dxftype()
-                    except Exception:
-                        sub_kind = ""
-                    if sub_kind not in {"TEXT", "MTEXT"}:
-                        continue
-                    text = _extract_entity_text(sub)
-                    if not text:
-                        continue
-                    x, y = _entity_xy(sub)
-                    yield text, x, y
-
-
-def _normalize(s: str) -> str:
-    return " ".join((s or "").replace("\u00D8", "Ø").replace("ø", "Ø").split())
-
-
-def _looks_like_hole_header(s: str) -> bool:
-    U = s.upper()
-    return (
-        ("HOLE" in U)
-        and ("REF" in U or "Ø" in U or "DIA" in U)
-        and ("QTY" in U)
-        and ("DESC" in U or "DESCRIPTION" in U)
-    )
-
-
 _RE_TEXT_ROW_START = re.compile(r"^\(\s*(\d+)\s*\)")
 
 
@@ -19836,83 +19752,16 @@ def extract_hole_table_from_text(doc, y_tol: float = 0.04, min_rows: int = 5):
     or {} if not found.
     """
 
+    _ = y_tol  # compatibility shim: spacing handled via fragment clustering
+
     try:
-        texts = [(_normalize(t), x, y) for (t, x, y) in _iter_text_with_xy(doc) if _normalize(t)]
+        fragments = _collect_text_table_fragments(doc)
     except Exception:
-        texts = []
-    if not texts:
+        fragments = []
+
+    rows = _parse_text_table_fragments(fragments, min_rows=min_rows)
+    if not rows:
         return {}
-
-    by_y: defaultdict[float, list[tuple[str, float, float]]] = defaultdict(list)
-    for s, x, y in texts:
-        by_y[round(y, 4)].append((s, x, y))
-    y_levels = sorted(by_y.keys(), reverse=True)
-    header_idx = None
-    header_x: dict[str, float] | None = None
-    for i, y in enumerate(y_levels):
-        line_txt = " | ".join(s for (s, _, _) in sorted(by_y[y], key=lambda z: z[1]))
-        if _looks_like_hole_header(line_txt):
-            header_idx = i
-            xs: dict[str, float] = {}
-            for s, x, _ in by_y[y]:
-                U = s.upper()
-                if "REF" in U or "Ø" in U or "DIA" in U:
-                    xs["REF"] = x
-                elif "QTY" in U or "QUANTITY" in U:
-                    xs["QTY"] = x
-                elif "HOLE" == U or U.startswith("HOLE "):
-                    xs["HOLE"] = x
-                elif "DESC" in U or "DESCRIPTION" in U:
-                    xs["DESC"] = x
-            if {"REF", "QTY", "DESC"} <= set(xs.keys()):
-                header_x = xs
-                break
-    if header_idx is None or header_x is None:
-        return {}
-
-    cols = [
-        ("HOLE", header_x.get("HOLE", min(header_x.values()) - 1e3)),
-        ("REF", header_x["REF"]),
-        ("QTY", header_x["QTY"]),
-        ("DESC", header_x["DESC"]),
-    ]
-    cols_sorted = sorted(cols, key=lambda kv: kv[1])
-    bounds = [c[1] for c in cols_sorted]
-    splits = [(bounds[i] + bounds[i + 1]) * 0.5 for i in range(len(bounds) - 1)]
-
-    rows: list[dict[str, str]] = []
-    for y in y_levels[header_idx + 1 :]:
-        band: list[tuple[str, float]] = []
-        for s, x, yy in texts:
-            if abs(yy - y) <= y_tol:
-                band.append((s, x))
-        if not band:
-            continue
-
-        def col_of(xv: float) -> str:
-            if xv < splits[0]:
-                return "HOLE"
-            if xv < splits[1]:
-                return "REF"
-            if xv < splits[2]:
-                return "QTY"
-            return "DESC"
-
-        cells: dict[str, list[str]] = {"HOLE": [], "REF": [], "QTY": [], "DESC": []}
-        for s, x in sorted(band, key=lambda z: z[1]):
-            cells[col_of(x)].append(s)
-        hole = " ".join(cells["HOLE"]).strip()
-        ref = " ".join(cells["REF"]).strip()
-        qtys = " ".join(cells["QTY"]).strip()
-        desc = " ".join(cells["DESC"]).strip()
-        if not (ref or qtys or desc):
-            continue
-        joined = " ".join(filter(None, [hole, ref, qtys, desc])).strip()
-        if not joined:
-            continue
-        if _looks_like_hole_header(joined):
-            break
-        rows.append({"hole": hole, "ref": ref, "qty": qtys, "desc": desc})
 
     rows = _merge_wrapped_text_rows(rows)
 
