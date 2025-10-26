@@ -4,7 +4,7 @@ import argparse
 import importlib
 import os
 import sys
-from collections.abc import Mapping
+from collections.abc import Iterable, Mapping
 from pathlib import Path
 from typing import Sequence
 
@@ -28,6 +28,43 @@ def _sum_qty(rows: list[Mapping[str, object]] | None) -> int:
         except Exception:
             continue
     return total
+
+
+def _payload_has_rows(payload: Mapping[str, object] | None) -> bool:
+    """Return ``True`` when the GEO payload already published any rows."""
+
+    if not isinstance(payload, Mapping):
+        return False
+
+    def _extract_rows(container: Mapping[str, object], key: str) -> list[object]:
+        value = container.get(key) if isinstance(container, Mapping) else None
+        if isinstance(value, list):
+            return value
+        if isinstance(value, Iterable) and not isinstance(value, (str, bytes, bytearray)):
+            rows_list = list(value)
+            if isinstance(container, dict):
+                container[key] = rows_list
+            return rows_list
+        return []
+
+    direct_rows = _extract_rows(payload, "rows")
+    if direct_rows:
+        return True
+
+    ops_summary = payload.get("ops_summary")
+    if not isinstance(ops_summary, Mapping):
+        geo = payload.get("geo")
+        if isinstance(geo, Mapping):
+            ops_summary = geo.get("ops_summary")
+    if isinstance(ops_summary, Mapping):
+        if not isinstance(ops_summary, dict):
+            ops_summary = dict(ops_summary)
+            if isinstance(payload, dict):
+                payload["ops_summary"] = ops_summary
+        if _extract_rows(ops_summary, "rows"):
+            return True
+
+    return False
 
 
 def main(argv: Sequence[str] | None = None) -> int:
@@ -201,6 +238,11 @@ def main(argv: Sequence[str] | None = None) -> int:
     if args.force_text:
         read_kwargs["force_text"] = True
     payload = read_geo(doc, **read_kwargs)
+    if isinstance(payload, Mapping):
+        payload = dict(payload)
+    else:
+        payload = {}
+    published = _payload_has_rows(payload)
     scan_info = geo_extractor.get_last_acad_table_scan() or {}
     tables_found = 0
     try:
@@ -208,7 +250,11 @@ def main(argv: Sequence[str] | None = None) -> int:
     except Exception:
         tables_found = 0
     geo_extractor.log_last_dxf_fallback(tables_found)
-    if tables_found == 0 and Path(path).suffix.lower() == ".dwg":
+    if (
+        tables_found == 0
+        and not published
+        and Path(path).suffix.lower() == ".dwg"
+    ):
         fallback_versions = [
             "ACAD2000",
             "ACAD2004",
@@ -227,13 +273,18 @@ def main(argv: Sequence[str] | None = None) -> int:
                 print(f"[ACAD-TABLE] DXF fallback {normalized_version} failed: {exc}")
                 continue
             payload = read_geo(fallback_doc, **read_kwargs)
+            if isinstance(payload, Mapping):
+                payload = dict(payload)
+            else:
+                payload = {}
+            published = _payload_has_rows(payload)
             scan_info = geo_extractor.get_last_acad_table_scan() or {}
             try:
                 tables_found = int(scan_info.get("tables_found", 0))  # type: ignore[arg-type]
             except Exception:
                 tables_found = 0
             geo_extractor.log_last_dxf_fallback(tables_found)
-            if tables_found:
+            if tables_found or published:
                 break
     if not isinstance(payload, Mapping):
         payload = {}
