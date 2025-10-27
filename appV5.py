@@ -59,6 +59,7 @@ from cad_quoter.app.quote_doc import (
     _sanitize_render_text,
 )
 from cad_quoter.pricing.machining_report import _drill_time_model
+from cad_quoter.utils.number_parse import NUM_DEC_RE, NUM_FRAC_RE, _to_inch
 from cad_quoter.utils.render_utils.tables import ascii_table
 
 
@@ -99,24 +100,6 @@ _re = re
 # --- Ops aggregation from HOLE TABLE rows (minimal) ---
 _SIDE_BOTH = re.compile(r"\b(FRONT\s*&\s*BACK|BOTH\s+SIDES)\b", re.I)
 _SIDE_BACK = re.compile(r"\b(?:FROM\s+)?BACK\b", re.I)
-# --- HOLE TABLE promotion helpers -------------------------------------------
-NUM_DEC_RE = re.compile(r"(?<!\d)(?:\d+\.\d+|\.\d+|\d+)(?!\d)")
-NUM_FRAC_RE = re.compile(r"(?<!\d)(\d+)\s*/\s*(\d+)(?!\d)")
-
-
-def _to_inch(num_text: str) -> float | None:
-    s = (num_text or "").strip()
-    if "/" in s:
-        try:
-            return float(Fraction(s))
-        except Exception:
-            return None
-    if s.startswith("."):
-        s = "0" + s
-    try:
-        return float(s)
-    except Exception:
-        return None
 
 
 def _rows_qty_sum(rows):
