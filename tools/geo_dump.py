@@ -640,6 +640,8 @@ def main(argv: Sequence[str] | None = None) -> int:
             hole_count = int(float(hole_count))
     except Exception:
         pass
+    if hole_count in (None, ""):
+        hole_count = qty_sum
 
     source = payload.get("source")
     if source is None and isinstance(ops_summary, Mapping):
