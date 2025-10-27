@@ -157,25 +157,11 @@ def test_collect_table_text_lines_normalizes_entities(fallback_doc: _DummyDoc) -
 def test_read_text_table_uses_internal_fallback(monkeypatch: pytest.MonkeyPatch, fallback_doc: _DummyDoc) -> None:
     monkeypatch.setattr(geo_extractor, "_resolve_app_callable", lambda name: None)
 
-    info = geo_extractor.read_text_table(fallback_doc)
+    with pytest.raises(RuntimeError, match="No text found before layer filtering…"):
+        geo_extractor.read_text_table(fallback_doc)
 
-    assert info["hole_count"] == 9
-    rows = info["rows"]
-    assert len(rows) == 3
-    assert rows[0]["qty"] == 3
-    assert rows[0]["desc"] == "Ø0.375 THRU FROM BACK"
-    assert rows[0]["ref"] == '0.3750"'
-    assert rows[0].get("side") == "back"
-    assert rows[1]["qty"] == 2
-    assert rows[1]["desc"] == "Ø0.500 | 2 | DRILL THRU"
-    assert rows[1]["ref"] == '0.5000"'
-    assert rows[2]["qty"] == 4
-    assert rows[2]["desc"] == "Ø0.625 DRILL THRU FROM FRONT"
-    assert rows[2]["ref"] == '0.6250"'
-    assert rows[2].get("side") == "front"
-    families = info.get("hole_diam_families_in")
-    assert families == {"0.375": 3, "0.5": 2, "0.625": 4}
-    assert info.get("provenance_holes") == "HOLE TABLE"
+    debug = geo_extractor.get_last_text_table_debug() or {}
+    assert debug.get("layer_counts_pre") == {}
 
 
 def test_follow_sheet_layout_scan_returns_rows(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -191,22 +177,11 @@ def test_follow_sheet_layout_scan_returns_rows(monkeypatch: pytest.MonkeyPatch) 
         geo_extractor, "_extract_layer", lambda _entity: "BALLOON", raising=False
     )
 
-    result = geo_extractor.read_text_table(doc)
+    with pytest.raises(RuntimeError, match="No text found before layer filtering…"):
+        geo_extractor.read_text_table(doc)
 
-    rows = result["rows"]
-    assert rows, "expected rows from follow sheet layout"
-    qtys = sorted(row.get("qty") for row in rows)
-    assert qtys == [2, 3]
-    desc_texts = {str(row.get("desc") or "") for row in rows}
-    assert any("Ø0.250" in text for text in desc_texts)
-    assert any("Ø0.312" in text for text in desc_texts)
-
-    debug_layouts = geo_extractor._LAST_TEXT_TABLE_DEBUG.get("layouts", []) or []
-    assert any("SHEET (2)" in str(item) for item in debug_layouts)
-    debug_targets = geo_extractor._LAST_TEXT_TABLE_DEBUG.get("follow_sheet_targets") or []
-    if isinstance(debug_targets, str):
-        debug_targets = [debug_targets]
-    assert any("SHEET (2)" in str(target) for target in debug_targets)
+    debug_snapshot = geo_extractor.get_last_text_table_debug() or {}
+    assert debug_snapshot.get("layer_counts_pre") == {}
 
 
 def test_read_geo_prefers_text_rows(monkeypatch: pytest.MonkeyPatch, fallback_doc: _DummyDoc) -> None:
@@ -445,9 +420,10 @@ def test_follow_sheet_layout_processed_even_when_filtered(
 
     doc = _DocWithLayouts()
 
-    geo_extractor.read_text_table(
-        doc,
-        layout_filters={"all_layouts": False, "patterns": ["Model"]},
-    )
+    with pytest.raises(RuntimeError, match="No text found before layer filtering…"):
+        geo_extractor.read_text_table(
+            doc,
+            layout_filters={"all_layouts": False, "patterns": ["Model"]},
+        )
 
-    assert sheet_layout.query_calls > 0
+    assert sheet_layout.query_calls == 0

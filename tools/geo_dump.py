@@ -446,7 +446,12 @@ def main(argv: Sequence[str] | None = None) -> int:
         read_kwargs["pipeline"] = args.pipeline
     if args.allow_geom:
         read_kwargs["allow_geom"] = True
-    payload = read_geo(doc, **read_kwargs)
+    try:
+        payload = read_geo(doc, **read_kwargs)
+    except RuntimeError as exc:
+        print(f"[geo_dump] ERROR: {exc}")
+        print("[geo_dump] Re-run with --dump-ents for diagnostics.")
+        return 2
     if isinstance(payload, Mapping):
         payload = dict(payload)
     else:
@@ -481,7 +486,12 @@ def main(argv: Sequence[str] | None = None) -> int:
             except Exception as exc:
                 print(f"[ACAD-TABLE] DXF fallback {normalized_version} failed: {exc}")
                 continue
-            payload = read_geo(fallback_doc, **read_kwargs)
+            try:
+                payload = read_geo(fallback_doc, **read_kwargs)
+            except RuntimeError as exc:
+                print(f"[geo_dump] ERROR: {exc}")
+                print("[geo_dump] Re-run with --dump-ents for diagnostics.")
+                return 2
             if isinstance(payload, Mapping):
                 payload = dict(payload)
             else:
