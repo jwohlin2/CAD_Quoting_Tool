@@ -1357,7 +1357,7 @@ def _rows_from_acad_table_with_info(
         if qty_idx is not None and qty_idx < len(row_cells):
             qty_val = _parse_qty_cell_text(row_cells[qty_idx])
         fallback_desc = ""
-        combined_qty, combined_remainder = _extract_row_quantity_and_remainder(combined_text)
+        combined_qty, combined_remainder = _extract_column_quantity_and_remainder(combined_text)
         if qty_val is None and combined_qty is not None and combined_qty > 0:
             qty_val = combined_qty
             fallback_desc = combined_remainder.strip()
@@ -1381,6 +1381,10 @@ def _rows_from_acad_table_with_info(
             ]
             desc_text = " ".join(desc_parts)
         desc_text = " ".join((desc_text or "").split())
+        if qty_val is not None and desc_text:
+            cleaned_desc = re.sub(r"^(?:\(\s*\d+\s*\)|\d+\s*[Xx×])\s+", "", desc_text, count=1)
+            if cleaned_desc:
+                desc_text = cleaned_desc
         if not desc_text:
             continue
 
@@ -1408,35 +1412,39 @@ def _rows_from_acad_table_with_info(
         )
         base_side = _detect_row_side(" ".join([side_cell_text, desc_text]))
 
-        fragments = [frag.strip() for frag in desc_text.split(";") if frag.strip()]
-        if not fragments:
-            fragments = [desc_text]
-
-        for fragment in fragments:
-            fragment_desc = " ".join(fragment.split())
-            if not fragment_desc:
-                continue
-            ref_text, ref_value = _extract_row_reference(fragment_desc)
-            if not ref_text and ref_cell_ref[0]:
-                ref_text, ref_value = ref_cell_ref
-            elif not ref_text and ref_cell_text:
-                ref_text = " ".join(ref_cell_text.split())
-                ref_value = None
-            side_value = _detect_row_side(" ".join([fragment_desc, side_cell_text]))
-            if not side_value:
-                side_value = base_side
-            row_entry: dict[str, Any] = {
-                "hole": hole_text,
-                "qty": qty_val,
-                "desc": fragment_desc,
-                "ref": ref_text,
-            }
-            if side_value:
-                row_entry["side"] = side_value
-            rows.append(row_entry)
-            if ref_value is not None:
-                key = f"{ref_value:.4f}".rstrip("0").rstrip(".")
-                families[key] = families.get(key, 0) + qty_val
+        fragment_desc = " ".join(desc_text.split())
+        if not fragment_desc:
+            continue
+        ref_text, ref_value = _extract_row_reference(fragment_desc)
+        if not ref_text and ref_cell_ref[0]:
+            ref_text, ref_value = ref_cell_ref
+        elif not ref_text and ref_cell_text:
+            ref_text = " ".join(ref_cell_text.split())
+            ref_value = None
+        if qty_val is not None and fragment_desc:
+            qty_prefix = re.match(r"^(\d+)\s*[Xx×]\s+(.*)", fragment_desc)
+            if qty_prefix:
+                prefix_qty = qty_prefix.group(1)
+                try:
+                    if int(prefix_qty) == int(qty_val):
+                        fragment_desc = qty_prefix.group(2).strip()
+                except Exception:
+                    fragment_desc = qty_prefix.group(2).strip()
+        side_value = _detect_row_side(" ".join([fragment_desc, side_cell_text]))
+        if not side_value:
+            side_value = base_side
+        row_entry: dict[str, Any] = {
+            "hole": hole_text,
+            "qty": qty_val,
+            "desc": fragment_desc,
+            "ref": ref_text,
+        }
+        if side_value:
+            row_entry["side"] = side_value
+        rows.append(row_entry)
+        if ref_value is not None:
+            key = f"{ref_value:.4f}".rstrip("0").rstrip(".")
+            families[key] = families.get(key, 0) + qty_val
 
     info["families"] = families
     info["row_count"] = len(rows)
@@ -2623,11 +2631,7 @@ def _has_candidate_token(text: str) -> bool:
 
 def _match_row_quantity(text: str) -> re.Match[str] | None:
     candidate = text or ""
-    for pattern in _ROW_QUANTITY_PATTERNS:
-        match = pattern.search(candidate)
-        if match:
-            return match
-    return None
+    return _ROW_ANCHOR_RE.match(candidate)
 
 
 def _search_flexible_quantity(text: str) -> re.Match[str] | None:
@@ -2678,6 +2682,44 @@ def _should_drop_candidate_line(text: Any) -> bool:
     if _is_numeric_ladder_line(normalized):
         return True
     return bool(_ADMIN_ROW_DROP_RE.search(normalized))
+
+
+def _norm_row_key(row: Mapping[str, Any] | Any) -> tuple[int, str]:
+    qty_value: Any = None
+    desc_source: str = ""
+    if isinstance(row, Mapping):
+        qty_value = row.get("qty")
+        desc_source = str(row.get("desc") or "")
+    else:
+        qty_value = getattr(row, "qty", None)
+        desc_source = str(getattr(row, "desc", "") or "")
+    try:
+        qty_int = int(float(qty_value or 0))
+    except Exception:
+        qty_int = 0
+    desc_normalized = " ".join(desc_source.split()).upper()
+    return (qty_int, desc_normalized)
+
+
+def _unique_rows_in_order(
+    row_sources: Iterable[Iterable[Mapping[str, Any]] | None]
+) -> tuple[list[dict[str, Any]], int]:
+    unique_rows: list[dict[str, Any]] = []
+    seen: set[tuple[int, str]] = set()
+    dropped = 0
+    for source in row_sources:
+        if not source:
+            continue
+        for row in source:
+            if not isinstance(row, Mapping):
+                continue
+            key = _norm_row_key(row)
+            if key in seen:
+                dropped += 1
+                continue
+            seen.add(key)
+            unique_rows.append(dict(row))
+    return unique_rows, dropped
 
 
 def _compute_anchor_height(entries: Iterable[Mapping[str, Any]]) -> tuple[float, int]:
@@ -2735,11 +2777,36 @@ def _extract_row_quantity_and_remainder(text: str) -> tuple[int | None, str]:
     if not base:
         return (None, "")
 
+    primary_match = _match_row_quantity(base)
+    if primary_match:
+        qty_text = primary_match.group(1)
+        try:
+            qty_val = int(qty_text)
+        except Exception:
+            qty_val = None
+        remainder = base[primary_match.end() :].strip()
+        return (qty_val, remainder)
+
+    return (None, base)
+
+
+def _extract_column_quantity_and_remainder(text: str) -> tuple[int | None, str]:
+    base = (text or "").strip()
+    if not base:
+        return (None, "")
+
+    def _match_any(candidate: str) -> re.Match[str] | None:
+        for pattern in _ROW_QUANTITY_PATTERNS:
+            match = pattern.search(candidate)
+            if match:
+                return match
+        return None
+
     def _strip_span(source: str, span: tuple[int, int]) -> str:
         start, end = span
         return (source[:start] + " " + source[end:]).strip()
 
-    primary_match = _match_row_quantity(base)
+    primary_match = _match_any(base)
     if primary_match:
         qty_text = primary_match.group(1)
         try:
@@ -2752,7 +2819,7 @@ def _extract_row_quantity_and_remainder(text: str) -> tuple[int | None, str]:
     letter_match = _LETTER_CODE_ROW_RE.match(base)
     if letter_match:
         remainder_body = base[letter_match.end() :].lstrip(" -.:|")
-        remainder_match = _match_row_quantity(remainder_body)
+        remainder_match = _match_any(remainder_body)
         if remainder_match:
             qty_text = remainder_match.group(1)
             try:
@@ -3560,7 +3627,7 @@ def _build_columnar_table_from_panel_entries(
             and desc_idx == qty_col
             and desc_text
         ):
-            inline_qty_val, inline_remainder = _extract_row_quantity_and_remainder(desc_text)
+            inline_qty_val, inline_remainder = _extract_column_quantity_and_remainder(desc_text)
             if inline_qty_val is not None and inline_qty_val > 0:
                 inline_qty_detail = {
                     "value": int(inline_qty_val),
@@ -3576,10 +3643,10 @@ def _build_columnar_table_from_panel_entries(
             inline_qty_val = None
             remainder = ""
             if desc_text:
-                inline_qty_val, remainder = _extract_row_quantity_and_remainder(desc_text)
-                source = "desc"
+                inline_qty_val, remainder = _extract_column_quantity_and_remainder(desc_text)
+            source = "desc"
             if inline_qty_val is None or inline_qty_val <= 0:
-                inline_qty_val, remainder = _extract_row_quantity_and_remainder(combined_text)
+                inline_qty_val, remainder = _extract_column_quantity_and_remainder(combined_text)
                 source = "combined"
             if inline_qty_val is not None and inline_qty_val > 0:
                 qty_val = inline_qty_val
@@ -4163,6 +4230,8 @@ def read_text_table(
     parsed_rows: list[dict[str, Any]] = []
     columnar_table_info: dict[str, Any] | None = None
     columnar_debug_info: dict[str, Any] | None = None
+    anchor_rows_primary: list[dict[str, Any]] = []
+    roi_rows_primary: list[dict[str, Any]] = []
     rows_txt_initial = 0
     confidence_high = False
 
@@ -4202,6 +4271,7 @@ def read_text_table(
         nonlocal table_lines, text_rows_info, merged_rows, parsed_rows
         nonlocal columnar_table_info, columnar_debug_info, roi_hint_effective
         nonlocal rows_txt_initial, doc, resolved_allowlist
+        nonlocal anchor_rows_primary, roi_rows_primary
         if table_lines is not None:
             return table_lines
 
@@ -4247,6 +4317,7 @@ def read_text_table(
         ) -> tuple[int, int, int]:
             nonlocal table_lines, text_rows_info, merged_rows, parsed_rows
             nonlocal columnar_table_info, columnar_debug_info, roi_hint_effective, rows_txt_initial
+            nonlocal anchor_rows_primary, roi_rows_primary
             nonlocal allowlist_display, follow_sheet_target_layouts
             nonlocal collected_entries, candidate_entries, entries_by_layout, layout_names
             nonlocal layout_order, see_sheet_hint_text, see_sheet_hint_logged
@@ -4259,6 +4330,8 @@ def read_text_table(
             parsed_rows = []
             text_rows_info = None
             rows_txt_initial = 0
+            anchor_rows_primary = []
+            roi_rows_primary = []
             hint_logged = False
             attrib_count = 0
             mleader_count = 0
@@ -5467,6 +5540,8 @@ def read_text_table(
             return (parsed, families, total)
 
         parsed_rows, families, total_qty = _parse_rows(merged_rows)
+        anchor_rows_primary = list(parsed_rows)
+        print(f"[TEXT-SCAN] pass=anchor rows={len(anchor_rows_primary)}")
 
         if follow_sheet_target_layouts:
             follow_debug_entries: list[dict[str, Any]] = []
@@ -5891,6 +5966,9 @@ def read_text_table(
             column_selected = True
             _print_promoted_rows_once(columnar_result.get("rows", []))
 
+    roi_rows_primary = _normalize_table_rows(columnar_result.get("rows")) if columnar_result else []
+    print(f"[TEXT-SCAN] pass=roi rows={len(roi_rows_primary)}")
+
     if primary_result is None:
         fallback = _fallback_text_table(lines)
         if fallback:
@@ -5912,6 +5990,40 @@ def read_text_table(
             return fallback
         _LAST_TEXT_TABLE_DEBUG["rows"] = []
         return {}
+
+    primary_rows = _normalize_table_rows(primary_result.get("rows"))
+    row_sources: list[list[dict[str, Any]]] = []
+    if anchor_rows_primary:
+        row_sources.append(list(anchor_rows_primary))
+        if roi_rows_primary:
+            row_sources.append(list(roi_rows_primary))
+        if primary_rows:
+            anchor_keys = {
+                _norm_row_key(row)
+                for row in anchor_rows_primary
+                if isinstance(row, Mapping)
+            }
+            extras = [
+                row
+                for row in primary_rows
+                if isinstance(row, Mapping) and _norm_row_key(row) not in anchor_keys
+            ]
+            if extras:
+                row_sources.append(extras)
+    else:
+        if primary_rows:
+            row_sources.append(list(primary_rows))
+        if roi_rows_primary:
+            row_sources.append(list(roi_rows_primary))
+
+    merged_unique_rows, dedup_dropped = _unique_rows_in_order(row_sources)
+    print(f"[TEXT-SCAN] merge_dedup final_rows={len(merged_unique_rows)}")
+    print(f"[TEXT-SCAN] dedup dropped={dedup_dropped}")
+    primary_result = dict(primary_result)
+    primary_result["rows"] = merged_unique_rows
+    final_qty_sum = _sum_qty(merged_unique_rows)
+    if final_qty_sum > 0:
+        primary_result["hole_count"] = final_qty_sum
 
     if column_selected:
         primary_result.setdefault("source", "text_table")
@@ -7208,9 +7320,6 @@ def read_geo(
             if totals_map:
                 ops_summary["totals"] = dict(totals_map)
             geo["hole_count"] = qty_sum
-            print(
-                f"[PATH] publish=text_table rows={len(publish_rows)} qty_sum={qty_sum}"
-            )
     else:
         geometry_rows_present = bool(rows)
         if geometry_rows_present and not allow_geom_rows:
