@@ -19,3 +19,6 @@ __pycache__/
 _dump.py
 GEO.txt
 latest_quote_error.txt
+
+# GEO dump artifacts
+out/
