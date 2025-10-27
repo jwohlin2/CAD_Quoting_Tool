@@ -4451,6 +4451,16 @@ def read_text_table(
             return dict(counts)
 
         layer_counts_pre = _count_layers(collected_entries)
+        total_layer_hits = sum(layer_counts_pre.values())
+        if total_layer_hits == 0:
+            if isinstance(_LAST_TEXT_TABLE_DEBUG, dict):
+                _LAST_TEXT_TABLE_DEBUG["layer_counts_pre"] = dict(layer_counts_pre)
+                _LAST_TEXT_TABLE_DEBUG["layout_counts_pre"] = {}
+                _LAST_TEXT_TABLE_DEBUG["scanned_layers"] = sorted(
+                    scanned_layers_map.values(), key=lambda value: value.upper()
+                )
+                _LAST_TEXT_TABLE_DEBUG["scanned_layouts"] = list(layout_names_seen)
+            raise RuntimeError("No text found before layer filtering…")
         layout_counts_pre = _count_layouts(collected_entries)
         print(f"[TEXT-SCAN] kept_by_layer(pre)={_format_layer_summary(layer_counts_pre)}")
         if isinstance(_LAST_TEXT_TABLE_DEBUG, dict):
@@ -6376,10 +6386,14 @@ def read_geo(
             if "layer_allowlist" in str(exc) or "roi_hint" in str(exc) or "layout_filters" in str(exc):
                 try:
                     text_info = read_text_table(doc) or {}
+                except RuntimeError:
+                    raise
                 except Exception:
                     text_info = {}
             else:
                 raise
+        except RuntimeError:
+            raise
         except Exception:
             text_info = {}
     else:
