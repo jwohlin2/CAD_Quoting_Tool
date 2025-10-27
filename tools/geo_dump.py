@@ -456,6 +456,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     if include_layer_patterns:
         read_kwargs["layer_include_regex"] = list(include_layer_patterns)
         print(f"[geo_dump] include_layer={include_layer_patterns}")
+    active_layer_exclude: list[str] | None = None
     exclude_layer_patterns = [
         value.strip()
         for value in args.exclude_layer or []
@@ -471,6 +472,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             )
         else:
             print("[geo_dump] exclude_layer=<none> (defaults disabled)")
+        active_layer_exclude = list(exclude_layer_patterns)
     elif exclude_layer_patterns:
         combined_patterns = list(DEFAULT_TEXT_LAYER_EXCLUDE_REGEX) + list(
             exclude_layer_patterns
@@ -481,6 +483,9 @@ def main(argv: Sequence[str] | None = None) -> int:
                 patterns=exclude_layer_patterns
             )
         )
+        active_layer_exclude = list(combined_patterns)
+    if active_layer_exclude is None:
+        active_layer_exclude = list(DEFAULT_TEXT_LAYER_EXCLUDE_REGEX)
     if args.debug_layouts:
         read_kwargs["debug_layouts"] = True
     if args.debug_scan:
@@ -491,6 +496,9 @@ def main(argv: Sequence[str] | None = None) -> int:
         read_kwargs["pipeline"] = args.pipeline
     if args.allow_geom:
         read_kwargs["allow_geom"] = True
+    if args.show_helpers:
+        display_regex = ", ".join(active_layer_exclude) if active_layer_exclude else "<none>"
+        print(f"[geo_dump] active layer exclude regex={display_regex}")
     try:
         payload = read_geo(doc, **read_kwargs)
     except NoTextRowsError:

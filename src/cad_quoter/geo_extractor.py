@@ -1703,6 +1703,10 @@ def _split_mtext_plain_text(text: Any) -> list[str]:
 _HOLE_ACTION_TOKEN_PATTERN = (
     r"(Ø|⌀|C['’]?BORE|COUNTER\s*BORE|DRILL|TAP|N\.?P\.?T|NPT|THRU|JIG\s*GRIND)"
 )
+_ADMIN_ROW_DROP_RE = re.compile(
+    r"\b(SEE\s+SHEET|BREAK\s+ALL|RADIUS|DEBURR|TOLERANCE|SCALE|TITLE|DETAIL|FINISH|NOTE)\b",
+    re.IGNORECASE,
+)
 _FRAGMENT_SPLIT_RE = re.compile(r";|(?<=\))\s+(?=\d+\))")
 _INCH_MARK_REF_RE = re.compile(r"\b(\d+(?:\.\d+)?)(?:\s*\"|[ ]?in\b)", re.IGNORECASE)
 _DIA_SYMBOL_INLINE_RE = re.compile(r"[Ø⌀]\s*(\d+(?:\.\d+)?)")
@@ -2648,9 +2652,9 @@ def _is_letter_code_row_start(text: str, next_text: str | None = None) -> bool:
 
 
 def _is_row_start(text: str, *, next_text: str | None = None) -> bool:
-    if _match_row_quantity(text):
-        return True
-    return _is_letter_code_row_start(text, next_text)
+    if not text:
+        return False
+    return bool(_ROW_QUANTITY_PATTERNS[0].match(text))
 
 
 def _extract_row_quantity_and_remainder(text: str) -> tuple[int | None, str]:
@@ -4167,7 +4171,33 @@ def read_text_table(
         layout_names: dict[int, str] = {}
         layout_order: list[int] = []
 
-        def _perform_text_scan(current_allowlist: _LayerAllowlist | None) -> tuple[int, int, int]:
+        def _filter_and_dedupe_row_texts(row_texts: Iterable[str]) -> list[str]:
+            filtered: list[str] = []
+            seen: set[tuple[str, str]] = set()
+            for raw_text in row_texts:
+                candidate = " ".join(str(raw_text or "").split()).strip()
+                if not candidate:
+                    continue
+                if _ADMIN_ROW_DROP_RE.search(candidate):
+                    continue
+                match = _ROW_QUANTITY_PATTERNS[0].match(candidate)
+                if not match:
+                    continue
+                qty_token = match.group(1)
+                remainder = candidate[match.end() :].strip()
+                normalized_desc = " ".join(remainder.split()).upper()
+                key = (qty_token, normalized_desc)
+                if key in seen:
+                    continue
+                seen.add(key)
+                filtered.append(candidate)
+            return filtered
+
+        def _perform_text_scan(
+            current_allowlist: _LayerAllowlist | None,
+            *,
+            ignore_regex_excludes: bool = False,
+        ) -> tuple[int, int, int]:
             nonlocal table_lines, text_rows_info, merged_rows, parsed_rows
             nonlocal columnar_table_info, columnar_debug_info, roi_hint_effective, rows_txt_initial
             nonlocal allowlist_display, follow_sheet_target_layouts
@@ -4794,8 +4824,9 @@ def read_text_table(
                             if value and pattern.search(value):
                                 return True
                     return False
-    
+
                 regex_filtered: list[dict[str, Any]] = []
+                active_exclude_patterns = [] if ignore_regex_excludes else list(exclude_patterns)
                 for entry in collected_entries:
                     layer_text = str(
                         entry.get("effective_layer")
@@ -4812,8 +4843,8 @@ def read_text_table(
                     if include_patterns:
                         include_ok = _matches_any(include_patterns, values)
                     exclude_hit = False
-                    if include_ok and exclude_patterns:
-                        exclude_hit = _matches_any(exclude_patterns, values)
+                    if include_ok and active_exclude_patterns:
+                        exclude_hit = _matches_any(active_exclude_patterns, values)
                     if include_ok and not exclude_hit:
                         regex_filtered.append(entry)
                 kept = len(regex_filtered)
@@ -4872,9 +4903,7 @@ def read_text_table(
     
             layer_counts_post = _count_layers(filtered_entries)
             layout_counts_post = _count_layouts(filtered_entries)
-            print(
-                f"[TEXT-SCAN] kept_by_layer(post-allow)={_format_layer_summary(layer_counts_post)}"
-            )
+            print(f"[TEXT-SCAN] kept_by_layer(post)={_format_layer_summary(layer_counts_post)}")
     
             am_bor_pre_count = _lookup_layer_count(layer_counts_pre, "AM_BOR")
             am_bor_post_count = _lookup_layer_count(layer_counts_post, "AM_BOR")
@@ -5151,6 +5180,10 @@ def read_text_table(
                     row_active = False
                     continuation_budget = 0
                     continue
+                if _ADMIN_ROW_DROP_RE.search(stripped):
+                    row_active = False
+                    continuation_budget = 0
+                    continue
                 next_text = (
                     collected_entries[idx + 1].get("text", "")
                     if idx + 1 < len(collected_entries)
@@ -5244,6 +5277,8 @@ def read_text_table(
                 line = entry.get("normalized_text", "").strip()
                 if not line:
                     continue
+                if _ADMIN_ROW_DROP_RE.search(line):
+                    continue
                 next_line = (
                     candidate_entries[idx + 1].get("normalized_text", "")
                     if idx + 1 < len(candidate_entries)
@@ -5257,43 +5292,45 @@ def read_text_table(
                     current_row.append(line)
             if current_row:
                 merged_rows.append(" ".join(current_row))
-    
+
+            merged_rows = _filter_and_dedupe_row_texts(merged_rows)
             rows_txt_initial = len(merged_rows)
             _LAST_TEXT_TABLE_DEBUG["rows_txt_count"] = rows_txt_initial
             _LAST_TEXT_TABLE_DEBUG["rows_txt_lines"] = list(merged_rows)
-            print(f"[TEXT-SCAN] rows_txt count={len(merged_rows)}")
-            for idx, row_text in enumerate(merged_rows[:10]):
-                print(f"  [{idx:02d}] {row_text}")
-    
+
             return (am_bor_pre_count, am_bor_post_count, am_bor_drop_count)
 
-        am_bor_pre_count, am_bor_post_count, am_bor_drop_count = _perform_text_scan(resolved_allowlist)
-        if (
-            resolved_allowlist is not None
-            and am_bor_pre_count >= 20
-            and am_bor_post_count == 0
-            and rows_txt_initial < 8
-        ):
-            tokens = list(resolved_allowlist)
+        am_bor_pre_count, am_bor_post_count, am_bor_drop_count = _perform_text_scan(
+            resolved_allowlist
+        )
+        if am_bor_pre_count >= 20 and am_bor_post_count == 0 and rows_txt_initial < 8:
+            tokens: list[str] = []
+            if resolved_allowlist is not None:
+                tokens = list(resolved_allowlist)
             token_set = {str(token).upper() for token in tokens}
-            if "AM_BOR" not in token_set:
-                drop_display = f"{am_bor_drop_count}+" if am_bor_drop_count >= 100 else str(am_bor_drop_count)
+            if "AM_BOR" not in token_set or resolved_allowlist is None:
                 print(
-                    f"[TEXT-SCAN] auto-retry including AM_BOR (dropped {drop_display} lines on first pass)"
+                    "[TEXT-SCAN] auto-retry including AM_BOR (first pass dropped chart layer)"
                 )
                 if isinstance(_LAST_TEXT_TABLE_DEBUG, dict):
                     _LAST_TEXT_TABLE_DEBUG.setdefault("auto_retry", {})["include_am_bor"] = {
                         "dropped": int(am_bor_drop_count),
                         "pre": int(am_bor_pre_count),
                     }
-                tokens.append("AM_BOR")
+                if "AM_BOR" not in token_set:
+                    tokens.append("AM_BOR")
+                elif not tokens:
+                    tokens = ["AM_BOR"]
                 resolved_allowlist = _normalize_layer_allowlist(tokens)
                 allowlist_display = (
                     "None"
                     if resolved_allowlist is None
                     else "{" + ",".join(sorted(resolved_allowlist) or []) + "}"
                 )
-                am_bor_pre_count, am_bor_post_count, am_bor_drop_count = _perform_text_scan(resolved_allowlist)
+                am_bor_pre_count, am_bor_post_count, am_bor_drop_count = _perform_text_scan(
+                    resolved_allowlist,
+                    ignore_regex_excludes=True,
+                )
         
         def _parse_rows(row_texts: list[str]) -> tuple[list[dict[str, Any]], dict[str, int], int]:
             families: dict[str, int] = {}
@@ -5303,74 +5340,37 @@ def read_text_table(
                 text_value = " ".join((row_text or "").split()).strip()
                 if not text_value:
                     continue
-                original_text = text_value
-                qty_val, remainder = _extract_row_quantity_and_remainder(text_value)
-                remainder_clean = remainder.strip()
-                remainder_normalized = " ".join(remainder_clean.split())
-                qty_prefix: str | None = None
-                if text_value:
-                    match = _match_row_quantity(text_value)
-                    if match:
-                        qty_prefix = match.group(0).strip()
-                if qty_val is None or qty_val <= 0:
+                if _ADMIN_ROW_DROP_RE.search(text_value):
                     continue
-                side_hint = _detect_row_side(text_value)
-                fragment_candidates = _FRAGMENT_SPLIT_RE.split(remainder)
-                fragments = [frag.strip() for frag in fragment_candidates if frag.strip()]
-                if not fragments:
-                    base_fragment = remainder_clean or text_value
-                    fragments = [base_fragment]
-                has_paren_prefix = bool(_ROW_QUANTITY_PATTERNS[0].match(text_value))
-                for fragment in fragments:
-                    fragment_clean = " ".join(fragment.split())
-                    if not fragment_clean:
-                        continue
-                    display_fragment = fragment_clean
-                    if qty_prefix and len(fragments) > 1:
-                        prefix = qty_prefix
-                        qty_prefix = None
-                        if not display_fragment.startswith(prefix):
-                            display_fragment = f"{prefix} {display_fragment}".strip()
-                    ref_text, ref_value = _extract_row_reference(fragment_clean)
-                    has_action = bool(_HOLE_ACTION_TOKEN_RE.search(fragment_clean))
-                    has_reference = bool(ref_text or (ref_value is not None))
-                    if not has_action and not has_reference:
-                        continue
-                    side = _detect_row_side(fragment_clean) or side_hint
-                    desc_value = fragment_clean
-                    qty_int: int | None = None
-                    qty_token: str | None = None
-                    if qty_val is not None:
-                        try:
-                            qty_int = int(qty_val)
-                        except Exception:
-                            qty_int = None
-                    if qty_int is not None:
-                        qty_token = f"({qty_int})"
-                    if (
-                        qty_token
-                        and original_text.startswith("(")
-                        and not fragment_clean.startswith("(")
-                    ):
-                        desc_value = f"{qty_token} {fragment_clean}".strip()
-                    letter_match = _LETTER_CODE_ROW_RE.match(original_text)
-                    if letter_match and not desc_value.startswith(letter_match.group(0)):
-                        desc_value = original_text
-                    elif qty_token and qty_token in original_text and qty_token not in desc_value:
-                        desc_value = original_text
-                    row_dict: dict[str, Any] = {
-                        "hole": "",
-                        "qty": qty_val,
-                        "desc": display_fragment,
-                        "ref": ref_text,
-                    }
-                    if side:
-                        row_dict["side"] = side
-                    parsed.append(row_dict)
-                    total += qty_val
-                    if ref_value is not None:
-                        key = f"{ref_value:.4f}".rstrip("0").rstrip(".")
-                        families[key] = families.get(key, 0) + qty_val
+                match = _ROW_QUANTITY_PATTERNS[0].match(text_value)
+                if not match:
+                    continue
+                qty_text = match.group(1)
+                try:
+                    qty_val = int(qty_text)
+                except Exception:
+                    continue
+                if qty_val <= 0:
+                    continue
+                remainder = text_value[match.end() :].strip()
+                desc_value = " ".join(remainder.split()) or text_value
+                if _ADMIN_ROW_DROP_RE.search(desc_value):
+                    continue
+                side_value = _detect_row_side(text_value) or _detect_row_side(desc_value)
+                ref_text, ref_value = _extract_row_reference(desc_value)
+                row_dict: dict[str, Any] = {
+                    "hole": "",
+                    "qty": qty_val,
+                    "desc": desc_value,
+                    "ref": ref_text or "",
+                }
+                if side_value:
+                    row_dict["side"] = side_value
+                parsed.append(row_dict)
+                total += qty_val
+                if ref_value is not None:
+                    key = f"{ref_value:.4f}".rstrip("0").rstrip(".")
+                    families[key] = families.get(key, 0) + qty_val
             return (parsed, families, total)
 
         parsed_rows, families, total_qty = _parse_rows(merged_rows)
@@ -5498,6 +5498,7 @@ def read_text_table(
             clusters = _cluster_entries_by_y(candidate_entries)
             fallback_rows = _clusters_to_rows(clusters)
             fallback_rows = [row for row in fallback_rows if row]
+            fallback_rows = _filter_and_dedupe_row_texts(fallback_rows)
             fallback_parsed, fallback_families, fallback_qty = _parse_rows(fallback_rows)
             print(
                 f"[TEXT-SCAN] fallback clusters={len(clusters)} "
@@ -5612,9 +5613,15 @@ def read_text_table(
                 if "roi" in debug_payload:
                     _LAST_TEXT_TABLE_DEBUG["roi"] = debug_payload.get("roi")
 
+        _LAST_TEXT_TABLE_DEBUG["rows_txt_count"] = len(merged_rows)
+        _LAST_TEXT_TABLE_DEBUG["rows_txt_lines"] = list(merged_rows)
+        print(f"[TEXT-SCAN] rows_txt count={len(merged_rows)}")
+        for idx, row_text in enumerate(merged_rows[:3]):
+            print(f"  [{idx:02d}] {row_text}")
+
         _LAST_TEXT_TABLE_DEBUG["text_row_count"] = len(parsed_rows)
         print(f"[TEXT-SCAN] parsed rows: {len(parsed_rows)}")
-        for idx, row in enumerate(parsed_rows[:20]):
+        for idx, row in enumerate(parsed_rows[:3]):
             ref_val = row.get("ref") or ""
             side_val = row.get("side") or ""
             desc_val = row.get("desc") or ""
@@ -6593,6 +6600,7 @@ def promote_table_to_geo(geo: dict[str, Any], table_info: Mapping[str, Any], sou
     ops_summary["rows"] = list(rows)
     ops_summary["source"] = source_tag
     totals = defaultdict(int)
+    qty_sum = 0
     for row in rows:
         if not isinstance(row, Mapping):
             continue
@@ -6603,6 +6611,7 @@ def promote_table_to_geo(geo: dict[str, Any], table_info: Mapping[str, Any], sou
         desc = str(row.get("desc") or "").upper()
         if qty <= 0:
             continue
+        qty_sum += qty
         if "TAP" in desc:
             totals["tap"] += qty
             totals["drill"] += qty
@@ -6633,6 +6642,14 @@ def promote_table_to_geo(geo: dict[str, Any], table_info: Mapping[str, Any], sou
             totals["spot"] += qty
     if totals:
         ops_summary["totals"] = dict(totals)
+    if source_tag == "text_table" and qty_sum > 0:
+        geo["hole_count"] = qty_sum
+        provenance = geo.setdefault("provenance", {})
+        if isinstance(provenance, Mapping) and not isinstance(provenance, dict):
+            provenance = dict(provenance)
+            geo["provenance"] = provenance
+        if isinstance(provenance, dict):
+            provenance["holes"] = "HOLE TABLE"
     preferred_hole_count = _sum_qty(rows)
     hole_count = table_info.get("hole_count")
     if preferred_hole_count > 0:
@@ -6957,21 +6974,21 @@ def read_geo(
     )
     if run_text and auto_text_fallback:
         publish_info = fallback_info
-        publish_source_tag = "text"
+        publish_source_tag = "text_table"
         fallback_selected = True
     elif run_text and force_text_mode:
         publish_info = fallback_info
-        publish_source_tag = "text"
+        publish_source_tag = "text_table"
         fallback_selected = True
     elif run_acad and acad_rows_list:
         publish_info = acad_info
-        publish_source_tag = "acad"
+        publish_source_tag = "acad_table"
     elif run_text and text_rows_list:
         publish_info = text_info
-        publish_source_tag = "text"
+        publish_source_tag = "text_table"
     elif run_text and fallback_info and fallback_rows_list:
         publish_info = fallback_info
-        publish_source_tag = "text"
+        publish_source_tag = "text_table"
         fallback_selected = True
 
     score_a = _score_table(acad_info)
@@ -6986,16 +7003,16 @@ def read_geo(
         publish_info = dict(best_table)
         publish_info["rows"] = _normalize_table_rows(publish_info.get("rows"))
         if run_acad and best_table is acad_info:
-            publish_source_tag = "acad"
+            publish_source_tag = "acad_table"
         else:
-            publish_source_tag = "text"
+            publish_source_tag = "text_table"
     publish_rows: list[dict[str, Any]] = []
     if isinstance(publish_info, Mapping):
         publish_rows = list(publish_info.get("rows") or [])
     skip_acad = bool(
         publish_rows
         and publish_source_tag
-        and str(publish_source_tag).lower() == "text"
+        and str(publish_source_tag).lower() == "text_table"
     )
     if pipeline_normalized in {"text", "geom"}:
         skip_acad = True
@@ -7022,9 +7039,9 @@ def read_geo(
         ):
             can_promote = True
         if can_promote:
-            promote_table_to_geo(geo, publish_info, publish_source_tag or "text")
+            promote_table_to_geo(geo, publish_info, publish_source_tag or "text_table")
             table_used = True
-            if publish_source_tag and publish_source_tag == "text":
+            if publish_source_tag and publish_source_tag == "text_table":
                 _print_promoted_rows_once(publish_rows)
 
     if not isinstance(best_table, Mapping) or not best_table.get("rows"):
@@ -7049,6 +7066,54 @@ def read_geo(
         ops_summary["rows"] = list(publish_rows)
         if publish_source_tag:
             ops_summary["source"] = publish_source_tag
+        if publish_source_tag == "text_table":
+            provenance = geo.setdefault("provenance", {})
+            if isinstance(provenance, Mapping) and not isinstance(provenance, dict):
+                provenance = dict(provenance)
+                geo["provenance"] = provenance
+            if isinstance(provenance, dict):
+                provenance["holes"] = "HOLE TABLE"
+            totals_map = defaultdict(int)
+            for row in publish_rows:
+                if not isinstance(row, Mapping):
+                    continue
+                try:
+                    qty_val = int(float(row.get("qty") or 0))
+                except Exception:
+                    qty_val = 0
+                if qty_val <= 0:
+                    continue
+                desc_upper = str(row.get("desc") or "").upper()
+                if "TAP" in desc_upper:
+                    totals_map["tap"] += qty_val
+                    totals_map["drill"] += qty_val
+                    if "BACK" in desc_upper and "FRONT" not in desc_upper:
+                        totals_map["tap_back"] += qty_val
+                    elif "FRONT" in desc_upper and "BACK" in desc_upper:
+                        totals_map["tap_front"] += qty_val
+                        totals_map["tap_back"] += qty_val
+                    else:
+                        totals_map["tap_front"] += qty_val
+                if any(marker in desc_upper for marker in ("CBORE", "COUNTERBORE", "C'BORE")):
+                    totals_map["counterbore"] += qty_val
+                    if "BACK" in desc_upper and "FRONT" not in desc_upper:
+                        totals_map["counterbore_back"] += qty_val
+                    elif "FRONT" in desc_upper and "BACK" in desc_upper:
+                        totals_map["counterbore_front"] += qty_val
+                        totals_map["counterbore_back"] += qty_val
+                    else:
+                        totals_map["counterbore_front"] += qty_val
+                if "JIG GRIND" in desc_upper:
+                    totals_map["jig_grind"] += qty_val
+                if (
+                    "SPOT" in desc_upper
+                    or "CENTER DRILL" in desc_upper
+                    or "C DRILL" in desc_upper
+                    or "C’DRILL" in desc_upper
+                ) and "TAP" not in desc_upper and "THRU" not in desc_upper:
+                    totals_map["spot"] += qty_val
+            if totals_map:
+                ops_summary["totals"] = dict(totals_map)
     else:
         geometry_rows_present = bool(rows)
         if geometry_rows_present and not allow_geom_rows:
@@ -7109,14 +7174,15 @@ def read_geo(
             rows_for_log = list(text_rows_list)
     source_display = ops_summary.get("source") if isinstance(ops_summary, Mapping) else None
     source_lower = str(source_display or "").lower()
-    if "text" in source_lower:
+    if source_lower == "text_table":
         skip_acad = True
-    if "acad" in source_lower:
-        publish_path = "acad"
-    elif "text" in source_lower:
-        publish_path = "text"
+        publish_path = "text_table"
+    elif source_lower == "acad_table":
+        publish_path = "acad_table"
+    elif source_lower:
+        publish_path = source_lower
     else:
-        publish_path = source_lower or "geom"
+        publish_path = "geom"
     print(f"[PATH] publish={publish_path} rows={len(rows_for_log)} qty_sum={qty_sum}")
     print(
         f"[EXTRACT] published rows={len(rows_for_log)} qty_sum={qty_sum} "
