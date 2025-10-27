@@ -182,6 +182,11 @@ def main(argv: Sequence[str] | None = None) -> int:
         help="Print raw text table candidates from the DXF/DWG",
     )
     parser.add_argument(
+        "--debug-scan",
+        action="store_true",
+        help="Emit detailed text-entity scan diagnostics",
+    )
+    parser.add_argument(
         "--show-helpers",
         action="store_true",
         help="Print helper resolution diagnostics",
@@ -310,6 +315,11 @@ def main(argv: Sequence[str] | None = None) -> int:
         const="debug/rows.csv",
         default=None,
         help="Write extracted rows to CSV (optional custom path; default debug/rows.csv)",
+    )
+    parser.add_argument(
+        "--dump-ents",
+        dest="dump_ents",
+        help="Write scanned text entities to CSV",
     )
     args = parser.parse_args(argv)
 
@@ -440,6 +450,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         )
     if args.debug_layouts:
         read_kwargs["debug_layouts"] = True
+    if args.debug_scan:
+        read_kwargs["debug_scan"] = True
     if args.force_text:
         read_kwargs["force_text"] = True
     if args.pipeline:
@@ -783,6 +795,33 @@ def main(argv: Sequence[str] | None = None) -> int:
             print(f"[geo_dump] wrote rows CSV to {csv_target}")
 
     debug_info = geo_extractor.get_last_text_table_debug() or {}
+
+    if args.dump_ents:
+        entities = debug_info.get("collected_entities") if isinstance(debug_info, Mapping) else None
+        target_path = Path(args.dump_ents)
+        try:
+            target_path.parent.mkdir(parents=True, exist_ok=True)
+            with target_path.open("w", newline="", encoding="utf-8") as handle:
+                writer = csv.writer(handle)
+                writer.writerow(["layout", "layer", "type", "x", "y", "height", "text"])
+                for entry in entities or []:
+                    if not isinstance(entry, Mapping):
+                        continue
+                    writer.writerow(
+                        [
+                            str(entry.get("layout", "")),
+                            str(entry.get("layer", "")),
+                            str(entry.get("type", "")),
+                            "" if entry.get("x") is None else entry.get("x"),
+                            "" if entry.get("y") is None else entry.get("y"),
+                            "" if entry.get("height") is None else entry.get("height"),
+                            str(entry.get("text", "")),
+                        ]
+                    )
+        except OSError as exc:
+            print(f"[geo_dump] failed to write entity dump: {exc}")
+        else:
+            print(f"[geo_dump] wrote entity dump to {target_path}")
 
     def _format_counts(counts: Mapping[str, int] | None) -> str:
         if not counts:

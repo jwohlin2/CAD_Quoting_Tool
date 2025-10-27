@@ -3861,6 +3861,7 @@ def read_text_table(
     layer_exclude_regex: Iterable[str] | str | None = DEFAULT_TEXT_LAYER_EXCLUDE_REGEX,
     layout_filters: Mapping[str, Any] | None = None,
     debug_layouts: bool = False,
+    debug_scan: bool = False,
 ) -> dict[str, Any]:
     helper = _resolve_app_callable("extract_hole_table_from_text")
     _print_helper_debug("text", helper)
@@ -3877,6 +3878,7 @@ def read_text_table(
         "bands": [],
         "layout_filters": layout_filters,
     }
+    debug_scan_enabled = bool(debug_scan)
     roi_hint_effective: Mapping[str, Any] | None = roi_hint
     resolved_allowlist = _normalize_layer_allowlist(layer_allowlist)
     normalized_block_allow = _normalize_block_allowlist(block_name_allowlist)
@@ -3887,6 +3889,7 @@ def read_text_table(
             "all_layouts": allow_all_layouts,
             "patterns": [pattern.pattern for pattern in layout_filter_patterns],
         }
+        _LAST_TEXT_TABLE_DEBUG["debug_scan_requested"] = debug_scan_enabled
 
     def _compile_layer_patterns(
         patterns: Iterable[str] | str | None,
@@ -3994,6 +3997,14 @@ def read_text_table(
         follow_sheet_target_layout: str | None = None
         follow_sheet_requests: dict[str, dict[str, Any]] = {}
         follow_sheet_target_layouts: list[str] = []
+        layout_lookup: dict[str, Any] = {}
+        layout_name_lookup: dict[str, str] = {}
+        layout_index_lookup: dict[str, int] = {}
+        visited_layout_keys: set[tuple[str, str]] = set()
+        expanded_layouts: list[str] = []
+        all_layout_names: set[str] = set()
+        follow_sheet_directives: list[dict[str, Any]] = []
+        layout_scan_debug: list[dict[str, Any]] = []
 
         if doc is None:
             table_lines = []
@@ -4153,6 +4164,7 @@ def read_text_table(
             source: str = "initial",
         ) -> bool:
             nonlocal hint_logged, attrib_count, mleader_count, follow_sheet_directive
+            nonlocal follow_sheet_directives
             if not _scan_layout_body(layout_index, layout_name, layout_obj, source=source):
                 return False
 
@@ -4237,6 +4249,7 @@ def read_text_table(
                     effective_layer = candidate
                     effective_layer_upper = candidate.upper() if candidate else ""
                 if kind in {"TEXT", "MTEXT", "ATTRIB", "ATTDEF", "MLEADER", "RTEXT"}:
+                    entity_type = "ATTRIB" if kind in {"ATTRIB", "ATTDEF"} else kind
                     coords = _extract_coords(entity)
                     coords = _apply_transform_point(flattened.transform, coords)
                     text_height = _extract_text_height(entity)
@@ -4267,14 +4280,15 @@ def read_text_table(
                                 "[HINT] Chart may live on an alternate sheet/block; ensure its INSERT is present and not on a frozen/off layer."
                             )
                             hint_logged = True
-                        if follow_sheet_directive is None:
-                            match = _FOLLOW_SHEET_DIRECTIVE_RE.search(normalized)
-                            if match:
-                                follow_sheet_directive = {
-                                    "layout": layout_name,
-                                    "token": match.group("target"),
-                                    "text": normalized,
-                                }
+                        match = _FOLLOW_SHEET_DIRECTIVE_RE.search(normalized)
+                        if match:
+                            directive_entry = {
+                                "layout": layout_name,
+                                "token": match.group("target"),
+                                "text": normalized,
+                            }
+                            follow_sheet_directive = directive_entry
+                            follow_sheet_directives.append(directive_entry)
                         entry = {
                             "layout_index": layout_index,
                             "layout_name": layout_name,
@@ -4290,6 +4304,7 @@ def read_text_table(
                             "effective_layer_upper": effective_layer_upper,
                             "block_name": active_block,
                             "block_stack": list(flattened.block_stack),
+                            "entity_type": entity_type,
                         }
                         counter += 1
                         collected_entries.append(entry)
@@ -4379,20 +4394,126 @@ def read_text_table(
                 )
             return True
 
-        if follow_sheet_directive:
-            token_value = follow_sheet_directive.get("token") if isinstance(follow_sheet_directive, Mapping) else None
-            catalog = [name for name in layout_names_seen if isinstance(name, str)]
-            target_label, resolved_layout, resolved_found = _resolve_follow_sheet_layout(
-                token_value or "", catalog
+        layout_pairs = _iter_layouts()
+        catalog_all = [name for name, _ in layout_pairs if isinstance(name, str)]
+        all_layout_names.update(catalog_all)
+        layout_queue: list[tuple[int, Any, Any, str, bool]] = []
+        layout_attempts: defaultdict[str, int] = defaultdict(int)
+        skip_initial_layouts: set[str] = set()
+        scanned_layout_keys: set[str] = set()
+        next_layout_index = 0
+        for layout_name, layout_obj in layout_pairs:
+            layout_label = str(layout_name or "")
+            normalized_key = _normalize_layout_key(layout_label)
+            if normalized_key:
+                layout_lookup.setdefault(normalized_key, layout_obj)
+                layout_name_lookup.setdefault(normalized_key, layout_label)
+                layout_index_lookup.setdefault(normalized_key, next_layout_index)
+                layout_attempts[normalized_key] += 1
+            if isinstance(layout_name, str):
+                all_layout_names.add(layout_name)
+            layout_queue.append((next_layout_index, layout_name, layout_obj, "initial", False))
+            next_layout_index += 1
+
+        processed_directive_count = 0
+        while layout_queue:
+            layout_index, layout_name, layout_obj, source, bypass_filter = layout_queue.pop(0)
+            layout_label = str(layout_name or "")
+            normalized_key = _normalize_layout_key(layout_label)
+            if normalized_key and normalized_key in skip_initial_layouts and not bypass_filter:
+                skip_initial_layouts.discard(normalized_key)
+                layout_scan_debug.append(
+                    {
+                        "layout": layout_name,
+                        "source": source,
+                        "allowed": True,
+                        "scanned": False,
+                        "skipped": True,
+                    }
+                )
+                continue
+            allowed = bypass_filter or _layout_matches_filter(
+                layout_label, allow_all_layouts, layout_filter_patterns
             )
-            follow_sheet_requests[target_label] = {
-                "token": token_value,
-                "target": target_label,
-                "resolved": resolved_layout,
-                "found": resolved_found,
-            }
-            if resolved_layout:
-                follow_sheet_target_layouts.append(resolved_layout)
+            if not allowed:
+                layout_scan_debug.append(
+                    {
+                        "layout": layout_name,
+                        "source": source,
+                        "allowed": False,
+                    }
+                )
+                continue
+            scanned = _scan_layout_entities(layout_index, layout_name, layout_obj, source=source)
+            layout_scan_debug.append(
+                {
+                    "layout": layout_name,
+                    "source": source,
+                    "allowed": True,
+                    "scanned": bool(scanned),
+                }
+            )
+            if scanned and normalized_key:
+                scanned_layout_keys.add(normalized_key)
+            while processed_directive_count < len(follow_sheet_directives):
+                directive = follow_sheet_directives[processed_directive_count]
+                processed_directive_count += 1
+                token_value = directive.get("token")
+                target_label, resolved_layout, resolved_found = _resolve_follow_sheet_layout(
+                    token_value or "", catalog_all or list(all_layout_names)
+                )
+                request_entry = {
+                    "token": token_value,
+                    "target": target_label,
+                    "resolved": resolved_layout,
+                    "found": resolved_found,
+                }
+                follow_sheet_requests[target_label] = request_entry
+                if resolved_found and resolved_layout:
+                    follow_sheet_target_layouts.append(resolved_layout)
+                    normalized_target = _normalize_layout_key(resolved_layout)
+                    if normalized_target:
+                        if isinstance(resolved_layout, str):
+                            all_layout_names.add(resolved_layout)
+                            if resolved_layout not in catalog_all:
+                                catalog_all.append(resolved_layout)
+                        if normalized_target in scanned_layout_keys:
+                            continue
+                        if layout_attempts[normalized_target] >= 3:
+                            continue
+                        layouts_manager = getattr(doc, "layouts", None)
+                        get_layout = getattr(layouts_manager, "get", None)
+                        target_obj = None
+                        if callable(get_layout):
+                            try:
+                                target_obj = get_layout(resolved_layout)  # type: ignore[arg-type]
+                            except Exception:
+                                target_obj = None
+                        if target_obj is None:
+                            target_obj = layout_lookup.get(normalized_target)
+                        if target_obj is not None:
+                            layout_lookup[normalized_target] = target_obj
+                            layout_name_lookup.setdefault(
+                                normalized_target, str(resolved_layout)
+                            )
+                            target_index = layout_index_lookup.get(normalized_target)
+                            if target_index is None:
+                                target_index = next_layout_index
+                                next_layout_index += 1
+                                layout_index_lookup[normalized_target] = target_index
+                            layout_queue.append(
+                                (target_index, resolved_layout, target_obj, "follow", True)
+                            )
+                            layout_attempts[normalized_target] += 1
+                            skip_initial_layouts.add(normalized_target)
+
+        follow_sheet_directive = (
+            follow_sheet_directives[-1] if follow_sheet_directives else None
+        )
+        if isinstance(_LAST_TEXT_TABLE_DEBUG, dict):
+            _LAST_TEXT_TABLE_DEBUG["layouts"] = list(expanded_layouts)
+            if layout_scan_debug:
+                _LAST_TEXT_TABLE_DEBUG["layout_scan_debug"] = list(layout_scan_debug)
 
         if _TRACE_ACAD and block_stats:
             for block_name, stats in block_stats.items():
@@ -4442,6 +4563,46 @@ def read_text_table(
 
         layer_counts_pre = _count_layers(collected_entries)
         layout_counts_pre = _count_layouts(collected_entries)
+        if debug_scan_enabled:
+            layout_display = ", ".join(
+                str(name) for name in layout_names_seen if isinstance(name, str)
+            )
+            if not layout_display:
+                layout_display = "-"
+            print(f"[TEXT-SCAN] layouts=[{layout_display}]")
+            layout_type_counts: dict[str, Counter[str]] = {}
+            for layout_index, layout_entries in entries_by_layout.items():
+                layout_name = layout_names.get(layout_index, layout_index)
+                name_str = str(layout_name)
+                counter = layout_type_counts.setdefault(name_str, Counter())
+                for entry in layout_entries:
+                    entry_type = str(entry.get("entity_type") or "")
+                    if entry_type == "ATTDEF":
+                        entry_type = "ATTRIB"
+                    if entry_type:
+                        counter[entry_type] += 1
+            preferred_types = ("TEXT", "MTEXT", "ATTRIB", "MLEADER", "RTEXT")
+            reported: set[str] = set()
+            for layout_name in layout_names_seen:
+                name_str = str(layout_name)
+                counter = layout_type_counts.get(name_str, Counter())
+                parts = [f"{type_name}={int(counter.get(type_name, 0))}" for type_name in preferred_types]
+                print(
+                    "[TEXT-SCAN] layout={name} {summary}".format(
+                        name=name_str or "-",
+                        summary=" ".join(parts),
+                    )
+                )
+                reported.add(name_str)
+            for extra_name in sorted(set(layout_type_counts) - reported):
+                counter = layout_type_counts.get(extra_name, Counter())
+                parts = [f"{type_name}={int(counter.get(type_name, 0))}" for type_name in preferred_types]
+                print(
+                    "[TEXT-SCAN] layout={name} {summary}".format(
+                        name=extra_name or "-",
+                        summary=" ".join(parts),
+                    )
+                )
         print(f"[TEXT-SCAN] kept_by_layer(pre)={_format_layer_summary(layer_counts_pre)}")
         if isinstance(_LAST_TEXT_TABLE_DEBUG, dict):
             _LAST_TEXT_TABLE_DEBUG["layer_counts_pre"] = dict(layer_counts_pre)
@@ -4450,6 +4611,11 @@ def read_text_table(
                 scanned_layers_map.values(), key=lambda value: value.upper()
             )
             _LAST_TEXT_TABLE_DEBUG["scanned_layouts"] = list(layout_names_seen)
+            if debug_scan_enabled:
+                _LAST_TEXT_TABLE_DEBUG["layout_entity_counts"] = {
+                    name: {key: int(value) for key, value in counter.items()}
+                    for name, counter in layout_type_counts.items()
+                }
 
         if include_patterns or exclude_patterns:
             def _matches_any(patterns: list[re.Pattern[str]], values: list[str]) -> bool:
@@ -4544,6 +4710,22 @@ def read_text_table(
         if isinstance(_LAST_TEXT_TABLE_DEBUG, dict):
             _LAST_TEXT_TABLE_DEBUG["layer_counts_post_allow"] = dict(layer_counts_post)
             _LAST_TEXT_TABLE_DEBUG["layout_counts_post_allow"] = dict(layout_counts_post)
+            _LAST_TEXT_TABLE_DEBUG["collected_entities"] = [
+                {
+                    "layout": str(entry.get("layout_name") or ""),
+                    "layer": str(
+                        entry.get("effective_layer")
+                        or entry.get("layer")
+                        or ""
+                    ),
+                    "type": str(entry.get("entity_type") or ""),
+                    "x": entry.get("x"),
+                    "y": entry.get("y"),
+                    "height": entry.get("height"),
+                    "text": str(entry.get("text") or ""),
+                }
+                for entry in collected_entries
+            ]
 
         if roi_hint_effective is None and preferred_block_rois:
             block_hint: Mapping[str, Any] | None = None
@@ -4594,26 +4776,31 @@ def read_text_table(
                         )
                     )
 
-        if follow_sheet_directive:
-            token_value = follow_sheet_directive.get("token")
+        if not follow_sheet_requests and follow_sheet_directives:
             layout_candidates = layout_names_seen if layout_names_seen else list(
                 layout_names.values()
             )
-            target_label, resolved_layout, found = _resolve_follow_sheet_layout(
-                token_value or "", layout_candidates
-            )
-            request_entry = {
-                "token": token_value,
-                "target": target_label,
-                "resolved": resolved_layout,
-                "found": found,
-            }
-            follow_sheet_requests[target_label] = request_entry
-            if found and resolved_layout:
-                follow_sheet_target_layouts.append(resolved_layout)
+            if not layout_candidates:
+                layout_candidates = catalog_all or list(all_layout_names)
+            for directive in follow_sheet_directives:
+                token_value = directive.get("token")
+                target_label, resolved_layout, found = _resolve_follow_sheet_layout(
+                    token_value or "", layout_candidates
+                )
+                request_entry = {
+                    "token": token_value,
+                    "target": target_label,
+                    "resolved": resolved_layout,
+                    "found": found,
+                }
+                follow_sheet_requests[target_label] = request_entry
+                if found and resolved_layout:
+                    follow_sheet_target_layouts.append(resolved_layout)
         if follow_sheet_target_layout:
             follow_sheet_target_layouts.append(follow_sheet_target_layout)
         follow_sheet_target_layouts = list(dict.fromkeys(follow_sheet_target_layouts))
+        if isinstance(_LAST_TEXT_TABLE_DEBUG, dict):
+            _LAST_TEXT_TABLE_DEBUG["follow_sheet_targets"] = list(follow_sheet_target_layouts)
 
         if follow_sheet_requests:
             info_entries: list[dict[str, Any]] = []
@@ -6270,6 +6457,7 @@ def read_geo(
     layer_include_regex: Iterable[str] | str | None = None,
     layer_exclude_regex: Iterable[str] | str | None = DEFAULT_TEXT_LAYER_EXCLUDE_REGEX,
     debug_layouts: bool = False,
+    debug_scan: bool = False,
 ) -> dict[str, Any]:
     """Process a loaded DXF/DWG document into GEO payload details.
 
@@ -6361,11 +6549,24 @@ def read_geo(
                 layer_include_regex=layer_include_regex,
                 layer_exclude_regex=layer_exclude_regex,
                 debug_layouts=debug_layouts,
+                debug_scan=debug_scan,
             ) or {}
         except TypeError as exc:
-            if "layer_allowlist" in str(exc) or "roi_hint" in str(exc) or "layout_filters" in str(exc):
+            message = str(exc)
+            if any(
+                key in message
+                for key in ("layer_allowlist", "roi_hint", "layout_filters", "debug_scan")
+            ):
                 try:
-                    text_info = read_text_table(doc) or {}
+                    text_info = read_text_table(doc, debug_scan=debug_scan) or {}
+                except TypeError as inner_exc:
+                    if "debug_scan" in str(inner_exc):
+                        try:
+                            text_info = read_text_table(doc) or {}
+                        except Exception:
+                            text_info = {}
+                    else:
+                        raise
                 except Exception:
                     text_info = {}
             else:
