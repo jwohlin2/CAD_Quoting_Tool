@@ -417,6 +417,16 @@ _DEFAULT_LAYER_ALLOWLIST = frozenset({"BALLOON"})
 DEFAULT_TEXT_LAYER_EXCLUDE_REGEX: tuple[str, ...] = (
     r"^(AM_BOR|DEFPOINTS|PAPER)$",
 )
+_TEXT_LAYER_EXCLUDE_ENV = os.environ.get("CAD_QUOTER_TEXT_LAYER_EXCLUDE")
+if _TEXT_LAYER_EXCLUDE_ENV is not None:
+    env_pattern = _TEXT_LAYER_EXCLUDE_ENV.strip()
+    if env_pattern:
+        if env_pattern.startswith("^"):
+            DEFAULT_TEXT_LAYER_EXCLUDE_REGEX = (env_pattern,)
+        else:
+            DEFAULT_TEXT_LAYER_EXCLUDE_REGEX = (f"^({env_pattern})$",)
+    else:
+        DEFAULT_TEXT_LAYER_EXCLUDE_REGEX = tuple()
 _PREFERRED_BLOCK_NAME_RE = re.compile(r"HOLE.*(?:CHART|TABLE)", re.IGNORECASE)
 _FOLLOW_SHEET_DIRECTIVE_RE = re.compile(
     r"SEE\s+(?:SHEET|SHT)\s+(?P<target>[A-Z0-9]+)", re.IGNORECASE
