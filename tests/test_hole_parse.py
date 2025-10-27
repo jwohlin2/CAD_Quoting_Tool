@@ -135,3 +135,25 @@ def test_geo_dump_artifacts_are_stable(tmp_path: Path) -> None:
     on_disk_totals = json.loads(totals_path.read_text())
     assert list(on_disk_rows.keys()) == list(rows_payload.keys())
     assert list(on_disk_totals["totals"].keys()) == list(totals_payload["totals"].keys())
+
+
+def test_geo_dump_main_exits_when_no_text_rows(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    dummy_doc: object = object()
+    dummy_path = tmp_path / "missing_text.dwg"
+
+    def fake_loader(_path: Path, **_kwargs: object) -> object:
+        return dummy_doc
+
+    def fake_read_geo(_doc: object, **_kwargs: object) -> dict[str, object]:
+        raise geo_extractor.NoTextRowsError()
+
+    monkeypatch.setattr(geo_extractor, "_load_doc_for_path", fake_loader)
+    monkeypatch.setattr(geo_dump, "read_geo", fake_read_geo)
+
+    exit_code = geo_dump.main([str(dummy_path)])
+    captured = capsys.readouterr()
+
+    assert exit_code == 2
+    assert geo_extractor.NO_TEXT_ROWS_MESSAGE in captured.out

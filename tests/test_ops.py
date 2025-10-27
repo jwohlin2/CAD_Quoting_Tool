@@ -12,8 +12,8 @@ from cad_quoter.app import hole_ops
     [
         ("1/4-20 TAP THRU", "Tap"),
         ("Ø0.250 DRILL THRU", "Drill"),
-        ("Ø0.500 C’BORE FROM BACK", "C'Bore"),
-        ("SPOT DRILL Ø0.312", "C'Drill/CSink"),
+        ("Ø0.500 C’BORE FROM BACK", "C'bore"),
+        ("SPOT DRILL Ø0.312", "C'drill"),
         ("FINAL JIG GRIND", "Jig Grind"),
     ],
 )

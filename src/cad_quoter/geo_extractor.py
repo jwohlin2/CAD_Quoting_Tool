@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections import Counter, defaultdict
+from collections import Counter, defaultdict, deque
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from fractions import Fraction
@@ -19,6 +19,16 @@ from fnmatch import fnmatchcase
 from cad_quoter import geometry
 from cad_quoter.geometry import convert_dwg_to_dxf
 from cad_quoter.vendors import ezdxf as _ezdxf_vendor
+
+
+NO_TEXT_ROWS_MESSAGE = "No text found before filtering; use --dump-ents to inspect."
+
+
+class NoTextRowsError(RuntimeError):
+    """Raised when neither ACAD nor text pipelines yield usable rows."""
+
+    def __init__(self, message: str = NO_TEXT_ROWS_MESSAGE) -> None:
+        super().__init__(message)
 
 
 TransformMatrix = tuple[float, float, float, float, float, float]
@@ -539,52 +549,6 @@ def _normalize_oda_version(version: str | None) -> str | None:
     return mapping.get(normalized, normalized)
 
 
-def _normalize_layout_filters(
-    layout_filters: Mapping[str, Any] | None,
-) -> tuple[bool, list[re.Pattern[str]]]:
-    allow_all = True
-    patterns: list[re.Pattern[str]] = []
-    if isinstance(layout_filters, Mapping):
-        allow_all = bool(layout_filters.get("all_layouts", True))
-        raw_patterns = layout_filters.get("patterns")
-        if isinstance(raw_patterns, str):
-            raw_values = [raw_patterns]
-        elif isinstance(raw_patterns, Iterable):
-            raw_values = list(raw_patterns)
-        else:
-            raw_values = []
-        for candidate in raw_values:
-            if not isinstance(candidate, str):
-                continue
-            text = candidate.strip()
-            if not text:
-                continue
-            try:
-                compiled = re.compile(text, re.IGNORECASE)
-            except re.error:
-                continue
-            patterns.append(compiled)
-    if not patterns:
-        allow_all = True
-    return (allow_all, patterns)
-
-
-def _layout_matches_filter(
-    name: str,
-    allow_all: bool,
-    patterns: Iterable[re.Pattern[str]],
-) -> bool:
-    if allow_all:
-        return True
-    for pattern in patterns:
-        try:
-            if pattern.search(name):
-                return True
-        except Exception:
-            continue
-    return False
-
-
 def _normalize_layout_key(name: str | None) -> str:
     if name is None:
         return ""
@@ -594,6 +558,129 @@ def _normalize_layout_key(name: str | None) -> str:
         return ""
     normalized = re.sub(r"\s+", " ", text).strip()
     return normalized.upper()
+
+
+def _parse_layout_filter(
+    layouts_arg: Mapping[str, Any] | Iterable[str] | str | None,
+) -> tuple[bool, list[str]]:
+    allow_all = True
+    patterns: list[str] = []
+    if isinstance(layouts_arg, Mapping):
+        allow_all = bool(layouts_arg.get("all_layouts", True))
+        raw_patterns = layouts_arg.get("patterns")
+        if isinstance(raw_patterns, str):
+            patterns = [raw_patterns]
+        elif isinstance(raw_patterns, Iterable) and not isinstance(
+            raw_patterns, (str, bytes, bytearray)
+        ):
+            patterns = [str(value) for value in raw_patterns if isinstance(value, str)]
+        else:
+            patterns = []
+    elif isinstance(layouts_arg, str):
+        allow_all = False
+        patterns = [layouts_arg]
+    elif isinstance(layouts_arg, Iterable) and not isinstance(
+        layouts_arg, (str, bytes, bytearray)
+    ):
+        allow_all = False
+        patterns = [str(value) for value in layouts_arg if isinstance(value, str)]
+    cleaned: list[str] = []
+    for pattern in patterns:
+        text = pattern.strip()
+        if text:
+            cleaned.append(text)
+    if not cleaned and not allow_all:
+        allow_all = False
+    return (allow_all, cleaned)
+
+
+def iter_layouts(
+    doc: Any,
+    layouts_arg: Mapping[str, Any] | Iterable[str] | str | None,
+    *,
+    log: bool = True,
+) -> list[tuple[str, Any]]:
+    allow_all, pattern_texts = _parse_layout_filter(layouts_arg)
+    layouts: list[tuple[str, Any]] = []
+    if doc is None:
+        if log:
+            print("[TEXT-SCAN] layouts=<none>")
+        raise RuntimeError("No DXF/DWG document loaded")
+
+    modelspace = getattr(doc, "modelspace", None)
+    if callable(modelspace):
+        try:
+            space = modelspace()
+        except Exception:
+            space = None
+        if space is not None:
+            layouts.append(("Model", space))
+
+    layouts_manager = getattr(doc, "layouts", None)
+    names: list[Any] = []
+    if layouts_manager is not None:
+        raw_names = getattr(layouts_manager, "names", None)
+        try:
+            if callable(raw_names):
+                names_iter = raw_names()  # type: ignore[call-arg]
+            else:
+                names_iter = raw_names
+            names = list(names_iter or [])
+        except Exception:
+            names = []
+        get_layout = getattr(layouts_manager, "get", None)
+        for name in names:
+            if not isinstance(name, str):
+                continue
+            if name.lower() == "model":
+                continue
+            layout_obj = None
+            if callable(get_layout):
+                try:
+                    layout_obj = get_layout(name)
+                except Exception:
+                    layout_obj = None
+            layouts.append((name, layout_obj))
+
+    # Deduplicate layouts by normalized name while preserving order.
+    unique_layouts: list[tuple[str, Any]] = []
+    seen_names: set[str] = set()
+    for name, layout_obj in layouts:
+        key = _normalize_layout_key(name)
+        if key in seen_names:
+            continue
+        seen_names.add(key)
+        unique_layouts.append((name, layout_obj))
+    layouts = unique_layouts
+
+    filtered_layouts = layouts
+    if pattern_texts:
+        compiled_patterns: list[re.Pattern[str]] = []
+        for text in pattern_texts:
+            try:
+                compiled_patterns.append(re.compile(text, re.IGNORECASE))
+            except re.error as exc:
+                print(f"[TEXT-SCAN] layout regex error pattern={text!r} err={exc}")
+        if compiled_patterns:
+            filtered_layouts = []
+            for name, layout_obj in layouts:
+                label = str(name or "")
+                if any(pattern.search(label) for pattern in compiled_patterns):
+                    filtered_layouts.append((name, layout_obj))
+        else:
+            filtered_layouts = []
+    elif not allow_all:
+        filtered_layouts = []
+
+    names_display = [str(name or "").strip() or "-" for name, _ in filtered_layouts]
+    if log:
+        display = ", ".join(names_display) if names_display else "<none>"
+        print(f"[TEXT-SCAN] layouts={display}")
+
+    if not filtered_layouts:
+        raise RuntimeError("No layouts matched the requested filters")
+
+    return filtered_layouts
 
 
 def set_trace_acad(enabled: bool) -> None:
@@ -2073,49 +2160,23 @@ def read_acad_table(
 
 
 
-def _collect_table_text_lines(doc: Any) -> list[str]:
+def _collect_table_text_lines(
+    doc: Any,
+    *,
+    layout_filters: Mapping[str, Any] | Iterable[str] | str | None = None,
+) -> list[str]:
     lines: list[str] = []
     if doc is None:
         return lines
 
-    spaces: list[Any] = []
-    modelspace = getattr(doc, "modelspace", None)
-    if callable(modelspace):
-        try:
-            space = modelspace()
-        except Exception:
-            space = None
-        if space is not None:
-            spaces.append(space)
+    try:
+        spaces = iter_layouts(doc, layout_filters, log=False)
+    except RuntimeError:
+        raise
 
-    layouts_manager = getattr(doc, "layouts", None)
-    if layouts_manager is not None:
-        try:
-            raw_names = getattr(layouts_manager, "names", None)
-            if callable(raw_names):
-                names_iter = raw_names()
-            else:
-                names_iter = raw_names
-            layout_names = list(names_iter or [])
-        except Exception:
-            layout_names = []
-        get_layout = getattr(layouts_manager, "get", None)
-        for name in layout_names:
-            if not isinstance(name, str):
-                continue
-            if name.lower() == "model":
-                continue
-            layout_obj = None
-            if callable(get_layout):
-                try:
-                    layout_obj = get_layout(name)
-                except Exception:
-                    layout_obj = None
-            if layout_obj is not None:
-                spaces.append(layout_obj)
-
-    seen_markers: set[int] = set()
-    for space in spaces:
+    for _name, space in spaces:
+        if space is None:
+            continue
         query = getattr(space, "query", None)
         if not callable(query):
             continue
@@ -3965,7 +4026,7 @@ def read_text_table(
     block_name_regex: Iterable[str] | str | None = None,
     layer_include_regex: Iterable[str] | str | None = None,
     layer_exclude_regex: Iterable[str] | str | None = DEFAULT_TEXT_LAYER_EXCLUDE_REGEX,
-    layout_filters: Mapping[str, Any] | None = None,
+    layout_filters: Mapping[str, Any] | Iterable[str] | str | None = None,
     debug_layouts: bool = False,
 ) -> dict[str, Any]:
     helper = _resolve_app_callable("extract_hole_table_from_text")
@@ -3987,11 +4048,11 @@ def read_text_table(
     resolved_allowlist = _normalize_layer_allowlist(layer_allowlist)
     normalized_block_allow = _normalize_block_allowlist(block_name_allowlist)
     block_regex_patterns = _compile_block_name_patterns(block_name_regex)
-    allow_all_layouts, layout_filter_patterns = _normalize_layout_filters(layout_filters)
+    allow_all_layouts, layout_filter_patterns = _parse_layout_filter(layout_filters)
     if isinstance(_LAST_TEXT_TABLE_DEBUG, dict):
         _LAST_TEXT_TABLE_DEBUG["layout_filters"] = {
             "all_layouts": allow_all_layouts,
-            "patterns": [pattern.pattern for pattern in layout_filter_patterns],
+            "patterns": list(layout_filter_patterns),
         }
 
     def _compile_layer_patterns(
@@ -4105,49 +4166,16 @@ def read_text_table(
         follow_sheet_target_layout: str | None = None
         follow_sheet_requests: dict[str, dict[str, Any]] = {}
         follow_sheet_target_layouts: list[str] = []
+        layout_lookup: dict[str, Any] = {}
+        layout_name_lookup: dict[str, Any] = {}
+        layout_index_lookup: dict[str, int] = {}
+        visited_layout_keys: set[tuple[str, str]] = set()
+        all_layout_names: set[str] = set()
+        expanded_layouts: list[str] = []
 
         if doc is None:
             table_lines = []
             return table_lines
-
-        def _iter_layouts() -> list[tuple[str, Any]]:
-            layouts: list[tuple[str, Any]] = []
-            modelspace = getattr(doc, "modelspace", None)
-            if callable(modelspace):
-                try:
-                    layout_obj = modelspace()
-                except Exception:
-                    layout_obj = None
-                if layout_obj is not None:
-                    layouts.append(("Model", layout_obj))
-
-            layouts_manager = getattr(doc, "layouts", None)
-            if layouts_manager is None:
-                return layouts
-            names: list[Any]
-            try:
-                raw_names = getattr(layouts_manager, "names", None)
-                if callable(raw_names):
-                    names_iter = raw_names()
-                else:
-                    names_iter = raw_names
-                names = list(names_iter or [])
-            except Exception:
-                names = []
-            get_layout = getattr(layouts_manager, "get", None)
-            for name in names:
-                if not isinstance(name, str):
-                    continue
-                if name.lower() == "model":
-                    continue
-                layout_obj = None
-                if callable(get_layout):
-                    try:
-                        layout_obj = get_layout(name)
-                    except Exception:
-                        layout_obj = None
-                layouts.append((name, layout_obj))
-            return layouts
 
         def _scan_layout_body(
             layout_index: int,
@@ -4490,20 +4518,105 @@ def read_text_table(
                 )
             return True
 
-        if follow_sheet_directive:
-            token_value = follow_sheet_directive.get("token") if isinstance(follow_sheet_directive, Mapping) else None
-            catalog = [name for name in layout_names_seen if isinstance(name, str)]
-            target_label, resolved_layout, resolved_found = _resolve_follow_sheet_layout(
-                token_value or "", catalog
-            )
-            follow_sheet_requests[target_label] = {
-                "token": token_value,
-                "target": target_label,
-                "resolved": resolved_layout,
-                "found": resolved_found,
-            }
-            if resolved_layout:
-                follow_sheet_target_layouts.append(resolved_layout)
+        try:
+            initial_layouts = iter_layouts(doc, layout_filters)
+        except RuntimeError:
+            table_lines = []
+            raise
+
+        if isinstance(_LAST_TEXT_TABLE_DEBUG, dict):
+            _LAST_TEXT_TABLE_DEBUG["layout_sequence"] = [
+                str(name or "") for name, _ in initial_layouts
+            ]
+
+        for name, _ in initial_layouts:
+            if isinstance(name, str):
+                all_layout_names.add(name)
+
+        layouts_manager = getattr(doc, "layouts", None)
+        raw_names = getattr(layouts_manager, "names", None) if layouts_manager is not None else None
+        if raw_names is not None:
+            try:
+                names_iter = raw_names() if callable(raw_names) else raw_names
+            except Exception:
+                names_iter = None
+            if names_iter is not None:
+                try:
+                    for candidate in names_iter:
+                        if isinstance(candidate, str):
+                            all_layout_names.add(candidate)
+                except Exception:
+                    pass
+
+        get_layout = getattr(layouts_manager, "get", None) if layouts_manager is not None else None
+        layout_queue: deque[tuple[int, Any, Any, str]] = deque(
+            (index, layout_name, layout_obj, "initial")
+            for index, (layout_name, layout_obj) in enumerate(initial_layouts)
+        )
+        next_layout_index = len(initial_layouts)
+        queued_layout_names: set[str] = {
+            _normalize_layout_key(layout_name)
+            for layout_name, _layout_obj in initial_layouts
+        }
+
+        def _enqueue_follow_layout(name: str) -> None:
+            nonlocal next_layout_index
+            normalized = _normalize_layout_key(name)
+            layout_obj = None
+            if callable(get_layout):
+                try:
+                    layout_obj = get_layout(name)
+                except Exception:
+                    layout_obj = None
+            if normalized in queued_layout_names:
+                return
+            queued_layout_names.add(normalized)
+            layout_queue.append((next_layout_index, name, layout_obj, "follow"))
+            next_layout_index += 1
+
+        def _update_follow_targets() -> None:
+            nonlocal follow_sheet_target_layouts
+            if not (follow_sheet_directive or follow_sheet_target_layout):
+                return
+            catalog = list(dict.fromkeys(name for name in all_layout_names if isinstance(name, str)))
+            if not catalog:
+                catalog = layout_names_seen if layout_names_seen else list(layout_names.values())
+            new_targets: list[str] = []
+            token_value = None
+            if isinstance(follow_sheet_directive, Mapping):
+                token_value = follow_sheet_directive.get("token")
+            if token_value:
+                target_label, resolved_layout, resolved_found = _resolve_follow_sheet_layout(
+                    token_value or "", catalog
+                )
+                follow_sheet_requests[target_label] = {
+                    "token": token_value,
+                    "target": target_label,
+                    "resolved": resolved_layout,
+                    "found": resolved_found,
+                }
+                if resolved_layout and resolved_found:
+                    new_targets.append(resolved_layout)
+            if follow_sheet_target_layout:
+                new_targets.append(follow_sheet_target_layout)
+            if new_targets:
+                existing = set(follow_sheet_target_layouts)
+                for target in new_targets:
+                    if target not in existing:
+                        follow_sheet_target_layouts.append(target)
+                        existing.add(target)
+
+        while layout_queue:
+            layout_index, layout_name, layout_obj, source = layout_queue.popleft()
+            if not _scan_layout_entities(layout_index, layout_name, layout_obj, source=source):
+                continue
+            _update_follow_targets()
+            for target_layout in follow_sheet_target_layouts:
+                _enqueue_follow_layout(target_layout)
+
+        if isinstance(_LAST_TEXT_TABLE_DEBUG, dict):
+            _LAST_TEXT_TABLE_DEBUG["layouts"] = list(expanded_layouts)
+            _LAST_TEXT_TABLE_DEBUG["follow_sheet_targets"] = list(follow_sheet_target_layouts)
 
         if _TRACE_ACAD and block_stats:
             for block_name, stats in block_stats.items():
@@ -4552,6 +4665,16 @@ def read_text_table(
             return dict(counts)
 
         layer_counts_pre = _count_layers(collected_entries)
+        total_layer_hits = sum(layer_counts_pre.values())
+        if total_layer_hits == 0:
+            if isinstance(_LAST_TEXT_TABLE_DEBUG, dict):
+                _LAST_TEXT_TABLE_DEBUG["layer_counts_pre"] = dict(layer_counts_pre)
+                _LAST_TEXT_TABLE_DEBUG["layout_counts_pre"] = {}
+                _LAST_TEXT_TABLE_DEBUG["scanned_layers"] = sorted(
+                    scanned_layers_map.values(), key=lambda value: value.upper()
+                )
+                _LAST_TEXT_TABLE_DEBUG["scanned_layouts"] = list(layout_names_seen)
+            raise RuntimeError("No text found before layer filtering…")
         layout_counts_pre = _count_layouts(collected_entries)
         print(f"[TEXT-SCAN] kept_by_layer(pre)={_format_layer_summary(layer_counts_pre)}")
         if isinstance(_LAST_TEXT_TABLE_DEBUG, dict):
@@ -4705,23 +4828,6 @@ def read_text_table(
                         )
                     )
 
-        if follow_sheet_directive:
-            token_value = follow_sheet_directive.get("token")
-            layout_candidates = layout_names_seen if layout_names_seen else list(
-                layout_names.values()
-            )
-            target_label, resolved_layout, found = _resolve_follow_sheet_layout(
-                token_value or "", layout_candidates
-            )
-            request_entry = {
-                "token": token_value,
-                "target": target_label,
-                "resolved": resolved_layout,
-                "found": found,
-            }
-            follow_sheet_requests[target_label] = request_entry
-            if found and resolved_layout:
-                follow_sheet_target_layouts.append(resolved_layout)
         if follow_sheet_target_layout:
             follow_sheet_target_layouts.append(follow_sheet_target_layout)
         follow_sheet_target_layouts = list(dict.fromkeys(follow_sheet_target_layouts))
@@ -4766,60 +4872,7 @@ def read_text_table(
                     _LAST_TEXT_TABLE_DEBUG["follow_sheet_info"] = info_entries
 
         if not collected_entries:
-            fallback_doc, fallback_lines = ensure_text_stream(doc, log=print)
-            if fallback_doc is not None and fallback_doc is not doc:
-                doc = fallback_doc
-                return ensure_lines()
-
-            layout_iter = _iter_layouts()
-            ordered_layout_lines: list[tuple[str, str]] = []
-            layout_line_map: defaultdict[str, list[str]] = defaultdict(list)
-            layout_index_map: dict[str, int] = {}
-            fallback_layout_names: list[str] = []
-            fallback_follow_entries: list[dict[str, Any]] = []
-
-            for layout_index, (layout_name, layout_obj) in enumerate(layout_iter):
-                label = str(layout_name or "").strip() or "FALLBACK"
-                if label not in fallback_layout_names:
-                    fallback_layout_names.append(label)
-                if layout_obj is None:
-                    continue
-                query = getattr(layout_obj, "query", None)
-                entities: list[Any] = []
-                if callable(query):
-                    try:
-                        entities = list(query("TEXT, MTEXT, RTEXT"))
-                    except Exception:
-                        entities = []
-                if not entities:
-                    try:
-                        entities = list(layout_obj)
-                    except Exception:
-                        entities = []
-                for entity in entities:
-                    for fragment, _ in _iter_entity_text_fragments(entity):
-                        normalized = _normalize_table_fragment(fragment)
-                        if not normalized:
-                            continue
-                        ordered_layout_lines.append((label, normalized))
-                        layout_line_map[label].append(normalized)
-                        match = _FOLLOW_SHEET_DIRECTIVE_RE.search(normalized)
-                        if match:
-                            token_value = match.group("target")
-                            target_label, resolved_layout, resolved_found = (
-                                _resolve_follow_sheet_layout(
-                                    token_value or "", fallback_layout_names
-                                )
-                            )
-                            follow_entry = {
-                                "token": token_value,
-                                "target": target_label,
-                                "resolved": resolved_layout if resolved_found else None,
-                                "found": bool(resolved_found),
-                            }
-                            fallback_follow_entries.append(follow_entry)
-
-            combined_fallback_lines = fallback_stream_lines
+            fallback_lines = _collect_table_text_lines(doc, layout_filters=layout_filters)
             if fallback_lines:
                 combined_fallback_lines = list(fallback_lines)
             combined_fallback_lines = [
@@ -5454,7 +5507,7 @@ def read_text_table(
 
     lines = ensure_lines()
     if not lines:
-        doc, lines = ensure_text_stream(doc, log=print)
+        lines = _collect_table_text_lines(doc, layout_filters=layout_filters)
 
     def _line_confident(text: str) -> bool:
         stripped = str(text or "").strip()
@@ -6540,6 +6593,7 @@ def read_geo(
     block_name_regex: Iterable[str] | str | None = None,
     layer_include_regex: Iterable[str] | str | None = None,
     layer_exclude_regex: Iterable[str] | str | None = DEFAULT_TEXT_LAYER_EXCLUDE_REGEX,
+    layout_filters: Mapping[str, Any] | Iterable[str] | str | None = None,
     debug_layouts: bool = False,
 ) -> dict[str, Any]:
     """Process a loaded DXF/DWG document into GEO payload details.
@@ -6631,16 +6685,21 @@ def read_geo(
                 block_name_regex=block_name_regex,
                 layer_include_regex=layer_include_regex,
                 layer_exclude_regex=layer_exclude_regex,
+                layout_filters=layout_filters,
                 debug_layouts=debug_layouts,
             ) or {}
         except TypeError as exc:
             if "layer_allowlist" in str(exc) or "roi_hint" in str(exc) or "layout_filters" in str(exc):
                 try:
                     text_info = read_text_table(doc) or {}
+                except RuntimeError:
+                    raise
                 except Exception:
                     text_info = {}
             else:
                 raise
+        except RuntimeError:
+            raise
         except Exception:
             text_info = {}
     else:
@@ -6712,6 +6771,18 @@ def read_geo(
             fallback_rows_list = _normalize_table_rows(fallback_info.get("rows"))
             fallback_info["rows"] = fallback_rows_list
             fallback_qty_sum = _sum_qty(fallback_rows_list)
+    no_text_rows_available = bool(
+        use_tables
+        and run_acad
+        and run_text
+        and acad_rows == 0
+        and text_rows == 0
+        and not fallback_rows_list
+        and rows_txt_debug == 0
+        and not allow_geom_rows
+    )
+    if no_text_rows_available:
+        raise NoTextRowsError()
     force_text_mode = bool(
         run_text and force_text and fallback_info and fallback_rows_list
     )
@@ -7221,6 +7292,8 @@ def get_last_acad_table_scan() -> dict[str, Any] | None:
 
 
 __all__ = [
+    "NoTextRowsError",
+    "NO_TEXT_ROWS_MESSAGE",
     "read_geo",
     "extract_geo_from_path",
     "read_acad_table",
