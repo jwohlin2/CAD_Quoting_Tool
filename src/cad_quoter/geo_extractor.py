@@ -4280,6 +4280,7 @@ def read_text_table(
     columnar_table_info: dict[str, Any] | None = None
     columnar_debug_info: dict[str, Any] | None = None
     anchor_rows_primary: list[dict[str, Any]] = []
+    anchor_is_authoritative = False
     roi_rows_primary: list[dict[str, Any]] = []
     rows_txt_initial = 0
     confidence_high = False
@@ -5590,7 +5591,8 @@ def read_text_table(
 
         parsed_rows, families, total_qty = _parse_rows(merged_rows)
         anchor_rows_primary = list(parsed_rows)
-        anchor_mode = "authoritative" if anchor_rows_primary else "fallback"
+        anchor_is_authoritative = bool(anchor_rows_primary)
+        anchor_mode = "authoritative" if anchor_is_authoritative else "fallback"
         print(
             f"[TEXT-SCAN] pass=anchor rows={len(anchor_rows_primary)} ({anchor_mode})"
         )
@@ -6001,7 +6003,7 @@ def read_text_table(
     columnar_result: dict[str, Any] | None = None
     column_selected = False
     roi_rows_primary: list[dict[str, Any]] = []
-    if not anchor_rows_primary:
+    if not anchor_is_authoritative:
         if isinstance(columnar_table_info, Mapping):
             columnar_result = dict(columnar_table_info)
             promoted_rows, promoted_qty_sum = _prepare_columnar_promoted_rows(
@@ -6826,7 +6828,13 @@ def read_geo(doc) -> dict[str, Any]:
     return {}
 
 
-def promote_table_to_geo(geo: dict[str, Any], table_info: Mapping[str, Any], source_tag: str) -> None:
+def promote_table_to_geo(
+    geo: dict[str, Any],
+    table_info: Mapping[str, Any],
+    source_tag: str,
+    *,
+    log_publish: bool = True,
+) -> None:
     helper = _resolve_app_callable("_persist_rows_and_totals")
     if callable(helper):
         try:
@@ -6893,9 +6901,10 @@ def promote_table_to_geo(geo: dict[str, Any], table_info: Mapping[str, Any], sou
             geo["provenance"] = provenance
         if isinstance(provenance, dict):
             provenance["holes"] = "HOLE TABLE"
-        print(
-            f"[PATH] publish=text_table rows={len(rows)} qty_sum={qty_sum}"
-        )
+        if log_publish:
+            print(
+                f"[PATH] publish=text_table rows={len(rows)} qty_sum={qty_sum}"
+            )
     preferred_hole_count = _sum_qty(rows)
     hole_count = table_info.get("hole_count")
     if preferred_hole_count > 0:
@@ -6906,6 +6915,128 @@ def promote_table_to_geo(geo: dict[str, Any], table_info: Mapping[str, Any], sou
         pass
     provenance = geo.setdefault("provenance", {})
     provenance["holes"] = "HOLE TABLE"
+
+
+def extract_hole_table(
+    doc_or_path: Any,
+    *,
+    opts: Mapping[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Return standardized hole-table data for downstream pricing/app usage."""
+
+    options = dict(opts or {})
+
+    doc = doc_or_path
+    if isinstance(doc_or_path, (str, os.PathLike, Path)):
+        use_oda = bool(options.pop("use_oda", True))
+        oda_version = options.pop("oda_version", None)
+        path_obj = Path(doc_or_path)
+        doc = _load_doc_for_path(path_obj, use_oda=use_oda, out_ver=oda_version)
+
+    if doc is None:
+        return {
+            "chart_rows": [],
+            "hole_count_table": 0,
+            "provenance": "HOLE TABLE",
+            "layouts_seen": [],
+            "layer_policy": {"include": "-", "exclude": "-"},
+        }
+
+    allowed_keys = {
+        "layer_allowlist",
+        "roi_hint",
+        "block_name_allowlist",
+        "block_name_regex",
+        "layer_include_regex",
+        "layer_exclude_regex",
+        "layout_filters",
+        "debug_layouts",
+        "debug_scan",
+    }
+    read_kwargs = {key: value for key, value in options.items() if key in allowed_keys}
+
+    try:
+        table_info = read_text_table(doc, **read_kwargs) or {}
+    except NoTextRowsError:
+        table_info = {}
+
+    rows = _normalize_table_rows(table_info.get("rows"))
+    chart_rows: list[dict[str, Any]] = []
+    for row in rows:
+        qty_val = 0
+        try:
+            qty_val = int(float(row.get("qty") or 0))
+        except Exception:
+            qty_val = 0
+        desc_text = " ".join(str(row.get("desc") or "").split())
+        if qty_val <= 0 and not desc_text:
+            continue
+        row_payload: dict[str, Any] = {}
+        if qty_val > 0:
+            row_payload["qty"] = qty_val
+        if desc_text:
+            row_payload["desc"] = desc_text
+        ref_text = str(row.get("ref") or "").strip()
+        if ref_text:
+            row_payload["ref"] = ref_text
+        side_text = str(row.get("side") or "").strip()
+        if side_text:
+            row_payload["side"] = side_text
+        if not row_payload:
+            continue
+        chart_rows.append(row_payload)
+
+    hole_count_table = sum(int(row.get("qty", 0)) for row in chart_rows)
+
+    debug_snapshot = get_last_text_table_debug() or {}
+    layout_candidates: list[str] = []
+    if isinstance(debug_snapshot, Mapping):
+        for key in ("scanned_layouts", "layouts"):
+            raw_value = debug_snapshot.get(key)
+            if isinstance(raw_value, list):
+                for item in raw_value:
+                    text = str(item or "").strip()
+                    if text:
+                        layout_candidates.append(text)
+    layouts_seen: list[str] = []
+    seen_layouts: set[str] = set()
+    for name in layout_candidates:
+        if name in seen_layouts:
+            continue
+        seen_layouts.add(name)
+        layouts_seen.append(name)
+
+    include_patterns: list[str] = []
+    exclude_patterns: list[str] = []
+    if isinstance(debug_snapshot, Mapping):
+        raw_include = debug_snapshot.get("layer_regex_include")
+        raw_exclude = debug_snapshot.get("layer_regex_exclude")
+        if isinstance(raw_include, list):
+            include_patterns = [str(item) for item in raw_include if str(item or "").strip()]
+        if isinstance(raw_exclude, list):
+            exclude_patterns = [str(item) for item in raw_exclude if str(item or "").strip()]
+    if not exclude_patterns:
+        exclude_patterns = [pattern for pattern in DEFAULT_TEXT_LAYER_EXCLUDE_REGEX if pattern]
+
+    def _pattern_display(patterns: list[str]) -> str:
+        if not patterns:
+            return "-"
+        return ", ".join(patterns)
+
+    layer_policy = {
+        "include": _pattern_display(include_patterns),
+        "exclude": _pattern_display(exclude_patterns),
+    }
+
+    provenance = "HOLE TABLE"
+
+    return {
+        "chart_rows": chart_rows,
+        "hole_count_table": hole_count_table,
+        "provenance": provenance,
+        "layouts_seen": layouts_seen,
+        "layer_policy": layer_policy,
+    }
 
 
 def extract_geometry(doc) -> dict[str, Any]:
@@ -7032,6 +7163,8 @@ def read_geo(
     geo = extract_geometry(doc)
     if not isinstance(geo, dict):
         geo = {}
+
+    published = False
 
     use_tables = bool(
         prefer_table and pipeline_normalized in {"auto", "acad", "text"}
@@ -7285,7 +7418,12 @@ def read_geo(
         ):
             can_promote = True
         if can_promote:
-            promote_table_to_geo(geo, publish_info, publish_source_tag or "text_table")
+            promote_table_to_geo(
+                geo,
+                publish_info,
+                publish_source_tag or "text_table",
+                log_publish=False,
+            )
             table_used = True
             if publish_source_tag and publish_source_tag == "text_table":
                 _print_promoted_rows_once(publish_rows)
@@ -7430,7 +7568,11 @@ def read_geo(
         publish_path = source_lower
     else:
         publish_path = "geom"
-    print(f"[PATH] publish={publish_path} rows={len(rows_for_log)} qty_sum={qty_sum}")
+    if not published:
+        print(
+            f"[PATH] publish={publish_path} rows={len(rows_for_log)} qty_sum={qty_sum}"
+        )
+        published = True
     print(
         f"[EXTRACT] published rows={len(rows_for_log)} qty_sum={qty_sum} "
         f"source={ops_summary.get('source')}"
@@ -7776,6 +7918,7 @@ __all__ = [
     "read_geo",
     "choose_better_table",
     "promote_table_to_geo",
+    "extract_hole_table",
     "extract_geometry",
     "read_geo",
     "get_last_text_table_debug",

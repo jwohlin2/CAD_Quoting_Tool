@@ -26,6 +26,18 @@ DEFAULT_SAMPLE_PATH = REPO_ROOT / "Cad Files" / "301_redacted.dwg"
 ARTIFACT_DIR = REPO_ROOT / "out"
 DEFAULT_EXCLUDE_PATTERN_TEXT = ", ".join(DEFAULT_TEXT_LAYER_EXCLUDE_REGEX) or "<none>"
 
+TABLE_EXTRACT_ALLOWED_KEYS = {
+    "layer_allowlist",
+    "roi_hint",
+    "block_name_allowlist",
+    "block_name_regex",
+    "layer_include_regex",
+    "layer_exclude_regex",
+    "layout_filters",
+    "debug_layouts",
+    "debug_scan",
+}
+
 
 def _sum_qty(rows: list[Mapping[str, object]] | None) -> int:
     total = 0
@@ -499,6 +511,12 @@ def main(argv: Sequence[str] | None = None) -> int:
     if args.show_helpers:
         display_regex = ", ".join(active_layer_exclude) if active_layer_exclude else "<none>"
         print(f"[geo_dump] active layer exclude regex={display_regex}")
+
+    extract_opts = {
+        key: read_kwargs[key]
+        for key in TABLE_EXTRACT_ALLOWED_KEYS
+        if key in read_kwargs
+    }
     try:
         payload = read_geo(doc, **read_kwargs)
     except NoTextRowsError:
@@ -560,6 +578,14 @@ def main(argv: Sequence[str] | None = None) -> int:
         payload = {}
     else:
         payload = dict(payload)
+
+    try:
+        extractor_table = geo_extractor.extract_hole_table(doc, opts=extract_opts) or {}
+    except Exception as exc:
+        print(f"[geo_dump] extract_hole_table failed: {exc}")
+        extractor_table = {}
+    if isinstance(payload, dict):
+        payload["extract_hole_table"] = extractor_table
 
     final_scan = geo_extractor.get_last_acad_table_scan() or scan_info
     if args.scan_acad_tables:

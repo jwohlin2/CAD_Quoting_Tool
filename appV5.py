@@ -59,6 +59,7 @@ from cad_quoter.utils.number_parse import NUM_DEC_RE, NUM_FRAC_RE, _to_inch
 from cad_quoter.utils.render_utils.tables import ascii_table
 from cad_quoter.utils.render_state import RenderState
 from cad_quoter.utils.chart_buckets import classify_chart_rows as _classify_chart_rows
+from cad_quoter.geo_extractor import extract_hole_table
 
 
 
@@ -21233,14 +21234,81 @@ def extract_2d_features_from_dxf_or_dwg(path: str | Path) -> dict[str, Any]:
 
     geo = _build_geo_from_ezdxf_doc(doc)
 
+    acad_info: dict[str, Any] = {}
+    table_extract_opts: dict[str, Any] = {}
+    table_data: dict[str, Any] = {}
     try:
-        acad_info = hole_count_from_acad_table(doc) or {}
-    except Exception:
-        acad_info = {}
-    try:
-        text_info = extract_hole_table_from_text(doc) or {}
-    except Exception:
-        text_info = {}
+        table_data = extract_hole_table(doc, opts=table_extract_opts) or {}
+    except Exception as exc:
+        print(f"[EXTRACTOR] extract_hole_table failed: {exc}")
+        table_data = {}
+
+    chart_rows_source: list[Mapping[str, Any]] = []
+    if isinstance(table_data, Mapping):
+        raw_rows = table_data.get("chart_rows")
+        if isinstance(raw_rows, list):
+            chart_rows_source = [row for row in raw_rows if isinstance(row, Mapping)]
+
+    chart_rows_list: list[dict[str, Any]] = []
+    for row in chart_rows_source:
+        qty_val = _coerce_int_or_zero(row.get("qty"))
+        desc_text = " ".join(str(row.get("desc") or "").split())
+        if not desc_text and row.get("desc"):
+            desc_text = str(row.get("desc"))
+        if qty_val <= 0 and not desc_text:
+            continue
+        row_payload: dict[str, Any] = {}
+        if qty_val > 0:
+            row_payload["qty"] = qty_val
+        if desc_text:
+            row_payload["desc"] = desc_text
+        ref_text = str(row.get("ref") or "").strip()
+        if ref_text:
+            row_payload["ref"] = ref_text
+        side_text = str(row.get("side") or "").strip()
+        if side_text:
+            row_payload["side"] = side_text
+        if row_payload:
+            chart_rows_list.append(row_payload)
+
+    hole_count_table = 0
+    if isinstance(table_data, Mapping):
+        try:
+            hole_count_table = int(float(table_data.get("hole_count_table") or 0))
+        except Exception:
+            hole_count_table = _rows_qty_sum(chart_rows_list)
+    if hole_count_table <= 0:
+        hole_count_table = _rows_qty_sum(chart_rows_list)
+
+    geo["chart_rows"] = list(chart_rows_list)
+    geo["hole_count_table"] = hole_count_table
+    geo["chart_summary"] = (
+        f"rows={len(chart_rows_list)} qty_sum={hole_count_table} source=text_table"
+    )
+    provenance_label = None
+    if isinstance(table_data, Mapping):
+        provenance_label = table_data.get("provenance")
+    if provenance_label:
+        provenance_entry = geo.get("provenance")
+        if isinstance(provenance_entry, dict):
+            provenance_entry = dict(provenance_entry)
+        else:
+            provenance_entry = {}
+        provenance_entry["holes"] = provenance_label
+        geo["provenance"] = provenance_entry
+
+    text_info: dict[str, Any] = {}
+    if chart_rows_list:
+        text_info = {
+            "rows": list(chart_rows_list),
+            "hole_count": hole_count_table,
+            "provenance_holes": provenance_label or "HOLE TABLE",
+            "source": "text_table",
+            "ops_summary": {
+                "rows": list(chart_rows_list),
+                "source": "text_table",
+            },
+        }
 
     table_info: dict[str, Any] = {}
     geo_rows_payload: Mapping[str, Any] | None = None
@@ -21444,17 +21512,8 @@ def extract_2d_features_from_dxf_or_dwg(path: str | Path) -> dict[str, Any]:
         rows_from_geo = []
 
     if not table_info.get("rows"):
-        acad_info = hole_count_from_acad_table(doc) or {}
-        try:
-            text_info = extract_hole_table_from_text(doc) or {}
-        except Exception:
-            text_info = {}
-        acad_rows_count = (
-            len((acad_info.get("rows") if isinstance(acad_info, _MappingABC) else []) or [])
-        )
-        text_rows_count = (
-            len((text_info.get("rows") if isinstance(text_info, _MappingABC) else []) or [])
-        )
+        acad_rows_count = 0
+        text_rows_count = len(chart_rows_list)
         print("[ACAD] rows=", acad_rows_count)
         print("[TEXT] rows=", text_rows_count)
         best_table_info = _choose_better(acad_info, text_info)
@@ -21462,7 +21521,7 @@ def extract_2d_features_from_dxf_or_dwg(path: str | Path) -> dict[str, Any]:
             _persist_rows_and_totals(
                 geo,
                 best_table_info,
-                src=("acad_table" if best_table_info is acad_info else "text_table"),
+                src="text_table",
             )
             merged_table = dict(table_info)
             merged_table.update(best_table_info)
@@ -21910,17 +21969,10 @@ def extract_2d_features_from_dxf_or_dwg(path: str | Path) -> dict[str, Any]:
     if hole_source and "GEOM" in str(hole_source).upper():
         table_counts_trusted = False
 
-    acad2 = hole_count_from_acad_table(doc) or {}
-    try:
-        text2 = extract_hole_table_from_text(doc) or {}
-    except Exception:
-        text2 = {}
-    acad2_rows_count = (
-        len((acad2.get("rows") if isinstance(acad2, _MappingABC) else []) or [])
-    )
-    text2_rows_count = (
-        len((text2.get("rows") if isinstance(text2, _MappingABC) else []) or [])
-    )
+    acad2: dict[str, Any] = {}
+    text2 = dict(text_info) if text_info else {}
+    acad2_rows_count = 0
+    text2_rows_count = len(chart_rows_list)
     print("[ACAD] rows=", acad2_rows_count)
     print("[TEXT] rows=", text2_rows_count)
     if text2 and text2.get("hole_count"):
