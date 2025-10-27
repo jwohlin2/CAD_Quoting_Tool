@@ -48,12 +48,12 @@ if _PKG_SRC.is_dir():
 
 from cad_quoter.app.quote_doc import (
     build_material_detail_lines,
-    build_quote_header_lines,
     _sanitize_render_text,
 )
 from cad_quoter.pricing.machining_report import _drill_time_model
 from cad_quoter.utils.number_parse import NUM_DEC_RE, NUM_FRAC_RE, _to_inch
 from cad_quoter.utils.render_utils.tables import ascii_table
+from cad_quoter.utils.render_state import RenderState
 
 
 
@@ -138,6 +138,10 @@ from cad_quoter.app.op_parser import (
     _side as _shared_side,
 )
 from cad_quoter.utils.numeric import coerce_positive_float
+from cad_quoter.render import (
+    RenderState as QuoteRenderState,
+    render_quote_sections as render_quote_sections_helper,
+)
 
 try:
     from cad_quoter.geometry.dxf_text import (
@@ -4759,6 +4763,7 @@ from cad_quoter.ui.planner_render import (
     sane_minutes_or_zero,
     canonicalize_costs,
 )
+from cad_quoter.ui.process_render import RenderState as ProcessRenderState, render_process
 from cad_quoter.ui.services import QuoteConfiguration
 from cad_quoter.pricing.validation import validate_quote_before_pricing
 from cad_quoter.utils.debug_tables import (
@@ -8740,6 +8745,23 @@ def parse_pct(x):
         return 0.0
     return v/100.0 if v > 1.0 else v
 
+
+def _is_truthy_flag(value) -> bool:
+    """Return True only for explicit truthy values."""
+
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return bool(value)
+    if isinstance(value, str):
+        lowered = value.strip().lower()
+        if lowered in {"1", "true", "t", "yes", "y", "on"}:
+            return True
+        if lowered in {"", "0", "false", "f", "no", "n", "off"}:
+            return False
+        return False
+    return False
+
 # ---------- Pretty printer for quote results ----------
 
 PROCESS_LABEL_OVERRIDES: dict[str, str] = {
@@ -8794,6 +8816,682 @@ class PlannerBucketCost(TypedDict):
     cost: float
 
 # ---------- Bucket & Operation Roles ----------
+
+
+@no_type_check
+def render_material(
+    state: RenderState,
+    *,
+    material: Mapping[str, Any] | MutableMapping[str, Any] | dict[str, Any] | None,
+    material_stock_block: Mapping[str, Any] | MutableMapping[str, Any] | dict[str, Any] | None,
+    material_selection: MutableMapping[str, Any] | dict[str, Any],
+    material_display_label: str,
+    normalized_material_key: str,
+    drilling_meta: Mapping[str, Any] | None,
+    ui_vars: Mapping[str, Any],
+    baseline: Mapping[str, Any] | None,
+    g: Mapping[str, Any],
+    geo_context: Mapping[str, Any] | None,
+    pricing_geom: Mapping[str, Any] | None,
+    pricing: Mapping[str, Any] | None,
+    material_detail_for_breakdown: Mapping[str, Any] | MutableMapping[str, Any] | dict[str, Any],
+    material_cost_components: Mapping[str, Any] | None,
+    material_overrides: Mapping[str, Any] | None,
+    show_material_shipping: bool,
+    shipping_total: float,
+    shipping_source: str | None,
+    material_warning_summary: bool,
+) -> list[str]:
+    """Render the Material & Stock section and update shared state."""
+
+    result = state.result
+    breakdown = state.breakdown
+    cfg = state.cfg
+    currency = state.currency
+    show_zeros = state.show_zeros
+    divider = state.divider
+    page_width = state.page_width
+
+    state.material_warning_needed = state.material_warning_needed or bool(material_warning_summary)
+
+    if isinstance(material, _MutableMappingABC):
+        material_map = material
+    elif isinstance(material, _MappingABC):
+        material_map = dict(material)
+    else:
+        material_map = {}
+
+    if isinstance(material_stock_block, _MutableMappingABC):
+        stock_map = material_stock_block
+    elif isinstance(material_stock_block, _MappingABC):
+        stock_map = dict(material_stock_block)
+    else:
+        stock_map = {}
+
+    lines: list[str] = []
+
+    def push(text: Any) -> None:
+        lines.append(str(text))
+
+    def extend(values: Iterable[str]) -> None:
+        for value in values:
+            push(value)
+
+    def _is_total_label(label: str) -> bool:
+        clean = str(label or "").strip()
+        if not clean:
+            return False
+        clean = clean.rstrip(":")
+        clean = clean.lstrip("= ")
+        return clean.lower().startswith("total")
+
+    def _maybe_insert_total_separator(width: int) -> None:
+        if not lines:
+            return
+        width = max(0, int(width))
+        if width <= 0:
+            return
+        if lines[-1] == divider:
+            return
+        pad = max(0, page_width - width)
+        short_divider = " " * pad + "-" * width
+        if lines[-1] == short_divider:
+            return
+        push(short_divider)
+
+    def _append_currency_row(label: str, value: float, indent: str = "") -> None:
+        right = state.format_currency(value)
+        if _is_total_label(label):
+            _maybe_insert_total_separator(len(right))
+        push(state.render_kv_line(label, right, indent))
+
+    def _lookup_blank(container: Mapping[str, Any] | None) -> Mapping[str, Any] | None:
+        if not isinstance(container, _MappingABC):
+            return None
+        for key in ("required_blank_in", "bbox_in"):
+            entry = container.get(key)
+            if isinstance(entry, _MappingABC):
+                return entry
+        return None
+
+    blank_sources: list[Mapping[str, Any] | None] = []
+    for parent in (breakdown, result):
+        if isinstance(parent, _MappingABC):
+            blank_sources.append(_lookup_blank(parent.get("geo")))
+            blank_sources.append(_lookup_blank(parent.get("geo_context")))
+            blank_sources.append(_lookup_blank(parent.get("geom")))
+    blank_sources.append(_lookup_blank(geo_context if isinstance(geo_context, _MappingABC) else None))
+    blank_sources.append(_lookup_blank(g if isinstance(g, _MappingABC) else None))
+    blank_sources.append(_lookup_blank(pricing_geom if isinstance(pricing_geom, _MappingABC) else None))
+
+    req_map: Mapping[str, Any] | None = next((entry for entry in blank_sources if entry), None)
+    w_val = coerce_positive_float(req_map.get("w")) if req_map else None
+    h_val = coerce_positive_float(req_map.get("h")) if req_map else None
+    t_val = coerce_positive_float(req_map.get("t")) if req_map else None
+    w = float(w_val) if w_val else 0.0
+    h = float(h_val) if h_val else 0.0
+    t = float(t_val) if t_val else 0.0
+    if t <= 0:
+        t = 2.0
+
+    if w <= 0 or h <= 0:
+        geo_candidates: list[Mapping[str, Any]] = []
+        for parent in (breakdown, result):
+            if isinstance(parent, _MappingABC):
+                for key in ("geo", "geo_context", "geom"):
+                    candidate = parent.get(key)
+                    if isinstance(candidate, _MappingABC):
+                        geo_candidates.append(candidate)
+        if isinstance(geo_context, _MappingABC):
+            geo_candidates.append(geo_context)
+        if isinstance(g, _MappingABC):
+            geo_candidates.append(g)
+        inferred_w = inferred_h = 0.0
+        for geo_candidate in geo_candidates:
+            inferred_w, inferred_h = _infer_rect_from_holes(geo_candidate)
+            if inferred_w > 0 and inferred_h > 0:
+                break
+        if inferred_w > 0 and w <= 0:
+            w = float(inferred_w)
+        if inferred_h > 0 and h <= 0:
+            h = float(inferred_h)
+
+    required_blank = (float(w), float(h), float(t))
+    blank_len = (
+        max(required_blank[0], required_blank[1])
+        if required_blank[0] > 0 and required_blank[1] > 0
+        else 0.0
+    )
+    blank_wid = (
+        min(required_blank[0], required_blank[1])
+        if required_blank[0] > 0 and required_blank[1] > 0
+        else 0.0
+    )
+
+    def _blank_has_dims(candidate: Mapping[str, Any] | None) -> bool:
+        if not isinstance(candidate, _MappingABC):
+            return False
+        return bool(
+            coerce_positive_float(candidate.get("w"))
+            and coerce_positive_float(candidate.get("h"))
+        )
+
+    def _apply_blank_hint(container: Mapping[str, Any] | None) -> None:
+        if not isinstance(container, _MutableMappingABC):
+            return
+        if required_blank[0] <= 0 or required_blank[1] <= 0:
+            return
+        hint_payload: dict[str, Any] = {
+            "w": float(required_blank[0]),
+            "h": float(required_blank[1]),
+        }
+        if required_blank[2] > 0:
+            hint_payload["t"] = float(required_blank[2])
+        existing_blank = container.get("required_blank_in")
+        if not _blank_has_dims(existing_blank):
+            container["required_blank_in"] = dict(hint_payload)
+        existing_bbox = container.get("bbox_in")
+        if not _blank_has_dims(existing_bbox):
+            container.setdefault("bbox_in", dict(hint_payload))
+
+    for context in (
+        geo_context if isinstance(geo_context, _MutableMappingABC) else None,
+        g if isinstance(g, _MutableMappingABC) else None,
+        pricing_geom if isinstance(pricing_geom, _MutableMappingABC) else None,
+    ):
+        _apply_blank_hint(context)
+    for parent in (breakdown, result):
+        if isinstance(parent, _MutableMappingABC):
+            for key in ("geo", "geo_context", "geom"):
+                _apply_blank_hint(parent.get(key))
+
+    for container in (
+        material_map if isinstance(material_map, _MutableMappingABC) else None,
+        stock_map if isinstance(stock_map, _MutableMappingABC) else None,
+    ):
+        _apply_blank_hint(container)
+
+    if blank_len > 0 and isinstance(stock_map, _MutableMappingABC):
+        if coerce_positive_float(stock_map.get("required_blank_len_in")) is None:
+            stock_map["required_blank_len_in"] = float(blank_len)
+        if coerce_positive_float(stock_map.get("required_blank_wid_in")) is None:
+            stock_map["required_blank_wid_in"] = float(blank_wid)
+        if required_blank[2] > 0 and coerce_positive_float(
+            stock_map.get("required_blank_thk_in")
+        ) is None:
+            stock_map["required_blank_thk_in"] = float(required_blank[2])
+
+    required_blank_len = float(blank_len) if blank_len > 0 else 0.0
+    required_blank_wid = float(blank_wid) if blank_wid > 0 else 0.0
+
+    if not material_map:
+        return lines
+
+    mass_g = material_map.get("mass_g")
+    net_mass_g = material_map.get("mass_g_net")
+    if _coerce_float_or_none(net_mass_g) is None:
+        fallback_net_mass = material_map.get("net_mass_g")
+        if _coerce_float_or_none(fallback_net_mass) is not None:
+            net_mass_g = fallback_net_mass
+    upg = material_map.get("unit_price_per_g")
+    minchg = material_map.get("supplier_min_charge")
+    matcost = material_map.get("material_cost")
+    scrap = material_map.get("scrap_pct", None)
+    scrap_credit_entered = _is_truthy_flag(material_map.get("material_scrap_credit_entered"))
+    scrap_credit = float(material_map.get("material_scrap_credit") or 0.0)
+    unit_price_kg = material_map.get("unit_price_usd_per_kg")
+    unit_price_lb = material_map.get("unit_price_usd_per_lb")
+    price_source = material_map.get("unit_price_source") or material_map.get("source")
+    price_asof = material_map.get("unit_price_asof")
+
+    have_any = any(
+        v
+        for v in [
+            mass_g,
+            net_mass_g,
+            upg,
+            minchg,
+            matcost,
+            scrap,
+            scrap_credit if scrap_credit_entered else 0.0,
+        ]
+    )
+
+    detail_lines: list[str] = []
+    total_material_cost: float | None = None
+    material_net_cost: float | None = None
+
+    if not have_any:
+        return lines
+
+    push("Material & Stock")
+    push(divider)
+    canonical_material_display = str(material_display_label or "").strip()
+    if not canonical_material_display and isinstance(material_selection, _MappingABC):
+        canonical_material_display = str(
+            material_selection.get("material_display")
+            or material_selection.get("canonical")
+            or material_selection.get("canonical_material")
+            or ""
+        ).strip()
+    if not canonical_material_display and isinstance(drilling_meta, _MappingABC):
+        drill_display = (
+            drilling_meta.get("material")
+            or drilling_meta.get("material_display")
+        )
+        if not drill_display:
+            drill_display = (
+                drilling_meta.get("material_key")
+                or drilling_meta.get("material_lookup")
+            )
+            if drill_display:
+                normalized_key = _normalize_lookup_key(drill_display)
+                drill_display = MATERIAL_DISPLAY_BY_KEY.get(
+                    normalized_key,
+                    drill_display,
+                )
+        if drill_display:
+            canonical_material_display = str(drill_display).strip()
+    material_name_display = canonical_material_display
+    if not material_name_display:
+        material_name_display = (
+            material_map.get("material_name")
+            or material_map.get("material")
+            or g.get("material")
+            or ui_vars.get("Material")
+            or ""
+        )
+    if isinstance(material_name_display, str):
+        material_name_display = material_name_display.strip()
+    else:
+        material_name_display = str(material_name_display).strip()
+    if material_name_display:
+        material_display_label = str(material_name_display)
+        material_selection.setdefault("material_display", material_display_label)
+        push(f"  Material used:  {material_name_display}")
+
+    blank_lines: list[str] = []
+    need_len = _coerce_float_or_none(
+        stock_map.get("required_blank_len_in")
+        if isinstance(stock_map, _MappingABC)
+        else None
+    )
+    need_wid = _coerce_float_or_none(
+        stock_map.get("required_blank_wid_in")
+        if isinstance(stock_map, _MappingABC)
+        else None
+    )
+    need_thk = _coerce_float_or_none(
+        stock_map.get("required_blank_thk_in")
+        if isinstance(stock_map, _MappingABC)
+        else None
+    )
+
+    if (need_len is None or need_len <= 0) and required_blank_len > 0:
+        need_len = float(required_blank_len)
+    if (need_wid is None or need_wid <= 0) and required_blank_wid > 0:
+        need_wid = float(required_blank_wid)
+    if (need_thk is None or need_thk <= 0) and required_blank[2] > 0:
+        need_thk = float(required_blank[2])
+
+    stock_len_val = _coerce_float_or_none(
+        stock_map.get("stock_L_in") if isinstance(stock_map, _MappingABC) else None
+    )
+    stock_wid_val = _coerce_float_or_none(
+        stock_map.get("stock_W_in") if isinstance(stock_map, _MappingABC) else None
+    )
+    stock_thk_val = _coerce_float_or_none(
+        stock_map.get("stock_T_in") if isinstance(stock_map, _MappingABC) else None
+    )
+
+    material_lookup_for_pick = normalized_material_key or ""
+    if not material_lookup_for_pick and material_display_label:
+        material_lookup_for_pick = _normalize_lookup_key(material_display_label)
+    picked_stock = _resolve_mcmaster_plate_for_quote(
+        float(need_len) if need_len else None,
+        float(need_wid) if need_wid else None,
+        float(need_thk) if need_thk else None,
+        material_key=material_lookup_for_pick or "MIC6",
+        stock_L_in=float(stock_len_val) if stock_len_val else None,
+        stock_W_in=float(stock_wid_val) if stock_wid_val else None,
+        stock_T_in=float(stock_thk_val) if stock_thk_val else None,
+    )
+
+    if picked_stock:
+        stock_len_val = float(picked_stock.get("len_in") or 0.0)
+        stock_wid_val = float(picked_stock.get("wid_in") or 0.0)
+        stock_thk_val = float(picked_stock.get("thk_in") or 0.0)
+        part_number = picked_stock.get("mcmaster_part")
+        source_hint = picked_stock.get("source") or "mcmaster-catalog"
+        if isinstance(stock_map, _MutableMappingABC):
+            stock_map["stock_L_in"] = float(stock_len_val)
+            stock_map["stock_W_in"] = float(stock_wid_val)
+            stock_map["stock_T_in"] = float(stock_thk_val)
+            stock_map["stock_source_tag"] = source_hint
+            stock_map["source"] = source_hint
+            if part_number:
+                stock_map["mcmaster_part"] = part_number
+                stock_map["part_no"] = part_number
+                if not stock_map.get("stock_price_source"):
+                    stock_map["stock_price_source"] = "mcmaster_api"
+        if isinstance(material_map, _MutableMappingABC):
+            material_map["stock_source_tag"] = source_hint
+            material_map["source"] = source_hint
+            if part_number:
+                material_map["mcmaster_part"] = part_number
+                material_map["part_no"] = part_number
+                if not material_map.get("stock_price_source"):
+                    material_map["stock_price_source"] = (
+                        stock_map.get("stock_price_source")
+                        if isinstance(stock_map, _MappingABC)
+                        else "mcmaster_api"
+                    )
+        if isinstance(result, _MutableMappingABC):
+            if part_number:
+                result["mcmaster_part"] = part_number
+                result["part_no"] = part_number
+                if not result.get("stock_price_source"):
+                    result["stock_price_source"] = (
+                        stock_map.get("stock_price_source")
+                        if isinstance(stock_map, _MappingABC)
+                        else "mcmaster_api"
+                    )
+            result["stock_source"] = source_hint
+
+    if (need_len is None or need_wid is None or need_thk is None) and isinstance(g, dict):
+        plan_guess = g.get("stock_plan_guess")
+        if isinstance(plan_guess, _MappingABC):
+            if need_len is None:
+                need_len = _coerce_float_or_none(
+                    plan_guess.get("need_len_in")
+                    or plan_guess.get("required_len_in")
+                )
+            if need_wid is None:
+                need_wid = _coerce_float_or_none(
+                    plan_guess.get("need_wid_in")
+                    or plan_guess.get("required_wid_in")
+                )
+            if need_thk is None:
+                need_thk = _coerce_float_or_none(
+                    plan_guess.get("need_thk_in")
+                    or plan_guess.get("stock_thk_in")
+                )
+
+    if need_len and need_wid and need_thk:
+        blank_lines.append(
+            f"  Required blank (w/ margins): {need_len:.2f} × {need_wid:.2f} × {need_thk:.2f} in"
+        )
+
+    source_tag = None
+    if isinstance(stock_map, _MappingABC):
+        source_tag = stock_map.get("stock_source_tag") or stock_map.get("source")
+    if not source_tag and isinstance(material_map, _MappingABC):
+        source_tag = material_map.get("stock_source_tag") or material_map.get("source")
+    if isinstance(source_tag, str):
+        source_tag = source_tag.strip()
+        if not source_tag:
+            source_tag = None
+
+    if stock_len_val and stock_wid_val and stock_thk_val:
+        part_label = ""
+        if isinstance(result, Mapping):
+            part_label = str(result.get("mcmaster_part") or "").strip()
+        part_display = part_label or "—"
+        stock_line = (
+            "  Rounded to catalog: "
+            f"{stock_len_val:.2f} × {stock_wid_val:.2f} × {stock_thk_val:.3f} in"
+            f" (McMaster, {part_display})"
+        )
+        if source_tag:
+            stock_line += f" ({source_tag})"
+        thickness_diff = None
+        diff_candidate = None
+        if isinstance(stock_map, _MappingABC):
+            diff_candidate = _coerce_float_or_none(stock_map.get("thickness_diff_in"))
+        if diff_candidate is None and need_thk and stock_thk_val:
+            thickness_diff = abs(float(stock_thk_val) - float(need_thk))
+        elif diff_candidate is not None:
+            thickness_diff = float(diff_candidate)
+        if thickness_diff is not None and thickness_diff > 0.02:
+            warning_mode = (
+                "allowed"
+                if bool(getattr(cfg, "allow_thickness_upsize", False))
+                else "blocked"
+            )
+            stock_line += f" (WARNING: thickness upsize {warning_mode})"
+        blank_lines.append(stock_line)
+
+    if blank_lines:
+        detail_lines.extend(blank_lines)
+
+    material_cost_map: dict[str, Any] = {}
+    if isinstance(stock_map, _MappingABC):
+        material_cost_map.update(stock_map)
+    if isinstance(material_map, _MappingABC):
+        material_cost_map.update(material_map)
+    computed_components = _material_cost_components(
+        material_cost_map,
+        overrides=material_overrides,
+        cfg=cfg,
+    )
+    state.material_cost_components = computed_components
+    total_material_cost = computed_components["total_usd"]
+    material_net_cost = computed_components["net_usd"]
+    if total_material_cost is not None:
+        try:
+            material_map["total_material_cost"] = total_material_cost
+        except Exception:
+            pass
+        try:
+            material_record = (
+                breakdown.get("material") if isinstance(breakdown, _MappingABC) else None
+            )
+            if isinstance(material_record, _MutableMappingABC):
+                material_record["total_material_cost"] = float(total_material_cost)
+            elif isinstance(material_record, _MappingABC):
+                updated_material = dict(material_record)
+                updated_material["total_material_cost"] = float(total_material_cost)
+                if isinstance(breakdown, _MutableMappingABC):
+                    breakdown["material"] = updated_material
+            elif isinstance(breakdown, _MutableMappingABC):
+                breakdown["material"] = {"total_material_cost": float(total_material_cost)}
+        except Exception:
+            pass
+    scrap_context = {
+        "scrap_pct": scrap,
+        "scrap_credit_entered": scrap_credit_entered,
+        "scrap_credit": scrap_credit,
+        "scrap_credit_unit_price_usd_per_lb": material_map.get(
+            "scrap_credit_unit_price_usd_per_lb"
+        ),
+        "price_source": price_source,
+        "price_asof": price_asof,
+        "supplier_min_charge": minchg,
+    }
+    material_updates, helper_detail_lines = build_material_detail_lines(
+        material_map,
+        scrap_context=scrap_context,
+        currency=currency,
+        show_zeros=show_zeros,
+        show_material_shipping=show_material_shipping,
+        shipping_total=shipping_total,
+        shipping_source=shipping_source,
+    )
+    if isinstance(material_detail_for_breakdown, _MutableMappingABC):
+        for key, value in material_updates.items():
+            if value is None:
+                material_detail_for_breakdown.pop(key, None)
+            else:
+                material_detail_for_breakdown[key] = value
+    detail_lines.extend(helper_detail_lines)
+
+    def _coerce_dims(candidate: Any) -> tuple[float, float, float] | None:
+        if isinstance(candidate, (list, tuple)) and len(candidate) >= 3:
+            try:
+                Lc = float(candidate[0])
+                Wc = float(candidate[1])
+                Tc = float(candidate[2])
+            except Exception:
+                return None
+            return (Lc, Wc, Tc)
+        return None
+
+    stock_dims_candidate = _coerce_dims(material_map.get("stock_dims_in"))
+    if stock_dims_candidate is None:
+        stock_dims_candidate = _coerce_dims(stock_map.get("stock_dims_in"))
+
+    stock_L_val: float | None
+    stock_W_val: float | None
+    stock_T_val: float | None
+    if stock_dims_candidate:
+        stock_L_val, stock_W_val, stock_T_val = stock_dims_candidate
+    else:
+        stock_L_val = _coerce_float_or_none(stock_map.get("stock_L_in"))
+        stock_W_val = _coerce_float_or_none(stock_map.get("stock_W_in"))
+        stock_T_val = _coerce_float_or_none(stock_map.get("stock_T_in"))
+    if stock_T_val is None:
+        stock_T_val = _coerce_float_or_none(material_map.get("thickness_in"))
+        if stock_T_val is None:
+            stock_T_val = _coerce_float_or_none(g.get("thickness_in"))
+        if stock_T_val is None:
+            stock_T_val = _coerce_float_or_none(g.get("thickness_in_guess"))
+        if stock_T_val is None and isinstance(baseline, _MappingABC):
+            stock_T_val = _coerce_float_or_none(baseline.get("thickness_in"))
+    if stock_L_val is None or stock_W_val is None:
+        fallback_L = _coerce_float_or_none(ui_vars.get("Plate Length (in)"))
+        if fallback_L is None:
+            fallback_L = _coerce_float_or_none(g.get("plate_length_in"))
+        fallback_W = _coerce_float_or_none(ui_vars.get("Plate Width (in)"))
+        if fallback_W is None:
+            fallback_W = _coerce_float_or_none(g.get("plate_width_in"))
+        if (fallback_L is None or fallback_W is None) and isinstance(g, dict):
+            L_mm = _coerce_float_or_none(g.get("plate_length_mm"))
+            W_mm = _coerce_float_or_none(g.get("plate_width_mm"))
+            derived_ctx = g.get("derived") if isinstance(g, dict) else None
+            if (L_mm is None or W_mm is None) and isinstance(derived_ctx, dict):
+                bbox = derived_ctx.get("bbox_mm")
+                if bbox and len(bbox) >= 2:
+                    if L_mm is None:
+                        L_mm = _coerce_float_or_none(bbox[0])
+                    if W_mm is None:
+                        W_mm = _coerce_float_or_none(bbox[1])
+            if fallback_L is None and L_mm is not None:
+                fallback_L = float(L_mm) / 25.4
+            if fallback_W is None and W_mm is not None:
+                fallback_W = float(W_mm) / 25.4
+        if stock_L_val is None and fallback_L is not None:
+            stock_L_val = float(fallback_L)
+        if stock_W_val is None and fallback_W is not None:
+            stock_W_val = float(fallback_W)
+    if (stock_L_val is None or stock_W_val is None) and isinstance(g, dict):
+        inferred_dims = infer_plate_lw_in(g)
+        if inferred_dims:
+            if stock_L_val is None:
+                stock_L_val = float(inferred_dims[0])
+            if stock_W_val is None:
+                stock_W_val = float(inferred_dims[1])
+    if stock_L_val and stock_W_val and stock_T_val:
+        stock_dims_candidate = (float(stock_L_val), float(stock_W_val), float(stock_T_val))
+    if stock_L_val and stock_W_val and stock_T_val:
+        stock_line = f"{float(stock_L_val):.2f} × {float(stock_W_val):.2f} × {float(stock_T_val):.3f} in"
+    else:
+        inferred_dims = infer_plate_lw_in(g)
+        L_disp = stock_L_val
+        W_disp = stock_W_val
+        if (L_disp is None or W_disp is None) and inferred_dims:
+            if L_disp is None:
+                L_disp = inferred_dims[0]
+            if W_disp is None:
+                W_disp = inferred_dims[1]
+        T_disp_val = stock_T_val
+        if T_disp_val is None and isinstance(g, dict):
+            T_disp_val = _coerce_float_or_none(g.get("thickness_in"))
+        if T_disp_val is None and isinstance(g, dict):
+            T_disp_val = _coerce_float_or_none(g.get("thickness_in_guess"))
+        if L_disp and W_disp and T_disp_val:
+            stock_line = f"{float(L_disp):.2f} × {float(W_disp):.2f} × {float(T_disp_val):.3f} in"
+        else:
+            T_disp = "—"
+            if T_disp_val is not None:
+                T_disp = f"{float(T_disp_val):.3f}"
+            stock_line = f"— × — × {T_disp} in"
+    mat_info = breakdown.get("material_info") if isinstance(breakdown, _MappingABC) else None
+    if isinstance(mat_info, dict):
+        mat_info["stock_size_display"] = stock_line
+    if detail_lines:
+        extend(detail_lines)
+    mc: Mapping[str, Any] | None = computed_components
+    if not mc:
+        try:
+            mc = _material_cost_components(
+                material_map,
+                overrides=material_overrides,
+                cfg=cfg,
+            )
+        except Exception:
+            mc = None
+    if mc:
+        stock_piece_val = mc.get("stock_piece_usd")
+        if stock_piece_val is not None:
+            stock_src = mc.get("stock_source") or ""
+            src_suffix = f" ({stock_src})" if stock_src else ""
+            _append_currency_row(f"Stock Piece{src_suffix}", float(stock_piece_val), indent="  ")
+        else:
+            base_source = mc.get("base_source") or ""
+            base_label = "Base Material"
+            if base_source:
+                base_label = f"Base Material @ {base_source}"
+            _append_currency_row(base_label, float(mc.get("base_usd", 0.0)), indent="  ")
+        try:
+            tax_val = float(mc.get("tax_usd") or 0.0)
+        except Exception:
+            tax_val = 0.0
+        if tax_val:
+            _append_currency_row("Material Tax:", round(tax_val, 2), indent="  ")
+        try:
+            scrap_val = float(mc.get("scrap_credit_usd") or 0.0)
+        except Exception:
+            scrap_val = 0.0
+        scrap_text = mc.get("scrap_rate_text") or ""
+        if scrap_val and scrap_text:
+            _append_currency_row(
+                f"Scrap Credit @ {scrap_text}",
+                -round(scrap_val, 2),
+                indent="  ",
+            )
+        elif scrap_val:
+            _append_currency_row("Scrap Credit", -round(scrap_val, 2), indent="  ")
+        try:
+            base_for_total = float(mc.get("base_usd") or 0.0)
+        except Exception:
+            base_for_total = 0.0
+        tax_for_total = float(tax_val)
+        total_material_cost_val = mc.get("total_usd")
+        if total_material_cost_val is not None:
+            try:
+                total_material_cost = round(float(total_material_cost_val), 2)
+            except Exception:
+                total_material_cost = None
+        else:
+            total_material_cost = None
+        if total_material_cost is None:
+            scrap_for_total = min(float(scrap_val), base_for_total + tax_for_total)
+            total_material_cost = round(
+                base_for_total + tax_for_total - scrap_for_total,
+                2,
+            )
+        _append_currency_row("Total Material Cost :", total_material_cost, indent="  ")
+    elif total_material_cost is not None:
+        _append_currency_row("Total Material Cost :", total_material_cost, indent="  ")
+    push("")
+
+    state.material_component_total = total_material_cost
+    state.material_component_net = material_net_cost
+    state.material_net_cost = material_net_cost
+
+    return lines
+
+
 @no_type_check
 def render_quote(  # type: ignore[reportGeneralTypeIssues]
     result: dict,
@@ -9535,31 +10233,6 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
         pad = max(2, total - len(left) - len(right))
         return f"{left}{' ' * pad}{right}"
 
-    def _is_truthy_flag(value) -> bool:
-        """Return True only for explicit truthy values.
-
-        Material scrap credit overrides are stored as flags that may round-trip
-        through JSON/CSV layers. Those conversions can turn ``False`` into the
-        string "false", which would previously evaluate truthy and cause the
-        scrap credit line to render even when no override was entered. Treat
-        only well-known truthy strings/numbers as True; unknown or falsy inputs
-        default to False so that the credit row is hidden unless a user-supplied
-        override is present.
-        """
-
-        if isinstance(value, bool):
-            return value
-        if isinstance(value, (int, float)):
-            return bool(value)
-        if isinstance(value, str):
-            lowered = value.strip().lower()
-            if lowered in {"1", "true", "t", "yes", "y", "on"}:
-                return True
-            if lowered in {"", "0", "false", "f", "no", "n", "off"}:
-                return False
-            return False
-        return False
-
     # Define before first use to avoid closure-order issues
     def _extract_llm_debug_override(container: Mapping[str, Any] | None) -> bool | None:
         if not isinstance(container, _MappingABC):
@@ -10167,9 +10840,7 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
     if not planner_has_drilling_bucket:
         planner_has_drilling_bucket = _has_planner_drilling_bucket(buckets)
 
-    # Canonical QUOTE SUMMARY header (legacy variants removed in favour of this
-    # block so the Speeds/Feeds status + Drill Debug output stay consistent).
-    header_lines, pricing_source_value = build_quote_header_lines(
+    quote_render_state = QuoteRenderState(
         qty=qty,
         result=result if isinstance(result, _MappingABC) else None,
         breakdown=breakdown if isinstance(breakdown, _MappingABC) else None,
@@ -10179,97 +10850,27 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
         process_meta_raw=process_meta_raw,
         hour_summary_entries=hour_summary_entries,
         cfg=cfg,
+        llm_debug_enabled=llm_debug_enabled_flag,
+        drill_debug_entries=drill_debug_entries,
+        material_warning_summary=material_warning_summary,
+        material_warning_label=MATERIAL_WARNING_LABEL,
     )
-    append_lines(header_lines)
-    if material_warning_summary:
-        _push(lines, MATERIAL_WARNING_LABEL)
-    _push(lines, "")
-
-    if isinstance(breakdown, _MutableMappingABC):
-        if pricing_source_value:
-            breakdown["pricing_source"] = pricing_source_value
-        else:
-            breakdown.pop("pricing_source", None)
-
-    if isinstance(result, _MutableMappingABC):
-        app_meta_container = result.setdefault("app_meta", {})
-        if isinstance(app_meta_container, _MutableMappingABC):
-            if pricing_source_value and str(pricing_source_value).strip().lower() == "planner":
-                app_meta_container.setdefault("used_planner", True)
-
-        decision_state = result.get("decision_state")
-        if isinstance(decision_state, _MutableMappingABC):
-            baseline_state = decision_state.get("baseline")
-            if isinstance(baseline_state, _MutableMappingABC):
-                if pricing_source_value:
-                    baseline_state["pricing_source"] = pricing_source_value
-                else:
-                    baseline_state.pop("pricing_source", None)
-
-    def render_drill_debug(entries: Sequence[str]) -> None:
-        _push(lines, "Drill Debug")
-        _push(lines, divider)
-        prioritized_entries: list[tuple[int, int, str]] = []
-        for idx, entry in enumerate(entries):
-            if entry is None:
-                continue
-            text = str(entry).strip()
-            if not text:
-                continue
-            normalized = text.lstrip()
-            if normalized.startswith("Material Removal Debug"):
-                priority = 0
-            elif normalized.startswith("OK deep_drill") or normalized.startswith("OK drill"):
-                priority = 1
-            elif normalized.lower().startswith("drill bin") or normalized.lower().startswith("bin "):
-                priority = 3
-            else:
-                priority = 2
-            prioritized_entries.append((priority, idx, text))
-
-        for _priority, _idx, text in sorted(prioritized_entries, key=lambda item: (item[0], item[1])):
-            if "\n" in text:
-                normalized = text.lstrip()
-                block_indent = "" if normalized.startswith("Material Removal Debug") else "  "
-                for chunk in text.splitlines():
-                    write_line(chunk, block_indent)
-                if lines and lines[-1] != "":
-                    _push(lines, "")
-            else:
-                write_wrapped(text, "  ")
-        if lines and lines[-1] != "":
-            _push(lines, "")
+    for segment in render_quote_sections_helper(quote_render_state):
+        for segment_line in segment:
+            append_line(segment_line)
 
     app_meta = result.setdefault("app_meta", {})
-    # Only surface drill debug when LLM debug is enabled for this quote.
-    if drill_debug_entries and llm_debug_enabled_flag:
-        # Order so legacy per-bin “OK …” lines appear first, then tables/summary.
-        def _dbg_sort(a: str, b: str) -> int:
-            a_ok = a.strip().lower().startswith("ok ")
-            b_ok = b.strip().lower().startswith("ok ")
-            if a_ok and not b_ok: return -1
-            if b_ok and not a_ok: return 1
-            a_hdr = a.strip().lower().startswith("material removal debug")
-            b_hdr = b.strip().lower().startswith("material removal debug")
-            if a_hdr and not b_hdr: return 1
-            if b_hdr and not a_hdr: return -1
-            return 0
 
-        try:
-            sorted_drill_entries = sorted(drill_debug_entries, key=cmp_to_key(_dbg_sort))
-        except Exception:
-            sorted_drill_entries = drill_debug_entries
-
-        render_drill_debug(sorted_drill_entries)
+    pricing_source_value = quote_render_state.pricing_source_value
     row("Final Price per Part:", price)
-    final_price_row_index = len(lines) - 1
+    quote_render_state.final_price_row_index = len(lines) - 1
     total_process_cost_label = "Total Process Cost:"
     row(total_process_cost_label, float(totals.get("labor_cost", 0.0)))
-    total_process_cost_row_index = len(lines) - 1
+    quote_render_state.total_process_cost_row_index = len(lines) - 1
     total_direct_costs_label = "Total Direct Costs:"
     row(total_direct_costs_label, 0.0)
-    total_direct_costs_row_index = len(lines) - 1
-    process_total_row_index = -1
+    quote_render_state.total_direct_costs_row_index = len(lines) - 1
+    quote_render_state.process_total_row_index = -1
     directs: float = 0.0
     pricing_source_lower = pricing_source_value.lower() if pricing_source_value else ""
     display_red_flags: list[str] = []
@@ -10608,582 +11209,64 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
         if _coerce_float_or_none(pricing.get("total_direct_costs")) is None:
             pricing["total_direct_costs"] = float(sum(directs.values()))
 
-    def _lookup_blank(container: Mapping[str, Any] | None) -> Mapping[str, Any] | None:
-        if not isinstance(container, _MappingABC):
-            return None
-        for key in ("required_blank_in", "bbox_in"):
-            entry = container.get(key)
-            if isinstance(entry, _MappingABC):
-                return entry
-        return None
-
-    blank_sources: list[Mapping[str, Any] | None] = []
-    for parent in (breakdown, result):
-        if isinstance(parent, _MappingABC):
-            blank_sources.append(_lookup_blank(parent.get("geo")))
-            blank_sources.append(_lookup_blank(parent.get("geo_context")))
-            blank_sources.append(_lookup_blank(parent.get("geom")))
-    blank_sources.append(_lookup_blank(geo_context if isinstance(geo_context, _MappingABC) else None))
-    blank_sources.append(_lookup_blank(g if isinstance(g, _MappingABC) else None))
-    blank_sources.append(_lookup_blank(pricing_geom if isinstance(pricing_geom, _MappingABC) else None))
-
-    req_map: Mapping[str, Any] | None = next((entry for entry in blank_sources if entry), None)
-    w_val = coerce_positive_float(req_map.get("w")) if req_map else None
-    h_val = coerce_positive_float(req_map.get("h")) if req_map else None
-    t_val = coerce_positive_float(req_map.get("t")) if req_map else None
-    w = float(w_val) if w_val else 0.0
-    h = float(h_val) if h_val else 0.0
-    t = float(t_val) if t_val else 0.0
-    if t <= 0:
-        t = 2.0
-
-    if w <= 0 or h <= 0:
-        geo_candidates: list[Mapping[str, Any]] = []
-        for parent in (breakdown, result):
-            if isinstance(parent, _MappingABC):
-                for key in ("geo", "geo_context", "geom"):
-                    candidate = parent.get(key)
-                    if isinstance(candidate, _MappingABC):
-                        geo_candidates.append(candidate)
-        if isinstance(geo_context, _MappingABC):
-            geo_candidates.append(geo_context)
-        if isinstance(g, _MappingABC):
-            geo_candidates.append(g)
-        inferred_w = inferred_h = 0.0
-        for geo_candidate in geo_candidates:
-            inferred_w, inferred_h = _infer_rect_from_holes(geo_candidate)
-            if inferred_w > 0 and inferred_h > 0:
-                break
-        if inferred_w > 0 and w <= 0:
-            w = float(inferred_w)
-        if inferred_h > 0 and h <= 0:
-            h = float(inferred_h)
-
-    required_blank = (float(w), float(h), float(t))
-    blank_len = max(required_blank[0], required_blank[1]) if required_blank[0] > 0 and required_blank[1] > 0 else 0.0
-    blank_wid = min(required_blank[0], required_blank[1]) if required_blank[0] > 0 and required_blank[1] > 0 else 0.0
-
-    def _blank_has_dims(candidate: Mapping[str, Any] | None) -> bool:
-        if not isinstance(candidate, _MappingABC):
-            return False
-        return bool(
-            coerce_positive_float(candidate.get("w"))
-            and coerce_positive_float(candidate.get("h"))
-        )
-
-    def _apply_blank_hint(container: Mapping[str, Any] | None) -> None:
-        if not isinstance(container, _MutableMappingABC):
-            return
-        if required_blank[0] <= 0 or required_blank[1] <= 0:
-            return
-        hint_payload: dict[str, Any] = {"w": float(required_blank[0]), "h": float(required_blank[1])}
-        if required_blank[2] > 0:
-            hint_payload["t"] = float(required_blank[2])
-        existing_blank = container.get("required_blank_in")
-        if not _blank_has_dims(existing_blank):
-            container["required_blank_in"] = dict(hint_payload)
-        existing_bbox = container.get("bbox_in")
-        if not _blank_has_dims(existing_bbox):
-            container.setdefault("bbox_in", dict(hint_payload))
-
-    for context in (
-        geo_context if isinstance(geo_context, _MutableMappingABC) else None,
-        g if isinstance(g, _MutableMappingABC) else None,
-        pricing_geom if isinstance(pricing_geom, _MutableMappingABC) else None,
-    ):
-        _apply_blank_hint(context)
-    for parent in (breakdown, result):
-        if isinstance(parent, _MutableMappingABC):
-            for key in ("geo", "geo_context", "geom"):
-                _apply_blank_hint(parent.get(key))
-
-    for container in (
-        material if isinstance(material, _MutableMappingABC) else None,
-        material_stock_block if isinstance(material_stock_block, _MutableMappingABC) else None,
-    ):
-        _apply_blank_hint(container)
-
-    if blank_len > 0 and isinstance(material_stock_block, _MutableMappingABC):
-        if coerce_positive_float(material_stock_block.get("required_blank_len_in")) is None:
-            material_stock_block["required_blank_len_in"] = float(blank_len)
-        if coerce_positive_float(material_stock_block.get("required_blank_wid_in")) is None:
-            material_stock_block["required_blank_wid_in"] = float(blank_wid)
-        if required_blank[2] > 0 and coerce_positive_float(
-            material_stock_block.get("required_blank_thk_in")
-        ) is None:
-            material_stock_block["required_blank_thk_in"] = float(required_blank[2])
-
-    required_blank_len = float(blank_len) if blank_len > 0 else 0.0
-    required_blank_wid = float(blank_wid) if blank_wid > 0 else 0.0
-
-    # ---- material & stock (compact; shown only if we actually have data) -----
-    if material:
-        mass_g = material.get("mass_g")
-        net_mass_g = material.get("mass_g_net")
-        if _coerce_float_or_none(net_mass_g) is None:
-            fallback_net_mass = material.get("net_mass_g")
-            if _coerce_float_or_none(fallback_net_mass) is not None:
-                net_mass_g = fallback_net_mass
-        upg    = material.get("unit_price_per_g")
-        minchg = material.get("supplier_min_charge")
-        matcost= material.get("material_cost")
-        scrap  = material.get("scrap_pct", None)  # will show only if present in breakdown
-        scrap_credit_entered = _is_truthy_flag(
-            material.get("material_scrap_credit_entered")
-        )
-        scrap_credit = float(material.get("material_scrap_credit") or 0.0)
-        unit_price_kg = material.get("unit_price_usd_per_kg")
-        unit_price_lb = material.get("unit_price_usd_per_lb")
-        price_source  = material.get("unit_price_source") or material.get("source")
-        price_asof    = material.get("unit_price_asof")
-
-        have_any = any(
-            v
-            for v in [
-                mass_g,
-                net_mass_g,
-                upg,
-                minchg,
-                matcost,
-                scrap,
-                scrap_credit if scrap_credit_entered else 0.0,
-            ]
-        )
-
-        detail_lines: list[str] = []
-        total_material_cost: float | None = None
-        material_cost_components: Mapping[str, Any] | None = None
-
-        if have_any:
-            _push(lines, "Material & Stock")
-            _push(lines, divider)
-            canonical_material_display = str(material_display_label or "").strip()
-            if not canonical_material_display and isinstance(material_selection, _MappingABC):
-                canonical_material_display = str(
-                    material_selection.get("material_display")
-                    or material_selection.get("canonical")
-                    or material_selection.get("canonical_material")
-                    or ""
-                ).strip()
-            if not canonical_material_display and isinstance(drilling_meta, _MappingABC):
-                drill_display = (
-                    drilling_meta.get("material")
-                    or drilling_meta.get("material_display")
-                )
-                if not drill_display:
-                    drill_display = (
-                        drilling_meta.get("material_key")
-                        or drilling_meta.get("material_lookup")
-                    )
-                    if drill_display:
-                        normalized_key = _normalize_lookup_key(drill_display)
-                        drill_display = MATERIAL_DISPLAY_BY_KEY.get(
-                            normalized_key,
-                            drill_display,
-                        )
-                if drill_display:
-                    canonical_material_display = str(drill_display).strip()
-            material_name_display = canonical_material_display
-            if not material_name_display:
-                material_name_display = (
-                    material.get("material_name")
-                    or material.get("material")
-                    or g.get("material")
-                    or ui_vars.get("Material")
-                    or ""
-                )
-            if isinstance(material_name_display, str):
-                material_name_display = material_name_display.strip()
-            else:
-                material_name_display = str(material_name_display).strip()
-            if material_name_display:
-                material_display_label = str(material_name_display)
-                material_selection.setdefault("material_display", material_display_label)
-                material_display_for_debug = material_name_display
-                _push(lines, f"  Material used:  {material_name_display}")
-
-            blank_lines: list[str] = []
-            need_len = _coerce_float_or_none(
-                material_stock_block.get("required_blank_len_in")
-                if isinstance(material_stock_block, _MappingABC)
-                else None
-            )
-            need_wid = _coerce_float_or_none(
-                material_stock_block.get("required_blank_wid_in")
-                if isinstance(material_stock_block, _MappingABC)
-                else None
-            )
-            need_thk = _coerce_float_or_none(
-                material_stock_block.get("required_blank_thk_in")
-                if isinstance(material_stock_block, _MappingABC)
-                else None
-            )
-
-            if (need_len is None or need_len <= 0) and required_blank_len > 0:
-                need_len = float(required_blank_len)
-            if (need_wid is None or need_wid <= 0) and required_blank_wid > 0:
-                need_wid = float(required_blank_wid)
-            if (need_thk is None or need_thk <= 0) and required_blank[2] > 0:
-                need_thk = float(required_blank[2])
-
-            stock_len_val = _coerce_float_or_none(
-                material_stock_block.get("stock_L_in")
-                if isinstance(material_stock_block, _MappingABC)
-                else None
-            )
-            stock_wid_val = _coerce_float_or_none(
-                material_stock_block.get("stock_W_in")
-                if isinstance(material_stock_block, _MappingABC)
-                else None
-            )
-            stock_thk_val = _coerce_float_or_none(
-                material_stock_block.get("stock_T_in")
-                if isinstance(material_stock_block, _MappingABC)
-                else None
-            )
-
-            picked_stock: dict[str, Any] | None = None
-            material_lookup_for_pick = normalized_material_key or ""
-            if not material_lookup_for_pick and material_display_label:
-                material_lookup_for_pick = _normalize_lookup_key(material_display_label)
-            picked_stock = _resolve_mcmaster_plate_for_quote(
-                float(need_len) if need_len else None,
-                float(need_wid) if need_wid else None,
-                float(need_thk) if need_thk else None,
-                material_key=material_lookup_for_pick or "MIC6",
-                stock_L_in=float(stock_len_val) if stock_len_val else None,
-                stock_W_in=float(stock_wid_val) if stock_wid_val else None,
-                stock_T_in=float(stock_thk_val) if stock_thk_val else None,
-            )
-
-            if picked_stock:
-                stock_len_val = float(picked_stock.get("len_in") or 0.0)
-                stock_wid_val = float(picked_stock.get("wid_in") or 0.0)
-                stock_thk_val = float(picked_stock.get("thk_in") or 0.0)
-                part_number = picked_stock.get("mcmaster_part")
-                source_hint = picked_stock.get("source") or "mcmaster-catalog"
-                if isinstance(material_stock_block, _MutableMappingABC):
-                    material_stock_block["stock_L_in"] = float(stock_len_val)
-                    material_stock_block["stock_W_in"] = float(stock_wid_val)
-                    material_stock_block["stock_T_in"] = float(stock_thk_val)
-                    material_stock_block["stock_source_tag"] = source_hint
-                    material_stock_block["source"] = source_hint
-                    if part_number:
-                        material_stock_block["mcmaster_part"] = part_number
-                        material_stock_block["part_no"] = part_number
-                        if not material_stock_block.get("stock_price_source"):
-                            material_stock_block["stock_price_source"] = "mcmaster_api"
-                if isinstance(material, _MutableMappingABC):
-                    material["stock_source_tag"] = source_hint
-                    material["source"] = source_hint
-                    if part_number:
-                        material["mcmaster_part"] = part_number
-                        material["part_no"] = part_number
-                        if not material.get("stock_price_source"):
-                            material["stock_price_source"] = (
-                                material_stock_block.get("stock_price_source")
-                                if isinstance(material_stock_block, _MappingABC)
-                                else "mcmaster_api"
-                            )
-                if isinstance(result, _MutableMappingABC):
-                    if part_number:
-                        result["mcmaster_part"] = part_number
-                        result["part_no"] = part_number
-                        if not result.get("stock_price_source"):
-                            result["stock_price_source"] = (
-                                material_stock_block.get("stock_price_source")
-                                if isinstance(material_stock_block, _MappingABC)
-                                else "mcmaster_api"
-                            )
-                    result["stock_source"] = source_hint
-            if (need_len is None or need_wid is None or need_thk is None) and isinstance(g, dict):
-                plan_guess = g.get("stock_plan_guess")
-                if isinstance(plan_guess, _MappingABC):
-                    if need_len is None:
-                        need_len = _coerce_float_or_none(
-                            plan_guess.get("need_len_in")
-                            or plan_guess.get("required_len_in")
-                        )
-                    if need_wid is None:
-                        need_wid = _coerce_float_or_none(
-                            plan_guess.get("need_wid_in")
-                            or plan_guess.get("required_wid_in")
-                        )
-                    if need_thk is None:
-                        need_thk = _coerce_float_or_none(
-                            plan_guess.get("need_thk_in")
-                            or plan_guess.get("stock_thk_in")
-                        )
-
-            if need_len and need_wid and need_thk:
-                blank_lines.append(
-                    f"  Required blank (w/ margins): {need_len:.2f} × {need_wid:.2f} × {need_thk:.2f} in"
-                )
-
-            source_tag = None
-            if isinstance(material_stock_block, _MappingABC):
-                source_tag = material_stock_block.get("stock_source_tag") or material_stock_block.get("source")
-            if not source_tag and isinstance(material, _MappingABC):
-                source_tag = material.get("stock_source_tag") or material.get("source")
-            if isinstance(source_tag, str):
-                source_tag = source_tag.strip()
-                if not source_tag:
-                    source_tag = None
-
-            if stock_len_val and stock_wid_val and stock_thk_val:
-                part_label = ""
-                if isinstance(result, Mapping):
-                    part_label = str(result.get("mcmaster_part") or "").strip()
-                part_display = part_label or "—"
-                stock_line = (
-                    "  Rounded to catalog: "
-                    f"{stock_len_val:.2f} × {stock_wid_val:.2f} × {stock_thk_val:.3f} in"
-                    f" (McMaster, {part_display})"
-                )
-                if source_tag:
-                    stock_line += f" ({source_tag})"
-                thickness_diff = None
-                diff_candidate = None
-                if isinstance(material_stock_block, _MappingABC):
-                    diff_candidate = _coerce_float_or_none(
-                        material_stock_block.get("thickness_diff_in")
-                    )
-                if diff_candidate is None and need_thk and stock_thk_val:
-                    thickness_diff = abs(float(stock_thk_val) - float(need_thk))
-                elif diff_candidate is not None:
-                    thickness_diff = float(diff_candidate)
-                if (
-                    thickness_diff is not None
-                    and thickness_diff > 0.02
-                ):
-                    warning_mode = (
-                        "allowed"
-                        if bool(getattr(cfg, "allow_thickness_upsize", False))
-                        else "blocked"
-                    )
-                    stock_line += f" (WARNING: thickness upsize {warning_mode})"
-                blank_lines.append(stock_line)
-
-            if blank_lines:
-                detail_lines.extend(blank_lines)
-
-            material_cost_map: dict[str, Any] = {}
-            if isinstance(material_stock_block, _MappingABC):
-                material_cost_map.update(material_stock_block)
-            if isinstance(material, _MappingABC):
-                material_cost_map.update(material)
-            material_cost_components = _material_cost_components(
-                material_cost_map,
-                overrides=material_overrides,
-                cfg=cfg,
-            )
-            total_material_cost = material_cost_components["total_usd"]
-            material_net_cost = material_cost_components["net_usd"]
-            if total_material_cost is not None:
-                try:
-                    material_block["total_material_cost"] = total_material_cost
-                except Exception:
-                    pass
-                try:
-                    material_record = breakdown.get("material") if isinstance(breakdown, _MappingABC) else None
-                    if isinstance(material_record, _MutableMappingABC):
-                        material_record["total_material_cost"] = float(total_material_cost)
-                    elif isinstance(material_record, _MappingABC):
-                        updated_material = dict(material_record)
-                        updated_material["total_material_cost"] = float(total_material_cost)
-                        if isinstance(breakdown, _MutableMappingABC):
-                            breakdown["material"] = updated_material
-                    elif isinstance(breakdown, _MutableMappingABC):
-                        breakdown["material"] = {"total_material_cost": float(total_material_cost)}
-                except Exception:
-                    pass
-            scrap_context = {
-                "scrap_pct": scrap,
-                "scrap_credit_entered": scrap_credit_entered,
-                "scrap_credit": scrap_credit,
-                "scrap_credit_unit_price_usd_per_lb": material.get(
-                    "scrap_credit_unit_price_usd_per_lb"
-                ),
-                "price_source": price_source,
-                "price_asof": price_asof,
-                "supplier_min_charge": minchg,
-            }
-            material_updates, helper_detail_lines = build_material_detail_lines(
-                material,
-                scrap_context=scrap_context,
-                currency=currency,
-                show_zeros=show_zeros,
-                show_material_shipping=show_material_shipping,
-                shipping_total=shipping_total,
-                shipping_source=shipping_source,
-            )
-            if isinstance(material_detail_for_breakdown, _MutableMappingABC):
-                for key, value in material_updates.items():
-                    if value is None:
-                        material_detail_for_breakdown.pop(key, None)
-                    else:
-                        material_detail_for_breakdown[key] = value
-            detail_lines.extend(helper_detail_lines)
-            def _coerce_dims(candidate: Any) -> tuple[float, float, float] | None:
-                if isinstance(candidate, (list, tuple)) and len(candidate) >= 3:
-                    try:
-                        Lc = float(candidate[0])
-                        Wc = float(candidate[1])
-                        Tc = float(candidate[2])
-                    except Exception:
-                        return None
-                    return (Lc, Wc, Tc)
-                return None
-
-            stock_dims_candidate = _coerce_dims(material.get("stock_dims_in"))
-            if stock_dims_candidate is None:
-                stock_dims_candidate = _coerce_dims(
-                    material_stock_block.get("stock_dims_in")
-                )
-
-            stock_L_val: float | None
-            stock_W_val: float | None
-            stock_T_val: float | None
-            if stock_dims_candidate:
-                stock_L_val, stock_W_val, stock_T_val = stock_dims_candidate
-            else:
-                stock_L_val = _coerce_float_or_none(material_stock_block.get("stock_L_in"))
-                stock_W_val = _coerce_float_or_none(material_stock_block.get("stock_W_in"))
-                stock_T_val = _coerce_float_or_none(material_stock_block.get("stock_T_in"))
-            if stock_T_val is None:
-                stock_T_val = _coerce_float_or_none(material.get("thickness_in"))
-                if stock_T_val is None:
-                    stock_T_val = _coerce_float_or_none(g.get("thickness_in"))
-                if stock_T_val is None:
-                    stock_T_val = _coerce_float_or_none(g.get("thickness_in_guess"))
-                if stock_T_val is None and isinstance(baseline, _MappingABC):
-                    stock_T_val = _coerce_float_or_none(baseline.get("thickness_in"))
-            if stock_L_val is None or stock_W_val is None:
-                fallback_L = _coerce_float_or_none(ui_vars.get("Plate Length (in)"))
-                if fallback_L is None:
-                    fallback_L = _coerce_float_or_none(g.get("plate_length_in"))
-                fallback_W = _coerce_float_or_none(ui_vars.get("Plate Width (in)"))
-                if fallback_W is None:
-                    fallback_W = _coerce_float_or_none(g.get("plate_width_in"))
-                if (fallback_L is None or fallback_W is None) and isinstance(g, dict):
-                    L_mm = _coerce_float_or_none(g.get("plate_length_mm"))
-                    W_mm = _coerce_float_or_none(g.get("plate_width_mm"))
-                    derived_ctx = g.get("derived") if isinstance(g, dict) else None
-                    if (L_mm is None or W_mm is None) and isinstance(derived_ctx, dict):
-                        bbox = derived_ctx.get("bbox_mm")
-                        if bbox and len(bbox) >= 2:
-                            if L_mm is None:
-                                L_mm = _coerce_float_or_none(bbox[0])
-                            if W_mm is None:
-                                W_mm = _coerce_float_or_none(bbox[1])
-                    if fallback_L is None and L_mm is not None:
-                        fallback_L = float(L_mm) / 25.4
-                    if fallback_W is None and W_mm is not None:
-                        fallback_W = float(W_mm) / 25.4
-                if stock_L_val is None and fallback_L is not None:
-                    stock_L_val = float(fallback_L)
-                if stock_W_val is None and fallback_W is not None:
-                    stock_W_val = float(fallback_W)
-            if (stock_L_val is None or stock_W_val is None) and isinstance(g, dict):
-                inferred_dims = infer_plate_lw_in(g)
-                if inferred_dims:
-                    if stock_L_val is None:
-                        stock_L_val = float(inferred_dims[0])
-                    if stock_W_val is None:
-                        stock_W_val = float(inferred_dims[1])
-            if stock_L_val and stock_W_val and stock_T_val:
-                stock_dims_candidate = (float(stock_L_val), float(stock_W_val), float(stock_T_val))
-            if stock_L_val and stock_W_val and stock_T_val:
-                stock_line = f"{float(stock_L_val):.2f} × {float(stock_W_val):.2f} × {float(stock_T_val):.3f} in"
-            else:
-                inferred_dims = infer_plate_lw_in(g)
-                L_disp = stock_L_val
-                W_disp = stock_W_val
-                if (L_disp is None or W_disp is None) and inferred_dims:
-                    if L_disp is None:
-                        L_disp = inferred_dims[0]
-                    if W_disp is None:
-                        W_disp = inferred_dims[1]
-                T_disp_val = stock_T_val
-                if T_disp_val is None and isinstance(g, dict):
-                    T_disp_val = _coerce_float_or_none(g.get("thickness_in"))
-                if T_disp_val is None and isinstance(g, dict):
-                    T_disp_val = _coerce_float_or_none(g.get("thickness_in_guess"))
-                if L_disp and W_disp and T_disp_val:
-                    stock_line = f"{float(L_disp):.2f} × {float(W_disp):.2f} × {float(T_disp_val):.3f} in"
-                else:
-                    T_disp = "—"
-                    if T_disp_val is not None:
-                        T_disp = f"{float(T_disp_val):.3f}"
-                    stock_line = f"— × — × {T_disp} in"
-            if isinstance(mat_info, dict):
-                mat_info["stock_size_display"] = stock_line
-            if detail_lines:
-                append_lines(detail_lines)
-            mc: Mapping[str, Any] | None = material_cost_components
-            if not mc:
-                try:
-                    mc = _material_cost_components(
-                        material_block,
-                        overrides=material_overrides,
-                        cfg=cfg,
-                    )
-                except Exception:
-                    mc = None
-            if mc:
-                stock_piece_val = mc.get("stock_piece_usd")
-                if stock_piece_val is not None:
-                    stock_src = mc.get("stock_source") or ""
-                    src_suffix = f" ({stock_src})" if stock_src else ""
-                    row(f"Stock Piece{src_suffix}", float(stock_piece_val), indent="  ")
-                else:
-                    base_source = mc.get("base_source") or ""
-                    base_label = "Base Material"
-                    if base_source:
-                        base_label = f"Base Material @ {base_source}"
-                    row(base_label, float(mc.get("base_usd", 0.0)), indent="  ")
-                try:
-                    tax_val = float(mc.get("tax_usd") or 0.0)
-                except Exception:
-                    tax_val = 0.0
-                if tax_val:
-                    row("Material Tax:", round(tax_val, 2), indent="  ")
-                try:
-                    scrap_val = float(mc.get("scrap_credit_usd") or 0.0)
-                except Exception:
-                    scrap_val = 0.0
-                scrap_text = mc.get("scrap_rate_text") or ""
-                if scrap_val and scrap_text:
-                    row(
-                        f"Scrap Credit @ {scrap_text}",
-                        -round(scrap_val, 2),
-                        indent="  ",
-                    )
-                elif scrap_val:
-                    row("Scrap Credit", -round(scrap_val, 2), indent="  ")
-                try:
-                    base_for_total = float(mc.get("base_usd") or 0.0)
-                except Exception:
-                    base_for_total = 0.0
-                tax_for_total = float(tax_val)
-                total_material_cost_val = mc.get("total_usd")
-                if total_material_cost_val is not None:
-                    try:
-                        total_material_cost = round(float(total_material_cost_val), 2)
-                    except Exception:
-                        total_material_cost = None
-                else:
-                    total_material_cost = None
-                if total_material_cost is None:
-                    scrap_for_total = min(float(scrap_val), base_for_total + tax_for_total)
-                    total_material_cost = round(
-                        base_for_total + tax_for_total - scrap_for_total,
-                        2,
-                    )
-                row("Total Material Cost :", total_material_cost, indent="  ")
-            elif total_material_cost is not None:
-                row("Total Material Cost :", total_material_cost, indent="  ")
-            _push(lines, "")
+    result_owner: MutableMapping[str, Any]
+    if isinstance(result, _MutableMappingABC):
+        result_owner = typing.cast(MutableMapping[str, Any], result)
+    elif isinstance(result, dict):
+        result_owner = result
+    else:
+        result_owner = typing.cast(MutableMapping[str, Any], {})
+    if isinstance(breakdown, _MutableMappingABC):
+        breakdown_owner = typing.cast(MutableMapping[str, Any], breakdown)
+    elif isinstance(breakdown, dict):
+        breakdown_owner = breakdown
+    else:
+        breakdown_owner = typing.cast(MutableMapping[str, Any], {})
+    render_state = RenderState(
+        result=result_owner,
+        breakdown=breakdown_owner,
+        currency=currency,
+        show_zeros=show_zeros,
+        page_width=page_width,
+        divider=divider,
+        cfg=cfg,
+        geometry=geometry,
+        append_line=append_line,
+        append_lines=append_lines,
+        write_wrapped=write_wrapped,
+    )
+    material_section_lines = render_material(
+        render_state,
+        material=material,
+        material_stock_block=material_stock_block,
+        material_selection=material_selection,
+        material_display_label=material_display_label,
+        normalized_material_key=normalized_material_key,
+        drilling_meta=drilling_meta,
+        ui_vars=ui_vars,
+        baseline=baseline if isinstance(baseline, _MappingABC) else baseline,
+        g=g,
+        geo_context=geo_context,
+        pricing_geom=pricing_geom,
+        pricing=pricing,
+        material_detail_for_breakdown=material_detail_for_breakdown,
+        material_cost_components=material_cost_components,
+        material_overrides=material_overrides,
+        show_material_shipping=show_material_shipping,
+        shipping_total=shipping_total,
+        shipping_source=shipping_source,
+        material_warning_summary=material_warning_summary,
+    )
+    append_lines(material_section_lines)
+    if render_state.material_cost_components is not None:
+        material_cost_components = render_state.material_cost_components
+    if render_state.material_component_total is not None:
+        material_component_total = float(render_state.material_component_total)
+    if render_state.material_component_net is not None:
+        material_component_net = float(render_state.material_component_net)
+    if render_state.material_net_cost is not None:
+        material_net_cost = float(render_state.material_net_cost)
+    material_warning_needed = render_state.material_warning_needed
 
     rates.setdefault("LaborRate", 85.0)
     rates.setdefault(
@@ -12911,14 +12994,6 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
         process_table.had_rows = True
 
     bucket_view_obj = locals().get("bucket_view_obj") if "bucket_view_obj" in locals() else None
-    bucket_view_for_render: Mapping[str, Any] | None
-    if isinstance(bucket_view_obj, (_MappingABC, dict)):
-        bucket_view_for_render = typing.cast(Mapping[str, Any], bucket_view_obj)
-    elif isinstance(bucket_view_struct, (_MappingABC, dict)):
-        bucket_view_for_render = typing.cast(Mapping[str, Any], bucket_view_struct)
-    else:
-        bucket_view_for_render = None
-
     bucket_seed_target: MutableMapping[str, Any] | Mapping[str, Any] | None = None
     for candidate_name in ("bucket_view_obj", "bucket_view_struct"):
         candidate = locals().get(candidate_name)
@@ -12956,145 +13031,36 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
         or 45.0
     )
 
-    if bucket_seed_target is not None:
-        _purge_legacy_drill_sync(bucket_seed_target)
-        _set_bucket_minutes_cost(
-            bucket_seed_target,
-            "drilling",
-            drill_minutes_total,
-            drill_mrate,
-            drill_lrate,
-        )
-        try:
-            drilling_bucket_snapshot = (
-                (bucket_seed_target.get("buckets") or {}).get("drilling")
-                if isinstance(bucket_seed_target, (_MappingABC, dict))
-                else None
-            )
-        except Exception:
-            drilling_bucket_snapshot = None
-        logger.info(
-            "[bucket] drilling_minutes=%s drilling_bucket=%s",
-            drill_minutes_total,
-            drilling_bucket_snapshot,
-        )
-
-    if isinstance(bucket_view_obj, (_MutableMappingABC, dict)):
-        _normalize_buckets(typing.cast(MutableMapping[str, Any], bucket_view_obj))
-    elif isinstance(bucket_view_struct, (_MutableMappingABC, dict)):
-        _normalize_buckets(typing.cast(MutableMapping[str, Any], bucket_view_struct))
-
-    if isinstance(bucket_view_for_render, Mapping):
-        if isinstance(bucket_view_for_render, (_MutableMappingABC, dict)):
-            # ``bucket_view_for_render`` already references a mutable structure
-            # that has been normalised in-place above.
-            pass
-        else:
-            # Planner payloads are sometimes stored in read-only mapping
-            # proxies.  Clone and normalise those views so downstream helpers
-            # do not encounter unlabeled buckets (which would emit generic
-            # rate lines like ``0.21 hr @ $89.98/hr``).
-            bucket_view_for_render = _prepare_bucket_view(bucket_view_for_render)
-
-    process_section_start = len(lines)
-
-    bucket_entries_for_totals: Mapping[str, Any] | None = None
-    if isinstance(bucket_view_for_render, (_MappingABC, dict)):
-        try:
-            bucket_entries_candidate = bucket_view_for_render.get("buckets")
-        except Exception:
-            bucket_entries_candidate = None
-        if isinstance(bucket_entries_candidate, dict):
-            bucket_entries_for_totals = bucket_entries_candidate
-        elif isinstance(bucket_entries_candidate, _MappingABC):
-            try:
-                bucket_entries_for_totals = dict(bucket_entries_candidate)
-            except Exception:
-                bucket_entries_for_totals = {}
-    if bucket_entries_for_totals is None:
-        bucket_entries_for_totals = {}
-
-    bucket_entries_for_totals_map = {}
-
-    preferred_bucket_order = [
-        "programming",
-        "milling",
-        "drilling",
-        "tapping",
-        "counterbore",
-        "spot_drill",
-        "jig_grind",
-        "inspection",
-    ]
-
-    proc_total_rendered = 0.0
-    hrs_total_rendered = 0.0
-    seen_bucket_keys: set[str] = set()
-    for bucket_key in list(preferred_bucket_order) + [
-        key for key in bucket_entries_for_totals if key not in preferred_bucket_order
-    ]:
-        entry = bucket_entries_for_totals.get(bucket_key)
-        if not isinstance(entry, _MappingABC) or bucket_key in seen_bucket_keys:
-            continue
-        seen_bucket_keys.add(bucket_key)
-
-        canon_key = (
-            _canonical_bucket_key(bucket_key)
-            or _normalize_bucket_key(bucket_key)
-            or str(bucket_key)
-        )
-        normalized_key = _normalize_bucket_key(bucket_key)
-        display_label = _display_bucket_label(canon_key, label_overrides)
-
-        lookup_keys = {
-            str(bucket_key),
-            canon_key,
-            normalized_key,
-            display_label,
-        }
-        for lookup_key in lookup_keys:
-            if lookup_key:
-                bucket_entries_for_totals_map[str(lookup_key)] = entry
-
-    process_config_sources: list[Mapping[str, Any]] = []
-
-    def _collect_config_sources(container: Mapping[str, Any] | None) -> None:
-        if not isinstance(container, _MappingABC):
-            return
-        for key in ("config", "params"):
-            try:
-                candidate = container.get(key)
-            except Exception:
-                candidate = None
-            if isinstance(candidate, dict):
-                process_config_sources.append(candidate)
-            elif isinstance(candidate, _MappingABC):
-                process_config_sources.append(dict(candidate))
-
-    _collect_config_sources(breakdown if isinstance(breakdown, _MappingABC) else None)
-    _collect_config_sources(result if isinstance(result, _MappingABC) else None)
-    if isinstance(result, _MappingABC):
-        quote_state_payload = result.get("quote_state")
-        if isinstance(quote_state_payload, _MappingABC):
-            _collect_config_sources(quote_state_payload)
-
-    process_section_lines, process_rows_total, process_rows_minutes, process_rows_rendered = render_process_sections(
-        bucket_view_for_render,
-        process_meta=process_meta if isinstance(process_meta, _MappingABC) else None,
-        rates=rates if isinstance(rates, _MappingABC) else None,
-        cfg=cfg,
-        label_overrides=label_overrides,
+    process_render_state = ProcessRenderState(
+        lines=lines,
+        why_lines=why_lines,
+        page_width=page_width,
         format_money=_m,
-        add_process_notes=lambda label: add_process_notes(label),
-        config_sources=process_config_sources,
+        add_process_notes=add_process_notes,
+        render_bucket_table=render_bucket_table,
+        bucket_view_obj=typing.cast(Mapping[str, Any] | None, bucket_view_obj),
+        bucket_view_struct=typing.cast(Mapping[str, Any] | None, bucket_view_struct),
+        bucket_seed_target=bucket_seed_target,
+        process_plan_summary=process_plan_summary_candidate,
+        extra_map=extra_map_candidate,
+        rates=typing.cast(Mapping[str, Any] | None, rates_candidate),
+        drill_minutes_total=drill_minutes_total,
+        drill_machine_rate=drill_mrate,
+        drill_labor_rate=drill_lrate,
+        process_meta=typing.cast(Mapping[str, Any] | None, process_meta),
+        label_overrides=typing.cast(Mapping[str, Any] | None, label_overrides),
         labor_cost_totals=labor_cost_totals,
         programming_minutes=locals().get("programming_minutes"),
-        page_width=page_width,
+        breakdown=typing.cast(Mapping[str, Any] | None, breakdown),
+        result=typing.cast(Mapping[str, Any] | None, result),
+        cfg=cfg,
         canonical_bucket_key=_canonical_bucket_key,
         normalize_bucket_key=_normalize_bucket_key,
         display_bucket_label=_display_bucket_label,
         programming_per_part_label=PROGRAMMING_PER_PART_LABEL,
         programming_amortized_label=PROGRAMMING_AMORTIZED_LABEL,
+        bucket_entries_for_totals_map=bucket_entries_for_totals_map,
+        bucket_why_summary_line=bucket_why_summary_line,
     )
     lines.extend(process_section_lines)
     proc_total_rendered = process_rows_total
@@ -13129,7 +13095,7 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
         for offset, text in enumerate(lines[process_section_start:]):
             stripped = str(text or "").strip()
             if stripped.lower().startswith("total") and "$" in stripped:
-                process_total_row_index = process_section_start + offset
+                render_state.process_total_row_index = process_section_start + offset
                 break
     proc_total = proc_total_rendered
 
@@ -13445,9 +13411,9 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
     directs = float(round(directs_total_value, 2))
     if isinstance(totals, dict):
         totals["direct_costs"] = total_direct_costs_value
-    if 0 <= total_direct_costs_row_index < len(lines):
+    if 0 <= quote_render_state.total_direct_costs_row_index < len(lines):
         replace_line(
-            total_direct_costs_row_index,
+            quote_render_state.total_direct_costs_row_index,
             _format_row(
                 total_direct_costs_label,
                 total_direct_costs_value,
@@ -13540,9 +13506,9 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
             display_machine = 0.0
     if isinstance(totals, dict):
         totals["labor_cost"] = computed_total_labor_cost
-    if 0 <= total_process_cost_row_index < len(lines):
+    if 0 <= quote_render_state.total_process_cost_row_index < len(lines):
         replace_line(
-            total_process_cost_row_index,
+            quote_render_state.total_process_cost_row_index,
             _format_row(
                 total_process_cost_label,
                 total_process_cost_value,
@@ -13679,9 +13645,9 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
 
     final_per_part = round(machine_labor_total + nre_per_part + ladder_directs, 2)
     ladder_subtotal = final_per_part
-    if 0 <= total_process_cost_row_index < len(lines):
+    if 0 <= quote_render_state.total_process_cost_row_index < len(lines):
         replace_line(
-            total_process_cost_row_index,
+            quote_render_state.total_process_cost_row_index,
             _format_row(total_process_cost_label, total_process_cost_value),
         )
     if isinstance(pricing, dict):
@@ -15329,7 +15295,7 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
         result["price"] = price
     if isinstance(breakdown, dict):
         breakdown["final_price"] = final_price
-    replace_line(final_price_row_index, _format_row("Final Price per Part:", price))
+    replace_line(quote_render_state.final_price_row_index, _format_row("Final Price per Part:", price))
 
     subtotal_before_margin_val = _safe_float(subtotal_before_margin, 0.0)
     final_price_val = _safe_float(price, 0.0)
