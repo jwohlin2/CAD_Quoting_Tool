@@ -5853,22 +5853,33 @@ def read_geo(
     print(f"[PATH] text=run (rows_txt={rows_txt_debug})")
     print(f"[EXTRACT] acad_rows={acad_rows} text_rows={text_rows}")
 
+    score_a = _score_table(acad_info)
+    score_b = _score_table(text_info)
     publish_info: dict[str, Any] | None = None
     publish_source_tag: str | None = None
-    if acad_rows_list:
+    helper_choice = choose_better_table(acad_info, text_info)
+    helper_rows: list[dict[str, Any]] = []
+    if isinstance(helper_choice, Mapping):
+        helper_rows = _normalize_table_rows(helper_choice.get("rows"))
+    if helper_rows:
+        if helper_choice is acad_info:
+            publish_info = acad_info
+            publish_source_tag = "acad_table"
+        elif helper_choice is text_info:
+            publish_info = text_info
+            publish_source_tag = "text_table"
+        else:
+            publish_info = dict(helper_choice)
+            publish_info["rows"] = helper_rows
+            publish_source_tag = "acad_table" if score_a >= score_b else "text_table"
+    elif acad_rows_list:
         publish_info = acad_info
         publish_source_tag = "acad_table"
     elif text_rows_list:
         publish_info = text_info
         publish_source_tag = "text_table"
 
-    score_a = _score_table(acad_info)
-    score_b = _score_table(text_info)
-    best_table = publish_info or choose_better_table(acad_info, text_info)
-    if publish_info is None and isinstance(best_table, Mapping) and best_table.get("rows"):
-        publish_info = dict(best_table)
-        publish_info["rows"] = _normalize_table_rows(publish_info.get("rows"))
-        publish_source_tag = "acad_table" if score_a >= score_b else "text_table"
+    best_table = publish_info or helper_choice
     publish_rows: list[dict[str, Any]] = []
     if isinstance(publish_info, Mapping):
         publish_rows = list(publish_info.get("rows") or [])
