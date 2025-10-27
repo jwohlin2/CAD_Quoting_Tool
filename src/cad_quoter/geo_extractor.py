@@ -2183,6 +2183,19 @@ def _count_tables_for_layout_name(layout_name: str) -> int:
     return count
 
 
+def _extract_layer(entity: Any) -> str:
+    dxf_obj = getattr(entity, "dxf", None)
+    layer_name = None
+    if dxf_obj is not None:
+        layer_name = getattr(dxf_obj, "layer", None)
+    if not layer_name:
+        layer_name = getattr(entity, "layer", None)
+    try:
+        return str(layer_name or "").strip()
+    except Exception:
+        return ""
+
+
 def _normalize_table_fragment(fragment: str) -> str:
     if not isinstance(fragment, str):
         fragment = str(fragment)
@@ -2711,13 +2724,13 @@ def _build_columnar_table_from_panel_entries(
         return (
             None,
             {
-                "bands": [],
-                "band_cells": [],
                 "rows_txt_fallback": [],
                 "qty_col": None,
                 "ref_col": None,
                 "desc_col": None,
                 "roi": None,
+                "row_debug": [],
+                "columns": [],
             },
         )
 
@@ -2726,6 +2739,7 @@ def _build_columnar_table_from_panel_entries(
     roi_bounds: dict[str, float] | None = None
     roi_info: dict[str, Any] | None = None
     roi_median_height = 0.0
+    follow_sheet_requests: dict[str, Any] = {}
 
     if isinstance(roi_hint, Mapping):
         bbox = roi_hint.get("bbox")
@@ -3005,667 +3019,134 @@ def _build_columnar_table_from_panel_entries(
             f"[ROI] raw_lines -> roi_lines: {len(records_all)} -> {kept_count}"
         )
 
-    y_gap_limit = 0.75 * median_h if median_h > 0 else 4.0
-    if y_gap_limit <= 0:
-        y_gap_limit = 4.0
+    y_gap = 0.75 * median_h if median_h > 0 else 4.0
+    if y_gap <= 0:
+        y_gap = 4.0
 
-    raw_bands: list[list[dict[str, Any]]] = []
-    current_band: list[dict[str, Any]] = []
-    current_sum_y = 0.0
-    prev_y: float | None = None
+    normalized_cells: list[tuple[float, float, float, str]] = []
     for record in records:
-        y_val = record["y"]
-        if not current_band:
-            current_band = [record]
-            current_sum_y = y_val
-            prev_y = y_val
+        text_value = str(record.get("text") or "").strip()
+        if not text_value:
             continue
-        band_center = current_sum_y / len(current_band)
-        direct_gap = abs(y_val - prev_y) if prev_y is not None else 0.0
-        if direct_gap > y_gap_limit:
-            raw_bands.append(current_band)
-            current_band = [record]
-            current_sum_y = y_val
-            prev_y = y_val
+        x_raw = record.get("x")
+        y_raw = record.get("y")
+        if not isinstance(x_raw, (int, float)) or not isinstance(y_raw, (int, float)):
             continue
-        if abs(y_val - band_center) > y_gap_limit:
-            raw_bands.append(current_band)
-            current_band = [record]
-            current_sum_y = y_val
-            prev_y = y_val
-            continue
-        proposed_sum = current_sum_y + y_val
-        proposed_count = len(current_band) + 1
-        proposed_center = proposed_sum / proposed_count
-        if (
-            abs(proposed_center - band_center) > y_gap_limit
-            or abs(y_val - proposed_center) > y_gap_limit
-        ):
-            raw_bands.append(current_band)
-            current_band = [record]
-            current_sum_y = y_val
-            prev_y = y_val
-            continue
-        current_band.append(record)
-        current_sum_y = proposed_sum
-        prev_y = y_val
-    if current_band:
-        raw_bands.append(current_band)
-
-    bands: list[list[dict[str, Any]]] = []
-    for raw_index, band in enumerate(raw_bands):
-        if len(band) < 2:
-            continue
-        combined = " ".join(item["text"] for item in band)
-        if not any(char.isdigit() for char in combined) and not _COLUMN_TOKEN_RE.search(combined):
-            continue
-        drop_band = False
-        combined_upper = combined.upper()
-        drop_reason = ""
-        trimmed = combined.strip()
-        contains_hole_token = bool(_HOLE_ACTION_TOKEN_RE.search(combined))
-        keep_marker = bool(_BAND_KEEP_TOKEN_RE.search(combined_upper))
-        decimal_hits = len(_DECIMAL_RE.findall(combined))
-        fraction_hits = len(_FRACTION_RE.findall(combined))
-        numeric_guard = (decimal_hits + fraction_hits) >= 2
-        header_guard = bool(
-            re.search(
-                r"HOLE|REF|Ø|⌀|DIA|QUANTITY|QTY|DESCRIPTION|DESC",
-                combined_upper,
-            )
-        )
-        if _TITLE_AXIS_DROP_RE.search(combined_upper):
-            drop_band = not (keep_marker or numeric_guard)
-            drop_reason = "title/axis" if drop_band else ""
-        elif _SEE_SHEET_DROP_RE.search(combined_upper):
-            drop_band = not (keep_marker or numeric_guard)
-            drop_reason = "title/axis" if drop_band else ""
-        elif _AXIS_ZERO_PAIR_RE.match(trimmed):
-            drop_band = not (keep_marker or numeric_guard)
-            drop_reason = "title/axis" if drop_band else ""
-        elif _AXIS_ZERO_SINGLE_RE.match(trimmed):
-            drop_band = not (keep_marker or numeric_guard)
-            drop_reason = "title/axis" if drop_band else ""
+        height_raw = record.get("height")
+        if isinstance(height_raw, (int, float)) and float(height_raw) > 0:
+            height_val = float(height_raw)
         else:
-            small_ints = []
-            for token in _SMALL_INT_TOKEN_RE.findall(combined):
-                try:
-                    value = int(token)
-                except Exception:
-                    continue
-                if 1 <= value <= 16:
-                    small_ints.append(value)
-            if len(small_ints) >= 10:
-                drop_band = not (keep_marker or numeric_guard)
-                drop_reason = "title/axis" if drop_band else ""
-            elif len(small_ints) >= 12 and len(set(small_ints)) <= 16:
-                drop_band = not (keep_marker or numeric_guard)
-                drop_reason = "title/axis" if drop_band else ""
-        if header_guard:
-            drop_band = False
-            drop_reason = ""
-        if drop_band and contains_hole_token:
-            drop_band = False
-            drop_reason = ""
-        if drop_band:
-            preview = _truncate_cell_preview(trimmed or combined, 80).replace("\"", "\\\"")
-            print(
-                f"[TABLE-Y] drop band#{raw_index} reason={drop_reason} lines={len(band)} text=\"{preview}\""
-            )
-            continue
-        bands.append(band)
+            height_val = median_h if median_h > 0 else median_height_all or 4.0
+        normalized_cells.append((float(x_raw), float(y_raw), float(height_val), text_value))
 
-    print(f"[TABLE-Y] bands_total={len(bands)} median_h={median_h:.2f}")
-
-    header_token_patterns = [
-        (re.compile(r"\bHOLE\b", re.IGNORECASE), "hole"),
-        (re.compile(r"\bQTY\b|\bQUANTITY\b", re.IGNORECASE), "qty"),
-        (re.compile(r"\bDESC(?:RIPTION)?\b", re.IGNORECASE), "desc"),
-        (re.compile(r"\bSIDE\b|\bFACE\b", re.IGNORECASE), "side"),
-        (re.compile(r"\bREF\b", re.IGNORECASE), "ref"),
-        (re.compile(r"Ø|⌀|DIA|DIAM", re.IGNORECASE), "ref"),
-    ]
-
-    def _header_windows_from_band(
-        band_items: list[dict[str, Any]]
-    ) -> tuple[list[dict[str, Any]], dict[str, dict[str, Any]]]:
-        token_positions: list[float] = []
-        field_positions: dict[str, list[float]] = defaultdict(list)
-        for item in band_items:
-            text_value = str(item.get("text") or "")
-            if not text_value:
-                continue
-            try:
-                x_val = float(item.get("x"))
-            except Exception:
-                continue
-            upper_text = text_value.upper()
-            for pattern, field in header_token_patterns:
-                if pattern.search(upper_text):
-                    field_positions[field].append(x_val)
-                    token_positions.append(x_val)
-        if not token_positions:
-            return ([], {})
-        unique_positions = sorted({float(pos) for pos in token_positions})
-        diffs = [
-            abs(unique_positions[idx + 1] - unique_positions[idx])
-            for idx in range(len(unique_positions) - 1)
-            if abs(unique_positions[idx + 1] - unique_positions[idx]) > 0
-        ]
-        gap_baseline = statistics.median(diffs) if diffs else 0.0
-        if not gap_baseline or gap_baseline <= 0:
-            gap_baseline = 6.0 * median_h if median_h > 0 else 12.0
-        default_half = max(6.0, 0.5 * gap_baseline)
-        windows: list[dict[str, Any]] = []
-        for idx, center in enumerate(unique_positions):
-            if idx == 0:
-                left = center - default_half
-            else:
-                left = (unique_positions[idx - 1] + center) / 2.0
-            if idx + 1 < len(unique_positions):
-                right = (center + unique_positions[idx + 1]) / 2.0
-            else:
-                right = center + default_half
-            windows.append({"center": center, "left": left, "right": right, "field": None})
-
-        field_centers = {
-            field: statistics.mean(values)
-            for field, values in field_positions.items()
-            if values
+    if not normalized_cells:
+        debug_info = {
+            "rows_txt_fallback": [],
+            "median_h": median_h,
+            "roi": roi_info,
+            "row_gap": y_gap,
+            "columns": [],
         }
-        assigned_fields: set[str] = set()
-        used_indices: set[int] = set()
-        for field, center_val in sorted(field_centers.items(), key=lambda item: item[1]):
-            if field in assigned_fields:
-                continue
-            candidate_indices = list(range(len(windows)))
-            best_idx = min(
-                candidate_indices,
-                key=lambda idx: (abs(windows[idx]["center"] - center_val), idx),
-            )
-            if windows[best_idx].get("field") not in (None, field):
-                free_candidates = [
-                    idx
-                    for idx in candidate_indices
-                    if idx not in used_indices
-                    and windows[idx].get("field") in (None, field)
-                ]
-                if free_candidates:
-                    best_idx = min(
-                        free_candidates,
-                        key=lambda idx: (abs(windows[idx]["center"] - center_val), idx),
-                    )
-            windows[best_idx]["field"] = field
-            assigned_fields.add(field)
-            used_indices.add(best_idx)
+        return (None, debug_info)
 
-        for idx, window in enumerate(windows):
-            if window.get("field"):
+    class _RowBuffer:
+        __slots__ = ("cells", "y_values")
+
+        def __init__(self, cell: tuple[float, float, float, str]) -> None:
+            self.cells: list[tuple[float, float, float, str]] = [cell]
+            self.y_values: list[float] = [cell[1]]
+
+        def add(self, cell: tuple[float, float, float, str]) -> None:
+            self.cells.append(cell)
+            self.y_values.append(cell[1])
+
+        @property
+        def center(self) -> float:
+            return sum(self.y_values) / len(self.y_values)
+
+    sorted_cells = sorted(normalized_cells, key=lambda item: (-item[1], item[0]))
+    row_buffers: list[_RowBuffer] = []
+    for cell in sorted_cells:
+        if not row_buffers:
+            row_buffers.append(_RowBuffer(cell))
+            continue
+        current = row_buffers[-1]
+        if abs(cell[1] - current.center) <= y_gap:
+            current.add(cell)
+            continue
+        row_buffers.append(_RowBuffer(cell))
+
+    def _row_span(buffer: _RowBuffer) -> float:
+        xs = [cell[0] for cell in buffer.cells]
+        if len(xs) < 2:
+            return 0.0
+        return max(xs) - min(xs)
+
+    def _column_centers_from_rows(rows: list[_RowBuffer]) -> list[float]:
+        if not rows:
+            return []
+        span_target = max(rows, key=lambda row: (len(row.cells), _row_span(row)))
+        xs_sorted = sorted(cell[0] for cell in span_target.cells)
+        centers: list[float] = []
+        min_gap = max(2.0, 0.4 * (median_h if median_h > 0 else median_height_all or 4.0))
+        for x_val in xs_sorted:
+            if not centers:
+                centers.append(x_val)
                 continue
-            if idx == 0:
-                window["field"] = "hole"
-            elif idx == len(windows) - 1:
-                window["field"] = "desc"
-            elif idx == 1:
-                window["field"] = "ref"
-            elif idx == 2:
-                window["field"] = "qty"
+            if abs(x_val - centers[-1]) <= min_gap:
+                centers[-1] = (centers[-1] + x_val) / 2.0
             else:
-                window["field"] = "desc"
-        if windows and not windows[-1].get("field"):
-            windows[-1]["field"] = "desc"
+                centers.append(x_val)
+        if not centers:
+            centers = xs_sorted
+        return centers
 
-        seed_info: dict[str, dict[str, Any]] = {}
-        for idx, window in enumerate(windows):
-            field = window.get("field")
-            if isinstance(field, str) and field not in seed_info:
-                seed_info[field] = {
-                    "col": idx,
-                    "center": window.get("center"),
-                    "span": (window.get("left"), window.get("right")),
-                }
-        return (windows, seed_info)
+    column_centers = _column_centers_from_rows(row_buffers)
+    if not column_centers:
+        column_centers = sorted({cell[0] for cell in sorted_cells})
 
-    column_windows: list[dict[str, Any]] = []
-    header_seed_info: dict[str, dict[str, Any]] = {}
-    header_band_index: int | None = None
-
-    for idx, band in enumerate(bands):
-        combined_upper = " ".join(
-            str(item.get("text") or "").upper() for item in band if item.get("text")
-        )
-        if (
-            "HOLE" in combined_upper
-            and ("DESC" in combined_upper or "DESCRIPTION" in combined_upper)
-            and any(
-                token in combined_upper
-                for token in ("REF", "Ø", "⌀", "DIA", "QUANTITY", "QTY")
-            )
-        ):
-            header_band_index = idx
-            column_windows, header_seed_info = _header_windows_from_band(band)
-            break
-
-    if header_band_index is None:
-        for idx, band in enumerate(bands):
-            non_empty = [
-                item
-                for item in band
-                if str(item.get("text") or "").strip()
-            ]
-            if len(non_empty) >= 3:
-                header_band_index = idx
-                column_windows, header_seed_info = _header_windows_from_band(band)
-                if column_windows:
-                    break
-        if header_band_index is None:
-            header_band_index = 0 if bands else None
-
-    if column_windows:
-        if "hole" not in header_seed_info and column_windows:
-            header_seed_info["hole"] = {
-                "col": 0,
-                "center": column_windows[0].get("center"),
-                "span": (
-                    column_windows[0].get("left"),
-                    column_windows[0].get("right"),
-                ),
-            }
-        if "ref" not in header_seed_info and len(column_windows) >= 2:
-            header_seed_info["ref"] = {
-                "col": 1,
-                "center": column_windows[1].get("center"),
-                "span": (
-                    column_windows[1].get("left"),
-                    column_windows[1].get("right"),
-                ),
-            }
-        if "qty" not in header_seed_info and len(column_windows) >= 3:
-            qty_idx = 2 if len(column_windows) >= 3 else len(column_windows) - 2
-            qty_idx = max(1, min(qty_idx, len(column_windows) - 2))
-            header_seed_info["qty"] = {
-                "col": qty_idx,
-                "center": column_windows[qty_idx].get("center"),
-                "span": (
-                    column_windows[qty_idx].get("left"),
-                    column_windows[qty_idx].get("right"),
-                ),
-            }
-        if "desc" not in header_seed_info and column_windows:
-            last_idx = len(column_windows) - 1
-            header_seed_info["desc"] = {
-                "col": last_idx,
-                "center": column_windows[last_idx].get("center"),
-                "span": (
-                    column_windows[last_idx].get("left"),
-                    column_windows[last_idx].get("right"),
-                ),
-            }
-
-    header_initial_field_info: dict[str, dict[str, Any]] = {}
-    if header_seed_info and header_band_index is not None:
-        for field, info in header_seed_info.items():
-            info_copy = dict(info)
-            info_copy["band"] = header_band_index
-            header_initial_field_info[field] = info_copy
-
-    y_eps = y_gap_limit
-
-    qty_x: float | None = None
-    qty_groups: list[dict[str, Any]] = []
-    selected_qty_group: dict[str, Any] | None = None
-    qty_candidates: list[dict[str, Any]] = []
-    for band in bands:
-        for item in band:
-            text_candidate = (item.get("text") or "").strip()
-            if not text_candidate:
-                continue
-            if _QSTRIPE_CANDIDATE_RE.match(text_candidate):
-                qty_candidates.append({"x": item.get("x"), "text": text_candidate})
-
-    if qty_candidates:
-        valid_candidates = [
-            {"x": float(candidate["x"]), "text": candidate["text"]}
-            for candidate in qty_candidates
-            if isinstance(candidate.get("x"), (int, float))
+    def _snap_row(buffer: _RowBuffer, centers: list[float]) -> tuple[list[str], list[list[tuple[float, float, float, str]]]]:
+        if not centers:
+            return [], []
+        assignments: list[list[tuple[float, float, float, str]]] = [
+            [] for _ in centers
         ]
-        sorted_candidates = sorted(valid_candidates, key=lambda rec: rec["x"])
-        x_diffs = [
-            abs(sorted_candidates[idx]["x"] - sorted_candidates[idx - 1]["x"])
-            for idx in range(1, len(sorted_candidates))
-            if abs(sorted_candidates[idx]["x"] - sorted_candidates[idx - 1]["x"]) > 0
+        for cell in sorted(buffer.cells, key=lambda item: item[0]):
+            nearest_index = min(
+                range(len(centers)),
+                key=lambda idx: (abs(cell[0] - centers[idx]), idx),
+            )
+            assignments[nearest_index].append(cell)
+        cell_texts = [
+            " ".join(part[3] for part in bucket).strip() if bucket else ""
+            for bucket in assignments
         ]
-        if x_diffs:
-            median_diff = statistics.median(x_diffs)
-            x_stripe_eps = 0.6 * median_diff if median_diff > 0 else 0.0
-        else:
-            x_stripe_eps = 0.0
-        x_stripe_eps = max(4.0, x_stripe_eps)
-        for candidate in sorted_candidates:
-            x_pos = candidate["x"]
-            if not qty_groups:
-                qty_groups.append(
-                    {
-                        "items": [candidate],
-                        "count": 1,
-                        "sum_x": x_pos,
-                        "center": x_pos,
-                    }
-                )
-                continue
-            group = qty_groups[-1]
-            if abs(x_pos - group["center"]) <= x_stripe_eps:
-                group["items"].append(candidate)
-                group["count"] += 1
-                group["sum_x"] += x_pos
-                group["center"] = group["sum_x"] / group["count"]
-            else:
-                qty_groups.append(
-                    {
-                        "items": [candidate],
-                        "count": 1,
-                        "sum_x": x_pos,
-                        "center": x_pos,
-                    }
-                )
-        if qty_groups:
-            chosen_group = max(
-                qty_groups,
-                key=lambda group: (
-                    group.get("count", 0),
-                    -group.get("center", float("inf")),
-                ),
-            )
-            qty_x = chosen_group.get("center")
-            selected_qty_group = chosen_group
-    qty_groups_count = len(qty_groups)
-    qty_group_size = 0
-    qty_x_display = "-"
-    if qty_groups:
-        if selected_qty_group is None:
-            selected_qty_group = max(
-                qty_groups,
-                key=lambda group: (
-                    group.get("count", 0),
-                    -group.get("center", 0.0),
-                ),
-            )
-        qty_group_size = selected_qty_group.get("count", 0)
-        if qty_x is None:
-            qty_x = selected_qty_group.get("center")
-        if isinstance(qty_x, (int, float)):
-            qty_x_display = f"{float(qty_x):.1f}"
-    print(
-        f"[QSTRIPE] groups={qty_groups_count} chosen_x≈{qty_x_display} count={qty_group_size}"
-    )
+        return cell_texts, assignments
 
-    if not bands:
-        return (
-            None,
+    snapped_rows: list[dict[str, Any]] = []
+    for row_index, buffer in enumerate(row_buffers):
+        cell_texts, assignments = _snap_row(buffer, column_centers)
+        if not cell_texts and buffer.cells:
+            cell_texts = [" ".join(part[3] for part in sorted(buffer.cells, key=lambda item: item[0])).strip()]
+        row_center_y = sum(buffer.y_values) / len(buffer.y_values)
+        snapped_rows.append(
             {
-                "bands": [],
-                "band_cells": [],
-                "rows_txt_fallback": [],
-                "qty_col": None,
-                "ref_col": None,
-                "desc_col": None,
-                "y_eps": y_eps,
-                "roi": roi_info,
-                "column_windows": column_windows,
-                "header_band": header_band_index,
-            },
-        )
-
-    for idx, band in enumerate(bands[:10]):
-        mean_y = sum(item["y"] for item in band) / len(band)
-        print(f"[TABLE-Y] band#{idx} y≈{mean_y:.2f} lines={len(band)}")
-
-    band_summaries: list[dict[str, Any]] = []
-    band_cells_dump: list[dict[str, Any]] = []
-    band_results: list[dict[str, Any]] = []
-    window_fields_master = [
-        window.get("field") if isinstance(window, Mapping) else None
-        for window in column_windows
-    ] if column_windows else []
-
-    for band_index, band in enumerate(bands):
-        mean_y = sum(item["y"] for item in band) / len(band)
-        band_summaries.append(
-            {"index": band_index, "y_mean": mean_y, "line_count": len(band)}
-        )
-        sorted_band = sorted(band, key=lambda item: item["x"])
-        columns: list[dict[str, Any]] = []
-        x_eps_value = y_eps
-        if column_windows:
-            assignments: list[list[dict[str, Any]]] = [
-                [] for _ in column_windows
-            ]
-            for item in sorted_band:
-                x_val = item.get("x")
-                try:
-                    x_float = float(x_val)
-                except Exception:
-                    continue
-                best_idx: int | None = None
-                best_score: tuple[int, float, int] | None = None
-                for col_idx, window in enumerate(column_windows):
-                    center_val = float(window.get("center") or 0.0)
-                    left_val = window.get("left")
-                    right_val = window.get("right")
-                    try:
-                        left_float = float(left_val)
-                    except Exception:
-                        left_float = center_val
-                    try:
-                        right_float = float(right_val)
-                    except Exception:
-                        right_float = center_val
-                    width = abs(right_float - left_float)
-                    margin = max(1.0, 0.1 * width, 0.4 * median_h)
-                    if margin <= 0:
-                        margin = max(1.0, 0.4 * median_h, 2.0)
-                    in_window = (left_float - margin) <= x_float <= (right_float + margin)
-                    distance = abs(x_float - center_val)
-                    score = (0 if in_window else 1, distance, col_idx)
-                    if best_score is None or score < best_score:
-                        best_score = score
-                        best_idx = col_idx
-                if best_idx is None:
-                    continue
-                assignments[best_idx].append(item)
-            for col_idx, window in enumerate(column_windows):
-                col_items = sorted(assignments[col_idx], key=lambda itm: itm["x"])
-                if col_items:
-                    text_parts = [
-                        str(itm.get("text") or "").strip()
-                        for itm in col_items
-                        if str(itm.get("text") or "").strip()
-                    ]
-                    cell_text = " ".join(text_parts).strip()
-                    sum_x = sum(float(itm["x"]) for itm in col_items)
-                    sum_y = sum(float(itm["y"]) for itm in col_items)
-                    count = len(col_items)
-                    center_x = sum_x / count if count else float(window.get("center") or 0.0)
-                    center_y = sum_y / count if count else mean_y
-                    min_x = min(float(itm["x"]) for itm in col_items)
-                    max_x = max(float(itm["x"]) for itm in col_items)
-                else:
-                    cell_text = ""
-                    center_x = float(window.get("center") or 0.0)
-                    center_y = mean_y
-                    try:
-                        min_x = float(window.get("left"))
-                    except Exception:
-                        min_x = center_x
-                    try:
-                        max_x = float(window.get("right"))
-                    except Exception:
-                        max_x = center_x
-                columns.append(
-                    {
-                        "items": col_items,
-                        "center_x": center_x,
-                        "center_y": center_y,
-                        "min_x": min_x,
-                        "max_x": max_x,
-                        "text": cell_text,
-                        "field": window_fields_master[col_idx]
-                        if col_idx < len(window_fields_master)
-                        else None,
-                        "span_hint": (
-                            float(column_windows[col_idx].get("left"))
-                            if column_windows[col_idx].get("left") is not None
-                            else min_x,
-                            float(column_windows[col_idx].get("right"))
-                            if column_windows[col_idx].get("right") is not None
-                            else max_x,
-                        ),
-                    }
-                )
-        else:
-            x_values = [item["x"] for item in sorted_band]
-            x_gaps = [
-                abs(x_values[pos + 1] - x_values[pos])
-                for pos in range(len(x_values) - 1)
-                if abs(x_values[pos + 1] - x_values[pos]) > 0
-            ]
-            gap_med = statistics.median(x_gaps) if x_gaps else 0.0
-            gap_p75 = _percentile(x_gaps, 0.75) if x_gaps else gap_med
-            if gap_p75 <= 0:
-                gap_p75 = gap_med
-            x_eps = max(6.0, 0.8 * gap_p75 if gap_p75 > 0 else 0.0)
-            if x_eps <= 0:
-                x_eps = 6.0
-            x_eps_value = x_eps
-            for item in sorted_band:
-                x_pos = item["x"]
-                if not columns:
-                    columns.append(
-                        {
-                            "items": [item],
-                            "sum_x": x_pos,
-                            "sum_y": item["y"],
-                            "count": 1,
-                            "center_x": x_pos,
-                            "center_y": item["y"],
-                            "min_x": x_pos,
-                            "max_x": x_pos,
-                            "field": None,
-                        }
-                    )
-                    continue
-                column = columns[-1]
-                if abs(x_pos - column["center_x"]) <= x_eps:
-                    column["items"].append(item)
-                    column["sum_x"] += x_pos
-                    column["sum_y"] += item["y"]
-                    column["count"] += 1
-                    column["center_x"] = column["sum_x"] / column["count"]
-                    column["center_y"] = column["sum_y"] / column["count"]
-                    column["min_x"] = min(column.get("min_x", x_pos), x_pos)
-                    column["max_x"] = max(column.get("max_x", x_pos), x_pos)
-                    continue
-                columns.append(
-                    {
-                        "items": [item],
-                        "sum_x": x_pos,
-                        "sum_y": item["y"],
-                        "count": 1,
-                        "center_x": x_pos,
-                        "center_y": item["y"],
-                        "min_x": x_pos,
-                        "max_x": x_pos,
-                        "field": None,
-                    }
-                )
-            for column in columns:
-                column.setdefault("span_hint", (
-                    float(column.get("min_x", column.get("center_x", 0.0))),
-                    float(column.get("max_x", column.get("center_x", 0.0))),
-                ))
-
-        cell_texts: list[str] = []
-        preview_parts: list[str] = []
-        for col_index, column in enumerate(columns):
-            if column.get("items") is not None and "sum_x" in column:
-                # legacy path; recompute text
-                sorted_items = sorted(column.get("items", []), key=lambda itm: itm["x"])
-                cell_text = " ".join(item["text"] for item in sorted_items).strip()
-            else:
-                cell_text = column.get("text", "") or ""
-            if not isinstance(cell_text, str):
-                cell_text = str(cell_text)
-            cell_text = cell_text.strip()
-            cell_texts.append(cell_text)
-            cell_entry = {
-                "band": band_index,
-                "col": col_index,
-                "x_center": column.get("center_x"),
-                "y_center": column.get("center_y"),
-                "text": cell_text,
-            }
-            field_name = column.get("field")
-            if field_name:
-                cell_entry["field"] = field_name
-            band_cells_dump.append(cell_entry)
-            preview_parts.append(
-                f'C{col_index}="{_truncate_cell_preview(cell_text)}"'
-            )
-
-        if band_index < 10:
-            preview_body = " | ".join(preview_parts)
-            print(f"[TABLE-X] band#{band_index} cols={len(columns)} | {preview_body}")
-
-        spans = []
-        for column in columns:
-            span_hint = column.get("span_hint")
-            if isinstance(span_hint, tuple) and len(span_hint) == 2:
-                try:
-                    span_min = float(span_hint[0])
-                    span_max = float(span_hint[1])
-                except Exception:
-                    span_min = float(column.get("min_x", column.get("center_x", 0.0)))
-                    span_max = float(column.get("max_x", column.get("center_x", 0.0)))
-            else:
-                span_min = float(column.get("min_x", column.get("center_x", 0.0)))
-                span_max = float(column.get("max_x", column.get("center_x", 0.0)))
-            spans.append((span_min, span_max))
-
-        band_results.append(
-            {
+                "index": row_index,
+                "y": row_center_y,
                 "cells": cell_texts,
-                "y_mean": mean_y,
-                "line_count": len(band),
-                "centers": [column.get("center_x") for column in columns],
-                "x_eps": x_eps_value,
-                "spans": spans,
-                "window_fields": window_fields_master if column_windows else None,
+                "assignments": assignments,
             }
         )
 
-    if not band_results:
-        return (
-            None,
-            {
-                "bands": band_summaries,
-                "band_cells": band_cells_dump,
-                "rows_txt_fallback": [],
-                "qty_col": None,
-                "ref_col": None,
-                "desc_col": None,
-                "y_eps": y_eps,
-                "roi": roi_info,
-                "column_windows": column_windows,
-                "header_band": header_band_index,
-            },
-        )
-
-    header_field_info: dict[str, dict[str, Any]] = dict(header_initial_field_info)
-    header_band_indices: set[int] = {
-        int(info.get("band"))
-        for info in header_initial_field_info.values()
-        if isinstance(info.get("band"), int)
-    }
+    if not snapped_rows:
+        debug_info = {
+            "rows_txt_fallback": [],
+            "median_h": median_h,
+            "roi": roi_info,
+            "row_gap": y_gap,
+            "columns": column_centers,
+        }
+        return (None, debug_info)
 
     def _header_hits(cells: list[str]) -> dict[str, int]:
         hits: dict[str, int] = {}
@@ -3681,644 +3162,307 @@ def _build_columnar_table_from_panel_entries(
                 hits.setdefault("side", idx)
             if any(token in upper for token in ("Ø", "⌀", "DIA", "REF")):
                 hits.setdefault("ref", idx)
-            if "HOLE" in upper or re.search(r"\bID\b", upper):
+            if "HOLE" in upper or re.search(r"ID", upper):
                 hits.setdefault("hole", idx)
         return hits
 
-    for band_index, band in enumerate(band_results):
-        cells = band.get("cells", [])
-        if not cells:
-            continue
-        hits = _header_hits(cells)
+    header_rows: dict[int, dict[str, int]] = {}
+    header_cols: dict[str, int] = {}
+    for row in snapped_rows:
+        hits = _header_hits(row.get("cells", []))
         if not hits:
             continue
         if "qty" not in hits and len(hits) < 2:
             continue
-        header_band_indices.add(band_index)
-        centers = band.get("centers") or []
-        spans = band.get("spans") or []
+        header_rows[row["index"]] = hits
         for field, col_idx in hits.items():
-            if field in header_field_info:
-                continue
-            span_value = spans[col_idx] if col_idx < len(spans) else None
-            center_value = centers[col_idx] if col_idx < len(centers) else None
-            header_field_info[field] = {
-                "band": band_index,
-                "col": col_idx,
-                "center": center_value,
-                "span": span_value,
-            }
+            header_cols.setdefault(field, col_idx)
 
-    if header_field_info and "desc" not in header_field_info and header_band_indices:
-        header_idx = min(header_band_indices)
-        sample_band = band_results[header_idx]
-        cells = sample_band.get("cells", [])
-        centers = sample_band.get("centers") or []
-        spans = sample_band.get("spans") or []
-        used_cols = {info.get("col") for info in header_field_info.values() if isinstance(info.get("col"), int)}
-        candidates = [idx for idx in range(len(cells)) if idx not in used_cols]
-        if candidates:
-            best_idx = max(candidates, key=lambda idx: len(cells[idx]))
-            header_field_info["desc"] = {
-                "band": header_idx,
-                "col": best_idx,
-                "center": centers[best_idx] if best_idx < len(centers) else None,
-                "span": spans[best_idx] if best_idx < len(spans) else None,
-            }
+    header_row_indices = set(header_rows)
+    column_count = len(column_centers)
 
-    def _match_header_index(field: str, band: dict[str, Any]) -> int | None:
-        info = header_field_info.get(field)
-        if not info:
-            return None
-        centers = band.get("centers") or []
-        spans = band.get("spans") or []
-        if not centers:
-            return None
-        target_center = info.get("center")
-        header_col = info.get("col")
-        span_hint = info.get("span")
-        width = None
-        if isinstance(span_hint, tuple) and len(span_hint) == 2:
-            try:
-                span_min = float(span_hint[0])
-                span_max = float(span_hint[1])
-                width = abs(span_max - span_min)
-            except Exception:
-                span_min = span_max = None
-        else:
-            span_min = span_max = None
-        tolerance = max(6.0, (width or 0.0) * 0.6)
-        best_idx: int | None = None
-        best_score: tuple[float, float] | None = None
-        for idx, center in enumerate(centers):
-            if not isinstance(center, (int, float)):
-                continue
-            if span_min is not None and center < span_min - tolerance:
-                continue
-            if span_max is not None and center > span_max + tolerance:
-                continue
-            if isinstance(target_center, (int, float)):
-                distance = abs(center - float(target_center))
-            else:
-                distance = 0.0
-            if isinstance(header_col, int):
-                column_delta = abs(idx - header_col)
-            else:
-                column_delta = float("inf")
-            score = (distance, column_delta)
-            if best_score is None or score < best_score:
-                best_score = score
-                best_idx = idx
-        if best_idx is None and isinstance(header_col, int) and header_col < len(centers):
-            best_idx = header_col
-        return best_idx
+    def _normalize_cell(text: str) -> str:
+        return " ".join(text.split())
 
-    if header_field_info:
-        for band in band_results:
-            header_indices: dict[str, int] = {}
-            for field in header_field_info:
-                idx = _match_header_index(field, band)
-                if idx is not None:
-                    header_indices[field] = idx
-            if header_indices:
-                band["header_indices"] = header_indices
-
-    column_count = max(len(band["cells"]) for band in band_results)
-    header_cols: dict[str, int] = {}
-    if header_field_info:
-        for key in ("qty", "ref", "desc", "side", "hole"):
-            value = header_field_info.get(key, {}).get("col")
-            if isinstance(value, int) and 0 <= value < column_count:
-                header_cols[key] = value
-    if column_windows:
-        window_fields = [
-            window.get("field") if isinstance(window, Mapping) else None
-            for window in column_windows
-        ]
-        for key in ("hole", "ref", "qty", "side", "desc"):
-            if key in header_cols:
-                continue
-            try:
-                idx = window_fields.index(key)  # type: ignore[arg-type]
-            except ValueError:
-                continue
-            if isinstance(idx, int) and 0 <= idx < column_count:
-                header_cols[key] = idx
-    qty_digit_re = re.compile(r"^\d{1,3}$")
-    qty_suffix_re = re.compile(r"\b(REQD|REQUIRED|RE'?D|EA|EACH|HOLES?)\b$", re.IGNORECASE)
-
-    def _normalize_qty_cell(text: str) -> str:
-        candidate = (text or "").strip()
-        if not candidate:
-            return ""
-        normalized = candidate.upper()
-        normalized = re.sub(r"^QTY[:.]?", "", normalized).strip()
-        normalized = normalized.strip("() ")
-        normalized = re.sub(r"[X×]+$", "", normalized).strip()
-        while True:
-            cleaned = qty_suffix_re.sub("", normalized).strip()
-            if cleaned == normalized:
-                break
-            normalized = cleaned
-        return normalized
-
-    def _parse_qty_cell_value(cell_text: str) -> int | None:
-        normalized = _normalize_qty_cell(cell_text)
-        if not normalized:
-            return None
-        if qty_digit_re.match(normalized):
-            try:
-                value = int(normalized)
-            except Exception:
-                return None
-            if 0 < value <= 999:
-                return value
-        return None
-    qty_header_re = re.compile(r"^QTY[:.]?$", re.IGNORECASE)
-    ref_value_re = re.compile(r"(Ø|⌀|\"|\d+\s*/\s*\d+|(?<!\d)\.\d+|\d+\.\d+)")
-    ref_header_re = re.compile(r"^REF\b", re.IGNORECASE)
-
-    bands_for_stats = band_results[:5]
-
-    metrics: list[dict[str, Any]] = []
-    for col_index in range(column_count):
-        non_empty = 0
-        numeric_hits = 0
-        ref_hits = 0
-        token_hits = 0
-        total_len = 0
-        header_hit = False
-        ref_header_hit = False
-        for band in bands_for_stats:
-            cells = band.get("cells", [])
-            if col_index >= len(cells):
-                continue
-            cell_text = cells[col_index].strip()
-            if not cell_text:
-                continue
-            non_empty += 1
-            total_len += len(cell_text)
-            upper_text = cell_text.upper()
-            if qty_header_re.match(upper_text):
-                header_hit = True
-            if ref_header_re.match(upper_text):
-                ref_header_hit = True
-            qty_candidate = _parse_qty_cell_value(cell_text)
-            if qty_candidate is not None:
-                numeric_hits += 1
-            if ref_value_re.search(cell_text):
-                ref_hits += 1
-            if _HOLE_ACTION_TOKEN_RE.search(cell_text):
-                token_hits += 1
-        avg_len = (total_len / non_empty) if non_empty else 0.0
-        numeric_ratio = (numeric_hits / non_empty) if non_empty else 0.0
-        ref_ratio = (ref_hits / non_empty) if non_empty else 0.0
-        action_ratio = (token_hits / non_empty) if non_empty else 0.0
-        metrics.append(
+    column_metrics: list[dict[str, Any]] = []
+    for col_idx in range(column_count):
+        values = []
+        for row in snapped_rows:
+            cells = row.get("cells", [])
+            if col_idx < len(cells):
+                values.append(cells[col_idx])
+        non_empty = [value.strip() for value in values if value and value.strip()]
+        numeric_hits = sum(1 for value in non_empty if _parse_qty_cell_text(value) is not None)
+        qty_hits = sum(1 for value in non_empty if _ROW_QUANTITY_PATTERNS[0].match(value))
+        ref_hits = sum(1 for value in non_empty if _cell_has_ref_marker(value))
+        side_hits = sum(1 for value in non_empty if _detect_row_side(value))
+        avg_len = statistics.mean(len(value) for value in non_empty) if non_empty else 0.0
+        column_metrics.append(
             {
-                "non_empty": non_empty,
+                "non_empty": len(non_empty),
                 "numeric_hits": numeric_hits,
+                "qty_hits": qty_hits,
                 "ref_hits": ref_hits,
-                "token_hits": token_hits,
+                "side_hits": side_hits,
                 "avg_len": avg_len,
-                "header_qty": header_hit,
-                "header_ref": ref_header_hit,
-                "ref_ratio": ref_ratio,
-                "numeric_ratio": numeric_ratio,
-                "action_ratio": action_ratio,
             }
         )
 
-    synthetic_qty_mode = False
-    if column_count <= 1 and qty_groups_count == 0:
-        qty_style_hits = 0
-        considered_bands = 0
-        for band in bands_for_stats:
-            cells = band.get("cells", [])
-            if not cells:
-                continue
-            text_candidate = cells[0].strip()
-            if not text_candidate:
-                continue
-            considered_bands += 1
-            if _ROW_QUANTITY_PATTERNS[0].match(text_candidate) or _match_row_quantity(
-                text_candidate
-            ):
-                qty_style_hits += 1
-        if considered_bands >= 2:
-            threshold = max(2, math.ceil(considered_bands * 0.6))
-            if qty_style_hits >= threshold:
-                synthetic_qty_mode = True
+    qty_col = header_cols.get("qty")
+    if qty_col is None and column_metrics:
+        candidate = max(
+            range(column_count),
+            key=lambda idx: (
+                column_metrics[idx]["qty_hits"],
+                column_metrics[idx]["numeric_hits"],
+                column_metrics[idx]["non_empty"],
+                -idx,
+            ),
+        )
+        if column_metrics[candidate]["qty_hits"] > 0 or column_metrics[candidate]["numeric_hits"] > 0:
+            qty_col = candidate
 
-    fallback_qty_col: int | None = header_cols.get("qty") if header_cols else None
-    qty_candidates = [
-        idx
-        for idx, info in enumerate(metrics)
-        if info["header_qty"] or (info["non_empty"] > 0 and info["numeric_ratio"] >= 0.6)
-    ]
-    if qty_candidates and fallback_qty_col is None:
-        fallback_qty_col = min(qty_candidates)
+    ref_col = header_cols.get("ref")
+    if ref_col is None and column_metrics:
+        ref_candidates = [idx for idx in range(column_count) if idx != qty_col]
+        if not ref_candidates:
+            ref_candidates = list(range(column_count))
+        candidate = max(
+            ref_candidates,
+            key=lambda idx: (
+                column_metrics[idx]["ref_hits"],
+                column_metrics[idx]["non_empty"],
+                -idx,
+            ),
+        )
+        if column_metrics[candidate]["ref_hits"] > 0:
+            ref_col = candidate
 
-    if fallback_qty_col is None:
-        relaxed_candidates = [
+    side_col = header_cols.get("side")
+    if side_col is None and column_metrics:
+        side_candidates = [
             idx
-            for idx, info in enumerate(metrics)
-            if info["non_empty"] > 0 and info["numeric_ratio"] >= 0.4
+            for idx in range(column_count)
+            if idx not in {qty_col, ref_col}
         ]
-        if relaxed_candidates:
-            fallback_qty_col = min(relaxed_candidates)
-        else:
-            numericish_candidates = [
-                idx
-                for idx, info in enumerate(metrics)
-                if info["numeric_hits"] > 0 or info["numeric_ratio"] > 0
-            ]
-            if numericish_candidates:
-                fallback_qty_col = min(numericish_candidates)
-            elif column_count > 0:
-                fallback_qty_col = 0
+        if not side_candidates:
+            side_candidates = list(range(column_count))
+        candidate = max(
+            side_candidates,
+            key=lambda idx: (
+                column_metrics[idx]["side_hits"],
+                column_metrics[idx]["non_empty"],
+                -idx,
+            ),
+        )
+        if column_metrics[candidate]["side_hits"] > 0:
+            side_col = candidate
 
-    if synthetic_qty_mode:
-        fallback_qty_col = None
+    desc_col = header_cols.get("desc")
+    occupied = {idx for idx in (qty_col, ref_col, side_col) if isinstance(idx, int)}
+    if desc_col is None and column_metrics:
+        candidates = [idx for idx in range(column_count) if idx not in occupied]
+        if not candidates:
+            candidates = list(range(column_count))
+        desc_col = max(
+            candidates,
+            key=lambda idx: (
+                column_metrics[idx]["avg_len"],
+                column_metrics[idx]["non_empty"],
+                -idx,
+            ),
+        )
 
-    qty_votes: dict[int, int] = defaultdict(int)
-    qty_index_counts: dict[int, int] = defaultdict(int)
-    for band_idx, band in enumerate(band_results):
-        cells = band.get("cells", [])
-        centers = band.get("centers") or []
-        x_eps_band = float(band.get("x_eps") or 0.0)
-        qty_idx: int | None = None
-        qty_cell_text = ""
-        header_indices = band.get("header_indices") or {}
-        header_qty_idx = header_indices.get("qty")
-        if isinstance(header_qty_idx, int) and header_qty_idx < len(cells):
-            qty_idx = header_qty_idx
-            qty_cell_text = cells[header_qty_idx].strip()
-        if qty_idx is None and qty_x is not None and centers:
-            center_pairs = [
-                (col_index, float(center))
-                for col_index, center in enumerate(centers)
-                if isinstance(center, (int, float))
-            ]
-            if center_pairs:
-                closest_index, closest_center = min(
-                    center_pairs,
-                    key=lambda pair: (abs(pair[1] - qty_x), pair[0]),
-                )
-                qty_idx = closest_index
-                if qty_idx < len(cells):
-                    qty_cell_text = cells[qty_idx].strip()
-                if _parse_qty_cell_value(qty_cell_text) is None:
-                    within_eps: list[tuple[int, float]] = []
-                    for col_index, center_value in center_pairs:
-                        if abs(center_value - qty_x) <= x_eps_band + 1e-6:
-                            if col_index < len(cells):
-                                candidate_text = cells[col_index].strip()
-                                if _parse_qty_cell_value(candidate_text) is not None:
-                                    within_eps.append(
-                                        (col_index, abs(center_value - qty_x))
-                                    )
-                    if within_eps:
-                        best_index, _ = min(
-                            within_eps, key=lambda pair: (pair[1], pair[0])
-                        )
-                        qty_idx = best_index
-                        qty_cell_text = cells[qty_idx].strip() if qty_idx < len(cells) else ""
-        if qty_idx is None and fallback_qty_col is not None:
-            if fallback_qty_col < len(cells):
-                qty_idx = fallback_qty_col
-                qty_cell_text = cells[qty_idx].strip()
-        band["qty_index"] = qty_idx
-        if qty_idx is not None:
-            qty_index_counts[qty_idx] += 1
-            if (
-                band_idx < len(bands_for_stats)
-                and _parse_qty_cell_value(qty_cell_text or "") is not None
-            ):
-                qty_votes[qty_idx] += 1
-
-    qty_col: int | None = None
-    if qty_votes:
-        qty_col = max(qty_votes.items(), key=lambda item: (item[1], -item[0]))[0]
-    elif qty_index_counts:
-        qty_col = max(qty_index_counts.items(), key=lambda item: (item[1], -item[0]))[0]
-    else:
-        qty_col = fallback_qty_col
-    if "qty" in header_cols:
-        qty_col = header_cols["qty"]
-    if synthetic_qty_mode and "qty" not in header_cols:
-        qty_col = None
-
-    ref_candidates = [
-        idx
-        for idx, info in enumerate(metrics)
-        if info["header_ref"] or (info["non_empty"] > 0 and info["ref_ratio"] >= 0.4)
+    row_debug_entries = [
+        {
+            "index": row["index"],
+            "y": row["y"],
+            "cells": row.get("cells", []),
+        }
+        for row in snapped_rows
     ]
-    ref_col = max(ref_candidates) if ref_candidates else None
-    if "ref" in header_cols:
-        ref_col = header_cols["ref"]
-    elif synthetic_qty_mode:
-        ref_col = None
 
-    desc_candidates = [idx for idx in range(column_count) if idx != qty_col and idx != ref_col]
-    if not desc_candidates:
-        desc_candidates = list(range(column_count))
+    base_rows: list[dict[str, Any]] = []
 
-    def _desc_score(index: int) -> tuple[float, float, int]:
-        data = metrics[index]
-        return (float(data["action_ratio"]), float(data["avg_len"]), -index)
-
-    desc_col = max(desc_candidates, key=_desc_score)
-    if "desc" in header_cols:
-        desc_col = header_cols["desc"]
-
-    qty_display = "synthetic" if synthetic_qty_mode else (qty_col if qty_col is not None else "None")
-    if synthetic_qty_mode and ref_col is None:
-        ref_display = "desc-extracted"
-    else:
-        ref_display = ref_col if ref_col is not None else "None"
-    print(
-        "[TABLE-ID] qty_x≈{qx} qty_col={qty} ref_col={ref} desc_col={desc} bands_checked={bands}".format(
-            qx=qty_x_display,
-            qty=qty_display,
-            ref=ref_display,
-            desc=desc_col,
-            bands=len(bands_for_stats),
-        )
-    )
-
-    def _cell_at(cells: list[str], index: int | None) -> str:
-        if index is None:
-            return ""
-        if index < 0 or index >= len(cells):
-            return ""
-        return cells[index].strip()
-
-    rows: list[dict[str, Any]] = []
-    families: dict[str, int] = {}
-    for band_index, band in enumerate(band_results):
-        cells = band.get("cells", [])
-        header_indices = band.get("header_indices") or {}
-
-        def _resolved_index(default_idx: int | None, field: str) -> int | None:
-            idx_val = header_indices.get(field)
-            if isinstance(idx_val, int):
-                return idx_val
-            idx_val = header_cols.get(field)
-            if isinstance(idx_val, int):
-                return idx_val
-            return default_idx
-
-        qty_idx = _resolved_index(band.get("qty_index"), "qty")
-        if qty_idx is None:
-            qty_idx = qty_col
-        qty_text = _cell_at(cells, qty_idx)
-        qty_val = None
-        if qty_text:
-            qty_val = _parse_qty_cell_value(qty_text)
-        qty_token_text: str | None = None
-        used_qty_fallback = False
-        fallback_desc = ""
-        combined_row_text = " ".join(
-            cell.strip() for cell in cells if cell.strip()
-        )
-        if synthetic_qty_mode:
-            qty_token_present = bool(
-                _match_row_quantity(combined_row_text)
-                or _search_flexible_quantity(combined_row_text)
-            )
-            action_token_present = bool(_HOLE_ACTION_TOKEN_RE.search(combined_row_text))
-            if not qty_token_present and not action_token_present:
-                continue
-        fallback_qty: int | None = None
-        fallback_remainder = combined_row_text
-        if combined_row_text:
-            fallback_qty, fallback_remainder = _extract_band_quantity(
-                combined_row_text
-            )
-            if fallback_qty is None or fallback_qty <= 0:
-                fallback_qty, fallback_remainder = _extract_row_quantity_and_remainder(
-                    combined_row_text
-                )
+    for row in snapped_rows:
+        row_index = row["index"]
+        if row_index in header_row_indices:
+            continue
+        cells = [cell.strip() for cell in row.get("cells", [])]
+        if not any(cells):
+            continue
+        qty_text = ""
+        if isinstance(qty_col, int) and qty_col < len(cells):
+            qty_text = cells[qty_col]
+        qty_val = _parse_qty_cell_text(qty_text) if qty_text else None
+        desc_idx = desc_col if isinstance(desc_col, int) else None
+        desc_text = cells[desc_idx] if desc_idx is not None and desc_idx < len(cells) else ""
+        combined_text = " ".join(value for value in cells if value)
+        inline_qty_detail: dict[str, Any] | None = None
         if (
-            fallback_qty is not None
-            and fallback_qty > 0
-            and (qty_groups_count == 0 or qty_val is None or qty_val <= 0)
+            isinstance(desc_idx, int)
+            and desc_idx == qty_col
+            and desc_text
         ):
-            qty_val = fallback_qty
-            fallback_desc = fallback_remainder.strip()
-            used_qty_fallback = True
-            print(f"[QTY-FALLBACK] band#{band_index} qty={qty_val}")
+            inline_qty_val, inline_remainder = _extract_row_quantity_and_remainder(desc_text)
+            if inline_qty_val is not None and inline_qty_val > 0:
+                inline_qty_detail = {
+                    "value": int(inline_qty_val),
+                    "source": "desc",
+                    "remainder": inline_remainder.strip(),
+                }
+                if inline_qty_detail["remainder"]:
+                    desc_text = inline_qty_detail["remainder"]
+                if qty_val is None or qty_val <= 0:
+                    qty_val = inline_qty_val
+        if qty_val is None or qty_val <= 0:
+            source = None
+            inline_qty_val = None
+            remainder = ""
+            if desc_text:
+                inline_qty_val, remainder = _extract_row_quantity_and_remainder(desc_text)
+                source = "desc"
+            if inline_qty_val is None or inline_qty_val <= 0:
+                inline_qty_val, remainder = _extract_row_quantity_and_remainder(combined_text)
+                source = "combined"
+            if inline_qty_val is not None and inline_qty_val > 0:
+                qty_val = inline_qty_val
+                inline_qty_detail = {
+                    "value": int(inline_qty_val),
+                    "source": source,
+                    "remainder": remainder.strip(),
+                }
+                if not desc_text or (desc_idx == qty_col and inline_qty_detail["remainder"]):
+                    desc_text = inline_qty_detail["remainder"] or desc_text
         if qty_val is None or qty_val <= 0:
             continue
-        desc_idx = _resolved_index(desc_col, "desc")
-        desc_text = _cell_at(cells, desc_idx)
-        original_desc_text = desc_text
-        if used_qty_fallback:
-            desc_text = fallback_desc or desc_text
-            if fallback_desc and qty_val is not None:
-                original_for_prefix = original_desc_text or combined_row_text
-                if _ROW_QUANTITY_PATTERNS[0].match(original_for_prefix or ""):
-                    desc_text = f"({qty_val}) {desc_text}".strip()
+        try:
+            qty_int = int(qty_val)
+        except Exception:
+            continue
+        if qty_int <= 0:
+            continue
         if not desc_text:
-            exclude_index = qty_idx if qty_idx is not None else qty_col
             fallback_parts = [
-                cell.strip()
-                for idx, cell in enumerate(cells)
-                if idx != exclude_index and cell.strip()
+                value
+                for idx, value in enumerate(cells)
+                if idx != qty_col and value
             ]
-            desc_text = " ".join(fallback_parts)
-        desc_text = " ".join((desc_text or "").split())
-        ref_idx_resolved = _resolved_index(ref_col, "ref")
-        ref_text_candidate = _cell_at(cells, ref_idx_resolved)
-        ref_cell_ref = ("", None)
-        if ref_text_candidate:
-            ref_cell_ref = _extract_row_reference(ref_text_candidate)
-        hole_idx = _resolved_index(None, "hole")
-        hole_text = _cell_at(cells, hole_idx)
-        side_idx = _resolved_index(header_cols.get("side"), "side")
-        side_cell_text = _cell_at(cells, side_idx)
-        fragment_candidates = _FRAGMENT_SPLIT_RE.split(desc_text)
-        fragments = [frag.strip() for frag in fragment_candidates if frag.strip()]
-        if not fragments:
-            fragments = [desc_text]
-        for frag_index, fragment in enumerate(fragments):
-            fragment_desc = " ".join(fragment.split())
-            if not fragment_desc:
-                continue
-            if (
-                frag_index == 0
-                and qty_token_text
-                and not _RE_TEXT_ROW_START.match(fragment_desc)
-            ):
-                fragment_desc = f"{qty_token_text} {fragment_desc}".strip()
-            ref_text, ref_value = _extract_row_reference(fragment_desc)
-            has_action = bool(_HOLE_ACTION_TOKEN_RE.search(fragment_desc))
-            has_ref_marker = bool(ref_text or (ref_value is not None))
-            if not has_action and not has_ref_marker and not ref_cell_ref[0]:
-                continue
-            if not ref_text and ref_cell_ref[0]:
-                ref_text, ref_value = ref_cell_ref
-            combined_side_text = " ".join(
-                part for part in (side_cell_text, fragment_desc) if part
-            )
-            side = _detect_row_side(combined_side_text)
-            if not side:
-                side = _detect_row_side(fragment_desc)
-            if not side and side_cell_text:
-                upper_side = side_cell_text.upper()
-                if "BOTH" in upper_side:
-                    side = "both"
-                elif "BACK" in upper_side and "FRONT" not in upper_side:
-                    side = "back"
-                elif "FRONT" in upper_side and "BACK" not in upper_side:
-                    side = "front"
-            row_dict: dict[str, Any] = {
-                "hole": hole_text or "",
-                "qty": qty_val,
-                "desc": fragment_desc,
-                "ref": ref_text,
-            }
-            if side:
-                row_dict["side"] = side
-            rows.append(row_dict)
-            if ref_value is not None:
-                key = f"{ref_value:.4f}".rstrip("0").rstrip(".")
-                families[key] = families.get(key, 0) + qty_val
-            if band_index < 10:
-                band_label = (
-                    f"{band_index}.{frag_index}" if len(fragments) > 1 else str(band_index)
-                )
-                ref_display = ref_text or "-"
-                side_display = side or "-"
-                desc_display = _truncate_cell_preview(fragment_desc or "", 80)
-                print(
-                    f"[TABLE-R] band#{band_label} qty={qty_val} ref={ref_display} "
-                    f'side={side_display} desc="{desc_display}"'
-                )
-
-    merged_rows_local = locals().get("merged_rows")
-    if isinstance(merged_rows_local, list) and len(rows) == len(merged_rows_local):
-        for idx, fallback_text in enumerate(merged_rows_local):
-            if idx >= len(rows):
-                break
-            fallback_clean = " ".join(str(fallback_text or "").split())
-            if not fallback_clean:
-                continue
-            current_desc = str(rows[idx].get("desc") or "")
-            needs_update = False
-            if (
-                _RE_TEXT_ROW_START.match(fallback_clean)
-                and not _RE_TEXT_ROW_START.match(current_desc)
-            ):
-                needs_update = True
-            elif len(fallback_clean) > len(current_desc):
-                needs_update = True
-            if needs_update:
-                rows[idx]["desc"] = fallback_clean
-
-    if len(rows) < 8:
-        try:
-            raw_path = Path("raw_lines.tsv")
-            with raw_path.open("w", encoding="utf-8") as handle:
-                handle.write("layout\tin_block\tx\ty\ttext\n")
-                for rec in records_all:
-                    layout_val = str(rec.get("layout") or "")
-                    in_block = "1" if rec.get("from_block") else "0"
-                    x_val = rec.get("x")
-                    y_val = rec.get("y")
-                    if isinstance(x_val, (int, float)):
-                        x_text = f"{float(x_val):.3f}"
-                    else:
-                        x_text = ""
-                    if isinstance(y_val, (int, float)):
-                        y_text = f"{float(y_val):.3f}"
-                    else:
-                        y_text = ""
-                    text_val = rec.get("text") or ""
-                    handle.write(
-                        f"{layout_val}\t{in_block}\t{x_text}\t{y_text}\t{text_val}\n"
-                    )
-        except Exception as exc:
-            print(f"[COLUMN] failed to write raw_lines.tsv: {exc}")
-        try:
-            roi_path = Path("roi_cells.tsv")
-            with roi_path.open("w", encoding="utf-8") as handle:
-                handle.write("band\tcol\tx_center\ty_center\ttext\n")
-                for cell in band_cells_dump:
-                    band_idx = cell.get("band")
-                    col_idx = cell.get("col")
-                    x_center = cell.get("x_center")
-                    y_center = cell.get("y_center")
-                    if isinstance(x_center, (int, float)):
-                        x_center_text = f"{float(x_center):.3f}"
-                    else:
-                        x_center_text = ""
-                    if isinstance(y_center, (int, float)):
-                        y_center_text = f"{float(y_center):.3f}"
-                    else:
-                        y_center_text = ""
-                    text_val = cell.get("text") or ""
-                    handle.write(
-                        f"{band_idx}\t{col_idx}\t{x_center_text}\t{y_center_text}\t{text_val}\n"
-                    )
-        except Exception as exc:
-            print(f"[COLUMN] failed to write roi_cells.tsv: {exc}")
-
-    if not rows:
-        return (
-            None,
-            {
-                "bands": band_summaries,
-                "band_cells": band_cells_dump,
-                "rows_txt_fallback": [],
-                "qty_col": qty_col,
-                "ref_col": ref_col,
-                "desc_col": desc_col,
-                "y_eps": y_eps,
-                "median_h": median_h,
-                "roi": roi_info,
-            },
+            desc_text = " ".join(fallback_parts) if fallback_parts else combined_text
+        desc_text = _normalize_cell(desc_text)
+        ref_idx = header_cols.get("ref", ref_col)
+        ref_cell_text = (
+            cells[ref_idx]
+            if isinstance(ref_idx, int) and ref_idx < len(cells)
+            else ""
+        )
+        ref_text, ref_value = _extract_row_reference(ref_cell_text or desc_text)
+        if not ref_text:
+            alt_ref_text, alt_ref_value = _extract_row_reference(desc_text)
+            if alt_ref_text:
+                ref_text = alt_ref_text
+            if ref_value is None and alt_ref_value is not None:
+                ref_value = alt_ref_value
+        side_idx = header_cols.get("side", side_col)
+        side_cell_text = (
+            cells[side_idx]
+            if isinstance(side_idx, int) and side_idx < len(cells)
+            else ""
+        )
+        side_value = _detect_row_side(" ".join(filter(None, [side_cell_text, desc_text])))
+        row_entry: dict[str, Any] = {
+            "hole": "",
+            "qty": qty_int,
+            "desc": desc_text,
+            "ref": ref_text or "",
+        }
+        if side_value:
+            row_entry["side"] = side_value
+        if inline_qty_detail:
+            row_entry["inline_qty"] = inline_qty_detail
+        base_rows.append(row_entry)
+        preview_cols = ", ".join(
+            f"{idx}:{_truncate_cell_preview(value)}" for idx, value in enumerate(cells)
+        )
+        print(
+            f"[TABLE-R] row#{row_index} qty={qty_int} cols=[{preview_cols}]"
         )
 
-    total_qty = sum(row["qty"] for row in rows)
+    rows_output: list[dict[str, Any]] = []
+    for row_entry in base_rows:
+        desc_value = row_entry.get("desc", "")
+        fragments = [
+            frag.strip() for frag in _FRAGMENT_SPLIT_RE.split(desc_value) if frag.strip()
+        ]
+        if len(fragments) <= 1:
+            rows_output.append(row_entry)
+            continue
+        side_hint = row_entry.get("side")
+        for fragment in fragments:
+            fragment_clean = " ".join(fragment.split())
+            if not fragment_clean:
+                continue
+            action_token = bool(_HOLE_ACTION_TOKEN_RE.search(fragment_clean))
+            ref_text_fragment, ref_value_fragment = _extract_row_reference(fragment_clean)
+            if not action_token and not ref_text_fragment and ref_value_fragment is None:
+                continue
+            new_row = dict(row_entry)
+            new_row["desc"] = fragment_clean
+            if ref_text_fragment:
+                new_row["ref"] = ref_text_fragment
+            fragment_side = _detect_row_side(fragment_clean) or side_hint
+            if fragment_side:
+                new_row["side"] = fragment_side
+            rows_output.append(new_row)
+
+    if not rows_output:
+        debug_info = {
+            "rows_txt_fallback": [],
+            "median_h": median_h,
+            "roi": roi_info,
+            "row_gap": y_gap,
+            "columns": column_centers,
+            "header_rows": sorted(header_row_indices),
+            "header_cols": header_cols,
+        }
+        return (None, debug_info)
+
+    qty_sum = sum(int(row.get("qty") or 0) for row in rows_output)
+    families: dict[str, int] = {}
+    for row_entry in rows_output:
+        ref_text, ref_value = _extract_row_reference(row_entry.get("ref") or row_entry.get("desc") or "")
+        if ref_text:
+            row_entry["ref"] = ref_text
+        if ref_value is not None:
+            key = f"{ref_value:.4f}".rstrip("0").rstrip(".")
+            families[key] = families.get(key, 0) + int(row_entry.get("qty", 0))
+
     table_info: dict[str, Any] = {
-        "rows": rows,
-        "hole_count": total_qty,
+        "rows": rows_output,
+        "hole_count": qty_sum,
+        "sum_qty": qty_sum,
         "provenance_holes": "HOLE TABLE",
+        "source": "text_table",
     }
     if families:
         table_info["hole_diam_families_in"] = families
-    if column_windows and header_band_index is not None:
-        table_info["header_validated"] = True
-    table_info["source"] = "text_table"
 
     debug_info = {
-        "bands": band_summaries,
-        "band_cells": band_cells_dump,
-        "rows_txt_fallback": rows,
+        "rows_txt_fallback": rows_output,
+        "median_h": median_h,
+        "row_gap": y_gap,
+        "columns": column_centers,
+        "header_rows": sorted(header_row_indices),
+        "header_cols": header_cols,
         "qty_col": qty_col,
         "ref_col": ref_col,
         "desc_col": desc_col,
-        "y_eps": y_eps,
-        "median_h": median_h,
-        "column_windows": column_windows,
-        "header_band": header_band_index,
-        "bands_checked": len(bands_for_stats),
-        "qty_x": qty_x,
-        "synthetic_qty": synthetic_qty_mode,
+        "side_col": side_col,
+        "qty_sum": qty_sum,
+        "row_debug": row_debug_entries,
     }
     if roi_info is not None:
         debug_info["roi"] = roi_info
-    else:
-        debug_info["roi"] = {
-            "anchors": 0,
-            "bbox": None,
-            "expanded": None,
-            "total": len(records_all),
-            "kept": len(records),
-            "median_h": median_h,
-        }
     return (table_info, debug_info)
 
 
@@ -4603,10 +3747,13 @@ def _fallback_text_table(lines: Iterable[str]) -> dict[str, Any]:
         normalized_desc = " ".join(entry.split())
         if not normalized_desc:
             continue
-        rows.append({"hole": "", "ref": "", "qty": qty_val, "desc": normalized_desc})
+        remainder_clean = " ".join(remainder.split())
+        desc_text = remainder_clean or normalized_desc
+        desc_text = _FALLBACK_LEADING_QTY_RE.sub("", desc_text).strip()
+        rows.append({"hole": "", "ref": "", "qty": qty_val, "desc": desc_text})
         total_qty += qty_val
 
-        ref_text, ref_value = _extract_row_reference(remainder)
+        ref_text, ref_value = _extract_row_reference(remainder_clean or normalized_desc)
         if ref_text:
             rows[-1]["ref"] = ref_text
         side = _detect_row_side(normalized_desc)
@@ -4622,7 +3769,7 @@ def _fallback_text_table(lines: Iterable[str]) -> dict[str, Any]:
     result: dict[str, Any] = {"rows": rows, "hole_count": total_qty}
     if families:
         result["hole_diam_families_in"] = families
-    result["provenance_holes"] = "HOLE TABLE (TEXT_FALLBACK)"
+    result["provenance_holes"] = "HOLE TABLE"
     result["source"] = "text_table"
     return result
 
@@ -4721,13 +3868,15 @@ def read_text_table(
     global _LAST_TEXT_TABLE_DEBUG, _PROMOTED_ROWS_LOGGED
     _LAST_TEXT_TABLE_DEBUG = {
         "candidates": [],
-        "band_cells": [],
-        "bands": [],
         "rows": [],
         "raw_lines": [],
         "roi_hint": roi_hint,
         "roi": None,
         "preferred_blocks": [],
+        "row_debug": [],
+        "columns": [],
+        "bands": [],
+        "layout_filters": layout_filters,
     }
     roi_hint_effective: Mapping[str, Any] | None = roi_hint
     resolved_allowlist = _normalize_layer_allowlist(layer_allowlist)
@@ -5001,6 +4150,9 @@ def read_text_table(
                 if marker in seen_entities:
                     continue
                 seen_entities.add(marker)
+                parent_effective_layer = flattened.effective_layer
+                active_block = flattened.block_name
+                from_block = bool(flattened.from_block)
                 try:
                     dxftype = entity.dxftype()
                 except Exception:
@@ -5383,6 +4535,27 @@ def read_text_table(
                             ymax=float(bbox_vals[3]),
                         )
                     )
+
+        if follow_sheet_directive:
+            token_value = follow_sheet_directive.get("token")
+            layout_candidates = layout_names_seen if layout_names_seen else list(
+                layout_names.values()
+            )
+            target_label, resolved_layout, found = _resolve_follow_sheet_layout(
+                token_value or "", layout_candidates
+            )
+            request_entry = {
+                "token": token_value,
+                "target": target_label,
+                "resolved": resolved_layout,
+                "found": found,
+            }
+            follow_sheet_requests[target_label] = request_entry
+            if found and resolved_layout:
+                follow_sheet_target_layouts.append(resolved_layout)
+        if follow_sheet_target_layout:
+            follow_sheet_target_layouts.append(follow_sheet_target_layout)
+        follow_sheet_target_layouts = list(dict.fromkeys(follow_sheet_target_layouts))
 
         if follow_sheet_requests:
             info_entries: list[dict[str, Any]] = []
@@ -5890,15 +5063,16 @@ def read_text_table(
             columnar_table_info = table_candidate
             columnar_debug_info = debug_payload
             if isinstance(debug_payload, Mapping):
-                _LAST_TEXT_TABLE_DEBUG["bands"] = list(
-                    debug_payload.get("bands", [])
+                _LAST_TEXT_TABLE_DEBUG["row_debug"] = list(
+                    debug_payload.get("row_debug", [])
                 )
-                _LAST_TEXT_TABLE_DEBUG["band_cells"] = list(
-                    debug_payload.get("band_cells", [])
+                _LAST_TEXT_TABLE_DEBUG["columns"] = list(
+                    debug_payload.get("columns", [])
                 )
                 _LAST_TEXT_TABLE_DEBUG["rows"] = list(
                     debug_payload.get("rows_txt_fallback", [])
                 )
+                _LAST_TEXT_TABLE_DEBUG["bands"] = []
                 if "roi" in debug_payload:
                     _LAST_TEXT_TABLE_DEBUG["roi"] = debug_payload.get("roi")
 
@@ -5950,6 +5124,8 @@ def read_text_table(
         return candidate_map, (qty_total, row_count)
 
     lines = ensure_lines()
+    if not lines:
+        lines = _collect_table_text_lines(doc)
 
     def _line_confident(text: str) -> bool:
         stripped = str(text or "").strip()
@@ -6104,8 +5280,8 @@ def read_text_table(
     if column_selected:
         primary_result.setdefault("source", "text_table")
     if isinstance(columnar_debug_info, Mapping):
-        bands_payload = columnar_debug_info.get("bands", [])
-        band_cells_payload = columnar_debug_info.get("band_cells", [])
+        row_debug_payload = columnar_debug_info.get("row_debug", [])
+        columns_payload = columnar_debug_info.get("columns", [])
 
         def _as_list(value: Any) -> list[Any]:
             if isinstance(value, list):
@@ -6116,11 +5292,13 @@ def read_text_table(
                 return []
             return [value]
 
-        _LAST_TEXT_TABLE_DEBUG["bands"] = _as_list(bands_payload)
-        _LAST_TEXT_TABLE_DEBUG["band_cells"] = _as_list(band_cells_payload)
-    elif "band_cells" not in _LAST_TEXT_TABLE_DEBUG:
-        _LAST_TEXT_TABLE_DEBUG["band_cells"] = []
+        _LAST_TEXT_TABLE_DEBUG["row_debug"] = _as_list(row_debug_payload)
+        _LAST_TEXT_TABLE_DEBUG["columns"] = _as_list(columns_payload)
         _LAST_TEXT_TABLE_DEBUG["bands"] = []
+    else:
+        _LAST_TEXT_TABLE_DEBUG.setdefault("row_debug", [])
+        _LAST_TEXT_TABLE_DEBUG.setdefault("columns", [])
+        _LAST_TEXT_TABLE_DEBUG.setdefault("bands", [])
     rows_materialized = list(primary_result.get("rows", []))
     if confidence_high and rows_materialized:
         primary_result["confidence_high"] = True
