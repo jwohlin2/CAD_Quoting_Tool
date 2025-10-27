@@ -176,6 +176,36 @@ def test_read_text_table_raises_when_layout_filter_has_no_match(
         )
 
 
+def test_read_text_table_auto_retries_excluded_am_bor(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(geo_extractor, "_resolve_app_callable", lambda name: None)
+
+    class _LayeredMText(_DummyMText):
+        def __init__(self, text: str, layer: str) -> None:
+            super().__init__(text)
+            self.dxf = types.SimpleNamespace(layer=layer)
+
+    doc = _DummyDoc(
+        [
+            _LayeredMText("(2) Ø0.250 DRILL THRU", "AM_BOR"),
+            _LayeredMText("(3) Ø0.312 TAP FROM FRONT", "AM_BOR"),
+        ]
+    )
+
+    result = geo_extractor.read_text_table(doc)
+
+    rows = result.get("rows") or []
+    assert len(rows) == 2
+    assert sorted(row.get("qty") for row in rows) == [2, 3]
+    assert any("Ø0.250" in str(row.get("desc")) for row in rows)
+
+    debug = geo_extractor.get_last_text_table_debug() or {}
+    layer_counts_pre = debug.get("layer_counts_pre") or {}
+    assert layer_counts_pre.get("AM_BOR") == 2
+    layer_counts_post = debug.get("layer_counts_post_allow") or {}
+    assert layer_counts_post == {} or not any(layer_counts_post.values())
+    assert int(debug.get("rows_txt_count") or 0) == 2
+
+
 def test_follow_sheet_layout_scan_returns_rows(monkeypatch: pytest.MonkeyPatch) -> None:
     sheet_entities = [
         _DummyMText("(2) Ø0.250 DRILL THRU"),
