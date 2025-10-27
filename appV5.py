@@ -1372,43 +1372,6 @@ def minutes_to_hours(m: Any) -> float:
     return _minutes_to_hours(m)
 
 
-def _set_bucket_minutes_cost(
-    bvo: MutableMapping[str, Any] | Mapping[str, Any] | None,
-    key: str,
-    minutes: float,
-    machine_rate: float,
-    labor_rate: float,
-) -> None:
-    minutes_val = _as_float(minutes, 0.0)
-    if not (0.0 <= minutes_val <= 10_000.0):
-        logging.warning(f"[bucket] ignoring {key} minutes out of range: {minutes}")
-        minutes_val = 0.0
-
-    machine_rate_val = _as_float(machine_rate, 0.0)
-    labor_rate_val = _as_float(labor_rate, 0.0)
-
-    buckets_obj: MutableMapping[str, Any] | None = None
-    if isinstance(bvo, dict):
-        buckets_obj = bvo.setdefault("buckets", {})
-    elif isinstance(bvo, _MutableMappingABC):
-        buckets_obj = typing.cast(MutableMapping[str, Any], bvo.setdefault("buckets", {}))
-    else:
-        return
-
-    if buckets_obj is None:
-        return
-
-    machine_cost = (minutes_val / 60.0) * machine_rate_val
-    labor_cost = (minutes_val / 60.0) * labor_rate_val
-
-    buckets_obj[key] = {
-        "minutes": minutes_val,
-        "machine$": round(machine_cost, 2),
-        "labor$": round(labor_cost, 2),
-        "total$": round(machine_cost + labor_cost, 2),
-    }
-
-
 def _normalize_buckets(bucket_view_obj: MutableMapping[str, Any] | Mapping[str, Any] | None) -> None:
     if not isinstance(bucket_view_obj, (_MutableMappingABC, dict)):
         return
@@ -4848,6 +4811,7 @@ from cad_quoter.ui.planner_render import (
     _process_label,
     _seed_bucket_minutes as _planner_seed_bucket_minutes,
     _normalize_buckets,
+    _set_bucket_minutes_cost,
     _split_hours_for_bucket,
     _purge_legacy_drill_sync,
     _build_planner_bucket_render_state,
