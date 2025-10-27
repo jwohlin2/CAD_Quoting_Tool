@@ -3861,7 +3861,6 @@ def read_text_table(
     layer_exclude_regex: Iterable[str] | str | None = DEFAULT_TEXT_LAYER_EXCLUDE_REGEX,
     layout_filters: Mapping[str, Any] | None = None,
     debug_layouts: bool = False,
-    layout_filters: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     helper = _resolve_app_callable("extract_hole_table_from_text")
     _print_helper_debug("text", helper)
@@ -4379,16 +4378,6 @@ def read_text_table(
                     f"tables={layout_tables}"
                 )
             return True
-
-                print(
-                    f"[TEXT-SCAN] layout={layout_name} text={text_fragments} "
-                    f"mtext={mtext_fragments} kept={kept_count} from_blocks={from_blocks_count}"
-                )
-            if _TRACE_ACAD:
-                print(
-                    f"[LAYOUT] {layout_label} texts={text_fragments}/{mtext_fragments} "
-                    f"tables={layout_tables}"
-                )
 
         if follow_sheet_directive:
             token_value = follow_sheet_directive.get("token") if isinstance(follow_sheet_directive, Mapping) else None
