@@ -59,6 +59,7 @@ from cad_quoter.app.quote_doc import (
     _sanitize_render_text,
 )
 from cad_quoter.pricing.machining_report import _drill_time_model
+from cad_quoter.utils.number_parse import NUM_DEC_RE, NUM_FRAC_RE, _to_inch
 from cad_quoter.utils.render_utils.tables import ascii_table
 
 
@@ -99,24 +100,6 @@ _re = re
 # --- Ops aggregation from HOLE TABLE rows (minimal) ---
 _SIDE_BOTH = re.compile(r"\b(FRONT\s*&\s*BACK|BOTH\s+SIDES)\b", re.I)
 _SIDE_BACK = re.compile(r"\b(?:FROM\s+)?BACK\b", re.I)
-# --- HOLE TABLE promotion helpers -------------------------------------------
-NUM_DEC_RE = re.compile(r"(?<!\d)(?:\d+\.\d+|\.\d+|\d+)(?!\d)")
-NUM_FRAC_RE = re.compile(r"(?<!\d)(\d+)\s*/\s*(\d+)(?!\d)")
-
-
-def _to_inch(num_text: str) -> float | None:
-    s = (num_text or "").strip()
-    if "/" in s:
-        try:
-            return float(Fraction(s))
-        except Exception:
-            return None
-    if s.startswith("."):
-        s = "0" + s
-    try:
-        return float(s)
-    except Exception:
-        return None
 
 
 def _rows_qty_sum(rows):
@@ -1370,43 +1353,6 @@ def _minutes_to_hours(m: Any) -> float:
 
 def minutes_to_hours(m: Any) -> float:
     return _minutes_to_hours(m)
-
-
-def _set_bucket_minutes_cost(
-    bvo: MutableMapping[str, Any] | Mapping[str, Any] | None,
-    key: str,
-    minutes: float,
-    machine_rate: float,
-    labor_rate: float,
-) -> None:
-    minutes_val = _as_float(minutes, 0.0)
-    if not (0.0 <= minutes_val <= 10_000.0):
-        logging.warning(f"[bucket] ignoring {key} minutes out of range: {minutes}")
-        minutes_val = 0.0
-
-    machine_rate_val = _as_float(machine_rate, 0.0)
-    labor_rate_val = _as_float(labor_rate, 0.0)
-
-    buckets_obj: MutableMapping[str, Any] | None = None
-    if isinstance(bvo, dict):
-        buckets_obj = bvo.setdefault("buckets", {})
-    elif isinstance(bvo, _MutableMappingABC):
-        buckets_obj = typing.cast(MutableMapping[str, Any], bvo.setdefault("buckets", {}))
-    else:
-        return
-
-    if buckets_obj is None:
-        return
-
-    machine_cost = (minutes_val / 60.0) * machine_rate_val
-    labor_cost = (minutes_val / 60.0) * labor_rate_val
-
-    buckets_obj[key] = {
-        "minutes": minutes_val,
-        "machine$": round(machine_cost, 2),
-        "labor$": round(labor_cost, 2),
-        "total$": round(machine_cost + labor_cost, 2),
-    }
 
 
 def _normalize_buckets(bucket_view_obj: MutableMapping[str, Any] | Mapping[str, Any] | None) -> None:
@@ -4848,6 +4794,7 @@ from cad_quoter.ui.planner_render import (
     _process_label,
     _seed_bucket_minutes as _planner_seed_bucket_minutes,
     _normalize_buckets,
+    _set_bucket_minutes_cost,
     _split_hours_for_bucket,
     _purge_legacy_drill_sync,
     _build_planner_bucket_render_state,

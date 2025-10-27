@@ -15,7 +15,12 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 from cad_quoter import geo_extractor
-from cad_quoter.geo_extractor import DEFAULT_TEXT_LAYER_EXCLUDE_REGEX, read_geo
+from cad_quoter.geo_extractor import (
+    DEFAULT_TEXT_LAYER_EXCLUDE_REGEX,
+    NO_TEXT_ROWS_MESSAGE,
+    NoTextRowsError,
+    read_geo,
+)
 
 DEFAULT_SAMPLE_PATH = REPO_ROOT / "Cad Files" / "301_redacted.dwg"
 ARTIFACT_DIR = REPO_ROOT / "out"
@@ -448,9 +453,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         read_kwargs["allow_geom"] = True
     try:
         payload = read_geo(doc, **read_kwargs)
-    except RuntimeError as exc:
-        print(f"[geo_dump] ERROR: {exc}")
-        print("[geo_dump] Re-run with --dump-ents for diagnostics.")
+    except NoTextRowsError:
+        print(NO_TEXT_ROWS_MESSAGE)
         return 2
     if isinstance(payload, Mapping):
         payload = dict(payload)
@@ -488,9 +492,8 @@ def main(argv: Sequence[str] | None = None) -> int:
                 continue
             try:
                 payload = read_geo(fallback_doc, **read_kwargs)
-            except RuntimeError as exc:
-                print(f"[geo_dump] ERROR: {exc}")
-                print("[geo_dump] Re-run with --dump-ents for diagnostics.")
+            except NoTextRowsError:
+                print(NO_TEXT_ROWS_MESSAGE)
                 return 2
             if isinstance(payload, Mapping):
                 payload = dict(payload)
