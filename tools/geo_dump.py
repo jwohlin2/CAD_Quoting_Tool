@@ -286,6 +286,20 @@ def main(argv: Sequence[str] | None = None) -> int:
         help="Force publishing text fallback rows when available",
     )
     parser.add_argument(
+        "--pipeline",
+        choices=("auto", "acad", "text", "geom"),
+        default="auto",
+        help=(
+            "Select the extraction pipeline: 'auto' runs ACAD first then TEXT, "
+            "while 'geom' returns raw geometry rows"
+        ),
+    )
+    parser.add_argument(
+        "--allow-geom",
+        action="store_true",
+        help="Permit geometry rows even when using the automatic pipeline",
+    )
+    parser.add_argument(
         "--debug-layouts",
         action="store_true",
         help="Print layout and layer summaries after extraction",
@@ -428,6 +442,10 @@ def main(argv: Sequence[str] | None = None) -> int:
         read_kwargs["debug_layouts"] = True
     if args.force_text:
         read_kwargs["force_text"] = True
+    if args.pipeline:
+        read_kwargs["pipeline"] = args.pipeline
+    if args.allow_geom:
+        read_kwargs["allow_geom"] = True
     payload = read_geo(doc, **read_kwargs)
     if isinstance(payload, Mapping):
         payload = dict(payload)
