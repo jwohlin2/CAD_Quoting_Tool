@@ -5864,11 +5864,23 @@ def read_geo(
 
     score_a = _score_table(acad_info)
     score_b = _score_table(text_info)
-    best_table = publish_info or choose_better_table(acad_info, text_info)
-    if publish_info is None and isinstance(best_table, Mapping) and best_table.get("rows"):
-        publish_info = dict(best_table)
-        publish_info["rows"] = _normalize_table_rows(publish_info.get("rows"))
-        publish_source_tag = "acad_table" if score_a >= score_b else "text_table"
+    best_table_candidate = choose_better_table(acad_info, text_info)
+    if isinstance(best_table_candidate, Mapping) and best_table_candidate.get("rows"):
+        current_score = _score_table(publish_info) if isinstance(publish_info, Mapping) else (0, 0, 0)
+        candidate_score = _score_table(best_table_candidate)
+        if publish_info is None or candidate_score > current_score:
+            if best_table_candidate is acad_info:
+                publish_info = acad_info
+                publish_source_tag = "acad_table"
+            elif best_table_candidate is text_info:
+                publish_info = text_info
+                publish_source_tag = "text_table"
+            else:
+                publish_info = dict(best_table_candidate)
+                publish_info["rows"] = _normalize_table_rows(best_table_candidate.get("rows"))
+                if publish_source_tag is None:
+                    publish_source_tag = "acad_table" if score_a >= score_b else "text_table"
+    best_table = publish_info or best_table_candidate
     publish_rows: list[dict[str, Any]] = []
     if isinstance(publish_info, Mapping):
         publish_rows = list(publish_info.get("rows") or [])
