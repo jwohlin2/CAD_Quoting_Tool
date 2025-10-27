@@ -8,6 +8,8 @@ from pathlib import Path
 
 import appV5
 
+from cad_quoter.render import RenderState, render_quote_sections
+from cad_quoter.utils.render_utils import QuoteDocRecorder
 from tests.pricing.test_dummy_quote_acceptance import _dummy_quote_payload
 
 SNAPSHOT_PATH = (
@@ -29,14 +31,18 @@ def _normalize_render_text(text: str) -> str:
 def test_render_quote_matches_snapshot() -> None:
     payload = _dummy_quote_payload()
 
-    try:
-        import cad_quoter.render as render_module  # type: ignore[import-not-found]
-    except ModuleNotFoundError:
-        render_module = None
-    else:
-        render_sections = getattr(render_module, "render_quote_sections", None)
-        if callable(render_sections):
-            render_sections(copy.deepcopy(payload), currency="$", show_zeros=False)
+    divider = "-" * 74
+    state = RenderState(
+        qty=int(payload.get("qty") or payload.get("breakdown", {}).get("qty") or 1),
+        result=payload,
+        breakdown=payload.get("breakdown"),
+        page_width=74,
+        divider=divider,
+        drill_debug_entries=payload.get("drill_debug"),
+        lines=[],
+        recorder=QuoteDocRecorder(divider),
+    )
+    render_quote_sections(state)
 
     logging.disable(logging.CRITICAL)
     try:

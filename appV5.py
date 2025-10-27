@@ -10858,10 +10858,15 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
         drill_debug_entries=drill_debug_entries,
         material_warning_summary=material_warning_summary,
         material_warning_label=MATERIAL_WARNING_LABEL,
+        lines=lines,
+        recorder=doc_builder,
     )
     for segment in render_quote_sections_helper(quote_render_state):
         for segment_line in segment:
             append_line(segment_line)
+
+    if quote_render_state.deferred_replacements:
+        quote_render_state.apply_replacements(replace_line)
 
     app_meta = result.setdefault("app_meta", {})
 
@@ -13066,6 +13071,17 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
         bucket_entries_for_totals_map=bucket_entries_for_totals_map,
         bucket_why_summary_line=bucket_why_summary_line,
     )
+    process_render_result = render_process(process_render_state)
+    process_section_lines = list(process_render_result.lines)
+    for note in process_render_result.why_lines:
+        if note not in why_lines:
+            why_lines.append(note)
+    if process_render_result.bucket_summary:
+        bucket_why_summary_line = process_render_result.bucket_summary
+    process_rows_rendered = list(process_render_state.process_rows_rendered)
+    process_rows_total = float(process_render_state.process_total_cost)
+    process_rows_minutes = float(process_render_state.process_total_minutes)
+    process_section_start = len(lines)
     lines.extend(process_section_lines)
     proc_total_rendered = process_rows_total
     hrs_total_rendered = process_rows_minutes / 60.0 if process_rows_minutes > 0 else 0.0
@@ -13099,7 +13115,7 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
         for offset, text in enumerate(lines[process_section_start:]):
             stripped = str(text or "").strip()
             if stripped.lower().startswith("total") and "$" in stripped:
-                render_state.process_total_row_index = process_section_start + offset
+                quote_render_state.process_total_row_index = process_section_start + offset
                 break
     proc_total = proc_total_rendered
 
@@ -15674,7 +15690,7 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
         "decision_state": decision_state,
         "replace_line": replace_line,
         "format_row": _format_row,
-        "final_price_row_index": final_price_row_index,
+        "final_price_row_index": quote_render_state.final_price_row_index,
         "safe_float": _safe_float,
         "compute_pricing_ladder": _compute_pricing_ladder,
         "currency": currency,
@@ -15689,6 +15705,7 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
         "vendor_items_total": vendor_items_total,
         "ascii_table": ascii_table,
         "write_wrapped": write_wrapped,
+        "skip_pricing_ladder": True,
         "llm_notes": llm_notes,
         "explanation_lines": explanation_lines,
         "why_lines": why_lines,

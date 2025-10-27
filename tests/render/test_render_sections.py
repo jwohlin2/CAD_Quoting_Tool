@@ -3,35 +3,30 @@ from __future__ import annotations
 import pytest
 
 from cad_quoter.render import RenderState, render_quote_sections
-from cad_quoter.utils.rendering import QuoteDocRecorder
+from cad_quoter.utils.render_utils import QuoteDocRecorder
 
 
 @pytest.fixture
 def minimal_state() -> RenderState:
+    divider = "-" * 74
     return RenderState(
+        qty=1,
         result={},
         breakdown={},
-        totals={},
-        recorder=QuoteDocRecorder("---"),
-        callbacks={},
+        page_width=74,
+        divider=divider,
+        lines=[],
+        recorder=QuoteDocRecorder(divider),
     )
 
 
-def _make_renderer(name: str):
-    def _renderer(state: RenderState) -> list[str]:  # pragma: no cover - trivial
-        return [name]
+def test_render_quote_sections_emits_summary(minimal_state: RenderState) -> None:
+    sections = render_quote_sections(minimal_state)
 
-    return _renderer
+    assert sections, "at least one section should be rendered"
+    header = sections[0]
 
-
-def test_render_quote_sections_chains_outputs(monkeypatch: pytest.MonkeyPatch, minimal_state: RenderState) -> None:
-    ordered_names = ["summary", "material", "nre", "process", "pass_through", "appendix"]
-    monkeypatch.setattr(
-        "cad_quoter.render.SECTION_RENDERERS",
-        tuple(_make_renderer(name) for name in ordered_names),
-        raising=False,
-    )
-
-    lines = render_quote_sections(minimal_state)
-
-    assert lines == ordered_names
+    assert header[0] == "QUOTE SUMMARY - Qty 1"
+    assert header[1] == minimal_state.divider
+    assert minimal_state.summary_lines[: len(header)] == header
+    assert minimal_state.deferred_replacements == []

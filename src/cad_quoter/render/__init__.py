@@ -4,13 +4,14 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from functools import cmp_to_key
-from typing import Any, Sequence
+from typing import Any, Callable, Sequence
 
 from cad_quoter.app.quote_doc import (
     build_quote_header_lines,
     _sanitize_render_text,
 )
 from cad_quoter.ui.services import QuoteConfiguration
+from cad_quoter.utils.render_utils import QuoteDocRecorder
 
 try:  # Python 3.11+: ``collections.abc`` already exports ``MutableMapping``
     from collections.abc import Mapping, MutableMapping
@@ -42,9 +43,24 @@ class RenderState:
     total_process_cost_row_index: int = -1
     total_direct_costs_row_index: int = -1
     process_total_row_index: int = -1
+    lines: list[str] | None = None
+    recorder: QuoteDocRecorder | None = None
+    deferred_replacements: list[tuple[int, str]] = field(default_factory=list)
 
     #: Accumulated header lines that precede the pricing ladder rows.
     summary_lines: list[str] = field(default_factory=list)
+
+    def defer_replacement(self, index: int, text: str) -> None:
+        """Queue a line replacement to be applied after section rendering."""
+
+        self.deferred_replacements.append((index, text))
+
+    def apply_replacements(self, replace: Callable[[int, str], None]) -> None:
+        """Apply all deferred replacements using *replace* and clear the queue."""
+
+        while self.deferred_replacements:
+            index, text = self.deferred_replacements.pop(0)
+            replace(index, text)
 
 
 def _wrap_text(text: str, page_width: int, indent: str = "") -> list[str]:
@@ -196,6 +212,7 @@ def render_quote_sections(state: RenderState) -> list[list[str]]:
     sections: list[list[str]] = [header_lines]
     if suffix_lines:
         sections.append(suffix_lines)
+
     return sections
 
 

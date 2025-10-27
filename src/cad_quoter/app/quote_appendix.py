@@ -146,9 +146,11 @@ def render_appendix(state: RenderState) -> AppendixResult:
 
     initial_line_count = len(lines)
 
-    # Pricing ladder banner
-    state.push("Pricing Ladder")
-    state.push(divider)
+    skip_pricing_ladder = bool(ctx.get("skip_pricing_ladder"))
+    if not skip_pricing_ladder:
+        # Pricing ladder banner
+        state.push("Pricing Ladder")
+        state.push(divider)
 
     override_sources: list[Mapping[str, Any]] = []
 
@@ -564,12 +566,19 @@ def render_appendix(state: RenderState) -> AppendixResult:
                     }
                 )
 
-    row_fn("Subtotal (Labor + Directs):", subtotal)
-    if applied_pcts.get("ExpeditePct"):
-        row_fn(f"+ Expedite ({pct_formatter(applied_pcts.get('ExpeditePct'))}):", expedite_cost)
-    row_fn("= Subtotal before Margin:", subtotal_before_margin)
-    row_fn(f"Final Price with Margin ({pct_formatter(applied_pcts.get('MarginPct'))}):", final_price)
-    state.push("")
+    if not skip_pricing_ladder:
+        row_fn("Subtotal (Labor + Directs):", subtotal)
+        if applied_pcts.get("ExpeditePct"):
+            row_fn(
+                f"+ Expedite ({pct_formatter(applied_pcts.get('ExpeditePct'))}):",
+                expedite_cost,
+            )
+        row_fn("= Subtotal before Margin:", subtotal_before_margin)
+        row_fn(
+            f"Final Price with Margin ({pct_formatter(applied_pcts.get('MarginPct'))}):",
+            final_price,
+        )
+        state.push("")
 
     def _format_dotted_line(label: str, value_text: str, *, indent: str = "  ") -> str:
         base = f"{indent}{label}"
