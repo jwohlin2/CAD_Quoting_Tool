@@ -48,7 +48,6 @@ if _PKG_SRC.is_dir():
 
 from cad_quoter.app.quote_doc import (
     build_material_detail_lines,
-    build_quote_header_lines,
     _sanitize_render_text,
 )
 from cad_quoter.pricing.machining_report import _drill_time_model
@@ -138,6 +137,10 @@ from cad_quoter.app.op_parser import (
     _side as _shared_side,
 )
 from cad_quoter.utils.numeric import coerce_positive_float
+from cad_quoter.render import (
+    RenderState as QuoteRenderState,
+    render_quote_sections as render_quote_sections_helper,
+)
 
 try:
     from cad_quoter.geometry.dxf_text import (
@@ -10167,9 +10170,7 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
     if not planner_has_drilling_bucket:
         planner_has_drilling_bucket = _has_planner_drilling_bucket(buckets)
 
-    # Canonical QUOTE SUMMARY header (legacy variants removed in favour of this
-    # block so the Speeds/Feeds status + Drill Debug output stay consistent).
-    header_lines, pricing_source_value = build_quote_header_lines(
+    quote_render_state = QuoteRenderState(
         qty=qty,
         result=result if isinstance(result, _MappingABC) else None,
         breakdown=breakdown if isinstance(breakdown, _MappingABC) else None,
@@ -10179,97 +10180,27 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
         process_meta_raw=process_meta_raw,
         hour_summary_entries=hour_summary_entries,
         cfg=cfg,
+        llm_debug_enabled=llm_debug_enabled_flag,
+        drill_debug_entries=drill_debug_entries,
+        material_warning_summary=material_warning_summary,
+        material_warning_label=MATERIAL_WARNING_LABEL,
     )
-    append_lines(header_lines)
-    if material_warning_summary:
-        _push(lines, MATERIAL_WARNING_LABEL)
-    _push(lines, "")
-
-    if isinstance(breakdown, _MutableMappingABC):
-        if pricing_source_value:
-            breakdown["pricing_source"] = pricing_source_value
-        else:
-            breakdown.pop("pricing_source", None)
-
-    if isinstance(result, _MutableMappingABC):
-        app_meta_container = result.setdefault("app_meta", {})
-        if isinstance(app_meta_container, _MutableMappingABC):
-            if pricing_source_value and str(pricing_source_value).strip().lower() == "planner":
-                app_meta_container.setdefault("used_planner", True)
-
-        decision_state = result.get("decision_state")
-        if isinstance(decision_state, _MutableMappingABC):
-            baseline_state = decision_state.get("baseline")
-            if isinstance(baseline_state, _MutableMappingABC):
-                if pricing_source_value:
-                    baseline_state["pricing_source"] = pricing_source_value
-                else:
-                    baseline_state.pop("pricing_source", None)
-
-    def render_drill_debug(entries: Sequence[str]) -> None:
-        _push(lines, "Drill Debug")
-        _push(lines, divider)
-        prioritized_entries: list[tuple[int, int, str]] = []
-        for idx, entry in enumerate(entries):
-            if entry is None:
-                continue
-            text = str(entry).strip()
-            if not text:
-                continue
-            normalized = text.lstrip()
-            if normalized.startswith("Material Removal Debug"):
-                priority = 0
-            elif normalized.startswith("OK deep_drill") or normalized.startswith("OK drill"):
-                priority = 1
-            elif normalized.lower().startswith("drill bin") or normalized.lower().startswith("bin "):
-                priority = 3
-            else:
-                priority = 2
-            prioritized_entries.append((priority, idx, text))
-
-        for _priority, _idx, text in sorted(prioritized_entries, key=lambda item: (item[0], item[1])):
-            if "\n" in text:
-                normalized = text.lstrip()
-                block_indent = "" if normalized.startswith("Material Removal Debug") else "  "
-                for chunk in text.splitlines():
-                    write_line(chunk, block_indent)
-                if lines and lines[-1] != "":
-                    _push(lines, "")
-            else:
-                write_wrapped(text, "  ")
-        if lines and lines[-1] != "":
-            _push(lines, "")
+    for segment in render_quote_sections_helper(quote_render_state):
+        for segment_line in segment:
+            append_line(segment_line)
 
     app_meta = result.setdefault("app_meta", {})
-    # Only surface drill debug when LLM debug is enabled for this quote.
-    if drill_debug_entries and llm_debug_enabled_flag:
-        # Order so legacy per-bin “OK …” lines appear first, then tables/summary.
-        def _dbg_sort(a: str, b: str) -> int:
-            a_ok = a.strip().lower().startswith("ok ")
-            b_ok = b.strip().lower().startswith("ok ")
-            if a_ok and not b_ok: return -1
-            if b_ok and not a_ok: return 1
-            a_hdr = a.strip().lower().startswith("material removal debug")
-            b_hdr = b.strip().lower().startswith("material removal debug")
-            if a_hdr and not b_hdr: return 1
-            if b_hdr and not a_hdr: return -1
-            return 0
 
-        try:
-            sorted_drill_entries = sorted(drill_debug_entries, key=cmp_to_key(_dbg_sort))
-        except Exception:
-            sorted_drill_entries = drill_debug_entries
-
-        render_drill_debug(sorted_drill_entries)
+    pricing_source_value = quote_render_state.pricing_source_value
     row("Final Price per Part:", price)
-    final_price_row_index = len(lines) - 1
+    quote_render_state.final_price_row_index = len(lines) - 1
     total_process_cost_label = "Total Process Cost:"
     row(total_process_cost_label, float(totals.get("labor_cost", 0.0)))
-    total_process_cost_row_index = len(lines) - 1
+    quote_render_state.total_process_cost_row_index = len(lines) - 1
     total_direct_costs_label = "Total Direct Costs:"
     row(total_direct_costs_label, 0.0)
-    total_direct_costs_row_index = len(lines) - 1
-    process_total_row_index = -1
+    quote_render_state.total_direct_costs_row_index = len(lines) - 1
+    quote_render_state.process_total_row_index = -1
     directs: float = 0.0
     pricing_source_lower = pricing_source_value.lower() if pricing_source_value else ""
     display_red_flags: list[str] = []
@@ -13129,7 +13060,7 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
         for offset, text in enumerate(lines[process_section_start:]):
             stripped = str(text or "").strip()
             if stripped.lower().startswith("total") and "$" in stripped:
-                process_total_row_index = process_section_start + offset
+                render_state.process_total_row_index = process_section_start + offset
                 break
     proc_total = proc_total_rendered
 
@@ -13445,9 +13376,9 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
     directs = float(round(directs_total_value, 2))
     if isinstance(totals, dict):
         totals["direct_costs"] = total_direct_costs_value
-    if 0 <= total_direct_costs_row_index < len(lines):
+    if 0 <= quote_render_state.total_direct_costs_row_index < len(lines):
         replace_line(
-            total_direct_costs_row_index,
+            quote_render_state.total_direct_costs_row_index,
             _format_row(
                 total_direct_costs_label,
                 total_direct_costs_value,
@@ -13540,9 +13471,9 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
             display_machine = 0.0
     if isinstance(totals, dict):
         totals["labor_cost"] = computed_total_labor_cost
-    if 0 <= total_process_cost_row_index < len(lines):
+    if 0 <= quote_render_state.total_process_cost_row_index < len(lines):
         replace_line(
-            total_process_cost_row_index,
+            quote_render_state.total_process_cost_row_index,
             _format_row(
                 total_process_cost_label,
                 total_process_cost_value,
@@ -13679,9 +13610,9 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
 
     final_per_part = round(machine_labor_total + nre_per_part + ladder_directs, 2)
     ladder_subtotal = final_per_part
-    if 0 <= total_process_cost_row_index < len(lines):
+    if 0 <= quote_render_state.total_process_cost_row_index < len(lines):
         replace_line(
-            total_process_cost_row_index,
+            quote_render_state.total_process_cost_row_index,
             _format_row(total_process_cost_label, total_process_cost_value),
         )
     if isinstance(pricing, dict):
@@ -15329,7 +15260,7 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
         result["price"] = price
     if isinstance(breakdown, dict):
         breakdown["final_price"] = final_price
-    replace_line(final_price_row_index, _format_row("Final Price per Part:", price))
+    replace_line(quote_render_state.final_price_row_index, _format_row("Final Price per Part:", price))
 
     subtotal_before_margin_val = _safe_float(subtotal_before_margin, 0.0)
     final_price_val = _safe_float(price, 0.0)
