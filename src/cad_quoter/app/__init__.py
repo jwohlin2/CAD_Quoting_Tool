@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 from .container import ServiceContainer, create_default_container
-from . import audit, runner, chart_lines
+from . import audit, runner, chart_lines, ui_runtime, io, runtime, driver
 
 __all__ = [
     "ServiceContainer",
@@ -10,4 +10,8 @@ __all__ = [
     "audit",
     "runner",
     "chart_lines",
+    "ui_runtime",
+    "io",
+    "runtime",
+    "driver",
 ]
