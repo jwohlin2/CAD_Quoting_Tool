@@ -59,6 +59,7 @@ from cad_quoter.app.quote_doc import (
     _sanitize_render_text,
 )
 from cad_quoter.pricing.machining_report import _drill_time_model
+from cad_quoter.utils.number_parse import NUM_DEC_RE, NUM_FRAC_RE, _to_inch
 from cad_quoter.utils.render_utils.tables import ascii_table
 
 
@@ -99,24 +100,6 @@ _re = re
 # --- Ops aggregation from HOLE TABLE rows (minimal) ---
 _SIDE_BOTH = re.compile(r"\b(FRONT\s*&\s*BACK|BOTH\s+SIDES)\b", re.I)
 _SIDE_BACK = re.compile(r"\b(?:FROM\s+)?BACK\b", re.I)
-# --- HOLE TABLE promotion helpers -------------------------------------------
-NUM_DEC_RE = re.compile(r"(?<!\d)(?:\d+\.\d+|\.\d+|\d+)(?!\d)")
-NUM_FRAC_RE = re.compile(r"(?<!\d)(\d+)\s*/\s*(\d+)(?!\d)")
-
-
-def _to_inch(num_text: str) -> float | None:
-    s = (num_text or "").strip()
-    if "/" in s:
-        try:
-            return float(Fraction(s))
-        except Exception:
-            return None
-    if s.startswith("."):
-        s = "0" + s
-    try:
-        return float(s)
-    except Exception:
-        return None
 
 
 def _rows_qty_sum(rows):
@@ -684,11 +667,6 @@ def _seed_drill_bins_from_geo__local(geo_map) -> dict[float, int]:
     return bins
 
 
-_MM_DIM_TOKEN = re.compile(
-    r"(?:Ø|⌀|DIA|REF)?\s*((?:\d+\s*/\s*\d+)|(?:\d+(?:\.\d+)?))\s*(?:MM|MILLIM(?:E|E)T(?:E|)RS?)",
-    re.IGNORECASE,
-)
-
 RE_COUNTERDRILL = re.compile(
     r"\b(?:C[’']\s*DRILL|COUNTER[\s-]*DRILL|CTR\s*DRILL)\b",
     re.IGNORECASE,
@@ -766,38 +744,6 @@ def _log_geo_seed_debug(lines: list[str], geo: Mapping[str, Any] | dict[str, Any
         )
     except Exception:
         pass
-
-
-def _parse_dim_to_mm(value: Any) -> float | None:
-    """Parse a dimension string containing millimeter units to a float value."""
-
-    if value is None:
-        return None
-    if isinstance(value, (int, float)):
-        try:
-            mm_val = float(value)
-        except Exception:
-            return None
-        return mm_val if math.isfinite(mm_val) and mm_val > 0 else None
-
-    text = str(value).strip()
-    if not text:
-        return None
-
-    match = _MM_DIM_TOKEN.search(text)
-    if not match:
-        return None
-
-    token = match.group(1).replace(" ", "")
-    try:
-        if "/" in token:
-            mm_val = float(Fraction(token))
-        else:
-            mm_val = float(token)
-    except Exception:
-        return None
-
-    return mm_val if math.isfinite(mm_val) and mm_val > 0 else None
 
 
 def _sanitize_drill_removal_minutes(minutes_value: Any) -> float:
@@ -1189,8 +1135,8 @@ from cad_quoter.app.hole_ops import (
     _major_diameter_from_thread,
     _normalize_hole_text,
     _parse_hole_line,
-    _parse_ref_to_inch,
     _SPOT_TOKENS,
+    parse_dim,
     summarize_hole_chart_lines,
 )
 from cad_quoter.utils.number_parse import first_inch_value
@@ -1370,43 +1316,6 @@ def _minutes_to_hours(m: Any) -> float:
 
 def minutes_to_hours(m: Any) -> float:
     return _minutes_to_hours(m)
-
-
-def _set_bucket_minutes_cost(
-    bvo: MutableMapping[str, Any] | Mapping[str, Any] | None,
-    key: str,
-    minutes: float,
-    machine_rate: float,
-    labor_rate: float,
-) -> None:
-    minutes_val = _as_float(minutes, 0.0)
-    if not (0.0 <= minutes_val <= 10_000.0):
-        logging.warning(f"[bucket] ignoring {key} minutes out of range: {minutes}")
-        minutes_val = 0.0
-
-    machine_rate_val = _as_float(machine_rate, 0.0)
-    labor_rate_val = _as_float(labor_rate, 0.0)
-
-    buckets_obj: MutableMapping[str, Any] | None = None
-    if isinstance(bvo, dict):
-        buckets_obj = bvo.setdefault("buckets", {})
-    elif isinstance(bvo, _MutableMappingABC):
-        buckets_obj = typing.cast(MutableMapping[str, Any], bvo.setdefault("buckets", {}))
-    else:
-        return
-
-    if buckets_obj is None:
-        return
-
-    machine_cost = (minutes_val / 60.0) * machine_rate_val
-    labor_cost = (minutes_val / 60.0) * labor_rate_val
-
-    buckets_obj[key] = {
-        "minutes": minutes_val,
-        "machine$": round(machine_cost, 2),
-        "labor$": round(labor_cost, 2),
-        "total$": round(machine_cost + labor_cost, 2),
-    }
 
 
 def _normalize_buckets(bucket_view_obj: MutableMapping[str, Any] | Mapping[str, Any] | None) -> None:
@@ -4848,6 +4757,7 @@ from cad_quoter.ui.planner_render import (
     _process_label,
     _seed_bucket_minutes as _planner_seed_bucket_minutes,
     _normalize_buckets,
+    _set_bucket_minutes_cost,
     _split_hours_for_bucket,
     _purge_legacy_drill_sync,
     _build_planner_bucket_render_state,
@@ -5583,8 +5493,8 @@ def _ops_card_rows_from_group_totals(
             diameter_in = _first_numeric_or_none(
                 payload.get("diameter_in"),
                 payload.get("ref_dia_in"),
-                _parse_ref_to_inch(payload.get("ref_label")),
-                _parse_ref_to_inch(payload.get("ref")),
+                parse_dim(payload.get("ref_label")),
+                parse_dim(payload.get("ref")),
             )
             label = _label_for_ops_kind(
                 kind,
@@ -5639,8 +5549,8 @@ def _ops_card_rows_from_detail(
         diameter_in = _first_numeric_or_none(
             entry.get("ref_dia_in"),
             entry.get("diameter_in"),
-            _parse_ref_to_inch(entry.get("ref_label")),
-            _parse_ref_to_inch(entry.get("ref")),
+            parse_dim(entry.get("ref_label")),
+            parse_dim(entry.get("ref")),
         )
         depth_in = _first_numeric_or_none(entry.get("depth_in"))
         label = _label_for_ops_kind(
@@ -5725,8 +5635,8 @@ def _ops_card_rows_from_simple(
         sides = _extract_sides_from_desc(desc_upper)
         diameter_in = _first_numeric_or_none(
             entry_map.get("diameter_in"),
-            _parse_ref_to_inch(entry_map.get("ref")),
-            _parse_ref_to_inch(desc),
+            parse_dim(entry_map.get("ref")),
+            parse_dim(desc),
         )
         depth_in = _first_numeric_or_none(entry_map.get("depth_in"), _depth_from_desc(desc))
         label = _label_for_ops_kind(
@@ -7715,13 +7625,13 @@ def _diameter_from_ops_row(entry: Mapping[str, Any]) -> float | None:
     direct = _coerce_float_or_none(entry.get("diameter_in"))
     if direct is not None and direct > 0:
         return float(direct)
-    ref_val = _parse_ref_to_inch(entry.get("ref"))
+    ref_val = parse_dim(entry.get("ref"))
     if ref_val is not None and ref_val > 0:
         return ref_val
     desc = entry.get("desc")
     if isinstance(desc, str):
         for match in _DIA_TOKEN.finditer(desc):
-            candidate = _parse_ref_to_inch(match.group(1))
+            candidate = parse_dim(match.group(1))
             if candidate is not None and candidate > 0:
                 return candidate
     return None
@@ -7761,7 +7671,7 @@ def _drilling_groups_from_ops_summary(
                     if dia_candidate is None:
                         dia_candidate = _coerce_float_or_none(side_info.get("ref_dia_in"))
                     if dia_candidate is None and isinstance(ref_key, str):
-                        dia_candidate = _coerce_float_or_none(_parse_ref_to_inch(ref_key))
+                        dia_candidate = _coerce_float_or_none(parse_dim(ref_key))
                     if dia_candidate is not None and math.isfinite(dia_candidate):
                         dia_val = float(dia_candidate)
                 depth_val = (
@@ -7812,10 +7722,7 @@ def _drilling_groups_from_ops_summary(
                 except Exception:
                     diameter_in = None
             else:
-                diameter_in = _parse_ref_to_inch(raw_label)
-                if diameter_in is None:
-                    dia_mm = _parse_dim_to_mm(raw_label)
-                    diameter_in = (dia_mm / 25.4) if dia_mm else None
+                diameter_in = parse_dim(raw_label)
             if diameter_in is None or not math.isfinite(diameter_in) or diameter_in <= 0:
                 continue
             key = round(float(diameter_in), 4)
