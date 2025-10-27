@@ -15,10 +15,11 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 from cad_quoter import geo_extractor
-from cad_quoter.geo_extractor import read_geo
+from cad_quoter.geo_extractor import DEFAULT_TEXT_LAYER_EXCLUDE_REGEX, read_geo
 
 DEFAULT_SAMPLE_PATH = REPO_ROOT / "Cad Files" / "301_redacted.dwg"
 ARTIFACT_DIR = REPO_ROOT / "out"
+DEFAULT_EXCLUDE_PATTERN_TEXT = ", ".join(DEFAULT_TEXT_LAYER_EXCLUDE_REGEX) or "<none>"
 
 
 def _sum_qty(rows: list[Mapping[str, object]] | None) -> int:
@@ -233,13 +234,29 @@ def main(argv: Sequence[str] | None = None) -> int:
         "--include-layer",
         dest="include_layer",
         action="append",
-        help="Regex pattern for layers to include when scanning text (repeatable)",
+        help=(
+            "Regex pattern for layers to include when scanning text (repeatable; "
+            f"defaults still exclude {DEFAULT_EXCLUDE_PATTERN_TEXT})"
+        ),
     )
     parser.add_argument(
         "--exclude-layer",
         dest="exclude_layer",
         action="append",
-        help="Regex pattern for layers to exclude when scanning text (repeatable)",
+        help=(
+            "Regex pattern for layers to exclude when scanning text (repeatable; "
+            f"defaults: {DEFAULT_EXCLUDE_PATTERN_TEXT})"
+        ),
+    )
+    parser.add_argument(
+        "--no-exclude-layer",
+        dest="no_exclude_layer",
+        action="store_true",
+        help=(
+            "Disable the default text-layer exclusions "
+            f"({DEFAULT_EXCLUDE_PATTERN_TEXT}) before applying any --exclude-layer"
+            " filters"
+        ),
     )
     parser.add_argument(
         "--scan-acad-tables",
@@ -267,6 +284,20 @@ def main(argv: Sequence[str] | None = None) -> int:
         "--force-text",
         action="store_true",
         help="Force publishing text fallback rows when available",
+    )
+    parser.add_argument(
+        "--pipeline",
+        choices=("auto", "acad", "text", "geom"),
+        default="auto",
+        help=(
+            "Select the extraction pipeline: 'auto' runs ACAD first then TEXT, "
+            "while 'geom' returns raw geometry rows"
+        ),
+    )
+    parser.add_argument(
+        "--allow-geom",
+        action="store_true",
+        help="Permit geometry rows even when using the automatic pipeline",
     )
     parser.add_argument(
         "--debug-layouts",
@@ -374,18 +405,47 @@ def main(argv: Sequence[str] | None = None) -> int:
         if normalized_patterns:
             read_kwargs["block_name_regex"] = normalized_patterns
             print(f"[geo_dump] block_regex={normalized_patterns}")
-    include_layer_patterns = args.include_layer or []
+    include_layer_patterns = [
+        value.strip()
+        for value in args.include_layer or []
+        if isinstance(value, str) and value.strip()
+    ]
     if include_layer_patterns:
         read_kwargs["layer_include_regex"] = list(include_layer_patterns)
         print(f"[geo_dump] include_layer={include_layer_patterns}")
-    exclude_layer_patterns = args.exclude_layer or []
-    if exclude_layer_patterns:
+    exclude_layer_patterns = [
+        value.strip()
+        for value in args.exclude_layer or []
+        if isinstance(value, str) and value.strip()
+    ]
+    if args.no_exclude_layer:
         read_kwargs["layer_exclude_regex"] = list(exclude_layer_patterns)
-        print(f"[geo_dump] exclude_layer={exclude_layer_patterns}")
+        if exclude_layer_patterns:
+            print(
+                "[geo_dump] exclude_layer={patterns} (defaults disabled)".format(
+                    patterns=exclude_layer_patterns
+                )
+            )
+        else:
+            print("[geo_dump] exclude_layer=<none> (defaults disabled)")
+    elif exclude_layer_patterns:
+        combined_patterns = list(DEFAULT_TEXT_LAYER_EXCLUDE_REGEX) + list(
+            exclude_layer_patterns
+        )
+        read_kwargs["layer_exclude_regex"] = combined_patterns
+        print(
+            "[geo_dump] exclude_layer={patterns} (defaults + custom)".format(
+                patterns=exclude_layer_patterns
+            )
+        )
     if args.debug_layouts:
         read_kwargs["debug_layouts"] = True
     if args.force_text:
         read_kwargs["force_text"] = True
+    if args.pipeline:
+        read_kwargs["pipeline"] = args.pipeline
+    if args.allow_geom:
+        read_kwargs["allow_geom"] = True
     payload = read_geo(doc, **read_kwargs)
     if isinstance(payload, Mapping):
         payload = dict(payload)
@@ -735,13 +795,24 @@ def main(argv: Sequence[str] | None = None) -> int:
 
     scanned_layouts = list(dict.fromkeys(debug_info.get("scanned_layouts") or []))
     scanned_layers = list(dict.fromkeys(debug_info.get("scanned_layers") or []))
+    include_patterns_dbg = list(
+        dict.fromkeys(debug_info.get("layer_regex_include") or [])
+    )
+    exclude_patterns_dbg = list(
+        dict.fromkeys(debug_info.get("layer_regex_exclude") or [])
+    )
     layout_summary = ",".join(scanned_layouts) if scanned_layouts else "-"
     layer_summary = ",".join(scanned_layers) if scanned_layers else "-"
+    include_summary = ",".join(include_patterns_dbg) if include_patterns_dbg else "-"
+    exclude_summary = ",".join(exclude_patterns_dbg) if exclude_patterns_dbg else "-"
     csv_display = str(rows_csv_path) if rows_csv_path else "-"
     print(
-        "[geo_dump] summary layouts={layouts} layers={layers} rows={rows} csv={csv}".format(
+        "[geo_dump] summary layouts={layouts} layers={layers} incl={incl} "
+        "excl={excl} rows={rows} csv={csv}".format(
             layouts=layout_summary,
             layers=layer_summary,
+            incl=include_summary,
+            excl=exclude_summary,
             rows=len(rows),
             csv=csv_display,
         )

@@ -168,19 +168,22 @@ def _parse_ref_to_inch(value: Any) -> float | None:
 
 
 _SUMMARY_OP_RULES: tuple[tuple[str, re.Pattern[str]], ...] = (
-    ("Tap", re.compile(r"\bTAP\b")),
+    ("Tap", re.compile(r"\b(?:TAP|N\.?P\.?T\.?)\b")),
     (
-        "C'Bore",
+        "Counterbore",
         re.compile(r"\b(?:C'? ?BORE|COUNTER ?BORE)\b"),
     ),
     (
-        "C'Drill/CSink",
+        "Countersink/Counterdrill",
         re.compile(
             r"\b(?:C'? ?DRILL|COUNTER[- ]?DRILL|CTR ?DRILL|CENTER ?DRILL|SPOT ?DRILL|SPOT|C'? ?SINK|CSK|COUNTER ?SINK)\b"
         ),
     ),
     ("Jig Grind", re.compile(r"\bJIG ?GRIND\b")),
-    ("Drill", re.compile(r"\b(?:DRILL|THRU)\b")),
+    (
+        "Drill",
+        re.compile(r"\b(?:DRILL|THRU)\b"),
+    ),
 )
 
 _SUMMARY_OP_TRANSLATE = str.maketrans(
@@ -198,6 +201,10 @@ _SUMMARY_OP_TRANSLATE = str.maketrans(
         "Ø": "O",
         "ø": "O",
         "⌀": "O",
+        "×": "X",
+        "✕": "X",
+        "✖": "X",
+        "⨯": "X",
     }
 )
 
@@ -210,8 +217,9 @@ def _norm_txt(s: str) -> str:
 
 def _normalize_ops_desc(desc: str) -> str:
     text = (desc or "").translate(_SUMMARY_OP_TRANSLATE)
-    text = re.sub(r"\s+", " ", text).strip()
     text = text.upper()
+    text = re.sub(r"\bN\.\s*P\.\s*T\.?\b", "NPT", text)
+    text = re.sub(r"\s+", " ", text).strip()
     return text
 
 
@@ -219,8 +227,6 @@ def _match_summary_operation(desc: str) -> tuple[str, str]:
     normalized = _normalize_ops_desc(desc)
     for label, pattern in _SUMMARY_OP_RULES:
         if pattern.search(normalized):
-            if label == "C'Drill/CSink" and ("THRU" in normalized or "TAP" in normalized):
-                continue
             return label, normalized
     return "Unknown", normalized
 
@@ -1802,7 +1808,7 @@ def _aggregate_summary_rows(
             else:
                 totals["tap_front"] += qty
                 actions["tap_front"] += qty
-        elif label == "C'Bore":
+        elif label == "Counterbore":
             totals["counterbore"] += qty
             if side == "BACK":
                 totals["counterbore_back"] += qty
@@ -1815,7 +1821,7 @@ def _aggregate_summary_rows(
             else:
                 totals["counterbore_front"] += qty
                 actions["counterbore_front"] += qty
-        elif label == "C'Drill/CSink":
+        elif label == "Countersink/Counterdrill":
             totals["spot"] += qty
             actions["spot"] += qty
         elif label == "Jig Grind":

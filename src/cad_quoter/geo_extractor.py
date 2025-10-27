@@ -201,6 +201,15 @@ def flatten_entities(layout: Any, depth: int = 5) -> Iterable[FlattenedEntity]:
             try:
                 iterator = iter(container)
             except Exception:
+                query = getattr(container, "query", None)
+                if callable(query):
+                    for spec in ("TEXT, MTEXT, RTEXT, MLEADER, INSERT", "*"):
+                        try:
+                            result = list(query(spec))
+                        except Exception:
+                            continue
+                        if result:
+                            break
                 return result
             for item in iterator:
                 result.append(item)
@@ -395,6 +404,9 @@ def flatten_entities(layout: Any, depth: int = 5) -> Iterable[FlattenedEntity]:
 _HAS_ODAFC = bool(getattr(geometry, "HAS_ODAFC", False))
 
 _DEFAULT_LAYER_ALLOWLIST = frozenset({"BALLOON"})
+DEFAULT_TEXT_LAYER_EXCLUDE_REGEX: tuple[str, ...] = (
+    r"^(AM_BOR|DEFPOINTS|PAPER)$",
+)
 _PREFERRED_BLOCK_NAME_RE = re.compile(r"HOLE.*(?:CHART|TABLE)", re.IGNORECASE)
 _FOLLOW_SHEET_DIRECTIVE_RE = re.compile(
     r"SEE\s+(?:SHEET|SHT)\s+(?P<target>[A-Z0-9]+)", re.IGNORECASE
@@ -461,6 +473,12 @@ def _entity_layer(entity: Any) -> str:
         if text:
             return text
     return ""
+
+
+def _extract_layer(entity: Any) -> str:
+    """Return the best-effort layer name for ``entity``."""
+
+    return _entity_layer(entity)
 
 
 def _entity_handle(entity: Any) -> str:
@@ -3840,9 +3858,10 @@ def read_text_table(
     block_name_allowlist: Iterable[str] | None = None,
     block_name_regex: Iterable[str] | str | None = None,
     layer_include_regex: Iterable[str] | str | None = None,
-    layer_exclude_regex: Iterable[str] | str | None = None,
+    layer_exclude_regex: Iterable[str] | str | None = DEFAULT_TEXT_LAYER_EXCLUDE_REGEX,
     layout_filters: Mapping[str, Any] | None = None,
     debug_layouts: bool = False,
+    layout_filters: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     helper = _resolve_app_callable("extract_hole_table_from_text")
     _print_helper_debug("text", helper)
@@ -3863,11 +3882,12 @@ def read_text_table(
     resolved_allowlist = _normalize_layer_allowlist(layer_allowlist)
     normalized_block_allow = _normalize_block_allowlist(block_name_allowlist)
     block_regex_patterns = _compile_block_name_patterns(block_name_regex)
-    allow_all_layouts, layout_name_patterns = _normalize_layout_filters(layout_filters)
-    _LAST_TEXT_TABLE_DEBUG["layout_filter_allow_all"] = allow_all_layouts
-    _LAST_TEXT_TABLE_DEBUG["layout_filter_patterns"] = [
-        pattern.pattern for pattern in layout_name_patterns
-    ]
+    allow_all_layouts, layout_filter_patterns = _normalize_layout_filters(layout_filters)
+    if isinstance(_LAST_TEXT_TABLE_DEBUG, dict):
+        _LAST_TEXT_TABLE_DEBUG["layout_filters"] = {
+            "all_layouts": allow_all_layouts,
+            "patterns": [pattern.pattern for pattern in layout_filter_patterns],
+        }
 
     def _compile_layer_patterns(
         patterns: Iterable[str] | str | None,
@@ -3973,7 +3993,7 @@ def read_text_table(
         scanned_layers_map: dict[str, str] = {}
         follow_sheet_directive: dict[str, Any] | None = None
         follow_sheet_target_layout: str | None = None
-        follow_sheet_requests: dict[str, Any] = {}
+        follow_sheet_requests: dict[str, dict[str, Any]] = {}
         follow_sheet_target_layouts: list[str] = []
 
         if doc is None:
@@ -4123,6 +4143,9 @@ def read_text_table(
 
             for flattened in flatten_entities(layout_obj, depth=_MAX_INSERT_DEPTH):
                 entity = flattened.entity
+                parent_effective_layer = getattr(flattened, "parent_effective_layer", None)
+                active_block = getattr(flattened, "block_name", None)
+                from_block = bool(getattr(flattened, "from_block", False))
                 marker = id(entity)
                 if marker in seen_entities:
                     continue
@@ -4135,6 +4158,9 @@ def read_text_table(
                 except Exception:
                     dxftype = None
                 kind = str(dxftype or "").upper()
+                parent_effective_layer = getattr(flattened, "effective_layer", None)
+                from_block = bool(getattr(flattened, "from_block", False))
+                active_block = getattr(flattened, "block_name", None)
                 layer_name = _extract_layer(entity)
                 layer_upper = layer_name.upper() if layer_name else ""
                 effective_layer = layer_name
@@ -4285,15 +4311,30 @@ def read_text_table(
                     f"tables={layout_tables}"
                 )
 
-            print(
-                f"[TEXT-SCAN] layout={layout_name} text={text_fragments} "
-                f"mtext={mtext_fragments} kept={kept_count} from_blocks={from_blocks_count}"
-            )
+                print(
+                    f"[TEXT-SCAN] layout={layout_name} text={text_fragments} "
+                    f"mtext={mtext_fragments} kept={kept_count} from_blocks={from_blocks_count}"
+                )
             if _TRACE_ACAD:
                 print(
                     f"[LAYOUT] {layout_label} texts={text_fragments}/{mtext_fragments} "
                     f"tables={layout_tables}"
                 )
+
+        if follow_sheet_directive:
+            token_value = follow_sheet_directive.get("token") if isinstance(follow_sheet_directive, Mapping) else None
+            catalog = [name for name in layout_names_seen if isinstance(name, str)]
+            target_label, resolved_layout, resolved_found = _resolve_follow_sheet_layout(
+                token_value or "", catalog
+            )
+            follow_sheet_requests[target_label] = {
+                "token": token_value,
+                "target": target_label,
+                "resolved": resolved_layout,
+                "found": resolved_found,
+            }
+            if resolved_layout:
+                follow_sheet_target_layouts.append(resolved_layout)
 
         if _TRACE_ACAD and block_stats:
             for block_name, stats in block_stats.items():
@@ -4556,6 +4597,23 @@ def read_text_table(
                     _LAST_TEXT_TABLE_DEBUG["follow_sheet_info"] = info_entries
 
         if not collected_entries:
+            fallback_lines = _collect_table_text_lines(doc)
+            if fallback_lines:
+                merged_rows = _merge_table_lines(fallback_lines)
+                table_lines = list(merged_rows)
+                _LAST_TEXT_TABLE_DEBUG["rows_txt_count"] = len(table_lines)
+                _LAST_TEXT_TABLE_DEBUG["text_row_count"] = len(table_lines)
+                print(
+                    "[TEXT-SCAN] rows_txt count={count}".format(
+                        count=len(table_lines)
+                    )
+                )
+                print(
+                    "[TEXT-SCAN] parsed rows: {count}".format(
+                        count=len(table_lines)
+                    )
+                )
+                return table_lines
             _LAST_TEXT_TABLE_DEBUG["rows_txt_count"] = 0
             _LAST_TEXT_TABLE_DEBUG["text_row_count"] = 0
             table_lines = []
@@ -5200,6 +5258,20 @@ def read_text_table(
     if primary_result is None:
         fallback = _fallback_text_table(lines)
         if fallback:
+            rows = fallback.get("rows")
+            if isinstance(rows, list):
+                for row in rows:
+                    if not isinstance(row, Mapping):
+                        continue
+                    desc_val = row.get("desc")
+                    if isinstance(desc_val, str):
+                        cleaned = _FALLBACK_LEADING_QTY_RE.sub("", desc_val).strip()
+                        if cleaned:
+                            cleaned = re.sub(r"^[A-Z]\s*\|\s*", "", cleaned)
+                            cleaned = re.sub(r"\|\s*\(\d+\)\s*", "| ", cleaned)
+                        if cleaned:
+                            row["desc"] = cleaned
+            fallback["provenance_holes"] = "HOLE TABLE"
             _LAST_TEXT_TABLE_DEBUG["rows"] = list(fallback.get("rows", []))
             return fallback
         _LAST_TEXT_TABLE_DEBUG["rows"] = []
@@ -5983,12 +6055,7 @@ def promote_table_to_geo(geo: dict[str, Any], table_info: Mapping[str, Any], sou
         return
     ops_summary = geo.setdefault("ops_summary", {})
     ops_summary["rows"] = list(rows)
-    source_label = source_tag
-    if isinstance(table_info, Mapping):
-        label_candidate = table_info.get("source_label") or table_info.get("source")
-        if isinstance(label_candidate, str) and label_candidate.strip():
-            source_label = label_candidate
-    ops_summary["source"] = source_label
+    ops_summary["source"] = source_tag
     totals = defaultdict(int)
     for row in rows:
         if not isinstance(row, Mapping):
@@ -6137,21 +6204,39 @@ def read_geo(
     prefer_table: bool = True,
     feature_flags: Mapping[str, Any] | None = None,
     force_text: bool = False,
+    pipeline: str = "auto",
+    allow_geom: bool = False,
     layer_allowlist: Iterable[str] | None = _DEFAULT_LAYER_ALLOWLIST,
     block_name_allowlist: Iterable[str] | None = None,
     block_name_regex: Iterable[str] | str | None = None,
     layer_include_regex: Iterable[str] | str | None = None,
-    layer_exclude_regex: Iterable[str] | str | None = None,
+    layer_exclude_regex: Iterable[str] | str | None = DEFAULT_TEXT_LAYER_EXCLUDE_REGEX,
     debug_layouts: bool = False,
 ) -> dict[str, Any]:
-    """Process a loaded DXF/DWG document into GEO payload details."""
+    """Process a loaded DXF/DWG document into GEO payload details.
+
+    Args:
+        pipeline: Extraction pipeline to run. ``"auto"`` tries ACAD first and
+            falls back to TEXT, ``"acad"`` and ``"text"`` force a specific path,
+            and ``"geom"`` publishes geometry-derived rows directly.
+        allow_geom: When ``True``, geometry rows may be emitted even when the
+            pipeline is set to ``"auto"``.
+    """
 
     del feature_flags  # placeholder for future feature toggles
+    pipeline_normalized = str(pipeline or "auto").strip().lower()
+    if pipeline_normalized not in {"auto", "acad", "text", "geom"}:
+        pipeline_normalized = "auto"
+    allow_geom_rows = bool(allow_geom or pipeline_normalized == "geom")
     geo = extract_geometry(doc)
     if not isinstance(geo, dict):
         geo = {}
 
-    use_tables = bool(prefer_table)
+    use_tables = bool(
+        prefer_table and pipeline_normalized in {"auto", "acad", "text"}
+    )
+    run_acad = pipeline_normalized in {"auto", "acad"}
+    run_text = pipeline_normalized in {"auto", "text"}
 
     existing_ops_summary = geo.get("ops_summary") if isinstance(geo, Mapping) else {}
     provenance = geo.get("provenance") if isinstance(geo, Mapping) else {}
@@ -6176,17 +6261,21 @@ def read_geo(
     else:
         current_table_info = {}
 
-    try:
-        acad_info = read_acad_table(doc, layer_allowlist=layer_allowlist) or {}
-    except TypeError as exc:
-        if "layer_allowlist" in str(exc):
-            try:
-                acad_info = read_acad_table(doc) or {}
-            except Exception:
-                acad_info = {}
-        else:
-            raise
-    except Exception:
+    acad_info: Mapping[str, Any] | dict[str, Any]
+    if run_acad:
+        try:
+            acad_info = read_acad_table(doc, layer_allowlist=layer_allowlist) or {}
+        except TypeError as exc:
+            if "layer_allowlist" in str(exc):
+                try:
+                    acad_info = read_acad_table(doc) or {}
+                except Exception:
+                    acad_info = {}
+            else:
+                raise
+        except Exception:
+            acad_info = {}
+    else:
         acad_info = {}
     acad_roi_hint: Mapping[str, Any] | None = None
     if isinstance(acad_info, Mapping):
@@ -6203,26 +6292,29 @@ def read_geo(
                 text_layer_allowlist = None
         except TypeError:
             pass
-    try:
-        text_info = read_text_table(
-            doc,
-            layer_allowlist=text_layer_allowlist,
-            roi_hint=acad_roi_hint,
-            block_name_allowlist=block_name_allowlist,
-            block_name_regex=block_name_regex,
-            layer_include_regex=layer_include_regex,
-            layer_exclude_regex=layer_exclude_regex,
-            debug_layouts=debug_layouts,
-        ) or {}
-    except TypeError as exc:
-        if "layer_allowlist" in str(exc) or "roi_hint" in str(exc) or "layout_filters" in str(exc):
-            try:
-                text_info = read_text_table(doc) or {}
-            except Exception:
-                text_info = {}
-        else:
-            raise
-    except Exception:
+    if run_text:
+        try:
+            text_info = read_text_table(
+                doc,
+                layer_allowlist=text_layer_allowlist,
+                roi_hint=acad_roi_hint,
+                block_name_allowlist=block_name_allowlist,
+                block_name_regex=block_name_regex,
+                layer_include_regex=layer_include_regex,
+                layer_exclude_regex=layer_exclude_regex,
+                debug_layouts=debug_layouts,
+            ) or {}
+        except TypeError as exc:
+            if "layer_allowlist" in str(exc) or "roi_hint" in str(exc) or "layout_filters" in str(exc):
+                try:
+                    text_info = read_text_table(doc) or {}
+                except Exception:
+                    text_info = {}
+            else:
+                raise
+        except Exception:
+            text_info = {}
+    else:
         text_info = {}
 
     acad_rows_list: list[dict[str, Any]] = []
@@ -6233,7 +6325,9 @@ def read_geo(
     else:
         acad_info = {}
     acad_rows = len(acad_rows_list)
-    if acad_rows == 0:
+    if not run_acad:
+        print("[PATH] acad=skip (pipeline=text/geom)")
+    elif acad_rows == 0:
         print("[PATH] acad=0 (no tables found)")
 
     text_rows_list: list[dict[str, Any]] = []
@@ -6271,7 +6365,10 @@ def read_geo(
             normalized_candidate = " ".join(text_candidate.split())
             if normalized_candidate:
                 rows_txt_lines.append(normalized_candidate)
-    print(f"[PATH] text=run (rows_txt={rows_txt_debug})")
+    if run_text:
+        print(f"[PATH] text=run (rows_txt={rows_txt_debug})")
+    else:
+        print("[PATH] text=skip (pipeline=acad/geom)")
     print(f"[EXTRACT] acad_rows={acad_rows} text_rows={text_rows}")
 
     publish_info: dict[str, Any] | None = None
@@ -6286,32 +6383,35 @@ def read_geo(
             fallback_rows_list = _normalize_table_rows(fallback_info.get("rows"))
             fallback_info["rows"] = fallback_rows_list
             fallback_qty_sum = _sum_qty(fallback_rows_list)
-    force_text_mode = bool(force_text and fallback_info and fallback_rows_list)
+    force_text_mode = bool(
+        run_text and force_text and fallback_info and fallback_rows_list
+    )
     fallback_selected = False
     auto_text_fallback = bool(
-        fallback_info
+        run_text
+        and fallback_info
         and fallback_rows_list
-        and acad_rows == 0
+        and (not run_acad or acad_rows == 0)
         and text_rows == 0
         and rows_txt_lines
     )
-    if auto_text_fallback:
+    if run_text and auto_text_fallback:
         publish_info = fallback_info
-        publish_source_tag = "text_table"
+        publish_source_tag = "text"
         fallback_selected = True
-    elif force_text_mode:
+    elif run_text and force_text_mode:
         publish_info = fallback_info
-        publish_source_tag = "text_table"
+        publish_source_tag = "text"
         fallback_selected = True
-    elif acad_rows_list:
+    elif run_acad and acad_rows_list:
         publish_info = acad_info
-        publish_source_tag = "acad_table"
-    elif text_rows_list:
+        publish_source_tag = "acad"
+    elif run_text and text_rows_list:
         publish_info = text_info
-        publish_source_tag = "text_table"
-    elif fallback_info and fallback_rows_list:
+        publish_source_tag = "text"
+    elif run_text and fallback_info and fallback_rows_list:
         publish_info = fallback_info
-        publish_source_tag = "text_table"
+        publish_source_tag = "text"
         fallback_selected = True
 
     score_a = _score_table(acad_info)
@@ -6325,19 +6425,24 @@ def read_geo(
     if publish_info is None and isinstance(best_table, Mapping) and best_table.get("rows"):
         publish_info = dict(best_table)
         publish_info["rows"] = _normalize_table_rows(publish_info.get("rows"))
-        publish_source_tag = "acad_table" if score_a >= score_b else "text_table"
+        if run_acad and best_table is acad_info:
+            publish_source_tag = "acad"
+        else:
+            publish_source_tag = "text"
     publish_rows: list[dict[str, Any]] = []
     if isinstance(publish_info, Mapping):
         publish_rows = list(publish_info.get("rows") or [])
     skip_acad = bool(
         publish_rows
         and publish_source_tag
-        and "text" in str(publish_source_tag).lower()
+        and str(publish_source_tag).lower() == "text"
     )
+    if pipeline_normalized in {"text", "geom"}:
+        skip_acad = True
     if fallback_selected and fallback_rows_list:
         print(
             f"[TEXT-FALLBACK] promoted rows={len(fallback_rows_list)} "
-            f"qty_sum={fallback_qty_sum} source=text_table"
+            f"qty_sum={fallback_qty_sum} source=text"
         )
 
     table_used = False
@@ -6357,9 +6462,9 @@ def read_geo(
         ):
             can_promote = True
         if can_promote:
-            promote_table_to_geo(geo, publish_info, publish_source_tag or "text_table")
+            promote_table_to_geo(geo, publish_info, publish_source_tag or "text")
             table_used = True
-            if publish_source_tag and "text" in publish_source_tag:
+            if publish_source_tag and publish_source_tag == "text":
                 _print_promoted_rows_once(publish_rows)
 
     if not isinstance(best_table, Mapping) or not best_table.get("rows"):
@@ -6385,10 +6490,24 @@ def read_geo(
         if publish_source_tag:
             ops_summary["source"] = publish_source_tag
     else:
-        if rows:
+        geometry_rows_present = bool(rows)
+        if geometry_rows_present and not allow_geom_rows:
             ops_summary.pop("rows", None)
             rows = []
-        ops_summary["source"] = "geom"
+            if pipeline_normalized == "auto":
+                print(
+                    "[PATH] geom suppressed (use --pipeline geom or --allow-geom)"
+                )
+            ops_summary["source"] = pipeline_normalized
+        else:
+            if not geometry_rows_present:
+                ops_summary.pop("rows", None)
+                rows = []
+            if geometry_rows_present and allow_geom_rows:
+                ops_summary["source"] = "geom"
+                qty_sum = _sum_qty(rows)
+            else:
+                ops_summary["source"] = pipeline_normalized
 
     if not table_used and not publish_rows:
         hole_count = _best_geo_hole_count(geo)
@@ -6532,11 +6651,13 @@ def _read_geo_payload_from_path(
     use_oda: bool = True,
     feature_flags: Mapping[str, Any] | None = None,
     force_text: bool = False,
+    pipeline: str = "auto",
+    allow_geom: bool = False,
     layer_allowlist: Iterable[str] | None = _DEFAULT_LAYER_ALLOWLIST,
     block_name_allowlist: Iterable[str] | None = None,
     block_name_regex: Iterable[str] | str | None = None,
     layer_include_regex: Iterable[str] | str | None = None,
-    layer_exclude_regex: Iterable[str] | str | None = None,
+    layer_exclude_regex: Iterable[str] | str | None = DEFAULT_TEXT_LAYER_EXCLUDE_REGEX,
     debug_layouts: bool = False,
 ) -> dict[str, Any]:
     try:
@@ -6550,6 +6671,8 @@ def _read_geo_payload_from_path(
         prefer_table=prefer_table,
         feature_flags=feature_flags,
         force_text=force_text,
+        pipeline=pipeline,
+        allow_geom=allow_geom,
         layer_allowlist=layer_allowlist,
         block_name_allowlist=block_name_allowlist,
         block_name_regex=block_name_regex,
@@ -6603,6 +6726,8 @@ def _read_geo_payload_from_path(
                 prefer_table=prefer_table,
                 feature_flags=feature_flags,
                 force_text=force_text,
+                pipeline=pipeline,
+                allow_geom=allow_geom,
                 layer_allowlist=layer_allowlist,
                 block_name_allowlist=block_name_allowlist,
                 block_name_regex=block_name_regex,
@@ -6618,7 +6743,7 @@ def _read_geo_payload_from_path(
                 if not existing_rows:
                     geo_obj = payload.get("geo")
                     if isinstance(geo_obj, dict):
-                        promote_table_to_geo(geo_obj, mechanical_table, "text_table")
+                        promote_table_to_geo(geo_obj, mechanical_table, "text")
                         ops_summary_obj = geo_obj.get("ops_summary")
                         ops_summary = dict(ops_summary_obj) if isinstance(ops_summary_obj, Mapping) else {}
                         payload["ops_summary"] = ops_summary
@@ -6673,11 +6798,13 @@ def extract_geo_from_path(
     use_oda: bool = True,
     feature_flags: Mapping[str, Any] | None = None,
     force_text: bool = False,
+    pipeline: str = "auto",
+    allow_geom: bool = False,
     layer_allowlist: Iterable[str] | None = _DEFAULT_LAYER_ALLOWLIST,
     block_name_allowlist: Iterable[str] | None = None,
     block_name_regex: Iterable[str] | str | None = None,
     layer_include_regex: Iterable[str] | str | None = None,
-    layer_exclude_regex: Iterable[str] | str | None = None,
+    layer_exclude_regex: Iterable[str] | str | None = DEFAULT_TEXT_LAYER_EXCLUDE_REGEX,
     debug_layouts: bool = False,
 ) -> dict[str, Any]:
     """Load DWG/DXF at ``path`` and return a GEO dictionary."""
@@ -6689,6 +6816,8 @@ def extract_geo_from_path(
         use_oda=use_oda,
         feature_flags=feature_flags,
         force_text=force_text,
+        pipeline=pipeline,
+        allow_geom=allow_geom,
         layer_allowlist=layer_allowlist,
         block_name_allowlist=block_name_allowlist,
         block_name_regex=block_name_regex,
@@ -6711,11 +6840,13 @@ def extract_geo_from_path(
     use_oda: bool = True,
     feature_flags: Mapping[str, Any] | None = None,
     force_text: bool = False,
+    pipeline: str = "auto",
+    allow_geom: bool = False,
     layer_allowlist: Iterable[str] | None = _DEFAULT_LAYER_ALLOWLIST,
     block_name_allowlist: Iterable[str] | None = None,
     block_name_regex: Iterable[str] | str | None = None,
     layer_include_regex: Iterable[str] | str | None = None,
-    layer_exclude_regex: Iterable[str] | str | None = None,
+    layer_exclude_regex: Iterable[str] | str | None = DEFAULT_TEXT_LAYER_EXCLUDE_REGEX,
     debug_layouts: bool = False,
 ) -> dict[str, Any]:
     """Load DWG/DXF at ``path`` and return a GEO dictionary."""
@@ -6727,6 +6858,8 @@ def extract_geo_from_path(
         use_oda=use_oda,
         feature_flags=feature_flags,
         force_text=force_text,
+        pipeline=pipeline,
+        allow_geom=allow_geom,
         layer_allowlist=layer_allowlist,
         block_name_allowlist=block_name_allowlist,
         block_name_regex=block_name_regex,
@@ -6774,4 +6907,5 @@ __all__ = [
     "get_last_acad_table_scan",
     "set_trace_acad",
     "log_last_dxf_fallback",
+    "DEFAULT_TEXT_LAYER_EXCLUDE_REGEX",
 ]
