@@ -4036,9 +4036,54 @@ def read_text_table(
                         layout_obj = get_layout(name)
                     except Exception:
                         layout_obj = None
-                if layout_obj is not None:
-                    layouts.append((name, layout_obj))
+                layouts.append((name, layout_obj))
             return layouts
+
+        def _scan_layout_body(
+            layout_index: int,
+            layout_name: Any,
+            layout_obj: Any,
+            *,
+            source: str = "initial",
+        ) -> bool:
+            nonlocal follow_sheet_directive
+
+            name_text = str(layout_name or "")
+            name_clean = name_text.strip()
+            key_upper = name_clean.upper()
+            if isinstance(layout_name, str):
+                all_layout_names.add(layout_name)
+            unique_key = (source, key_upper or f"#{layout_index}")
+            if unique_key in visited_layout_keys:
+                return False
+            visited_layout_keys.add(unique_key)
+
+            if source != "block" and key_upper:
+                layout_lookup[key_upper] = layout_obj
+                layout_name_lookup.setdefault(key_upper, name_clean or layout_name)
+                layout_index_lookup.setdefault(key_upper, layout_index)
+
+            layout_names[layout_index] = layout_name
+            if layout_name not in layout_names_seen_set:
+                layout_names_seen_set.add(layout_name)
+                layout_names_seen.append(layout_name)
+            if layout_index not in layout_order:
+                layout_order.append(layout_index)
+
+            layout_str = str(layout_name or "")
+            layout_label = layout_str.strip() or "-"
+            display_name = layout_name if layout_name else layout_label
+            if source == "follow":
+                display_name = f"{display_name} [FOLLOW]"
+            elif source == "block":
+                display_name = f"{display_name} [BLOCK]"
+            elif layout_obj is None:
+                display_name = f"{display_name} [UNRESOLVED]"
+            expanded_layouts.append(display_name)
+
+            if layout_obj is None:
+                return False
+            return True
 
         def _extract_coords(entity: Any) -> tuple[float | None, float | None]:
             insert = None
@@ -4101,18 +4146,23 @@ def read_text_table(
                 block_stats[key] = entry
             return entry
 
-        for layout_index, (layout_name, layout_obj) in enumerate(_iter_layouts()):
-            layout_names[layout_index] = layout_name
-            if layout_name not in layout_names_seen_set:
-                layout_names_seen_set.add(layout_name)
-                layout_names_seen.append(layout_name)
-            if layout_index not in layout_order:
-                layout_order.append(layout_index)
+        def _scan_layout_entities(
+            layout_index: int,
+            layout_name: Any,
+            layout_obj: Any,
+            *,
+            source: str = "initial",
+        ) -> bool:
+            nonlocal hint_logged, attrib_count, mleader_count, follow_sheet_directive
+            if not _scan_layout_body(layout_index, layout_name, layout_obj, source=source):
+                return False
+
             layout_str = str(layout_name or "")
             layout_label = layout_str.strip() or "-"
             layout_tables = _count_tables_for_layout_name(layout_str)
             query = getattr(layout_obj, "query", None)
             base_entities: list[Any] = []
+            layer_extractor = globals().get("_extract_layer")
             if callable(query):
                 try:
                     base_entities = list(query("TEXT, MTEXT, RTEXT, MLEADER, INSERT"))
@@ -4132,7 +4182,7 @@ def read_text_table(
             if not base_entities:
                 if _TRACE_ACAD:
                     print(f"[LAYOUT] {layout_label} texts=0/0 tables={layout_tables}")
-                continue
+                return False
 
             seen_entities: set[int] = set()
             text_fragments = 0
@@ -4141,7 +4191,25 @@ def read_text_table(
             from_blocks_count = 0
             counter = 0
 
-            for flattened in flatten_entities(layout_obj, depth=_MAX_INSERT_DEPTH):
+            flattened_entities = list(flatten_entities(layout_obj, depth=_MAX_INSERT_DEPTH))
+            if not flattened_entities and base_entities:
+                for entity in base_entities:
+                    flattened_entities.append(
+                        FlattenedEntity(
+                            entity=entity,
+                            transform=_IDENTITY_TRANSFORM,
+                            from_block=False,
+                            block_name=None,
+                            block_stack=tuple(),
+                            depth=0,
+                            layer="",
+                            layer_upper="",
+                            effective_layer="",
+                            effective_layer_upper="",
+                        )
+                    )
+
+            for flattened in flattened_entities:
                 entity = flattened.entity
                 parent_effective_layer = getattr(flattened, "parent_effective_layer", None)
                 active_block = getattr(flattened, "block_name", None)
@@ -4310,6 +4378,7 @@ def read_text_table(
                     f"[LAYOUT] {layout_label} texts={text_fragments}/{mtext_fragments} "
                     f"tables={layout_tables}"
                 )
+            return True
 
                 print(
                     f"[TEXT-SCAN] layout={layout_name} text={text_fragments} "
