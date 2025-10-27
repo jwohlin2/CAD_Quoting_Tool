@@ -582,41 +582,36 @@ def main(argv: Sequence[str] | None = None) -> int:
         debug_payload = geo_extractor.get_last_text_table_debug() or {}
 
     if args.dump_bands:
-        band_cells = debug_payload.get("band_cells") or []
-        band_map: dict[int, dict[int, list[str]]] = {}
-        if isinstance(band_cells, list):
-            for cell in band_cells:
-                if not isinstance(cell, Mapping):
+        row_debug = debug_payload.get("row_debug") or []
+        columns = debug_payload.get("columns") or []
+        if isinstance(row_debug, Mapping):
+            row_debug = [row_debug]
+        if isinstance(columns, Mapping):
+            columns = list(columns.values())
+        if isinstance(row_debug, list) and row_debug:
+            print(
+                f"[TABLE-Y] dump rows_total={len(row_debug)} columns={len(columns)}"
+            )
+            for entry in row_debug[:30]:
+                if not isinstance(entry, Mapping):
                     continue
-                band_raw = cell.get("band")
-                col_raw = cell.get("col")
+                row_idx = entry.get("index")
                 try:
-                    band_idx = int(band_raw)
+                    row_idx_int = int(row_idx)
                 except Exception:
-                    continue
-                try:
-                    col_idx = int(col_raw)
-                except Exception:
-                    continue
-                text_val = str(cell.get("text") or "")
-                column_map = band_map.setdefault(band_idx, {})
-                column_map.setdefault(col_idx, []).append(text_val)
-        band_indices = sorted(band_map.keys())
-        if band_indices:
-            print(f"[TABLE-Y] dump bands_total={len(band_indices)}")
-            for band_idx in band_indices[:30]:
-                column_map = band_map.get(band_idx, {})
-                parts = []
-                for col_idx in sorted(column_map.keys()):
-                    cell_text = " ".join(part.strip() for part in column_map[col_idx] if part).strip()
-                    preview = geo_extractor._truncate_cell_preview(cell_text)
+                    row_idx_int = -1
+                cells = entry.get("cells") or []
+                parts: list[str] = []
+                for col_idx, cell_text in enumerate(cells):
+                    preview = geo_extractor._truncate_cell_preview(str(cell_text or ""))
                     parts.append(f'C{col_idx}="{preview}"')
                 preview_body = " | ".join(parts)
+                label = row_idx_int if row_idx_int >= 0 else row_idx
                 print(
-                    f"[TABLE-X] band#{band_idx} cols={len(column_map)} | {preview_body}"
+                    f"[TABLE-X] row#{label} cols={len(cells)} | {preview_body}"
                 )
         else:
-            print("[TABLE-X] dump bands: no band_cells in debug payload")
+            print("[TABLE-X] dump rows: no row_debug in debug payload")
 
     dump_base = args.dump_lines
     if args.debug_entities and len(rows) < 8 and not dump_base:
@@ -628,7 +623,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         bands_path = lines_path.with_name(f"{lines_path.stem}_bands.tsv")
         raw_lines = debug_payload.get("raw_lines") or []
         candidates = raw_lines or debug_payload.get("candidates", [])
-        band_cells = debug_payload.get("band_cells", [])
+        row_debug = debug_payload.get("row_debug", [])
 
         def _format_float(value: object) -> str:
             if isinstance(value, (int, float)):
@@ -653,6 +648,13 @@ def main(argv: Sequence[str] | None = None) -> int:
                             _format_float(item.get("y")),
                             str(item.get("text") or ""),
                         ]
+                    elif header.startswith("row\t"):
+                        fields = [
+                            str(item.get("row", "")),
+                            str(item.get("col", "")),
+                            _format_float(item.get("y_center")),
+                            str(item.get("text") or ""),
+                        ]
                     else:
                         fields = [
                             str(item.get("band", "")),
@@ -665,7 +667,29 @@ def main(argv: Sequence[str] | None = None) -> int:
 
         try:
             _write_lines(lines_path, "layout\tin_block\tx\ty\ttext", list(candidates))
-            _write_lines(bands_path, "band\tcol\tx_center\ty_center\ttext", list(band_cells))
+            if row_debug:
+                row_dump: list[dict[str, object]] = []
+                for entry in row_debug:
+                    if not isinstance(entry, Mapping):
+                        continue
+                    row_idx = entry.get("index")
+                    y_center = entry.get("y")
+                    cells = entry.get("cells") or []
+                    for col_idx, cell_text in enumerate(cells):
+                        row_dump.append(
+                            {
+                                "row": row_idx,
+                                "col": col_idx,
+                                "y_center": y_center,
+                                "text": cell_text,
+                            }
+                        )
+                if row_dump:
+                    _write_lines(
+                        bands_path,
+                        "row\tcol\ty_center\ttext",
+                        row_dump,
+                    )
         except OSError as exc:  # pragma: no cover - filesystem issues
             print(f"[geo_dump] failed to write dumps: {exc}")
         else:
