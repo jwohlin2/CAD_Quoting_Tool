@@ -535,3 +535,45 @@ def test_follow_sheet_layout_processed_even_when_filtered(
     assert rows[0].get("qty") == 1
 
     assert sheet_layout.query_calls >= 1
+
+
+def test_unique_rows_in_order_dedupes_anchor_and_roi() -> None:
+    anchor_rows = [
+        {"qty": 2, "desc": "TAP 1/4-20"},
+        {"qty": 2, "desc": "TAP 5/16-18"},
+        {"qty": 4, "desc": "DRILL + NPT"},
+    ]
+    roi_rows = [
+        {"qty": 2, "desc": "tap 1/4-20"},
+        {"qty": 2, "desc": "tap 5/16-18"},
+    ]
+
+    merged, dropped = geo_extractor._unique_rows_in_order([anchor_rows, roi_rows])
+
+    assert [row.get("qty") for row in merged] == [2, 2, 4]
+    assert dropped == 2
+
+
+def test_extract_row_quantity_requires_anchor_pattern() -> None:
+    qty, remainder = geo_extractor._extract_row_quantity_and_remainder(
+        "BREAK ALL EDGES .12 R"
+    )
+
+    assert qty is None
+    assert "BREAK ALL" in remainder
+
+
+def test_semicolon_row_remains_single_entry(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(geo_extractor, "_resolve_app_callable", lambda name: None)
+
+    doc = _DummyDoc([_DummyMText("(4) COUNTERBORE; DRILL; NPT")])
+
+    result = geo_extractor.read_text_table(doc)
+
+    rows = result.get("rows") or []
+    assert len(rows) == 1
+    row = rows[0]
+    assert row.get("qty") == 4
+    desc_text = row.get("desc")
+    assert isinstance(desc_text, str)
+    assert desc_text.count(";") == 2
