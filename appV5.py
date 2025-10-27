@@ -24676,23 +24676,102 @@ class App(tk.Tk):
             if not already_repricing:
                 self._reprice_in_progress = False
 
+_CLI_SENTINEL = "--cli"
+_GUI_SENTINEL = "--gui"
+_CLI_ONLY_FLAGS = {"--qty", "--out", "--stdout"}
+_CLI_INPUT_SUFFIXES = {".dwg", ".dxf", ".pdf", ".csv", ".xlsx"}
+
+
+def _classify_invocation(
+    argv: Sequence[str],
+) -> tuple[bool, list[str], list[str]]:
+    """Return (is_cli_mode, cli_args, gui_args) for ``argv``."""
+
+    gui_args = list(argv)
+    cli_args = list(argv)
+
+    if _GUI_SENTINEL in gui_args:
+        gui_args = [arg for arg in gui_args if arg != _GUI_SENTINEL]
+        return False, [], gui_args
+
+    if _CLI_SENTINEL in cli_args:
+        cli_args = [arg for arg in cli_args if arg != _CLI_SENTINEL]
+        return True, cli_args, gui_args
+
+    if not cli_args:
+        return False, cli_args, gui_args
+
+    if any(flag in cli_args for flag in _CLI_ONLY_FLAGS):
+        return True, cli_args, gui_args
+
+    first = cli_args[0]
+    if first.startswith("--"):
+        return False, cli_args, gui_args
+
+    try:
+        suffix = Path(first).suffix.lower()
+    except Exception:
+        suffix = ""
+    if suffix in _CLI_INPUT_SUFFIXES:
+        return True, cli_args, gui_args
+
+    try:
+        candidate = Path(first)
+    except Exception:
+        return False, cli_args, gui_args
+
+    try:
+        if candidate.exists() and candidate.is_dir():
+            return True, cli_args, gui_args
+    except Exception:
+        pass
+
+    return False, cli_args, gui_args
+
+
 def main(argv: Sequence[str] | None = None) -> int:
-    """CLI composition root for quoting via :mod:`cad_quoter.app` helpers."""
+    """Entry point that preserves the GUI launcher while exposing the CLI driver."""
 
-    from cad_quoter.app import io as app_io
-    from cad_quoter.app import runtime, driver
+    raw_args = list(argv) if argv is not None else list(sys.argv[1:])
+    is_cli_mode, cli_args, gui_args = _classify_invocation(raw_args)
 
-    ns = app_io.parse_args(list(argv) if argv is not None else None)
-    cfg = runtime.build_config()
+    if is_cli_mode:
+        from cad_quoter.app import io as app_io
+        from cad_quoter.app import runtime, driver
 
-    spec = app_io.resolve_input(ns)
-    if spec.batch_dir:
-        lines = driver.run_batch(cfg, spec)
-    else:
-        lines = driver.run_single_file(cfg, spec)
+        ns = app_io.parse_args(cli_args)
+        cfg = runtime.build_config()
 
-    app_io.emit_output(ns, lines)
-    return 0
+        spec = app_io.resolve_input(ns)
+        if spec.batch_dir:
+            lines = driver.run_batch(cfg, spec)
+        else:
+            lines = driver.run_single_file(cfg, spec)
+
+        app_io.emit_output(ns, lines)
+        return 0
+
+    from cad_quoter.app import ui_runtime
+
+    if typing.TYPE_CHECKING:
+        from cad_quoter.pricing import (
+            PricingEngine as _PricingEngine,
+            create_default_registry as _create_default_registry,
+        )
+    else:  # pragma: no cover - executed at runtime
+        from cad_quoter.pricing import (
+            PricingEngine as _PricingEngine,
+            create_default_registry as _create_default_registry,
+        )
+
+    return ui_runtime.main(
+        gui_args,
+        app_cls=App,
+        pricing_engine_cls=_PricingEngine,
+        pricing_registry_factory=_create_default_registry,
+        app_env=APP_ENV,
+        env_setter=lambda env: globals().__setitem__("APP_ENV", env),
+    )
 
 
 if __name__ == "__main__":
