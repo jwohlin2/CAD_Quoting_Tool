@@ -7171,6 +7171,8 @@ def read_geo(
         print("[PATH] text=skip (pipeline=acad/geom)")
     print(f"[EXTRACT] acad_rows={acad_rows} text_rows={text_rows}")
 
+    score_a = _score_table(acad_info)
+    score_b = _score_table(text_info)
     publish_info: dict[str, Any] | None = None
     publish_source_tag: str | None = None
     fallback_info: dict[str, Any] | None = None
