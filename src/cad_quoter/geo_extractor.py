@@ -201,6 +201,15 @@ def flatten_entities(layout: Any, depth: int = 5) -> Iterable[FlattenedEntity]:
             try:
                 iterator = iter(container)
             except Exception:
+                query = getattr(container, "query", None)
+                if callable(query):
+                    for spec in ("TEXT, MTEXT, RTEXT, MLEADER, INSERT", "*"):
+                        try:
+                            result = list(query(spec))
+                        except Exception:
+                            continue
+                        if result:
+                            break
                 return result
             for item in iterator:
                 result.append(item)
@@ -395,6 +404,9 @@ def flatten_entities(layout: Any, depth: int = 5) -> Iterable[FlattenedEntity]:
 _HAS_ODAFC = bool(getattr(geometry, "HAS_ODAFC", False))
 
 _DEFAULT_LAYER_ALLOWLIST = frozenset({"BALLOON"})
+DEFAULT_TEXT_LAYER_EXCLUDE_REGEX: tuple[str, ...] = (
+    r"^(AM_BOR|DEFPOINTS|PAPER)$",
+)
 _PREFERRED_BLOCK_NAME_RE = re.compile(r"HOLE.*(?:CHART|TABLE)", re.IGNORECASE)
 _FOLLOW_SHEET_DIRECTIVE_RE = re.compile(
     r"SEE\s+(?:SHEET|SHT)\s+(?P<target>[A-Z0-9]+)", re.IGNORECASE
@@ -461,6 +473,12 @@ def _entity_layer(entity: Any) -> str:
         if text:
             return text
     return ""
+
+
+def _extract_layer(entity: Any) -> str:
+    """Compatibility shim returning the entity layer name."""
+
+    return _entity_layer(entity)
 
 
 def _entity_handle(entity: Any) -> str:
@@ -4693,7 +4711,8 @@ def read_text_table(
     block_name_allowlist: Iterable[str] | None = None,
     block_name_regex: Iterable[str] | str | None = None,
     layer_include_regex: Iterable[str] | str | None = None,
-    layer_exclude_regex: Iterable[str] | str | None = None,
+    layer_exclude_regex: Iterable[str] | str | None = DEFAULT_TEXT_LAYER_EXCLUDE_REGEX,
+    layout_filters: Mapping[str, Any] | None = None,
     debug_layouts: bool = False,
 ) -> dict[str, Any]:
     helper = _resolve_app_callable("extract_hole_table_from_text")
@@ -4713,6 +4732,12 @@ def read_text_table(
     resolved_allowlist = _normalize_layer_allowlist(layer_allowlist)
     normalized_block_allow = _normalize_block_allowlist(block_name_allowlist)
     block_regex_patterns = _compile_block_name_patterns(block_name_regex)
+    allow_all_layouts, layout_filter_patterns = _normalize_layout_filters(layout_filters)
+    if isinstance(_LAST_TEXT_TABLE_DEBUG, dict):
+        _LAST_TEXT_TABLE_DEBUG["layout_filters"] = {
+            "all_layouts": allow_all_layouts,
+            "patterns": [pattern.pattern for pattern in layout_filter_patterns],
+        }
 
     def _compile_layer_patterns(
         patterns: Iterable[str] | str | None,
@@ -4818,6 +4843,8 @@ def read_text_table(
         scanned_layers_map: dict[str, str] = {}
         follow_sheet_directive: dict[str, Any] | None = None
         follow_sheet_target_layout: str | None = None
+        follow_sheet_requests: dict[str, dict[str, Any]] = {}
+        follow_sheet_target_layouts: list[str] = []
 
         if doc is None:
             table_lines = []
@@ -4975,6 +5002,9 @@ def read_text_table(
                 except Exception:
                     dxftype = None
                 kind = str(dxftype or "").upper()
+                parent_effective_layer = getattr(flattened, "effective_layer", None)
+                from_block = bool(getattr(flattened, "from_block", False))
+                active_block = getattr(flattened, "block_name", None)
                 layer_name = _extract_layer(entity)
                 layer_upper = layer_name.upper() if layer_name else ""
                 effective_layer = layer_name
@@ -6955,7 +6985,7 @@ def read_geo(
     block_name_allowlist: Iterable[str] | None = None,
     block_name_regex: Iterable[str] | str | None = None,
     layer_include_regex: Iterable[str] | str | None = None,
-    layer_exclude_regex: Iterable[str] | str | None = None,
+    layer_exclude_regex: Iterable[str] | str | None = DEFAULT_TEXT_LAYER_EXCLUDE_REGEX,
     debug_layouts: bool = False,
 ) -> dict[str, Any]:
     """Process a loaded DXF/DWG document into GEO payload details."""
@@ -7350,7 +7380,7 @@ def _read_geo_payload_from_path(
     block_name_allowlist: Iterable[str] | None = None,
     block_name_regex: Iterable[str] | str | None = None,
     layer_include_regex: Iterable[str] | str | None = None,
-    layer_exclude_regex: Iterable[str] | str | None = None,
+    layer_exclude_regex: Iterable[str] | str | None = DEFAULT_TEXT_LAYER_EXCLUDE_REGEX,
     debug_layouts: bool = False,
 ) -> dict[str, Any]:
     try:
@@ -7491,7 +7521,7 @@ def extract_geo_from_path(
     block_name_allowlist: Iterable[str] | None = None,
     block_name_regex: Iterable[str] | str | None = None,
     layer_include_regex: Iterable[str] | str | None = None,
-    layer_exclude_regex: Iterable[str] | str | None = None,
+    layer_exclude_regex: Iterable[str] | str | None = DEFAULT_TEXT_LAYER_EXCLUDE_REGEX,
     debug_layouts: bool = False,
 ) -> dict[str, Any]:
     """Load DWG/DXF at ``path`` and return a GEO dictionary."""
@@ -7529,7 +7559,7 @@ def extract_geo_from_path(
     block_name_allowlist: Iterable[str] | None = None,
     block_name_regex: Iterable[str] | str | None = None,
     layer_include_regex: Iterable[str] | str | None = None,
-    layer_exclude_regex: Iterable[str] | str | None = None,
+    layer_exclude_regex: Iterable[str] | str | None = DEFAULT_TEXT_LAYER_EXCLUDE_REGEX,
     debug_layouts: bool = False,
 ) -> dict[str, Any]:
     """Load DWG/DXF at ``path`` and return a GEO dictionary."""
@@ -7588,4 +7618,5 @@ __all__ = [
     "get_last_acad_table_scan",
     "set_trace_acad",
     "log_last_dxf_fallback",
+    "DEFAULT_TEXT_LAYER_EXCLUDE_REGEX",
 ]
