@@ -2180,6 +2180,10 @@ def _collect_table_text_lines(
         query = getattr(space, "query", None)
         if not callable(query):
             continue
+        marker = id(space)
+        if marker in seen_markers:
+            continue
+        seen_markers.add(marker)
         try:
             entities = list(query("TEXT, MTEXT, RTEXT"))
         except Exception:
@@ -2191,6 +2195,81 @@ def _collect_table_text_lines(
                 if normalized:
                     lines.append(normalized)
     return lines
+
+
+def ensure_text_stream(
+    doc_or_path: Any, log: Callable[[str], None] | None = None
+) -> tuple[Any, list[str]]:
+    """Run the text collector and retry via DXF conversion when needed."""
+
+    def _log(message: str) -> None:
+        if callable(log):
+            try:
+                log(message)
+            except Exception:  # pragma: no cover - defensive logging
+                pass
+
+    doc_candidate = doc_or_path
+    try:
+        lines = _collect_table_text_lines(doc_candidate)
+    except Exception:
+        lines = []
+
+    if lines:
+        return doc_candidate, lines
+
+    path_obj: Path | None = None
+    if isinstance(doc_or_path, (str, os.PathLike)):
+        try:
+            path_obj = Path(doc_or_path)
+        except Exception:
+            path_obj = None
+    else:
+        for attr in ("filename", "filepath", "file_path", "_filename"):
+            candidate = getattr(doc_or_path, attr, None)
+            if not candidate:
+                continue
+            try:
+                path_obj = Path(candidate)
+            except Exception:
+                continue
+            if path_obj:
+                break
+
+    if path_obj is None or path_obj.suffix.lower() != ".dwg":
+        return doc_candidate, lines
+
+    try:
+        dxf_path = convert_dwg_to_dxf(str(path_obj), out_ver="ACAD2013")
+    except Exception as exc:  # pragma: no cover - defensive logging
+        _log(f"[FALLBACK] text-stream convert failed path={path_obj} err={exc}")
+        return doc_candidate, lines
+
+    _log(
+        "[FALLBACK] text-stream source={src} dxf={dst}".format(
+            src=path_obj, dst=dxf_path
+        )
+    )
+
+    fallback_doc: Any | None = None
+    try:
+        ezdxf_mod = geometry.require_ezdxf()
+        readfile = getattr(ezdxf_mod, "readfile", None)
+        if callable(readfile):
+            fallback_doc = readfile(str(dxf_path))
+    except Exception as exc:  # pragma: no cover - defensive logging
+        _log(f"[FALLBACK] text-stream read err={exc}")
+        fallback_doc = None
+
+    if fallback_doc is None:
+        return doc_candidate, lines
+
+    doc_candidate = fallback_doc
+    try:
+        lines = _collect_table_text_lines(doc_candidate)
+    except Exception:
+        lines = []
+    return doc_candidate, lines
 
 
 def _resolve_follow_sheet_layout(
@@ -4054,9 +4133,14 @@ def read_text_table(
     def ensure_lines() -> list[str]:
         nonlocal table_lines, text_rows_info, merged_rows, parsed_rows
         nonlocal columnar_table_info, columnar_debug_info, roi_hint_effective
-        nonlocal rows_txt_initial
+        nonlocal rows_txt_initial, doc
         if table_lines is not None:
             return table_lines
+
+        text_stream_doc, text_stream_lines = ensure_text_stream(doc, log=print)
+        if text_stream_doc is not None:
+            doc = text_stream_doc
+        fallback_stream_lines = list(text_stream_lines or [])
 
         collected_entries: list[dict[str, Any]] = []
         entries_by_layout: defaultdict[int, list[dict[str, Any]]] = defaultdict(list)
@@ -4790,27 +4874,134 @@ def read_text_table(
         if not collected_entries:
             fallback_lines = _collect_table_text_lines(doc, layout_filters=layout_filters)
             if fallback_lines:
-                merged_rows = _merge_table_lines(fallback_lines)
-                table_lines = list(merged_rows)
-                _LAST_TEXT_TABLE_DEBUG["rows_txt_count"] = len(table_lines)
-                _LAST_TEXT_TABLE_DEBUG["text_row_count"] = len(table_lines)
-                print(
-                    "[TEXT-SCAN] rows_txt count={count}".format(
-                        count=len(table_lines)
+                combined_fallback_lines = list(fallback_lines)
+            combined_fallback_lines = [
+                " ".join(str(line or "").split())
+                for line in combined_fallback_lines
+                if str(line or "").strip()
+            ]
+
+            fallback_entries: list[dict[str, Any]] = []
+            if ordered_layout_lines:
+                entries_by_layout = defaultdict(list)
+                layout_names = {}
+                layout_order = []
+                for idx, (layout_label, text_value) in enumerate(ordered_layout_lines):
+                    layout_key = layout_label or "FALLBACK"
+                    layout_index_effective = layout_index_map.setdefault(
+                        layout_key, len(layout_index_map)
                     )
-                )
-                print(
-                    "[TEXT-SCAN] parsed rows: {count}".format(
-                        count=len(table_lines)
-                    )
-                )
+                    if layout_index_effective not in layout_order:
+                        layout_order.append(layout_index_effective)
+                    layout_names[layout_index_effective] = layout_key
+                    entry = {
+                        "layout_index": layout_index_effective,
+                        "layout_name": layout_key,
+                        "text": text_value,
+                        "x": None,
+                        "y": None,
+                        "order": idx,
+                        "from_block": False,
+                        "height": None,
+                        "layer": "",
+                        "layer_upper": "",
+                        "effective_layer": "",
+                        "effective_layer_upper": "",
+                        "block_name": None,
+                        "block_stack": [],
+                    }
+                    fallback_entries.append(entry)
+                    entries_by_layout[layout_index_effective].append(entry)
+            elif combined_fallback_lines:
+                entries_by_layout = defaultdict(list)
+                layout_names = {}
+                layout_order = []
+                for idx, text_value in enumerate(combined_fallback_lines):
+                    entry = {
+                        "layout_index": 0,
+                        "layout_name": "FALLBACK",
+                        "text": text_value,
+                        "x": None,
+                        "y": None,
+                        "order": idx,
+                        "from_block": False,
+                        "height": None,
+                        "layer": "",
+                        "layer_upper": "",
+                        "effective_layer": "",
+                        "effective_layer_upper": "",
+                        "block_name": None,
+                        "block_stack": [],
+                    }
+                    fallback_entries.append(entry)
+                if fallback_entries:
+                    entries_by_layout[0] = list(fallback_entries)
+                    layout_names[0] = "FALLBACK"
+                    layout_order.append(0)
+
+            if fallback_entries:
+                collected_entries = fallback_entries
+                if isinstance(_LAST_TEXT_TABLE_DEBUG, dict):
+                    if ordered_layout_lines or combined_fallback_lines:
+                        debug_lines = [
+                            text for _, text in ordered_layout_lines
+                        ] or combined_fallback_lines
+                        _LAST_TEXT_TABLE_DEBUG["fallback_text_stream"] = list(debug_lines)
+                    debug_layouts = list(_LAST_TEXT_TABLE_DEBUG.get("layouts") or [])
+                    for name in fallback_layout_names or ["FALLBACK"]:
+                        if name and name not in debug_layouts:
+                            debug_layouts.append(name)
+                    _LAST_TEXT_TABLE_DEBUG["layouts"] = debug_layouts
+                    if fallback_follow_entries:
+                        info_entries: list[dict[str, Any]] = []
+                        for follow_entry in fallback_follow_entries:
+                            target_label = follow_entry.get("target")
+                            resolved_layout = follow_entry.get("resolved")
+                            resolved_found = bool(follow_entry.get("found")) and bool(
+                                resolved_layout
+                            )
+                            info_map = {
+                                "target": target_label,
+                                "resolved": resolved_layout if resolved_found else None,
+                                "texts": len(
+                                    layout_line_map.get(
+                                        resolved_layout or target_label or "", []
+                                    )
+                                ),
+                                "tables": 0,
+                            }
+                            info_entries.append(info_map)
+                        if info_entries:
+                            if len(info_entries) == 1:
+                                _LAST_TEXT_TABLE_DEBUG["follow_sheet_info"] = info_entries[0]
+                            else:
+                                _LAST_TEXT_TABLE_DEBUG["follow_sheet_info"] = info_entries
+                            targets_payload = []
+                            for info in info_entries:
+                                resolved = info.get("resolved") or info.get("target")
+                                if resolved and resolved not in targets_payload:
+                                    targets_payload.append(resolved)
+                            if targets_payload:
+                                existing_targets = _LAST_TEXT_TABLE_DEBUG.get(
+                                    "follow_sheet_targets"
+                                )
+                                if isinstance(existing_targets, list):
+                                    targets = list(existing_targets)
+                                elif existing_targets:
+                                    targets = [existing_targets]
+                                else:
+                                    targets = []
+                                for candidate in targets_payload:
+                                    if candidate not in targets:
+                                        targets.append(candidate)
+                                _LAST_TEXT_TABLE_DEBUG["follow_sheet_targets"] = targets
+            else:
+                _LAST_TEXT_TABLE_DEBUG["rows_txt_count"] = 0
+                _LAST_TEXT_TABLE_DEBUG["text_row_count"] = 0
+                table_lines = []
+                print("[TEXT-SCAN] rows_txt count=0")
+                print("[TEXT-SCAN] parsed rows: 0")
                 return table_lines
-            _LAST_TEXT_TABLE_DEBUG["rows_txt_count"] = 0
-            _LAST_TEXT_TABLE_DEBUG["text_row_count"] = 0
-            table_lines = []
-            print("[TEXT-SCAN] rows_txt count=0")
-            print("[TEXT-SCAN] parsed rows: 0")
-            return table_lines
 
         def _entry_sort_key(entry: dict[str, Any]) -> tuple[float, float, int, int]:
             x_val = entry.get("x")
