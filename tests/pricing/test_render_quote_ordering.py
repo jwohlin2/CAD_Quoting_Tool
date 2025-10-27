@@ -1,5 +1,6 @@
 import math
 from collections.abc import Mapping
+from types import MappingProxyType
 
 import appV5
 
@@ -335,3 +336,49 @@ def test_explain_quote_reports_no_drilling_when_minutes_absent() -> None:
     explanation = explain_quote(breakdown, render_state={"extra": {}})
 
     assert "Main cost drivers derive from bucket totals; none dominate." in explanation
+
+
+def test_render_quote_ignores_unlabeled_bucket_details() -> None:
+    blank_bucket = MappingProxyType(
+        {"minutes": 12.6, "labor$": 18.9, "machine$": 0.0, "total$": 18.9}
+    )
+    milling_bucket = MappingProxyType(
+        {"minutes": 60.0, "labor$": 0.0, "machine$": 270.0, "total$": 270.0}
+    )
+    bucket_view = MappingProxyType(
+        {
+            "buckets": MappingProxyType({"": blank_bucket, "milling": milling_bucket}),
+            "order": ("", "milling"),
+        }
+    )
+
+    breakdown = {
+        "qty": 1,
+        "totals": {
+            "labor_cost": 18.9,
+            "direct_costs": 270.0,
+            "subtotal": 288.9,
+            "with_expedite": 288.9,
+        },
+        "nre_detail": {},
+        "nre": {},
+        "material": {},
+        "process_costs": {"milling": 270.0},
+        "process_meta": {},
+        "pass_through": {"Material": 270.0},
+        "applied_pcts": {"MarginPct": 0.1},
+        "rates": {},
+        "params": {},
+        "labor_cost_details": {},
+        "direct_cost_details": {},
+        "bucket_view": bucket_view,
+        "process_plan": {"bucket_view": bucket_view},
+        "process_plan_summary": {"bucket_view": bucket_view},
+    }
+
+    result = {"price": 317.79, "breakdown": breakdown}
+
+    rendered, _ = _render_payload(result)
+
+    assert "Milling:" in rendered
+    assert "0.21 hr @ $89" not in rendered

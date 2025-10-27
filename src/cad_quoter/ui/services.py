@@ -34,7 +34,6 @@ from cad_quoter.resources import default_app_settings_json
 from cad_quoter.domain_models import DEFAULT_MATERIAL_DISPLAY
 from cad_quoter.domain_models import coerce_float_or_none as _coerce_float_or_none
 from cad_quoter.domain_models import normalize_material_key as _normalize_lookup_key
-from cad_quoter.pricing.rate_defaults import labor_rate, machine_rate
 from cad_quoter.utils import jdump
 
 from cad_quoter.app.optional_loaders import (
@@ -239,8 +238,8 @@ class QuoteConfiguration:
     round_tol_in: float = 0.05
     stock_rounding_mode: str = "per_axis_min_area"
     separate_machine_labor: bool = True
-    machine_rate_per_hr: float = machine_rate("milling")
-    labor_rate_per_hr: float = labor_rate("milling")
+    machine_rate_per_hr: float = 45.0
+    labor_rate_per_hr: float = 45.0
     milling_attended_fraction: float = 1.0
     hole_source_preference: str = "table"  # "table" | "geometry" | "auto"
     hole_merge_tol_diam_in: float = 0.001
