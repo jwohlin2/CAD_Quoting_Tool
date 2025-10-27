@@ -1,11 +1,12 @@
 from __future__ import annotations
 from math import sqrt, log1p
-from typing import Any, Dict, Tuple, List
+from typing import Any, Dict, Tuple, List, Iterable, Mapping
 
 from cad_quoter.planning.process_planner import plan_job
 from cad_quoter.rates import ensure_two_bucket_defaults
 from cad_quoter.utils import _dict
 from cad_quoter.pricing.rate_buckets import bucket_cost_breakdown
+from cad_quoter.utils.chart_buckets import classify_chart_rows
 
 def _as_float(x, default=None):
     try:
@@ -159,6 +160,14 @@ def _geom(geom: dict) -> dict:
     ops_summary = _dict(d.get("ops_summary"))
     if not ops_summary:
         ops_summary = _dict(_dict(d.get("geo")).get("ops_summary"))
+
+    chart_rows_iter: Iterable[Mapping[str, Any]] | None = None
+    rows_candidate = ops_summary.get("rows")
+    if isinstance(rows_candidate, list):
+        chart_rows_iter = [row for row in rows_candidate if isinstance(row, Mapping)]
+
+    chart_buckets, chart_row_count, chart_qty_sum = classify_chart_rows(chart_rows_iter)
+
     ops_totals = _dict(ops_summary.get("totals"))
     out["ops"] = {
         "drill": int(_as_float(ops_totals.get("drill"), 0) or 0),
@@ -173,6 +182,19 @@ def _geom(geom: dict) -> dict:
         "jig_grind": int(_as_float(ops_totals.get("jig_grind"), 0) or 0),
     }
     out["flip_required"] = bool(ops_summary.get("flip_required"))
+
+    if chart_buckets:
+        out["ops"]["chart_rows"] = {
+            "buckets": chart_buckets,
+            "row_count": chart_row_count,
+            "qty_sum": chart_qty_sum,
+        }
+
+    if chart_buckets.get("tap", 0) > out.get("tap_qty", 0):
+        out["tap_qty"] = int(chart_buckets.get("tap", 0))
+    if chart_buckets.get("cbore", 0) > out.get("cbore_qty", 0):
+        out["cbore_qty"] = int(chart_buckets.get("cbore", 0))
+
     return out
 
 def _material_factor(material: str | None) -> Tuple[float, float]:

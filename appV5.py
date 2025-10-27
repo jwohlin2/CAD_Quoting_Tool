@@ -58,6 +58,7 @@ from cad_quoter.pricing.machining_report import _drill_time_model
 from cad_quoter.utils.number_parse import NUM_DEC_RE, NUM_FRAC_RE, _to_inch
 from cad_quoter.utils.render_utils.tables import ascii_table
 from cad_quoter.utils.render_state import RenderState
+from cad_quoter.utils.chart_buckets import classify_chart_rows as _classify_chart_rows
 
 
 
@@ -2532,6 +2533,7 @@ def _ops_counts_from_geo_and_locals(
         "counterbore": max(0, int(counterbore_from_groups or 0)),
         "counterdrill": 0,
         "jig-grind": 0,
+        "npt": 0,
     }
 
     def _coerce_int(value: Any) -> int:
@@ -2621,6 +2623,8 @@ def _ops_counts_from_geo_and_locals(
                 total += 1
         return total
 
+    geometry_hole_total = 0
+
     geo_layers: list[_MappingABC[str, Any]] = []
     queue: list[_MappingABC[str, Any]] = []
     seen: set[int] = set()
@@ -2637,9 +2641,17 @@ def _ops_counts_from_geo_and_locals(
 
     if isinstance(core_geo, (_MappingABC, dict)):
         _enqueue(core_geo)
+        for key in ("hole_count", "hole_count_geom", "hole_count_geom_dedup"):
+            geometry_hole_total = max(
+                geometry_hole_total, _coerce_int(_get_field(core_geo, key))
+            )
 
     while queue:
         layer = queue.pop(0)
+        for key in ("hole_count", "hole_count_geom", "hole_count_geom_dedup"):
+            geometry_hole_total = max(
+                geometry_hole_total, _coerce_int(_get_field(layer, key))
+            )
         fc_candidate = _get_field(layer, "feature_counts")
         if isinstance(fc_candidate, (_MappingABC, dict)):
             _enqueue(fc_candidate)
@@ -2671,6 +2683,22 @@ def _ops_counts_from_geo_and_locals(
                     _enqueue(value)
         except Exception:
             pass
+
+    chart_rows_list: list[Mapping[str, Any]] = []
+    if isinstance(core_geo, (_MappingABC, dict)):
+        ops_summary_root = _get_field(core_geo, "ops_summary")
+        if isinstance(ops_summary_root, (_MappingABC, dict)):
+            rows_candidate = _get_field(ops_summary_root, "rows")
+            if isinstance(rows_candidate, list):
+                chart_rows_list = [
+                    row
+                    for row in rows_candidate
+                    if isinstance(row, (_MappingABC, dict))
+                ]
+
+    chart_row_buckets, chart_row_row_count, chart_row_qty_sum = _classify_chart_rows(
+        chart_rows_list
+    )
 
     chart_cleaned = [
         str(line or "").strip()
@@ -2874,6 +2902,24 @@ def _ops_counts_from_geo_and_locals(
     counts["counterbore"] = _max_positive(cb_candidates)
     counts["counterdrill"] = _max_positive(counterdrill_candidates)
     counts["jig-grind"] = _max_positive(jig_candidates)
+
+    if chart_row_buckets:
+        counts["_chart_row_buckets"] = dict(chart_row_buckets)
+        counts["_chart_row_rows"] = int(chart_row_row_count)
+        counts["_chart_row_qty_sum"] = int(chart_row_qty_sum)
+        tap_chart = _coerce_int(chart_row_buckets.get("tap"))
+        cb_chart = _coerce_int(chart_row_buckets.get("cbore"))
+        npt_chart = _coerce_int(chart_row_buckets.get("npt"))
+        drill_chart = _coerce_int(chart_row_buckets.get("drill_spec"))
+        if tap_chart > 0:
+            counts["tap"] = max(counts["tap"], tap_chart)
+        if cb_chart > 0:
+            counts["counterbore"] = max(counts["counterbore"], cb_chart)
+        if npt_chart > 0:
+            counts["npt"] = max(counts.get("npt", 0), npt_chart)
+        if drill_chart > 0:
+            base_total = max(counts["drill"], geometry_hole_total)
+            counts["drill"] = max(0, base_total - drill_chart)
 
     for key in tuple(counts):
         counts[key] = max(0, _coerce_int(counts.get(key)))
@@ -3370,6 +3416,9 @@ def _apply_ops_audit_counts(
     *,
     drill_actions: int,
     ops_claims: Mapping[str, Any] | None,
+    chart_row_buckets: Mapping[str, int] | None = None,
+    chart_row_row_count: int | None = None,
+    chart_row_qty_sum: int | None = None,
 ) -> MutableMapping[str, int]:
     """Merge chart-derived action counts into ``ops_counts`` for audit display."""
 
@@ -3385,9 +3434,8 @@ def _apply_ops_audit_counts(
         except Exception:
             return 0
 
-    drill_total = max(0, _coerce_int(drill_actions))
-    if drill_total > _coerce_int(ops_counts.get("drills")):
-        ops_counts["drills"] = drill_total
+    geometry_drill_total = max(0, _coerce_int(drill_actions))
+    drill_total_existing = _coerce_int(ops_counts.get("drills"))
 
     claims = ops_claims if isinstance(ops_claims, Mapping) else None
 
@@ -3423,15 +3471,55 @@ def _apply_ops_audit_counts(
         counterdrill_total = max(0, _coerce_int(claims.get("counterdrill")))
         jig_total = max(0, _coerce_int(claims.get("jig")))
 
+    chart_rows_data: dict[str, int] = {}
+    if isinstance(chart_row_buckets, Mapping):
+        for key, value in chart_row_buckets.items():
+            chart_rows_data[str(key)] = _coerce_int(value)
+        if chart_rows_data:
+            ops_counts["_chart_row_buckets"] = dict(chart_rows_data)
+            if chart_row_row_count is not None:
+                ops_counts["_chart_row_count"] = _coerce_int(chart_row_row_count)
+            if chart_row_qty_sum is not None:
+                ops_counts["_chart_row_qty_sum"] = _coerce_int(chart_row_qty_sum)
+
+    tap_chart = chart_rows_data.get("tap", 0)
+    cb_chart = chart_rows_data.get("cbore", 0)
+    npt_chart = chart_rows_data.get("npt", 0)
+    drill_chart_claim = chart_rows_data.get("drill_spec", 0)
+
+    if tap_chart > 0:
+        tap_total = tap_chart
+    if cb_chart > 0:
+        cb_total = cb_chart
+
     if tap_total > _coerce_int(ops_counts.get("taps_total")):
         ops_counts["taps_total"] = tap_total
-
     if cb_total > _coerce_int(ops_counts.get("counterbores_total")):
         ops_counts["counterbores_total"] = cb_total
-        if cb_front > _coerce_int(ops_counts.get("counterbores_front")):
-            ops_counts["counterbores_front"] = cb_front
-        if cb_back > _coerce_int(ops_counts.get("counterbores_back")):
-            ops_counts["counterbores_back"] = cb_back
+
+    if tap_total > 0 and (
+        _coerce_int(ops_counts.get("taps_front"))
+        + _coerce_int(ops_counts.get("taps_back"))
+        == 0
+    ):
+        ops_counts["taps_front"] = tap_total
+        ops_counts["taps_back"] = 0
+
+    if cb_total > 0 and (
+        _coerce_int(ops_counts.get("counterbores_front"))
+        + _coerce_int(ops_counts.get("counterbores_back"))
+        == 0
+    ):
+        ops_counts["counterbores_front"] = cb_total
+        ops_counts["counterbores_back"] = 0
+
+    if cb_front > _coerce_int(ops_counts.get("counterbores_front")):
+        ops_counts["counterbores_front"] = cb_front
+    if cb_back > _coerce_int(ops_counts.get("counterbores_back")):
+        ops_counts["counterbores_back"] = cb_back
+
+    if npt_chart > 0:
+        ops_counts["npt"] = npt_chart
 
     if spot_total > _coerce_int(ops_counts.get("spot")):
         ops_counts["spot"] = spot_total
@@ -3441,6 +3529,13 @@ def _apply_ops_audit_counts(
 
     if jig_total > _coerce_int(ops_counts.get("jig_grind")):
         ops_counts["jig_grind"] = jig_total
+
+    drill_total = drill_total_existing
+    if drill_chart_claim > 0 and geometry_drill_total > 0:
+        drill_total = max(drill_total, max(0, geometry_drill_total - drill_chart_claim))
+    else:
+        drill_total = max(drill_total, geometry_drill_total)
+    ops_counts["drills"] = drill_total
 
     ops_counts["actions_total"] = (
         max(0, _coerce_int(ops_counts.get("drills")))
@@ -3459,6 +3554,13 @@ def _apply_ops_audit_counts(
         "counterdrill": counterdrill_total,
         "jig": jig_total,
     }
+
+    if chart_rows_data:
+        ops_counts["_audit_claims"]["chart_rows"] = dict(chart_rows_data)
+        if chart_row_qty_sum is not None:
+            ops_counts["_audit_claims"]["chart_row_qty_sum"] = _coerce_int(
+                chart_row_qty_sum
+            )
 
     return ops_counts
 
@@ -5069,6 +5171,85 @@ def _render_table_row_reviewer(*, result=None, breakdown=None, max_rows=10) -> l
             lines.append(f"chart_lines ......... {len(ch)}")
     return lines
 
+
+def _detect_anchor_flag(*containers: Any) -> bool:
+    queue: list[Mapping[str, Any]] = []
+    seen: set[int] = set()
+
+    for container in containers:
+        if isinstance(container, Mapping):
+            queue.append(typing.cast(Mapping[str, Any], container))
+        elif isinstance(container, Iterable) and not isinstance(
+            container, (str, bytes, bytearray)
+        ):
+            for item in container:
+                if isinstance(item, Mapping):
+                    queue.append(typing.cast(Mapping[str, Any], item))
+
+    while queue:
+        current = queue.pop(0)
+        ident = id(current)
+        if ident in seen:
+            continue
+        seen.add(ident)
+
+        for key, value in current.items():
+            key_lower = str(key).lower()
+            if "anchor" in key_lower:
+                qty = _coerce_int_or_zero(value)
+                if qty > 0:
+                    return True
+            if isinstance(value, Mapping):
+                queue.append(typing.cast(Mapping[str, Any], value))
+            elif isinstance(value, Iterable) and not isinstance(
+                value, (str, bytes, bytearray)
+            ):
+                for item in value:
+                    if isinstance(item, Mapping):
+                        queue.append(typing.cast(Mapping[str, Any], item))
+    return False
+
+
+def _print_table_review(
+    rows: Sequence[Mapping[str, Any]] | None,
+    *,
+    row_count: int,
+    qty_sum: int,
+    anchor_flag: bool = False,
+    max_rows: int = 10,
+) -> None:
+    suffix = " (authoritative)" if anchor_flag and row_count > 0 else ""
+    print(f"[TABLE-REVIEW] rows={row_count} qty_sum={qty_sum}{suffix}")
+
+    if not rows:
+        return
+
+    seen: set[str] = set()
+    for raw_row in rows[: max_rows]:
+        if not isinstance(raw_row, Mapping):
+            continue
+        qty = _coerce_int_or_zero(raw_row.get("qty"))
+        desc = (
+            str(
+                raw_row.get("desc")
+                or raw_row.get("description")
+                or raw_row.get("text")
+                or ""
+            )
+            .strip()
+        )
+        desc = re.sub(r"\s+", " ", desc)
+        if desc and desc.startswith("("):
+            item_text = desc
+        else:
+            prefix = f"({qty})" if qty > 0 else "(0)"
+            item_text = f"{prefix} {desc}".strip()
+        if not item_text:
+            continue
+        if item_text in seen:
+            continue
+        seen.add(item_text)
+        print(f" - {item_text}")
 
 def _build_ops_rows_from_chart_lines(chart_lines: list[str]) -> list[dict]:
     if not chart_lines:
@@ -13763,6 +13944,11 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
     if not isinstance(ops_rows_now, list):
         ops_rows_now = []
 
+    ops_rows_for_review = [row for row in ops_rows_now if isinstance(row, Mapping)]
+    chart_row_buckets, chart_row_row_count, chart_row_qty_sum = _classify_chart_rows(
+        ops_rows_for_review
+    )
+
     ops_claims: dict[str, int] = {}
     try:
         if any(
@@ -14785,6 +14971,18 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
         if isinstance(line, str)
     )
 
+    anchor_flag = _detect_anchor_flag(
+        (geo_map or {}).get("ops_summary"),
+        (geo_map or {}).get("chart_summary"),
+        geo_map,
+    )
+    _print_table_review(
+        ops_rows_for_review,
+        row_count=chart_row_row_count,
+        qty_sum=chart_row_qty_sum,
+        anchor_flag=anchor_flag,
+    )
+
     ops_counts = audit_operations(
         planner_ops_rows_for_audit,
         removal_sections_text,
@@ -14796,6 +14994,9 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
         typing.cast(MutableMapping[str, int], ops_counts),
         drill_actions=int(locals().get("drill_actions_from_groups") or 0),
         ops_claims=ops_claims,
+        chart_row_buckets=chart_row_buckets,
+        chart_row_row_count=chart_row_row_count,
+        chart_row_qty_sum=chart_row_qty_sum,
     )
 
     def _resolve_drilling_summary_candidate(*containers: Mapping[str, Any] | None) -> Mapping[str, Any] | None:
