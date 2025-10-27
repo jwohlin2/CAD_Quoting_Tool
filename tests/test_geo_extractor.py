@@ -3,6 +3,7 @@ from __future__ import annotations
 import types
 from collections import defaultdict
 from pathlib import Path
+import re
 
 import pytest
 
@@ -194,6 +195,15 @@ def test_follow_sheet_layout_scan_returns_rows(monkeypatch: pytest.MonkeyPatch) 
 
     debug_snapshot = geo_extractor.get_last_text_table_debug() or {}
     assert debug_snapshot.get("layer_counts_pre") == {}
+
+
+def test_default_text_layer_excludes_do_not_filter_am_bor() -> None:
+    patterns = [
+        re.compile(pattern, re.IGNORECASE)
+        for pattern in geo_extractor.DEFAULT_TEXT_LAYER_EXCLUDE_REGEX
+    ]
+
+    assert all(not pattern.match("AM_BOR") for pattern in patterns)
 
 
 def test_read_geo_prefers_text_rows(monkeypatch: pytest.MonkeyPatch, fallback_doc: _DummyDoc) -> None:
