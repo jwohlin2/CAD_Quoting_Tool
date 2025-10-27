@@ -1,10 +1,27 @@
 from __future__ import annotations
 
 import types
+from pathlib import Path
 
 import pytest
 
 from cad_quoter import geo_extractor
+
+
+_RTEXT_FIXTURE_PATH = Path(__file__).resolve().parent / "data" / "rtext_fixture.dxf"
+
+
+def _load_rtext_fixture_text() -> str:
+    data = _RTEXT_FIXTURE_PATH.read_text(encoding="utf-8").splitlines()
+    for idx in range(0, len(data) - 1, 2):
+        code = data[idx].strip()
+        value = data[idx + 1].strip()
+        if code in {"1000", "1"} and value:
+            return value
+    raise AssertionError("rtext fixture did not contain expected text payload")
+
+
+_RTEXT_FIXTURE_TEXT = _load_rtext_fixture_text()
 
 
 class _DummyMText:
@@ -24,6 +41,26 @@ class _DummyText:
 
     def dxftype(self) -> str:
         return "TEXT"
+
+
+class _DummyRText:
+    def __init__(self, text: str) -> None:
+        self._text = text
+        self.dxf = types.SimpleNamespace(text="")
+        payload = [(1000, text)]
+        self._xdata = {"RTEXT": list(payload), "ACAD_RTEXT": list(payload)}
+        self.raw_content = text
+        self.content = text
+        self.text = ""
+
+    def dxftype(self) -> str:
+        return "RTEXT"
+
+    def get_xdata(self, appid: str) -> list[tuple[int, str]]:
+        return list(self._xdata.get(appid, []))
+
+    def has_xdata(self, appid: str) -> bool:
+        return appid in self._xdata
 
 
 class _DummySpace:
@@ -48,8 +85,20 @@ def fallback_doc() -> _DummyDoc:
         _DummyMText(r"\\A1;(3) %%C0.375\\PTHRU"),
         _DummyMText("FROM BACK"),
         _DummyText("A | Ø0.500 | 2 | (2) DRILL THRU"),
+        _DummyRText(_RTEXT_FIXTURE_TEXT),
     ]
     return _DummyDoc(entities)
+
+
+def test_iter_entity_text_fragments_handles_rtext() -> None:
+    entity = _DummyRText(_RTEXT_FIXTURE_TEXT)
+
+    fragments = list(geo_extractor._iter_entity_text_fragments(entity))
+
+    assert fragments, "expected RTEXT fragments"
+    texts = [text for text, _ in fragments]
+    assert _RTEXT_FIXTURE_TEXT in texts
+    assert all(is_mtext for _, is_mtext in fragments)
 
 
 def test_collect_table_text_lines_normalizes_entities(fallback_doc: _DummyDoc) -> None:
@@ -59,6 +108,7 @@ def test_collect_table_text_lines_normalizes_entities(fallback_doc: _DummyDoc) -
     assert "THRU" in lines
     assert "FROM BACK" in lines
     assert "A | Ø0.500 | 2 | (2) DRILL THRU" in lines
+    assert "(4) Ø0.625 DRILL THRU FROM FRONT" in lines
 
 
 def test_read_text_table_uses_internal_fallback(monkeypatch: pytest.MonkeyPatch, fallback_doc: _DummyDoc) -> None:
@@ -66,9 +116,9 @@ def test_read_text_table_uses_internal_fallback(monkeypatch: pytest.MonkeyPatch,
 
     info = geo_extractor.read_text_table(fallback_doc)
 
-    assert info["hole_count"] == 5
+    assert info["hole_count"] == 9
     rows = info["rows"]
-    assert len(rows) == 2
+    assert len(rows) == 3
     assert rows[0]["qty"] == 3
     assert rows[0]["desc"] == "Ø0.375 THRU FROM BACK"
     assert rows[0]["ref"] == '0.3750"'
@@ -76,8 +126,12 @@ def test_read_text_table_uses_internal_fallback(monkeypatch: pytest.MonkeyPatch,
     assert rows[1]["qty"] == 2
     assert rows[1]["desc"] == "Ø0.500 | 2 | DRILL THRU"
     assert rows[1]["ref"] == '0.5000"'
+    assert rows[2]["qty"] == 4
+    assert rows[2]["desc"] == "Ø0.625 DRILL THRU FROM FRONT"
+    assert rows[2]["ref"] == '0.6250"'
+    assert rows[2].get("side") == "front"
     families = info.get("hole_diam_families_in")
-    assert families == {"0.375": 3, "0.5": 2}
+    assert families == {"0.375": 3, "0.5": 2, "0.625": 4}
     assert info.get("provenance_holes") == "HOLE TABLE"
 
 
@@ -124,6 +178,40 @@ def test_read_geo_prefers_text_rows(monkeypatch: pytest.MonkeyPatch, fallback_do
         'qty=2 ref=0.5000" side=- desc=A | Ø0.500 | 2 | (2) DRILL THRU',
     ]
     assert result["chart_lines"] == expected_lines
+
+
+def test_read_geo_promotes_rows_txt_fallback(
+    monkeypatch: pytest.MonkeyPatch, fallback_doc: _DummyDoc
+) -> None:
+    rows_txt_lines = [
+        "(4) Ø0.250 DRILL THRU",
+        "(12) Ø0.339 TAP FROM FRONT",
+    ]
+
+    def fake_acad(_doc: _DummyDoc, **_kwargs: object) -> dict[str, object]:
+        return {}
+
+    def fake_text(_doc: _DummyDoc, **_kwargs: object) -> dict[str, object]:
+        geo_extractor._LAST_TEXT_TABLE_DEBUG = {
+            "rows": [],
+            "rows_txt_count": len(rows_txt_lines),
+            "rows_txt_lines": list(rows_txt_lines),
+        }
+        return {}
+
+    monkeypatch.setattr(geo_extractor, "read_acad_table", fake_acad)
+    monkeypatch.setattr(geo_extractor, "read_text_table", fake_text)
+
+    result = geo_extractor.read_geo(fallback_doc)
+
+    rows = result["rows"]
+    assert len(rows) == 2
+    assert sorted(row["qty"] for row in rows) == [4, 12]
+    assert result["hole_count"] == 16
+    assert result["provenance_holes"] == "HOLE TABLE (fallback)"
+    refs = {row.get("ref") for row in rows}
+    assert '0.2500"' in refs
+    assert '0.3390"' in refs
 
 
 def test_build_column_table_accepts_wrapped_qty_cells() -> None:
@@ -241,3 +329,51 @@ def test_build_column_table_splits_semicolons_and_detects_operations() -> None:
 
     tap_row = desc_map[tap_desc]
     assert tap_row.get("side") == "back"
+
+
+def test_follow_sheet_layout_processed_even_when_filtered(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(geo_extractor, "_resolve_app_callable", lambda name: None)
+
+    class _CountingLayout:
+        def __init__(self, entities: list[object]) -> None:
+            self._entities = entities
+            self.query_calls = 0
+
+        def query(self, _spec: str) -> list[object]:
+            self.query_calls += 1
+            return list(self._entities)
+
+        def __iter__(self):  # type: ignore[override]
+            self.query_calls += 1
+            return iter(self._entities)
+
+    class _LayoutManager:
+        def __init__(self, mapping: dict[str, _CountingLayout]) -> None:
+            self._mapping = mapping
+
+        def names(self) -> list[str]:
+            return list(self._mapping.keys())
+
+        def get(self, name: str) -> _CountingLayout | None:
+            return self._mapping.get(name)
+
+    model_layout = _CountingLayout([_DummyText("SEE SHT 2 FOR HOLE CHART")])
+    sheet_layout = _CountingLayout([_DummyText("(1) HOLE TABLE")])
+
+    class _DocWithLayouts:
+        def __init__(self) -> None:
+            self.layouts = _LayoutManager({"SHEET 2": sheet_layout})
+
+        def modelspace(self) -> _CountingLayout:
+            return model_layout
+
+    doc = _DocWithLayouts()
+
+    geo_extractor.read_text_table(
+        doc,
+        layout_filters={"all_layouts": False, "patterns": ["Model"]},
+    )
+
+    assert sheet_layout.query_calls > 0
