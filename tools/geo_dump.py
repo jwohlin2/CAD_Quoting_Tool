@@ -15,10 +15,11 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 from cad_quoter import geo_extractor
-from cad_quoter.geo_extractor import read_geo
+from cad_quoter.geo_extractor import DEFAULT_TEXT_LAYER_EXCLUDE_REGEX, read_geo
 
 DEFAULT_SAMPLE_PATH = REPO_ROOT / "Cad Files" / "301_redacted.dwg"
 ARTIFACT_DIR = REPO_ROOT / "out"
+DEFAULT_EXCLUDE_PATTERN_TEXT = ", ".join(DEFAULT_TEXT_LAYER_EXCLUDE_REGEX) or "<none>"
 
 
 def _sum_qty(rows: list[Mapping[str, object]] | None) -> int:
@@ -233,13 +234,29 @@ def main(argv: Sequence[str] | None = None) -> int:
         "--include-layer",
         dest="include_layer",
         action="append",
-        help="Regex pattern for layers to include when scanning text (repeatable)",
+        help=(
+            "Regex pattern for layers to include when scanning text (repeatable; "
+            f"defaults still exclude {DEFAULT_EXCLUDE_PATTERN_TEXT})"
+        ),
     )
     parser.add_argument(
         "--exclude-layer",
         dest="exclude_layer",
         action="append",
-        help="Regex pattern for layers to exclude when scanning text (repeatable)",
+        help=(
+            "Regex pattern for layers to exclude when scanning text (repeatable; "
+            f"defaults: {DEFAULT_EXCLUDE_PATTERN_TEXT})"
+        ),
+    )
+    parser.add_argument(
+        "--no-exclude-layer",
+        dest="no_exclude_layer",
+        action="store_true",
+        help=(
+            "Disable the default text-layer exclusions "
+            f"({DEFAULT_EXCLUDE_PATTERN_TEXT}) before applying any --exclude-layer"
+            " filters"
+        ),
     )
     parser.add_argument(
         "--scan-acad-tables",
@@ -267,6 +284,20 @@ def main(argv: Sequence[str] | None = None) -> int:
         "--force-text",
         action="store_true",
         help="Force publishing text fallback rows when available",
+    )
+    parser.add_argument(
+        "--pipeline",
+        choices=("auto", "acad", "text", "geom"),
+        default="auto",
+        help=(
+            "Select the extraction pipeline: 'auto' runs ACAD first then TEXT, "
+            "while 'geom' returns raw geometry rows"
+        ),
+    )
+    parser.add_argument(
+        "--allow-geom",
+        action="store_true",
+        help="Permit geometry rows even when using the automatic pipeline",
     )
     parser.add_argument(
         "--debug-layouts",
@@ -374,18 +405,47 @@ def main(argv: Sequence[str] | None = None) -> int:
         if normalized_patterns:
             read_kwargs["block_name_regex"] = normalized_patterns
             print(f"[geo_dump] block_regex={normalized_patterns}")
-    include_layer_patterns = args.include_layer or []
+    include_layer_patterns = [
+        value.strip()
+        for value in args.include_layer or []
+        if isinstance(value, str) and value.strip()
+    ]
     if include_layer_patterns:
         read_kwargs["layer_include_regex"] = list(include_layer_patterns)
         print(f"[geo_dump] include_layer={include_layer_patterns}")
-    exclude_layer_patterns = args.exclude_layer or []
-    if exclude_layer_patterns:
+    exclude_layer_patterns = [
+        value.strip()
+        for value in args.exclude_layer or []
+        if isinstance(value, str) and value.strip()
+    ]
+    if args.no_exclude_layer:
         read_kwargs["layer_exclude_regex"] = list(exclude_layer_patterns)
-        print(f"[geo_dump] exclude_layer={exclude_layer_patterns}")
+        if exclude_layer_patterns:
+            print(
+                "[geo_dump] exclude_layer={patterns} (defaults disabled)".format(
+                    patterns=exclude_layer_patterns
+                )
+            )
+        else:
+            print("[geo_dump] exclude_layer=<none> (defaults disabled)")
+    elif exclude_layer_patterns:
+        combined_patterns = list(DEFAULT_TEXT_LAYER_EXCLUDE_REGEX) + list(
+            exclude_layer_patterns
+        )
+        read_kwargs["layer_exclude_regex"] = combined_patterns
+        print(
+            "[geo_dump] exclude_layer={patterns} (defaults + custom)".format(
+                patterns=exclude_layer_patterns
+            )
+        )
     if args.debug_layouts:
         read_kwargs["debug_layouts"] = True
     if args.force_text:
         read_kwargs["force_text"] = True
+    if args.pipeline:
+        read_kwargs["pipeline"] = args.pipeline
+    if args.allow_geom:
+        read_kwargs["allow_geom"] = True
     payload = read_geo(doc, **read_kwargs)
     if isinstance(payload, Mapping):
         payload = dict(payload)
@@ -582,41 +642,36 @@ def main(argv: Sequence[str] | None = None) -> int:
         debug_payload = geo_extractor.get_last_text_table_debug() or {}
 
     if args.dump_bands:
-        band_cells = debug_payload.get("band_cells") or []
-        band_map: dict[int, dict[int, list[str]]] = {}
-        if isinstance(band_cells, list):
-            for cell in band_cells:
-                if not isinstance(cell, Mapping):
+        row_debug = debug_payload.get("row_debug") or []
+        columns = debug_payload.get("columns") or []
+        if isinstance(row_debug, Mapping):
+            row_debug = [row_debug]
+        if isinstance(columns, Mapping):
+            columns = list(columns.values())
+        if isinstance(row_debug, list) and row_debug:
+            print(
+                f"[TABLE-Y] dump rows_total={len(row_debug)} columns={len(columns)}"
+            )
+            for entry in row_debug[:30]:
+                if not isinstance(entry, Mapping):
                     continue
-                band_raw = cell.get("band")
-                col_raw = cell.get("col")
+                row_idx = entry.get("index")
                 try:
-                    band_idx = int(band_raw)
+                    row_idx_int = int(row_idx)
                 except Exception:
-                    continue
-                try:
-                    col_idx = int(col_raw)
-                except Exception:
-                    continue
-                text_val = str(cell.get("text") or "")
-                column_map = band_map.setdefault(band_idx, {})
-                column_map.setdefault(col_idx, []).append(text_val)
-        band_indices = sorted(band_map.keys())
-        if band_indices:
-            print(f"[TABLE-Y] dump bands_total={len(band_indices)}")
-            for band_idx in band_indices[:30]:
-                column_map = band_map.get(band_idx, {})
-                parts = []
-                for col_idx in sorted(column_map.keys()):
-                    cell_text = " ".join(part.strip() for part in column_map[col_idx] if part).strip()
-                    preview = geo_extractor._truncate_cell_preview(cell_text)
+                    row_idx_int = -1
+                cells = entry.get("cells") or []
+                parts: list[str] = []
+                for col_idx, cell_text in enumerate(cells):
+                    preview = geo_extractor._truncate_cell_preview(str(cell_text or ""))
                     parts.append(f'C{col_idx}="{preview}"')
                 preview_body = " | ".join(parts)
+                label = row_idx_int if row_idx_int >= 0 else row_idx
                 print(
-                    f"[TABLE-X] band#{band_idx} cols={len(column_map)} | {preview_body}"
+                    f"[TABLE-X] row#{label} cols={len(cells)} | {preview_body}"
                 )
         else:
-            print("[TABLE-X] dump bands: no band_cells in debug payload")
+            print("[TABLE-X] dump rows: no row_debug in debug payload")
 
     dump_base = args.dump_lines
     if args.debug_entities and len(rows) < 8 and not dump_base:
@@ -628,7 +683,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         bands_path = lines_path.with_name(f"{lines_path.stem}_bands.tsv")
         raw_lines = debug_payload.get("raw_lines") or []
         candidates = raw_lines or debug_payload.get("candidates", [])
-        band_cells = debug_payload.get("band_cells", [])
+        row_debug = debug_payload.get("row_debug", [])
 
         def _format_float(value: object) -> str:
             if isinstance(value, (int, float)):
@@ -653,6 +708,13 @@ def main(argv: Sequence[str] | None = None) -> int:
                             _format_float(item.get("y")),
                             str(item.get("text") or ""),
                         ]
+                    elif header.startswith("row\t"):
+                        fields = [
+                            str(item.get("row", "")),
+                            str(item.get("col", "")),
+                            _format_float(item.get("y_center")),
+                            str(item.get("text") or ""),
+                        ]
                     else:
                         fields = [
                             str(item.get("band", "")),
@@ -665,7 +727,29 @@ def main(argv: Sequence[str] | None = None) -> int:
 
         try:
             _write_lines(lines_path, "layout\tin_block\tx\ty\ttext", list(candidates))
-            _write_lines(bands_path, "band\tcol\tx_center\ty_center\ttext", list(band_cells))
+            if row_debug:
+                row_dump: list[dict[str, object]] = []
+                for entry in row_debug:
+                    if not isinstance(entry, Mapping):
+                        continue
+                    row_idx = entry.get("index")
+                    y_center = entry.get("y")
+                    cells = entry.get("cells") or []
+                    for col_idx, cell_text in enumerate(cells):
+                        row_dump.append(
+                            {
+                                "row": row_idx,
+                                "col": col_idx,
+                                "y_center": y_center,
+                                "text": cell_text,
+                            }
+                        )
+                if row_dump:
+                    _write_lines(
+                        bands_path,
+                        "row\tcol\ty_center\ttext",
+                        row_dump,
+                    )
         except OSError as exc:  # pragma: no cover - filesystem issues
             print(f"[geo_dump] failed to write dumps: {exc}")
         else:
@@ -711,13 +795,24 @@ def main(argv: Sequence[str] | None = None) -> int:
 
     scanned_layouts = list(dict.fromkeys(debug_info.get("scanned_layouts") or []))
     scanned_layers = list(dict.fromkeys(debug_info.get("scanned_layers") or []))
+    include_patterns_dbg = list(
+        dict.fromkeys(debug_info.get("layer_regex_include") or [])
+    )
+    exclude_patterns_dbg = list(
+        dict.fromkeys(debug_info.get("layer_regex_exclude") or [])
+    )
     layout_summary = ",".join(scanned_layouts) if scanned_layouts else "-"
     layer_summary = ",".join(scanned_layers) if scanned_layers else "-"
+    include_summary = ",".join(include_patterns_dbg) if include_patterns_dbg else "-"
+    exclude_summary = ",".join(exclude_patterns_dbg) if exclude_patterns_dbg else "-"
     csv_display = str(rows_csv_path) if rows_csv_path else "-"
     print(
-        "[geo_dump] summary layouts={layouts} layers={layers} rows={rows} csv={csv}".format(
+        "[geo_dump] summary layouts={layouts} layers={layers} incl={incl} "
+        "excl={excl} rows={rows} csv={csv}".format(
             layouts=layout_summary,
             layers=layer_summary,
+            incl=include_summary,
+            excl=exclude_summary,
             rows=len(rows),
             csv=csv_display,
         )
