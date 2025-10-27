@@ -415,7 +415,7 @@ _HAS_ODAFC = bool(getattr(geometry, "HAS_ODAFC", False))
 
 _DEFAULT_LAYER_ALLOWLIST = frozenset({"BALLOON"})
 DEFAULT_TEXT_LAYER_EXCLUDE_REGEX: tuple[str, ...] = (
-    r"^(AM_BOR|DEFPOINTS|PAPER)$",
+    r"^(DEFPOINTS|PAPER)$",
 )
 _PREFERRED_BLOCK_NAME_RE = re.compile(r"HOLE.*(?:CHART|TABLE)", re.IGNORECASE)
 _FOLLOW_SHEET_DIRECTIVE_RE = re.compile(
