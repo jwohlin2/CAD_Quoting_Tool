@@ -1707,6 +1707,7 @@ _ADMIN_ROW_DROP_RE = re.compile(
     r"\b(SEE\s+SHEET|BREAK\s+ALL|RADIUS|DEBURR|TOLERANCE|SCALE|TITLE|DETAIL|FINISH|NOTE)\b",
     re.IGNORECASE,
 )
+_NUMERIC_LADDER_RE = re.compile(r"^(?:\d+\s+){8,}\d+$")
 _FRAGMENT_SPLIT_RE = re.compile(r";|(?<=\))\s+(?=\d+\))")
 _INCH_MARK_REF_RE = re.compile(r"\b(\d+(?:\.\d+)?)(?:\s*\"|[ ]?in\b)", re.IGNORECASE)
 _DIA_SYMBOL_INLINE_RE = re.compile(r"[Ø⌀]\s*(\d+(?:\.\d+)?)")
@@ -1718,8 +1719,9 @@ _PIPE_NPT_REF_RE = re.compile(
     re.IGNORECASE,
 )
 _THREAD_CALL_OUT_RE = re.compile(r"\b(\d+\/\d+|M\d+(?:\.\d+)?)-\d+\b", re.IGNORECASE)
+_ROW_ANCHOR_RE = re.compile(r"^\(\s*(\d{1,3})\s*\)\s+", re.IGNORECASE)
 _ROW_QUANTITY_PATTERNS = [
-    re.compile(r"^\(\s*(\d+)\s*\)", re.IGNORECASE),
+    _ROW_ANCHOR_RE,
     re.compile(r"^\s*(\d+)\s*[x×]\b", re.IGNORECASE),
     re.compile(r"^\s*(?:QTY|QTY\.|QTY:)\s*(\d+)\b", re.IGNORECASE),
     re.compile(r"^\s*(\d+)\s*(?:REQD|REQUIRED|RE'?D)\b", re.IGNORECASE),
@@ -1734,7 +1736,7 @@ _ROW_QUANTITY_FLEX_PATTERNS = [
 _FALLBACK_LEADING_QTY_RE = re.compile(r"^\(\d+\)\s*")
 _FALLBACK_JJ_NOISE_RE = re.compile(r"\bJ\s+J\b", re.IGNORECASE)
 _FALLBACK_ETCH_NOISE_RE = re.compile(r"\bETCH ON DETAIL\b(?:\.)?", re.IGNORECASE)
-_RE_TEXT_ROW_START = re.compile(r"^\(\s*(\d+)\s*\)")
+_RE_TEXT_ROW_START = _ROW_ANCHOR_RE
 _LETTER_CODE_ROW_RE = re.compile(r"^\s*[A-Z]\s*(?:[-.:|]|$)")
 _HOLE_ACTION_TOKEN_RE = re.compile(_HOLE_ACTION_TOKEN_PATTERN, re.IGNORECASE)
 _DIAMETER_PREFIX_RE = re.compile(
@@ -2654,7 +2656,78 @@ def _is_letter_code_row_start(text: str, next_text: str | None = None) -> bool:
 def _is_row_start(text: str, *, next_text: str | None = None) -> bool:
     if not text:
         return False
-    return bool(_ROW_QUANTITY_PATTERNS[0].match(text))
+    return bool(_ROW_ANCHOR_RE.match(text))
+
+
+def _normalize_candidate_text(text: Any) -> str:
+    try:
+        base = str(text or "")
+    except Exception:
+        base = ""
+    return " ".join(base.split())
+
+
+def _is_numeric_ladder_line(text: str) -> bool:
+    return bool(_NUMERIC_LADDER_RE.match(text or ""))
+
+
+def _should_drop_candidate_line(text: Any) -> bool:
+    normalized = _normalize_candidate_text(text)
+    if not normalized:
+        return False
+    if _is_numeric_ladder_line(normalized):
+        return True
+    return bool(_ADMIN_ROW_DROP_RE.search(normalized))
+
+
+def _compute_anchor_height(entries: Iterable[Mapping[str, Any]]) -> tuple[float, int]:
+    heights: list[float] = []
+    count = 0
+    for entry in entries:
+        text_value = entry.get("normalized_text") or entry.get("text") or ""
+        normalized = _normalize_candidate_text(text_value)
+        if not _ROW_ANCHOR_RE.match(normalized):
+            continue
+        height_val = entry.get("height")
+        if not isinstance(height_val, (int, float)):
+            continue
+        height_float = float(height_val)
+        if height_float <= 0:
+            continue
+        heights.append(height_float)
+        count += 1
+    if not heights:
+        return (0.0, 0)
+    try:
+        anchor_height = float(statistics.median(heights))
+    except Exception:
+        anchor_height = float(heights[0])
+    return (anchor_height, count)
+
+
+def _filter_entries_by_anchor_height(
+    entries: Iterable[Mapping[str, Any]],
+    *,
+    anchor_height: float,
+    tolerance: float = 0.4,
+) -> list[Mapping[str, Any]]:
+    lower = max(anchor_height * (1.0 - tolerance), 0.0)
+    upper = anchor_height * (1.0 + tolerance)
+    filtered: list[Mapping[str, Any]] = []
+    if anchor_height <= 0:
+        return list(entries)
+    for entry in entries:
+        height_val = entry.get("height")
+        if not isinstance(height_val, (int, float)):
+            filtered.append(entry)
+            continue
+        height_float = float(height_val)
+        if height_float <= 0:
+            filtered.append(entry)
+            continue
+        if lower <= height_float <= upper:
+            filtered.append(entry)
+    return filtered
 
 
 def _extract_row_quantity_and_remainder(text: str) -> tuple[int | None, str]:
@@ -3465,6 +3538,7 @@ def _build_columnar_table_from_panel_entries(
     ]
 
     base_rows: list[dict[str, Any]] = []
+    base_row_keys: set[tuple[int, str]] = set()
 
     for row in snapped_rows:
         row_index = row["index"]
@@ -3562,6 +3636,10 @@ def _build_columnar_table_from_panel_entries(
             row_entry["side"] = side_value
         if inline_qty_detail:
             row_entry["inline_qty"] = inline_qty_detail
+        dedupe_key = (qty_int, " ".join(desc_text.split()).upper())
+        if dedupe_key in base_row_keys:
+            continue
+        base_row_keys.add(dedupe_key)
         base_rows.append(row_entry)
         preview_cols = ", ".join(
             f"{idx}:{_truncate_cell_preview(value)}" for idx, value in enumerate(cells)
@@ -3570,32 +3648,7 @@ def _build_columnar_table_from_panel_entries(
             f"[TABLE-R] row#{row_index} qty={qty_int} cols=[{preview_cols}]"
         )
 
-    rows_output: list[dict[str, Any]] = []
-    for row_entry in base_rows:
-        desc_value = row_entry.get("desc", "")
-        fragments = [
-            frag.strip() for frag in _FRAGMENT_SPLIT_RE.split(desc_value) if frag.strip()
-        ]
-        if len(fragments) <= 1:
-            rows_output.append(row_entry)
-            continue
-        side_hint = row_entry.get("side")
-        for fragment in fragments:
-            fragment_clean = " ".join(fragment.split())
-            if not fragment_clean:
-                continue
-            action_token = bool(_HOLE_ACTION_TOKEN_RE.search(fragment_clean))
-            ref_text_fragment, ref_value_fragment = _extract_row_reference(fragment_clean)
-            if not action_token and not ref_text_fragment and ref_value_fragment is None:
-                continue
-            new_row = dict(row_entry)
-            new_row["desc"] = fragment_clean
-            if ref_text_fragment:
-                new_row["ref"] = ref_text_fragment
-            fragment_side = _detect_row_side(fragment_clean) or side_hint
-            if fragment_side:
-                new_row["side"] = fragment_side
-            rows_output.append(new_row)
+    rows_output: list[dict[str, Any]] = [dict(row_entry) for row_entry in base_rows]
 
     if not rows_output:
         debug_info = {
@@ -3960,6 +4013,7 @@ def _publish_fallback_from_rows_txt(rows_txt: Iterable[Any]) -> dict[str, Any]:
     parsed_rows: list[dict[str, Any]] = []
     families: dict[str, int] = {}
     total_qty = 0
+    seen_keys: set[tuple[int, str]] = set()
 
     for raw_line in rows_txt:
         try:
@@ -3970,53 +4024,45 @@ def _publish_fallback_from_rows_txt(rows_txt: Iterable[Any]) -> dict[str, Any]:
         if not normalized:
             continue
         qty_val, remainder = _extract_row_quantity_and_remainder(normalized)
-        qty_int = None
-        if qty_val is not None and qty_val > 0:
-            try:
-                qty_int = int(qty_val)
-            except Exception:
-                qty_int = None
-        if qty_int is None or qty_int <= 0:
-            qty_int = 1
+        if qty_val is None or qty_val <= 0:
+            continue
+        try:
+            qty_int = int(qty_val)
+        except Exception:
+            continue
+        if qty_int <= 0:
+            continue
         side_hint = _detect_row_side(normalized)
-        fragments = [frag.strip() for frag in _FRAGMENT_SPLIT_RE.split(remainder) if frag.strip()]
-        if not fragments:
-            fragments = [remainder.strip() or normalized]
-        qty_prefix = None
-        if _ROW_QUANTITY_PATTERNS[0].match(normalized):
-            qty_prefix = f"({qty_int})"
-        for index, fragment in enumerate(fragments):
-            fragment_clean = " ".join(fragment.split())
-            if not fragment_clean:
-                continue
-            ref_text, ref_value = _extract_row_reference(fragment_clean)
-            has_action = bool(_HOLE_ACTION_TOKEN_RE.search(fragment_clean))
-            has_reference = bool(ref_text or (ref_value is not None))
-            if not has_action and not has_reference:
-                continue
-            desc_value = fragment_clean
-            if index == 0 and qty_prefix and not desc_value.startswith(qty_prefix):
-                desc_value = f"{qty_prefix} {desc_value}".strip()
-            desc_value = _FALLBACK_LEADING_QTY_RE.sub("", desc_value)
-            desc_value = _FALLBACK_JJ_NOISE_RE.sub("", desc_value)
-            desc_value = _FALLBACK_ETCH_NOISE_RE.sub("", desc_value)
-            desc_value = " ".join(desc_value.split()).strip()
-            if not desc_value:
-                continue
-            side_value = _detect_row_side(fragment_clean) or side_hint
-            row: dict[str, Any] = {
-                "hole": "",
-                "qty": qty_int,
-                "desc": desc_value,
-                "ref": ref_text or "",
-            }
-            if side_value:
-                row["side"] = side_value
-            parsed_rows.append(row)
-            total_qty += qty_int
-            if ref_value is not None:
-                key = f"{ref_value:.4f}".rstrip("0").rstrip(".")
-                families[key] = families.get(key, 0) + qty_int
+        desc_value_raw = remainder.strip() or normalized
+        desc_value = _FALLBACK_LEADING_QTY_RE.sub("", desc_value_raw)
+        desc_value = _FALLBACK_JJ_NOISE_RE.sub("", desc_value)
+        desc_value = _FALLBACK_ETCH_NOISE_RE.sub("", desc_value)
+        desc_value = " ".join(desc_value.split()).strip()
+        if not desc_value:
+            continue
+        ref_text, ref_value = _extract_row_reference(desc_value)
+        has_action = bool(_HOLE_ACTION_TOKEN_RE.search(desc_value))
+        has_reference = bool(ref_text or (ref_value is not None))
+        if not has_action and not has_reference:
+            continue
+        side_value = _detect_row_side(desc_value) or side_hint
+        normalized_key = (qty_int, " ".join(desc_value.split()).upper())
+        if normalized_key in seen_keys:
+            continue
+        seen_keys.add(normalized_key)
+        row: dict[str, Any] = {
+            "hole": "",
+            "qty": qty_int,
+            "desc": desc_value,
+            "ref": ref_text or "",
+        }
+        if side_value:
+            row["side"] = side_value
+        parsed_rows.append(row)
+        total_qty += qty_int
+        if ref_value is not None:
+            key = f"{ref_value:.4f}".rstrip("0").rstrip(".")
+            families[key] = families.get(key, 0) + qty_int
 
     if not parsed_rows:
         return {}
@@ -4120,10 +4166,9 @@ def read_text_table(
     rows_txt_initial = 0
     confidence_high = False
 
-    if helper is None:
-        if isinstance(_LAST_TEXT_TABLE_DEBUG, dict):
-            _LAST_TEXT_TABLE_DEBUG["layer_counts_pre"] = {}
-        raise RuntimeError("No text found before layer filtering…")
+    helper_missing = helper is None
+    if helper_missing and isinstance(_LAST_TEXT_TABLE_DEBUG, dict):
+        _LAST_TEXT_TABLE_DEBUG["layer_counts_pre"] = {}
 
     def _analyze_helper_signature(func: Callable[..., Any]) -> tuple[bool, bool]:
         needs_lines = False
@@ -4170,6 +4215,8 @@ def read_text_table(
         entries_by_layout: defaultdict[int, list[dict[str, Any]]] = defaultdict(list)
         layout_names: dict[int, str] = {}
         layout_order: list[int] = []
+        see_sheet_hint_text: str | None = None
+        see_sheet_hint_logged = False
 
         def _filter_and_dedupe_row_texts(row_texts: Iterable[str]) -> list[str]:
             filtered: list[str] = []
@@ -4202,7 +4249,7 @@ def read_text_table(
             nonlocal columnar_table_info, columnar_debug_info, roi_hint_effective, rows_txt_initial
             nonlocal allowlist_display, follow_sheet_target_layouts
             nonlocal collected_entries, candidate_entries, entries_by_layout, layout_names
-            nonlocal layout_order
+            nonlocal layout_order, see_sheet_hint_text, see_sheet_hint_logged
             collected_entries = []
             candidate_entries = []
             entries_by_layout = defaultdict(list)
@@ -5248,13 +5295,40 @@ def read_text_table(
                 else:
                     normalized_line = raw_line
                 normalized_line = " ".join(normalized_line.split())
+                if _should_drop_candidate_line(normalized_line):
+                    normalized_upper = normalized_line.upper()
+                    if (
+                        "SEE SHEET" in normalized_upper
+                        and "HOLE CHART" in normalized_upper
+                        and see_sheet_hint_text is None
+                    ):
+                        see_sheet_hint_text = normalized_line
+                    continue
                 entry_copy = dict(entry)
                 entry_copy["normalized_text"] = normalized_line
                 normalized_entries.append(entry_copy)
                 normalized_lines.append(normalized_line)
-    
+
             candidate_entries = normalized_entries
             table_lines = normalized_lines
+
+            anchor_height, anchor_count = _compute_anchor_height(candidate_entries)
+            print(f"[TEXT-SCAN] anchors={anchor_count} h_anchor={anchor_height:.2f}")
+            total_by_height = len(candidate_entries)
+            if anchor_height > 0 and candidate_entries:
+                filtered_entries = _filter_entries_by_anchor_height(
+                    candidate_entries, anchor_height=anchor_height
+                )
+                kept_count = len(filtered_entries)
+                if kept_count != total_by_height:
+                    candidate_entries = [dict(entry) for entry in filtered_entries]
+                    table_lines = [
+                        str(entry.get("normalized_text") or "") for entry in candidate_entries
+                    ]
+                total_kept = len(candidate_entries)
+            else:
+                total_kept = total_by_height
+            print(f"[TEXT-SCAN] kept_by_height={total_kept}/{total_by_height}")
     
             debug_candidates: list[dict[str, Any]] = []
             for entry in candidate_entries:
@@ -5298,6 +5372,20 @@ def read_text_table(
             _LAST_TEXT_TABLE_DEBUG["rows_txt_count"] = rows_txt_initial
             _LAST_TEXT_TABLE_DEBUG["rows_txt_lines"] = list(merged_rows)
 
+            if (
+                see_sheet_hint_text
+                and not see_sheet_hint_logged
+                and rows_txt_initial > 0
+            ):
+                preview = see_sheet_hint_text
+                if len(preview) > 60:
+                    preview = preview[:57] + "..."
+                print(
+                    f"[TEXT-SCAN] hint: HOLE CHART may be on another sheet (\"{preview}\") "
+                    f"rows here={rows_txt_initial}"
+                )
+                see_sheet_hint_logged = True
+
             return (am_bor_pre_count, am_bor_post_count, am_bor_drop_count)
 
         am_bor_pre_count, am_bor_post_count, am_bor_drop_count = _perform_text_scan(
@@ -5336,6 +5424,7 @@ def read_text_table(
             families: dict[str, int] = {}
             parsed: list[dict[str, Any]] = []
             total = 0
+            seen_keys: set[tuple[int, str]] = set()
             for row_text in row_texts:
                 text_value = " ".join((row_text or "").split()).strip()
                 if not text_value:
@@ -5358,6 +5447,10 @@ def read_text_table(
                     continue
                 side_value = _detect_row_side(text_value) or _detect_row_side(desc_value)
                 ref_text, ref_value = _extract_row_reference(desc_value)
+                normalized_key = (qty_val, " ".join(desc_value.split()).upper())
+                if normalized_key in seen_keys:
+                    continue
+                seen_keys.add(normalized_key)
                 row_dict: dict[str, Any] = {
                     "hole": "",
                     "qty": qty_val,
@@ -6275,10 +6368,7 @@ def _build_columnar_table_from_entries(
             except Exception:
                 qty_key = None
             desc_value = " ".join(str(row.get("desc") or "").split())
-            ref_value = " ".join(str(row.get("ref") or "").split())
-            side_value = str(row.get("side") or "").strip().lower()
-            hole_value = " ".join(str(row.get("hole") or "").split())
-            key = (qty_key, desc_value.lower(), ref_value.lower(), side_value, hole_value.lower())
+            key = (qty_key, desc_value.upper())
             if key in seen_row_keys:
                 continue
             seen_row_keys.add(key)
@@ -6650,6 +6740,9 @@ def promote_table_to_geo(geo: dict[str, Any], table_info: Mapping[str, Any], sou
             geo["provenance"] = provenance
         if isinstance(provenance, dict):
             provenance["holes"] = "HOLE TABLE"
+        print(
+            f"[PATH] publish=text_table rows={len(rows)} qty_sum={qty_sum}"
+        )
     preferred_hole_count = _sum_qty(rows)
     hole_count = table_info.get("hole_count")
     if preferred_hole_count > 0:
@@ -7114,6 +7207,10 @@ def read_geo(
                     totals_map["spot"] += qty_val
             if totals_map:
                 ops_summary["totals"] = dict(totals_map)
+            geo["hole_count"] = qty_sum
+            print(
+                f"[PATH] publish=text_table rows={len(publish_rows)} qty_sum={qty_sum}"
+            )
     else:
         geometry_rows_present = bool(rows)
         if geometry_rows_present and not allow_geom_rows:

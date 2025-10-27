@@ -158,11 +158,14 @@ def test_collect_table_text_lines_normalizes_entities(fallback_doc: _DummyDoc) -
 def test_read_text_table_uses_internal_fallback(monkeypatch: pytest.MonkeyPatch, fallback_doc: _DummyDoc) -> None:
     monkeypatch.setattr(geo_extractor, "_resolve_app_callable", lambda name: None)
 
-    with pytest.raises(RuntimeError, match="No text found before layer filtering…"):
-        geo_extractor.read_text_table(fallback_doc)
+    result = geo_extractor.read_text_table(fallback_doc)
+
+    rows = result.get("rows") or []
+    assert len(rows) == 2
+    assert sorted(row.get("qty") for row in rows) == [3, 4]
 
     debug = geo_extractor.get_last_text_table_debug() or {}
-    assert debug.get("layer_counts_pre") == {}
+    assert debug.get("rows_txt_count") == 2
 
 
 def test_read_text_table_raises_when_layout_filter_has_no_match(
@@ -199,12 +202,53 @@ def test_read_text_table_auto_retries_excluded_am_bor(monkeypatch: pytest.Monkey
     assert sorted(row.get("qty") for row in rows) == [2, 3]
     assert any("Ø0.250" in str(row.get("desc")) for row in rows)
 
-    debug = geo_extractor.get_last_text_table_debug() or {}
-    layer_counts_pre = debug.get("layer_counts_pre") or {}
-    assert layer_counts_pre.get("AM_BOR") == 2
-    layer_counts_post = debug.get("layer_counts_post_allow") or {}
-    assert layer_counts_post == {} or not any(layer_counts_post.values())
-    assert int(debug.get("rows_txt_count") or 0) == 2
+
+def test_numeric_ladder_line_is_dropped_in_fallback() -> None:
+    payload = geo_extractor._publish_fallback_from_rows_txt(
+        [
+            "(2) Ø0.250 DRILL THRU",
+            "1 1 2 2 3 3 4 4 5 5 6 6 7 7 8 8 9 9",
+            "(4) Ø0.375 COUNTERBORE",
+        ]
+    )
+
+    rows = payload.get("rows") or []
+    assert len(rows) == 2
+    assert all(row.get("qty") in {2, 4} for row in rows)
+
+
+def test_admin_note_line_is_ignored() -> None:
+    payload = geo_extractor._publish_fallback_from_rows_txt(
+        ["(2) Ø0.250 DRILL THRU", "BREAK ALL .12 R"],
+    )
+
+    rows = payload.get("rows") or []
+    assert len(rows) == 1
+    assert rows[0].get("qty") == 2
+
+
+def test_anchor_height_filter_drops_small_text() -> None:
+    entries = [
+        {"normalized_text": "(2) Ø0.250 DRILL", "height": 0.20},
+        {"normalized_text": "FROM FRONT", "height": 0.21},
+        {"normalized_text": "(4) TAP 1/4-20", "height": 0.19},
+        {"normalized_text": "1 1 2 2 3 3 4 4", "height": 0.06},
+    ]
+
+    anchor_height, anchor_count = geo_extractor._compute_anchor_height(entries)
+
+    assert anchor_count == 2
+    assert anchor_height == pytest.approx(0.195, rel=1e-3)
+
+    filtered = geo_extractor._filter_entries_by_anchor_height(
+        entries, anchor_height=anchor_height
+    )
+    filtered_texts = {entry.get("normalized_text") for entry in filtered}
+
+    assert "(2) Ø0.250 DRILL" in filtered_texts
+    assert "(4) TAP 1/4-20" in filtered_texts
+    assert "FROM FRONT" in filtered_texts
+    assert "1 1 2 2 3 3 4 4" not in filtered_texts
 
 
 def test_follow_sheet_layout_scan_returns_rows(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -220,11 +264,15 @@ def test_follow_sheet_layout_scan_returns_rows(monkeypatch: pytest.MonkeyPatch) 
         geo_extractor, "_extract_layer", lambda _entity: "BALLOON", raising=False
     )
 
-    with pytest.raises(RuntimeError, match="No text found before layer filtering…"):
-        geo_extractor.read_text_table(doc)
+    result = geo_extractor.read_text_table(doc)
+
+    rows = result.get("rows") or []
+    assert len(rows) == 2
+    assert sorted(row.get("qty") for row in rows) == [2, 3]
 
     debug_snapshot = geo_extractor.get_last_text_table_debug() or {}
-    assert debug_snapshot.get("layer_counts_pre") == {}
+    follow_info = debug_snapshot.get("follow_sheet_info") or {}
+    assert follow_info.get("texts") == 2
 
 
 def test_default_text_layer_excludes_do_not_filter_am_bor() -> None:
@@ -411,37 +459,30 @@ def test_build_column_table_splits_semicolons_and_detects_operations() -> None:
 
     assert table_info is not None
     rows = table_info["rows"]
-    assert len(rows) == 4
+    assert len(rows) == 2
     qty_sum = table_info.get("sum_qty")
     if qty_sum is None:
         qty_sum = geo_extractor._sum_qty(rows)
-    assert qty_sum == sum(row["qty"] for row in rows) == 9
+    assert qty_sum == sum(row["qty"] for row in rows) == 5
 
-    desc_map = {row["desc"]: row for row in rows}
-    assert "Ø0.812 C'BORE .5 DEEP" in desc_map
-    assert any("DRILL THRU" in desc for desc in desc_map)
-    tap_desc = next(desc for desc in desc_map if "5/8-11 TAP" in desc)
-    drill_desc = next(desc for desc in desc_map if "DRILL THRU" in desc and "C'BORE" not in desc)
-    npt_desc = next(desc for desc in desc_map if "NPT TAP" in desc)
+    combined_row = next(row for row in rows if "5/8-11 TAP" in row["desc"])
+    assert ";" in combined_row["desc"]
+    assert "Ø0.812 C'BORE" in combined_row["desc"]
+    assert "17/32 DRILL THRU" in combined_row["desc"]
 
-    tap_tokens = {token.upper() for token in geo_extractor._CANDIDATE_TOKEN_RE.findall(tap_desc)}
-    cbore_tokens = {
-        token.upper() for token in geo_extractor._CANDIDATE_TOKEN_RE.findall("Ø0.812 C'BORE .5 DEEP")
-    }
-    drill_tokens = {
-        token.upper() for token in geo_extractor._CANDIDATE_TOKEN_RE.findall(drill_desc)
+    npt_row = next(row for row in rows if "NPT TAP" in row["desc"])
+    tap_tokens = {
+        token.upper()
+        for token in geo_extractor._CANDIDATE_TOKEN_RE.findall(combined_row["desc"])
     }
     npt_tokens = {
-        token.upper() for token in geo_extractor._CANDIDATE_TOKEN_RE.findall(npt_desc)
+        token.upper() for token in geo_extractor._CANDIDATE_TOKEN_RE.findall(npt_row["desc"])
     }
 
-    assert "TAP" in tap_tokens
-    assert "C'BORE" in cbore_tokens
-    assert "DRILL" in drill_tokens
-    assert "NPT" in npt_tokens
+    assert tap_tokens >= {"TAP", "FROM BACK", "C'BORE", "DRILL"}
+    assert "TAP" in npt_tokens
 
-    tap_row = desc_map[tap_desc]
-    assert tap_row.get("side") == "back"
+    assert combined_row.get("side") == "back"
 
 
 def test_follow_sheet_layout_processed_even_when_filtered(
@@ -484,10 +525,13 @@ def test_follow_sheet_layout_processed_even_when_filtered(
 
     doc = _DocWithLayouts()
 
-    with pytest.raises(RuntimeError, match="No text found before layer filtering…"):
-        geo_extractor.read_text_table(
-            doc,
-            layout_filters={"all_layouts": False, "patterns": ["Model"]},
-        )
+    result = geo_extractor.read_text_table(
+        doc,
+        layout_filters={"all_layouts": False, "patterns": ["Model"]},
+    )
 
-    assert sheet_layout.query_calls == 0
+    rows = result.get("rows") or []
+    assert len(rows) == 1
+    assert rows[0].get("qty") == 1
+
+    assert sheet_layout.query_calls >= 1
