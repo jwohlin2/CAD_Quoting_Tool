@@ -178,6 +178,18 @@ def test_read_text_table_uses_internal_fallback(monkeypatch: pytest.MonkeyPatch,
     assert info.get("provenance_holes") == "HOLE TABLE"
 
 
+def test_read_text_table_raises_when_layout_filter_has_no_match(
+    monkeypatch: pytest.MonkeyPatch, fallback_doc: _DummyDoc
+) -> None:
+    monkeypatch.setattr(geo_extractor, "_resolve_app_callable", lambda name: None)
+
+    with pytest.raises(RuntimeError):
+        geo_extractor.read_text_table(
+            fallback_doc,
+            layout_filters={"all_layouts": False, "patterns": ["^PAPERONLY$"]},
+        )
+
+
 def test_follow_sheet_layout_scan_returns_rows(monkeypatch: pytest.MonkeyPatch) -> None:
     sheet_entities = [
         _DummyMText("(2) Ø0.250 DRILL THRU"),
@@ -230,7 +242,7 @@ def test_read_geo_prefers_text_rows(monkeypatch: pytest.MonkeyPatch, fallback_do
     def fake_acad(_doc: _DummyDoc) -> dict[str, object]:
         return {}
 
-    def fake_text(_doc: _DummyDoc) -> dict[str, object]:
+    def fake_text(_doc: _DummyDoc, **_kwargs: object) -> dict[str, object]:
         return {
             "rows": list(text_rows),
             "hole_count": 5,

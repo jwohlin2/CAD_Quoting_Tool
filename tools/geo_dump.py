@@ -355,6 +355,34 @@ def main(argv: Sequence[str] | None = None) -> int:
         return 1
 
     read_kwargs: dict[str, object] = {}
+
+    layout_patterns = [
+        value.strip()
+        for value in args.layouts or []
+        if isinstance(value, str) and value.strip()
+    ]
+    layout_regex = None
+    if layout_patterns:
+        if len(layout_patterns) == 1:
+            layout_regex = layout_patterns[0]
+        else:
+            layout_regex = "|".join(f"(?:{pattern})" for pattern in layout_patterns)
+    layout_filters_arg: dict[str, object] | None = None
+    if layout_regex or not args.all_layouts:
+        layout_filters_arg = {
+            "all_layouts": bool(args.all_layouts),
+            "patterns": [layout_regex] if layout_regex else [],
+        }
+        read_kwargs["layout_filters"] = layout_filters_arg
+        if getattr(args, "debug_scan", False):
+            preview = geo_extractor.iter_layouts(doc, layout_filters_arg, log=False)
+            layout_names = [
+                str(name or "").strip() or "-"
+                for name, _ in preview
+            ]
+            display = ", ".join(layout_names) if layout_names else "<none>"
+            print(f"[geo_dump] layouts={display}")
+
     layer_allow_args = list(args.layer_allow or [])
     allow_layers_arg = getattr(args, "allow_layers", None)
     if allow_layers_arg:
