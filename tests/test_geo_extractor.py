@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import types
+from collections import defaultdict
 from pathlib import Path
 
 import pytest
@@ -79,6 +80,48 @@ class _DummyDoc:
         return _DummySpace(self._entities)
 
 
+class _ToggleLayout(_DummySpace):
+    def __init__(self, entities: list[object]) -> None:
+        super().__init__(entities)
+        self._active = False
+
+    def activate(self) -> None:
+        self._active = True
+
+    def query(self, _spec: str) -> list[object]:
+        if not self._active:
+            return []
+        return list(self._entities)
+
+    def __iter__(self):
+        return iter(self.query(""))
+
+
+class _FollowLayoutManager:
+    def __init__(self, layout: _ToggleLayout) -> None:
+        self._layout = layout
+        self._calls: defaultdict[str, int] = defaultdict(int)
+
+    def names(self) -> list[str]:
+        return ["SHEET (2)"]
+
+    def get(self, name: str) -> _ToggleLayout:
+        self._calls[name] += 1
+        if self._calls[name] > 1:
+            self._layout.activate()
+        return self._layout
+
+
+class _FollowDoc:
+    def __init__(self, model_entities: list[object], layout: _ToggleLayout) -> None:
+        self._model = _ToggleLayout(model_entities)
+        self._model.activate()
+        self.layouts = _FollowLayoutManager(layout)
+
+    def modelspace(self) -> _DummySpace:
+        return self._model
+
+
 @pytest.fixture
 def fallback_doc() -> _DummyDoc:
     entities = [
@@ -133,6 +176,37 @@ def test_read_text_table_uses_internal_fallback(monkeypatch: pytest.MonkeyPatch,
     families = info.get("hole_diam_families_in")
     assert families == {"0.375": 3, "0.5": 2, "0.625": 4}
     assert info.get("provenance_holes") == "HOLE TABLE"
+
+
+def test_follow_sheet_layout_scan_returns_rows(monkeypatch: pytest.MonkeyPatch) -> None:
+    sheet_entities = [
+        _DummyMText("(2) Ø0.250 DRILL THRU"),
+        _DummyMText("(3) Ø0.312 TAP FROM FRONT"),
+    ]
+    follow_layout = _ToggleLayout(sheet_entities)
+    doc = _FollowDoc([_DummyMText("SEE SHEET 2 FOR HOLE CHART")], follow_layout)
+
+    monkeypatch.setattr(geo_extractor, "_resolve_app_callable", lambda name: None)
+    monkeypatch.setattr(
+        geo_extractor, "_extract_layer", lambda _entity: "BALLOON", raising=False
+    )
+
+    result = geo_extractor.read_text_table(doc)
+
+    rows = result["rows"]
+    assert rows, "expected rows from follow sheet layout"
+    qtys = sorted(row.get("qty") for row in rows)
+    assert qtys == [2, 3]
+    desc_texts = {str(row.get("desc") or "") for row in rows}
+    assert any("Ø0.250" in text for text in desc_texts)
+    assert any("Ø0.312" in text for text in desc_texts)
+
+    debug_layouts = geo_extractor._LAST_TEXT_TABLE_DEBUG.get("layouts", []) or []
+    assert any("SHEET (2)" in str(item) for item in debug_layouts)
+    debug_targets = geo_extractor._LAST_TEXT_TABLE_DEBUG.get("follow_sheet_targets") or []
+    if isinstance(debug_targets, str):
+        debug_targets = [debug_targets]
+    assert any("SHEET (2)" in str(target) for target in debug_targets)
 
 
 def test_read_geo_prefers_text_rows(monkeypatch: pytest.MonkeyPatch, fallback_doc: _DummyDoc) -> None:
