@@ -16,13 +16,6 @@ from __future__ import annotations
 
 import os, sys, logging
 
-LOG_LEVEL = os.getenv("APP_LOG_LEVEL", "DEBUG").upper()
-logging.basicConfig(
-    stream=sys.stdout,
-    level=getattr(logging, LOG_LEVEL, logging.DEBUG),
-    format="[%(levelname)s] %(message)s",
-)
-
 
 def dbg(lines, msg: str):
     """Log to terminal, and also mirror into the quote if `lines` is provided."""
@@ -24684,33 +24677,28 @@ class App(tk.Tk):
                 self._reprice_in_progress = False
 
 def main(argv: Sequence[str] | None = None) -> int:
-    """Entry point so ``python appV5.py`` mirrors the CLI launcher."""
+    """CLI composition root for quoting via :mod:`cad_quoter.app` helpers."""
 
-    from cad_quoter.app.cli import main as _cli_main
+    from cad_quoter.app import io as app_io
+    from cad_quoter.app import runtime, driver
 
-    if typing.TYPE_CHECKING:
-        from cad_quoter.pricing import (
-            PricingEngine as _PricingEngine,
-            create_default_registry as _create_default_registry,
-        )
-    else:  # pragma: no cover - executed at runtime
-        from cad_quoter.pricing import (
-            PricingEngine as _PricingEngine,
-            create_default_registry as _create_default_registry,
-        )
+    ns = app_io.parse_args(list(argv) if argv is not None else None)
+    cfg = runtime.build_config()
 
-    return _cli_main(
-        argv,
-        app_cls=App,
-        pricing_engine_cls=_PricingEngine,
-        pricing_registry_factory=_create_default_registry,
-        app_env=APP_ENV,
-        env_setter=lambda env: globals().__setitem__("APP_ENV", env),
-    )
+    spec = app_io.resolve_input(ns)
+    if spec.batch_dir:
+        lines = driver.run_batch(cfg, spec)
+    else:
+        lines = driver.run_single_file(cfg, spec)
+
+    app_io.emit_output(ns, lines)
+    return 0
 
 
-if __name__ == "__main__":  # pragma: no cover - manual invocation
-    sys.exit(main())
+if __name__ == "__main__":
+    import sys as _sys
+
+    raise SystemExit(main(_sys.argv[1:]))
 
 # Emit chart-debug key lines at most once globally per run
 _PRINTED_CHART_DEBUG_KEYS = False
