@@ -4759,6 +4759,7 @@ from cad_quoter.ui.planner_render import (
     sane_minutes_or_zero,
     canonicalize_costs,
 )
+from cad_quoter.ui.process_render import RenderState as ProcessRenderState, render_process
 from cad_quoter.ui.services import QuoteConfiguration
 from cad_quoter.pricing.validation import validate_quote_before_pricing
 from cad_quoter.utils.debug_tables import (
@@ -12911,14 +12912,6 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
         process_table.had_rows = True
 
     bucket_view_obj = locals().get("bucket_view_obj") if "bucket_view_obj" in locals() else None
-    bucket_view_for_render: Mapping[str, Any] | None
-    if isinstance(bucket_view_obj, (_MappingABC, dict)):
-        bucket_view_for_render = typing.cast(Mapping[str, Any], bucket_view_obj)
-    elif isinstance(bucket_view_struct, (_MappingABC, dict)):
-        bucket_view_for_render = typing.cast(Mapping[str, Any], bucket_view_struct)
-    else:
-        bucket_view_for_render = None
-
     bucket_seed_target: MutableMapping[str, Any] | Mapping[str, Any] | None = None
     for candidate_name in ("bucket_view_obj", "bucket_view_struct"):
         candidate = locals().get(candidate_name)
@@ -12956,181 +12949,58 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
         or 45.0
     )
 
-    if bucket_seed_target is not None:
-        _purge_legacy_drill_sync(bucket_seed_target)
-        _set_bucket_minutes_cost(
-            bucket_seed_target,
-            "drilling",
-            drill_minutes_total,
-            drill_mrate,
-            drill_lrate,
-        )
-        try:
-            drilling_bucket_snapshot = (
-                (bucket_seed_target.get("buckets") or {}).get("drilling")
-                if isinstance(bucket_seed_target, (_MappingABC, dict))
-                else None
-            )
-        except Exception:
-            drilling_bucket_snapshot = None
-        logger.info(
-            "[bucket] drilling_minutes=%s drilling_bucket=%s",
-            drill_minutes_total,
-            drilling_bucket_snapshot,
-        )
-
-    if isinstance(bucket_view_obj, (_MutableMappingABC, dict)):
-        _normalize_buckets(typing.cast(MutableMapping[str, Any], bucket_view_obj))
-    elif isinstance(bucket_view_struct, (_MutableMappingABC, dict)):
-        _normalize_buckets(typing.cast(MutableMapping[str, Any], bucket_view_struct))
-
-    if isinstance(bucket_view_for_render, Mapping):
-        if isinstance(bucket_view_for_render, (_MutableMappingABC, dict)):
-            # ``bucket_view_for_render`` already references a mutable structure
-            # that has been normalised in-place above.
-            pass
-        else:
-            # Planner payloads are sometimes stored in read-only mapping
-            # proxies.  Clone and normalise those views so downstream helpers
-            # do not encounter unlabeled buckets (which would emit generic
-            # rate lines like ``0.21 hr @ $89.98/hr``).
-            bucket_view_for_render = _prepare_bucket_view(bucket_view_for_render)
-
-    process_section_start = len(lines)
-
-    bucket_entries_for_totals: Mapping[str, Any] | None = None
-    if isinstance(bucket_view_for_render, (_MappingABC, dict)):
-        try:
-            bucket_entries_candidate = bucket_view_for_render.get("buckets")
-        except Exception:
-            bucket_entries_candidate = None
-        if isinstance(bucket_entries_candidate, dict):
-            bucket_entries_for_totals = bucket_entries_candidate
-        elif isinstance(bucket_entries_candidate, _MappingABC):
-            try:
-                bucket_entries_for_totals = dict(bucket_entries_candidate)
-            except Exception:
-                bucket_entries_for_totals = {}
-    if bucket_entries_for_totals is None:
-        bucket_entries_for_totals = {}
-
-    bucket_entries_for_totals_map = {}
-
-    preferred_bucket_order = [
-        "programming",
-        "milling",
-        "drilling",
-        "tapping",
-        "counterbore",
-        "spot_drill",
-        "jig_grind",
-        "inspection",
-    ]
-
-    proc_total_rendered = 0.0
-    hrs_total_rendered = 0.0
-    seen_bucket_keys: set[str] = set()
-    for bucket_key in list(preferred_bucket_order) + [
-        key for key in bucket_entries_for_totals if key not in preferred_bucket_order
-    ]:
-        entry = bucket_entries_for_totals.get(bucket_key)
-        if not isinstance(entry, _MappingABC) or bucket_key in seen_bucket_keys:
-            continue
-        seen_bucket_keys.add(bucket_key)
-
-        canon_key = (
-            _canonical_bucket_key(bucket_key)
-            or _normalize_bucket_key(bucket_key)
-            or str(bucket_key)
-        )
-        normalized_key = _normalize_bucket_key(bucket_key)
-        display_label = _display_bucket_label(canon_key, label_overrides)
-
-        lookup_keys = {
-            str(bucket_key),
-            canon_key,
-            normalized_key,
-            display_label,
-        }
-        for lookup_key in lookup_keys:
-            if lookup_key:
-                bucket_entries_for_totals_map[str(lookup_key)] = entry
-
-    process_config_sources: list[Mapping[str, Any]] = []
-
-    def _collect_config_sources(container: Mapping[str, Any] | None) -> None:
-        if not isinstance(container, _MappingABC):
-            return
-        for key in ("config", "params"):
-            try:
-                candidate = container.get(key)
-            except Exception:
-                candidate = None
-            if isinstance(candidate, dict):
-                process_config_sources.append(candidate)
-            elif isinstance(candidate, _MappingABC):
-                process_config_sources.append(dict(candidate))
-
-    _collect_config_sources(breakdown if isinstance(breakdown, _MappingABC) else None)
-    _collect_config_sources(result if isinstance(result, _MappingABC) else None)
-    if isinstance(result, _MappingABC):
-        quote_state_payload = result.get("quote_state")
-        if isinstance(quote_state_payload, _MappingABC):
-            _collect_config_sources(quote_state_payload)
-
-    process_section_lines, process_rows_total, process_rows_minutes, process_rows_rendered = render_process_sections(
-        bucket_view_for_render,
-        process_meta=process_meta if isinstance(process_meta, _MappingABC) else None,
-        rates=rates if isinstance(rates, _MappingABC) else None,
-        cfg=cfg,
-        label_overrides=label_overrides,
+    process_render_state = ProcessRenderState(
+        lines=lines,
+        why_lines=why_lines,
+        page_width=page_width,
         format_money=_m,
-        add_process_notes=lambda label: add_process_notes(label),
-        config_sources=process_config_sources,
+        add_process_notes=add_process_notes,
+        render_bucket_table=render_bucket_table,
+        bucket_view_obj=typing.cast(Mapping[str, Any] | None, bucket_view_obj),
+        bucket_view_struct=typing.cast(Mapping[str, Any] | None, bucket_view_struct),
+        bucket_seed_target=bucket_seed_target,
+        process_plan_summary=process_plan_summary_candidate,
+        extra_map=extra_map_candidate,
+        rates=typing.cast(Mapping[str, Any] | None, rates_candidate),
+        drill_minutes_total=drill_minutes_total,
+        drill_machine_rate=drill_mrate,
+        drill_labor_rate=drill_lrate,
+        process_meta=typing.cast(Mapping[str, Any] | None, process_meta),
+        label_overrides=typing.cast(Mapping[str, Any] | None, label_overrides),
         labor_cost_totals=labor_cost_totals,
         programming_minutes=locals().get("programming_minutes"),
-        page_width=page_width,
+        breakdown=typing.cast(Mapping[str, Any] | None, breakdown),
+        result=typing.cast(Mapping[str, Any] | None, result),
+        cfg=cfg,
         canonical_bucket_key=_canonical_bucket_key,
         normalize_bucket_key=_normalize_bucket_key,
         display_bucket_label=_display_bucket_label,
         programming_per_part_label=PROGRAMMING_PER_PART_LABEL,
         programming_amortized_label=PROGRAMMING_AMORTIZED_LABEL,
+        bucket_entries_for_totals_map=bucket_entries_for_totals_map,
+        bucket_why_summary_line=bucket_why_summary_line,
     )
-    lines.extend(process_section_lines)
-    proc_total_rendered = process_rows_total
-    hrs_total_rendered = process_rows_minutes / 60.0 if process_rows_minutes > 0 else 0.0
-    proc_machine = sum(row[2] for row in process_rows_rendered)
-    proc_labor = sum(row[3] for row in process_rows_rendered)
-    machine_sum = proc_machine
-    labor_sum = proc_labor
-    if process_rows_rendered:
-        top_rows = sorted(
-            process_rows_rendered,
-            key=lambda r: r[4],
-            reverse=True,
-        )[:3]
-        top_lines = [
-            f"{name} ${total:,.2f}" for (name, _, _, _, total) in top_rows
-        ]
-        for line in top_lines:
-            if line not in why_lines:
-                why_lines.append(line)
-        summary_bits: list[str] = [
-            f"Machine {_m(machine_sum)}",
-            f"Labor {_m(labor_sum)}",
-        ]
-        top_summary = [
-            f"{name} {_m(total)}" for (name, _, _, _, total) in top_rows if total > 0
-        ]
-        if top_summary:
-            summary_bits.append("largest bucket(s): " + ", ".join(top_summary))
-        bucket_why_summary_line = "Process buckets — " + "; ".join(summary_bits)
-    if proc_total_rendered or hrs_total_rendered:
-        for offset, text in enumerate(lines[process_section_start:]):
-            stripped = str(text or "").strip()
-            if stripped.lower().startswith("total") and "$" in stripped:
-                process_total_row_index = process_section_start + offset
-                break
+
+    process_render_result = render_process(process_render_state)
+    lines.extend(process_render_result.lines)
+    for line in process_render_result.why_lines:
+        if line not in why_lines:
+            why_lines.append(line)
+    if process_render_result.bucket_summary:
+        bucket_why_summary_line = process_render_result.bucket_summary
+
+    proc_total_rendered = process_render_state.process_total_cost
+    hrs_total_rendered = (
+        process_render_state.process_total_minutes / 60.0
+        if process_render_state.process_total_minutes > 0.0
+        else 0.0
+    )
+    if process_render_state.process_total_row_index >= 0:
+        process_total_row_index = process_render_state.process_total_row_index
+    if isinstance(bucket_state, PlannerBucketRenderState):
+        bucket_state.process_total_cost = proc_total_rendered
+        bucket_state.process_total_minutes = process_render_state.process_total_minutes
+        bucket_state.process_total_row_index = process_render_state.process_total_row_index
     proc_total = proc_total_rendered
 
     # ---- Pass-Through & Direct (auto include non-zeros; sorted desc) --------

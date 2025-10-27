@@ -7,6 +7,7 @@ __all__ = [
     "editor_controls",
     "llm_panel",
     "planner_render",
+    "process_render",
     "services",
     "session_io",
     "suggestions",
