@@ -8,6 +8,7 @@ import re
 import pytest
 
 from cad_quoter import geo_extractor
+from cad_quoter.utils.chart_buckets import classify_chart_rows
 
 
 _RTEXT_FIXTURE_PATH = Path(__file__).resolve().parent / "data" / "rtext_fixture.dxf"
@@ -225,18 +226,31 @@ def test_admin_note_line_is_ignored() -> None:
     rows = payload.get("rows") or []
     assert len(rows) == 1
     assert rows[0].get("qty") == 2
+    assert "BREAK ALL" not in (rows[0].get("desc") or "")
+
+
+def test_break_all_line_never_forms_row() -> None:
+    payload = geo_extractor._fallback_text_table(["BREAK ALL .12 R"])
+
+    rows = payload.get("rows") or []
+    assert rows == []
+
+    buckets, row_count, qty_sum = classify_chart_rows(rows)
+    assert buckets == {}
+    assert row_count == 0
+    assert qty_sum == 0
 
 
 def test_anchor_rows_are_authoritative_over_roi() -> None:
     anchor_rows = [
-        {"qty": 2, "desc": "(2) 5/8-11 TAP"},
-        {"qty": 2, "desc": "(2) #10-32 TAP"},
-        {"qty": 4, "desc": "(4) .75 C'BORE ; \"R\" (.339) DRILL ; 1/8-NPT"},
+        {"qty": 2, "desc": "(2) 5/8-11 TAP X 1.00 DEEP"},
+        {"qty": 2, "desc": "(2) #10-32 TAP THRU"},
+        {
+            "qty": 4,
+            "desc": "(4) .75Ø C'BORE AS SHOWN; \"R\" (.339Ø) DRILL THRU AS SHOWN; 1/8- N.P.T.",
+        },
     ]
-    roi_rows = [
-        {"qty": 2, "desc": "(2) 5/8-11 TAP"},
-        {"qty": 12, "desc": ".12 R"},
-    ]
+    roi_rows = [{"qty": 8, "desc": "ROI noise"}, {"qty": 4, "desc": ".12 R"}]
 
     merged, dedup, authoritative = geo_extractor._combine_text_rows(
         anchor_rows,
@@ -247,6 +261,15 @@ def test_anchor_rows_are_authoritative_over_roi() -> None:
     assert authoritative
     assert merged == anchor_rows
     assert dedup == 0
+    assert sum(row.get("qty", 0) for row in merged) == 8
+
+    buckets, row_count, qty_sum = classify_chart_rows(merged)
+    assert row_count == 3
+    assert qty_sum == 8
+    assert buckets.get("tap") == 4
+    assert buckets.get("cbore") == 4
+    assert buckets.get("npt") == 4
+    assert buckets.get("drill_spec") == 4
 
 
 def test_merge_table_lines_ignores_numeric_ladder_noise() -> None:
@@ -264,15 +287,21 @@ def test_merge_table_lines_ignores_numeric_ladder_noise() -> None:
 def test_fallback_semicolon_row_remains_single_entry() -> None:
     result = geo_extractor._fallback_text_table(
         [
-            "(4) .75 C'BORE ; \"R\" (.339) DRILL ;",
-            "1/8-NPT",
+            "(4) .75Ø C'BORE AS SHOWN; \"R\" (.339Ø) DRILL THRU AS SHOWN; 1/8- N.P.T.",
         ]
     )
 
     rows = result.get("rows") or []
     assert len(rows) == 1
     assert rows[0].get("qty") == 4
-    assert "1/8-NPT" in rows[0].get("desc", "")
+    assert "1/8- N.P.T." in rows[0].get("desc", "")
+
+    buckets, row_count, qty_sum = classify_chart_rows(rows)
+    assert row_count == 1
+    assert qty_sum == 4
+    assert buckets.get("cbore") == 4
+    assert buckets.get("npt") == 4
+    assert buckets.get("tap", 0) == 0
 
 
 def test_anchor_height_filter_drops_small_text() -> None:
