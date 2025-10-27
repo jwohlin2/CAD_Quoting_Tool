@@ -168,21 +168,50 @@ def _parse_ref_to_inch(value: Any) -> float | None:
 
 
 _SUMMARY_OP_RULES: tuple[tuple[str, re.Pattern[str]], ...] = (
-    ("Tap", re.compile(r"\b(?:TAP|N\.?P\.?T\.?)\b")),
     (
-        "Counterbore",
-        re.compile(r"\b(?:C'? ?BORE|COUNTER ?BORE)\b"),
-    ),
-    (
-        "Countersink/Counterdrill",
+        "Tap",
         re.compile(
-            r"\b(?:C'? ?DRILL|COUNTER[- ]?DRILL|CTR ?DRILL|CENTER ?DRILL|SPOT ?DRILL|SPOT|C'? ?SINK|CSK|COUNTER ?SINK)\b"
+            r"""
+            \b(
+                TAP|
+                NPT|
+                \d+(?:/\d+)?\s*-\s*\d+(?:\.\d+)?(?:\s*(?:UNC|UNF|UNEF|UNS|UNJ|UNJC|UN|BSP|BSPT|BSPP|BSF|BSW|SAE|NPS|NPSM|NPSF|NPSL|NPTF))?|
+                \#\s*\d+\s*-\s*\d+(?:\.\d+)?|
+                M\d+(?:\.\d+)?\s*X\s*\d+(?:\.\d+)?
+            )\b
+            """,
+            re.VERBOSE,
         ),
     ),
-    ("Jig Grind", re.compile(r"\bJIG ?GRIND\b")),
+    (
+        "C'bore",
+        re.compile(
+            r"\b(?:C'? ?BORE|CBORE|COUNTER ?BORE|SPOT ?FACE|SPOTFACE)\b",
+        ),
+    ),
+    (
+        "C'drill",
+        re.compile(
+            r"\b(?:C'? ?DRILL|C'? ?DRL|C'? ?SINK|C'? ?SK|COUNTER[- ]?DRILL|COUNTER ?SINK|CTR ?DRILL|CENTER ?DRILL|SPOT ?DRILL|SPOT|CSK)\b",
+        ),
+    ),
+    (
+        "Jig Grind",
+        re.compile(r"\bJIG ?(?:GRIND|GRND)\b"),
+    ),
     (
         "Drill",
-        re.compile(r"\b(?:DRILL|THRU)\b"),
+        re.compile(
+            r"""
+            (
+                (?<!COUNTER )(?<!CENTER )(?<!CTR )(?<!SPOT )\bDRILL\b|
+                \bTHRU\b|
+                \bLETTER\s+[A-Z]\s+DRILL\b|
+                \b'?[A-Z]'?\s+DRILL\b
+            )
+            """,
+            re.VERBOSE,
+        ),
     ),
 )
 
@@ -190,8 +219,9 @@ _SUMMARY_OP_TRANSLATE = str.maketrans(
     {
         "’": "'",
         "‘": "'",
-        "“": '"',
-        "”": '"',
+        "“": "'",
+        "”": "'",
+        '"': "'",
         "‐": "-",
         "‑": "-",
         "‒": "-",
@@ -218,7 +248,10 @@ def _norm_txt(s: str) -> str:
 def _normalize_ops_desc(desc: str) -> str:
     text = (desc or "").translate(_SUMMARY_OP_TRANSLATE)
     text = text.upper()
+    text = text.replace("Ø", "O").replace("⌀", "O")
     text = re.sub(r"\bN\.\s*P\.\s*T\.?\b", "NPT", text)
+    text = re.sub(r"C\s*'\s*", "C'", text)
+    text = re.sub(r"'([A-Z])'", r"\1", text)
     text = re.sub(r"\s+", " ", text).strip()
     return text
 
@@ -1808,7 +1841,7 @@ def _aggregate_summary_rows(
             else:
                 totals["tap_front"] += qty
                 actions["tap_front"] += qty
-        elif label == "Counterbore":
+        elif label == "C'bore":
             totals["counterbore"] += qty
             if side == "BACK":
                 totals["counterbore_back"] += qty
@@ -1821,7 +1854,7 @@ def _aggregate_summary_rows(
             else:
                 totals["counterbore_front"] += qty
                 actions["counterbore_front"] += qty
-        elif label == "Countersink/Counterdrill":
+        elif label == "C'drill":
             totals["spot"] += qty
             actions["spot"] += qty
         elif label == "Jig Grind":
