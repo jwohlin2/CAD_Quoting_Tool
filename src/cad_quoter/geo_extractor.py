@@ -21,6 +21,16 @@ from cad_quoter.geometry import convert_dwg_to_dxf
 from cad_quoter.vendors import ezdxf as _ezdxf_vendor
 
 
+NO_TEXT_ROWS_MESSAGE = "No text found before filtering; use --dump-ents to inspect."
+
+
+class NoTextRowsError(RuntimeError):
+    """Raised when neither ACAD nor text pipelines yield usable rows."""
+
+    def __init__(self, message: str = NO_TEXT_ROWS_MESSAGE) -> None:
+        super().__init__(message)
+
+
 TransformMatrix = tuple[float, float, float, float, float, float]
 
 
@@ -6441,6 +6451,18 @@ def read_geo(
             fallback_rows_list = _normalize_table_rows(fallback_info.get("rows"))
             fallback_info["rows"] = fallback_rows_list
             fallback_qty_sum = _sum_qty(fallback_rows_list)
+    no_text_rows_available = bool(
+        use_tables
+        and run_acad
+        and run_text
+        and acad_rows == 0
+        and text_rows == 0
+        and not fallback_rows_list
+        and rows_txt_debug == 0
+        and not allow_geom_rows
+    )
+    if no_text_rows_available:
+        raise NoTextRowsError()
     force_text_mode = bool(
         run_text and force_text and fallback_info and fallback_rows_list
     )
@@ -6950,6 +6972,8 @@ def get_last_acad_table_scan() -> dict[str, Any] | None:
 
 
 __all__ = [
+    "NoTextRowsError",
+    "NO_TEXT_ROWS_MESSAGE",
     "read_geo",
     "extract_geo_from_path",
     "read_acad_table",

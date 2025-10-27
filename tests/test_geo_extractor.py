@@ -288,6 +288,18 @@ def test_read_geo_promotes_rows_txt_fallback(
     assert '0.3390"' in refs
 
 
+def test_read_geo_raises_when_no_text_rows(
+    monkeypatch: pytest.MonkeyPatch, fallback_doc: _DummyDoc
+) -> None:
+    monkeypatch.setattr(geo_extractor, "read_acad_table", lambda *args, **kwargs: {})
+    monkeypatch.setattr(geo_extractor, "read_text_table", lambda *args, **kwargs: {})
+    monkeypatch.setattr(geo_extractor, "extract_geometry", lambda _doc: {})
+    geo_extractor._LAST_TEXT_TABLE_DEBUG = {"rows_txt_count": 0, "rows_txt_lines": []}
+
+    with pytest.raises(geo_extractor.NoTextRowsError):
+        geo_extractor.read_geo(fallback_doc)
+
+
 def test_build_column_table_accepts_wrapped_qty_cells() -> None:
     def _entry(text: str, x: float, y: float) -> dict[str, object]:
         return {"text": text, "x": x, "y": y, "height": 0.1}
