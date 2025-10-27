@@ -124,8 +124,17 @@ _DIA_TOKEN = re.compile(
 )
 _MIXED_FRACTION_ONLY = re.compile(r"^[+-]?\s*(?:\d+\s+)?\d+/\d+\s*$")
 
+_MM_DIM_TOKEN = re.compile(
+    r"(?:%%[Cc]|[Ø⌀\u00D8]|DIA|DIAM|REF)?\s*"
+    r"((?:\d+\s*/\s*\d+)|(?:\d+(?:\.\d+)?))\s*"
+    r"(?:MM|MILLIM(?:E|E)T(?:E|)RS?)",
+    re.I,
+)
 
-def _parse_ref_to_inch(value: Any) -> float | None:
+
+def parse_dim(value: Any) -> float | None:
+    """Parse a dimension string to inches, handling fractions and millimetres."""
+
     if value is None:
         return None
     if isinstance(value, (int, float)):
@@ -138,6 +147,18 @@ def _parse_ref_to_inch(value: Any) -> float | None:
     text = str(value).strip()
     if not text:
         return None
+
+    mm_match = _MM_DIM_TOKEN.search(text)
+    if mm_match:
+        token = mm_match.group(1).replace(" ", "")
+        try:
+            mm_val = float(Fraction(token)) if "/" in token else float(token)
+        except Exception:
+            mm_val = None
+        if mm_val is not None:
+            inch_val = mm_val / 25.4
+            if math.isfinite(inch_val) and inch_val > 0:
+                return inch_val
 
     cleaned = (
         text.replace("%%C", "")
@@ -1168,7 +1189,7 @@ def _normalize_ops_entries(
             if dia_in is None:
                 dia_in = _coerce_float_or_none(op.get("ref_dia_in"))
             if dia_in is None and ref:
-                ref_in = _parse_ref_to_inch(ref)
+                ref_in = parse_dim(ref)
                 if ref_in is not None:
                     dia_in = ref_in
 
@@ -2428,7 +2449,7 @@ __all__ = [
     "_SIDE_FRONT",
     "_DEPTH_TOKEN",
     "_DIA_TOKEN",
-    "_parse_ref_to_inch",
+    "parse_dim",
     "_rows_from_ops_summary",
     "_side_of",
     "_major_diameter_from_thread",
