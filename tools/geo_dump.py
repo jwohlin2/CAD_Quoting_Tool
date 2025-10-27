@@ -15,7 +15,12 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 from cad_quoter import geo_extractor
-from cad_quoter.geo_extractor import DEFAULT_TEXT_LAYER_EXCLUDE_REGEX, read_geo
+from cad_quoter.geo_extractor import (
+    DEFAULT_TEXT_LAYER_EXCLUDE_REGEX,
+    NO_TEXT_ROWS_MESSAGE,
+    NoTextRowsError,
+    read_geo,
+)
 
 DEFAULT_SAMPLE_PATH = REPO_ROOT / "Cad Files" / "301_redacted.dwg"
 ARTIFACT_DIR = REPO_ROOT / "out"
@@ -446,7 +451,11 @@ def main(argv: Sequence[str] | None = None) -> int:
         read_kwargs["pipeline"] = args.pipeline
     if args.allow_geom:
         read_kwargs["allow_geom"] = True
-    payload = read_geo(doc, **read_kwargs)
+    try:
+        payload = read_geo(doc, **read_kwargs)
+    except NoTextRowsError:
+        print(NO_TEXT_ROWS_MESSAGE)
+        return 2
     if isinstance(payload, Mapping):
         payload = dict(payload)
     else:
@@ -481,7 +490,11 @@ def main(argv: Sequence[str] | None = None) -> int:
             except Exception as exc:
                 print(f"[ACAD-TABLE] DXF fallback {normalized_version} failed: {exc}")
                 continue
-            payload = read_geo(fallback_doc, **read_kwargs)
+            try:
+                payload = read_geo(fallback_doc, **read_kwargs)
+            except NoTextRowsError:
+                print(NO_TEXT_ROWS_MESSAGE)
+                return 2
             if isinstance(payload, Mapping):
                 payload = dict(payload)
             else:
