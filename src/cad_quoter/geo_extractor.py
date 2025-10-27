@@ -2166,6 +2166,7 @@ def _collect_table_text_lines(
     layout_filters: Mapping[str, Any] | Iterable[str] | str | None = None,
 ) -> list[str]:
     lines: list[str] = []
+    seen_markers: set[int] = set()
     if doc is None:
         return lines
 
@@ -4105,6 +4106,11 @@ def read_text_table(
     rows_txt_initial = 0
     confidence_high = False
 
+    if helper is None:
+        if isinstance(_LAST_TEXT_TABLE_DEBUG, dict):
+            _LAST_TEXT_TABLE_DEBUG["layer_counts_pre"] = {}
+        raise RuntimeError("No text found before layer filtering…")
+
     def _analyze_helper_signature(func: Callable[..., Any]) -> tuple[bool, bool]:
         needs_lines = False
         allows_lines = False
@@ -4136,7 +4142,7 @@ def read_text_table(
     def ensure_lines() -> list[str]:
         nonlocal table_lines, text_rows_info, merged_rows, parsed_rows
         nonlocal columnar_table_info, columnar_debug_info, roi_hint_effective
-        nonlocal rows_txt_initial, doc
+        nonlocal rows_txt_initial, doc, resolved_allowlist
         if table_lines is not None:
             return table_lines
 
@@ -4144,1073 +4150,1141 @@ def read_text_table(
         if text_stream_doc is not None:
             doc = text_stream_doc
         fallback_stream_lines = list(text_stream_lines or [])
-
+        follow_sheet_target_layouts: list[str] = []
         collected_entries: list[dict[str, Any]] = []
+        candidate_entries: list[dict[str, Any]] = []
         entries_by_layout: defaultdict[int, list[dict[str, Any]]] = defaultdict(list)
         layout_names: dict[int, str] = {}
         layout_order: list[int] = []
-        merged_rows = []
-        parsed_rows = []
-        text_rows_info = None
-        rows_txt_initial = 0
-        hint_logged = False
-        attrib_count = 0
-        mleader_count = 0
-        preferred_block_names: list[str] = []
-        preferred_block_rois: list[dict[str, Any]] = []
-        block_height_samples: defaultdict[str, list[float]] = defaultdict(list)
-        block_stats: defaultdict[str, dict[str, Any]] = defaultdict(
-            lambda: {"texts": 0, "att": 0, "nested_inserts": 0}
-        )
-        layout_names_seen: list[str] = []
-        layout_names_seen_set: set[str] = set()
-        scanned_layers_map: dict[str, str] = {}
-        follow_sheet_directive: dict[str, Any] | None = None
-        follow_sheet_target_layout: str | None = None
-        follow_sheet_requests: dict[str, dict[str, Any]] = {}
-        follow_sheet_target_layouts: list[str] = []
-        layout_lookup: dict[str, Any] = {}
-        layout_name_lookup: dict[str, Any] = {}
-        layout_index_lookup: dict[str, int] = {}
-        visited_layout_keys: set[tuple[str, str]] = set()
-        all_layout_names: set[str] = set()
-        expanded_layouts: list[str] = []
 
-        if doc is None:
-            table_lines = []
-            return table_lines
-
-        def _scan_layout_body(
-            layout_index: int,
-            layout_name: Any,
-            layout_obj: Any,
-            *,
-            source: str = "initial",
-        ) -> bool:
-            nonlocal follow_sheet_directive
-
-            name_text = str(layout_name or "")
-            name_clean = name_text.strip()
-            key_upper = name_clean.upper()
-            if isinstance(layout_name, str):
-                all_layout_names.add(layout_name)
-            unique_key = (source, key_upper or f"#{layout_index}")
-            if unique_key in visited_layout_keys:
-                return False
-            visited_layout_keys.add(unique_key)
-
-            if source != "block" and key_upper:
-                layout_lookup[key_upper] = layout_obj
-                layout_name_lookup.setdefault(key_upper, name_clean or layout_name)
-                layout_index_lookup.setdefault(key_upper, layout_index)
-
-            layout_names[layout_index] = layout_name
-            if layout_name not in layout_names_seen_set:
-                layout_names_seen_set.add(layout_name)
-                layout_names_seen.append(layout_name)
-            if layout_index not in layout_order:
-                layout_order.append(layout_index)
-
-            layout_str = str(layout_name or "")
-            layout_label = layout_str.strip() or "-"
-            display_name = layout_name if layout_name else layout_label
-            if source == "follow":
-                display_name = f"{display_name} [FOLLOW]"
-            elif source == "block":
-                display_name = f"{display_name} [BLOCK]"
-            elif layout_obj is None:
-                display_name = f"{display_name} [UNRESOLVED]"
-            expanded_layouts.append(display_name)
-
-            if layout_obj is None:
-                return False
-            return True
-
-        def _extract_coords(entity: Any) -> tuple[float | None, float | None]:
-            insert = None
-            dxf_obj = getattr(entity, "dxf", None)
-            if dxf_obj is not None:
-                insert = getattr(dxf_obj, "insert", None)
-            if insert is None:
-                insert = getattr(entity, "insert", None)
-            x_val: float | None = None
-            y_val: float | None = None
-            if insert is not None:
-                x_val = getattr(insert, "x", None)
-                y_val = getattr(insert, "y", None)
-                if (x_val is None or y_val is None) and hasattr(insert, "__iter__"):
+        def _perform_text_scan(current_allowlist: _LayerAllowlist | None) -> tuple[int, int, int]:
+            nonlocal table_lines, text_rows_info, merged_rows, parsed_rows
+            nonlocal columnar_table_info, columnar_debug_info, roi_hint_effective, rows_txt_initial
+            nonlocal allowlist_display, follow_sheet_target_layouts
+            nonlocal collected_entries, candidate_entries, entries_by_layout, layout_names
+            nonlocal layout_order
+            collected_entries = []
+            candidate_entries = []
+            entries_by_layout = defaultdict(list)
+            layout_names = {}
+            layout_order = []
+            merged_rows = []
+            parsed_rows = []
+            text_rows_info = None
+            rows_txt_initial = 0
+            hint_logged = False
+            attrib_count = 0
+            mleader_count = 0
+            preferred_block_names: list[str] = []
+            preferred_block_rois: list[dict[str, Any]] = []
+            block_height_samples: defaultdict[str, list[float]] = defaultdict(list)
+            block_stats: defaultdict[str, dict[str, Any]] = defaultdict(
+                lambda: {"texts": 0, "att": 0, "nested_inserts": 0}
+            )
+            layout_names_seen: list[str] = []
+            layout_names_seen_set: set[str] = set()
+            scanned_layers_map: dict[str, str] = {}
+            follow_sheet_directive: dict[str, Any] | None = None
+            follow_sheet_directives: list[dict[str, Any]] = []
+            follow_sheet_target_layouts = []
+            follow_sheet_target_layout: str | None = None
+            follow_sheet_requests: dict[str, dict[str, Any]] = {}
+            layout_lookup: dict[str, Any] = {}
+            layout_name_lookup: dict[str, Any] = {}
+            layout_index_lookup: dict[str, int] = {}
+            visited_layout_keys: set[tuple[str, str]] = set()
+            all_layout_names: set[str] = set()
+            expanded_layouts: list[str] = []
+    
+            allowlist_display = (
+                "None"
+                if current_allowlist is None
+                else "{" + ",".join(sorted(current_allowlist) or []) + "}"
+            )
+    
+            if doc is None:
+                table_lines = []
+                return (0, 0, 0)
+    
+            def _lookup_layer_count(counts: Mapping[str, int], target: str) -> int:
+                total = 0
+                for name, value in counts.items():
                     try:
-                        parts = list(insert)
+                        candidate = str(name or "").upper()
                     except Exception:
-                        parts = []
-                    if x_val is None and len(parts) >= 1:
-                        x_val = parts[0]
-                    if y_val is None and len(parts) >= 2:
-                        y_val = parts[1]
-            try:
-                x_float = float(x_val) if x_val is not None else None
-            except Exception:
-                x_float = None
-            try:
-                y_float = float(y_val) if y_val is not None else None
-            except Exception:
-                y_float = None
-            return (x_float, y_float)
-
-        def _extract_text_height(entity: Any) -> float | None:
-            dxf_obj = getattr(entity, "dxf", None)
-            height_candidates: list[Any] = []
-            if dxf_obj is not None:
-                for attr in ("height", "char_height", "text_height", "thickness"):
-                    height_candidates.append(getattr(dxf_obj, attr, None))
-            height_candidates.append(getattr(entity, "height", None))
-            for candidate in height_candidates:
-                if candidate is None:
-                    continue
-                try:
-                    value = float(candidate)
-                except Exception:
-                    continue
-                if value > 0:
-                    return value
-            return None
-
-        debug_enabled = _debug_entities_enabled()
-
-        block_stats: dict[str, dict[str, int]] = {}
-
-        def _block_stats_entry(name: str | None) -> dict[str, int]:
-            key = (name or "").strip()
-            entry = block_stats.get(key)
-            if entry is None:
-                entry = {"texts": 0, "att": 0, "nested_inserts": 0}
-                block_stats[key] = entry
-            return entry
-
-        def _scan_layout_entities(
-            layout_index: int,
-            layout_name: Any,
-            layout_obj: Any,
-            *,
-            source: str = "initial",
-        ) -> bool:
-            nonlocal hint_logged, attrib_count, mleader_count, follow_sheet_directive
-            nonlocal follow_sheet_directives
-            if not _scan_layout_body(layout_index, layout_name, layout_obj, source=source):
-                return False
-
-            layout_str = str(layout_name or "")
-            layout_label = layout_str.strip() or "-"
-            layout_tables = _count_tables_for_layout_name(layout_str)
-            query = getattr(layout_obj, "query", None)
-            base_entities: list[Any] = []
-            layer_extractor = globals().get("_extract_layer")
-            if callable(query):
-                try:
-                    base_entities = list(query("TEXT, MTEXT, RTEXT, MLEADER, INSERT"))
-                except Exception:
-                    base_entities = []
-                if not base_entities:
-                    for spec in ("TEXT", "MTEXT", "RTEXT", "MLEADER", "INSERT"):
+                        candidate = str(name).upper() if name is not None else ""
+                    if candidate == target:
                         try:
-                            base_entities.extend(list(query(spec)))
+                            total += int(value)
                         except Exception:
                             continue
-            if not base_entities:
+                return total
+    
+            def _scan_layout_body(
+                layout_index: int,
+                layout_name: Any,
+                layout_obj: Any,
+                *,
+                source: str = "initial",
+            ) -> bool:
+                nonlocal follow_sheet_directive
+    
+                name_text = str(layout_name or "")
+                name_clean = name_text.strip()
+                key_upper = name_clean.upper()
+                if isinstance(layout_name, str):
+                    all_layout_names.add(layout_name)
+                unique_key = (source, key_upper or f"#{layout_index}")
+                if unique_key in visited_layout_keys:
+                    return False
+                visited_layout_keys.add(unique_key)
+    
+                if source != "block" and key_upper:
+                    layout_lookup[key_upper] = layout_obj
+                    layout_name_lookup.setdefault(key_upper, name_clean or layout_name)
+                    layout_index_lookup.setdefault(key_upper, layout_index)
+    
+                layout_names[layout_index] = layout_name
+                if layout_name not in layout_names_seen_set:
+                    layout_names_seen_set.add(layout_name)
+                    layout_names_seen.append(layout_name)
+                if layout_index not in layout_order:
+                    layout_order.append(layout_index)
+    
+                layout_str = str(layout_name or "")
+                layout_label = layout_str.strip() or "-"
+                display_name = layout_name if layout_name else layout_label
+                if source == "follow":
+                    display_name = f"{display_name} [FOLLOW]"
+                elif source == "block":
+                    display_name = f"{display_name} [BLOCK]"
+                elif layout_obj is None:
+                    display_name = f"{display_name} [UNRESOLVED]"
+                expanded_layouts.append(display_name)
+    
+                if layout_obj is None:
+                    return False
+                return True
+    
+            def _extract_coords(entity: Any) -> tuple[float | None, float | None]:
+                insert = None
+                dxf_obj = getattr(entity, "dxf", None)
+                if dxf_obj is not None:
+                    insert = getattr(dxf_obj, "insert", None)
+                if insert is None:
+                    insert = getattr(entity, "insert", None)
+                x_val: float | None = None
+                y_val: float | None = None
+                if insert is not None:
+                    x_val = getattr(insert, "x", None)
+                    y_val = getattr(insert, "y", None)
+                    if (x_val is None or y_val is None) and hasattr(insert, "__iter__"):
+                        try:
+                            parts = list(insert)
+                        except Exception:
+                            parts = []
+                        if x_val is None and len(parts) >= 1:
+                            x_val = parts[0]
+                        if y_val is None and len(parts) >= 2:
+                            y_val = parts[1]
                 try:
-                    base_entities = list(layout_obj)
+                    x_float = float(x_val) if x_val is not None else None
                 except Exception:
-                    base_entities = []
-            if not base_entities:
+                    x_float = None
+                try:
+                    y_float = float(y_val) if y_val is not None else None
+                except Exception:
+                    y_float = None
+                return (x_float, y_float)
+    
+            def _extract_text_height(entity: Any) -> float | None:
+                dxf_obj = getattr(entity, "dxf", None)
+                height_candidates: list[Any] = []
+                if dxf_obj is not None:
+                    for attr in ("height", "char_height", "text_height", "thickness"):
+                        height_candidates.append(getattr(dxf_obj, attr, None))
+                height_candidates.append(getattr(entity, "height", None))
+                for candidate in height_candidates:
+                    if candidate is None:
+                        continue
+                    try:
+                        value = float(candidate)
+                    except Exception:
+                        continue
+                    if value > 0:
+                        return value
+                return None
+    
+            debug_enabled = _debug_entities_enabled()
+    
+            block_stats: dict[str, dict[str, int]] = {}
+    
+            def _block_stats_entry(name: str | None) -> dict[str, int]:
+                key = (name or "").strip()
+                entry = block_stats.get(key)
+                if entry is None:
+                    entry = {"texts": 0, "att": 0, "nested_inserts": 0}
+                    block_stats[key] = entry
+                return entry
+    
+            def _scan_layout_entities(
+                layout_index: int,
+                layout_name: Any,
+                layout_obj: Any,
+                *,
+                source: str = "initial",
+            ) -> bool:
+                nonlocal hint_logged, attrib_count, mleader_count, follow_sheet_directive
+                nonlocal follow_sheet_directives
+                if not _scan_layout_body(layout_index, layout_name, layout_obj, source=source):
+                    return False
+    
+                layout_str = str(layout_name or "")
+                layout_label = layout_str.strip() or "-"
+                layout_tables = _count_tables_for_layout_name(layout_str)
+                query = getattr(layout_obj, "query", None)
+                base_entities: list[Any] = []
+                layer_extractor = globals().get("_extract_layer")
+                if callable(query):
+                    try:
+                        base_entities = list(query("TEXT, MTEXT, RTEXT, MLEADER, INSERT"))
+                    except Exception:
+                        base_entities = []
+                    if not base_entities:
+                        for spec in ("TEXT", "MTEXT", "RTEXT", "MLEADER", "INSERT"):
+                            try:
+                                base_entities.extend(list(query(spec)))
+                            except Exception:
+                                continue
+                if not base_entities:
+                    try:
+                        base_entities = list(layout_obj)
+                    except Exception:
+                        base_entities = []
+                if not base_entities:
+                    if _TRACE_ACAD:
+                        print(f"[LAYOUT] {layout_label} texts=0/0 tables={layout_tables}")
+                    return False
+    
+                seen_entities: set[int] = set()
+                text_fragments = 0
+                mtext_fragments = 0
+                kept_count = 0
+                from_blocks_count = 0
+                counter = 0
+    
+                flattened_entities = list(flatten_entities(layout_obj, depth=_MAX_INSERT_DEPTH))
+                if not flattened_entities and base_entities:
+                    for entity in base_entities:
+                        flattened_entities.append(
+                            FlattenedEntity(
+                                entity=entity,
+                                transform=_IDENTITY_TRANSFORM,
+                                from_block=False,
+                                block_name=None,
+                                block_stack=tuple(),
+                                depth=0,
+                                layer="",
+                                layer_upper="",
+                                effective_layer="",
+                                effective_layer_upper="",
+                            )
+                        )
+    
+                for flattened in flattened_entities:
+                    entity = flattened.entity
+                    parent_effective_layer = getattr(flattened, "parent_effective_layer", None)
+                    active_block = getattr(flattened, "block_name", None)
+                    from_block = bool(getattr(flattened, "from_block", False))
+                    marker = id(entity)
+                    if marker in seen_entities:
+                        continue
+                    seen_entities.add(marker)
+                    parent_effective_layer = flattened.effective_layer
+                    active_block = flattened.block_name
+                    from_block = bool(flattened.from_block)
+                    try:
+                        dxftype = entity.dxftype()
+                    except Exception:
+                        dxftype = None
+                    kind = str(dxftype or "").upper()
+                    parent_effective_layer = getattr(flattened, "effective_layer", None)
+                    from_block = bool(getattr(flattened, "from_block", False))
+                    active_block = getattr(flattened, "block_name", None)
+                    layer_name = _extract_layer(entity)
+                    layer_upper = layer_name.upper() if layer_name else ""
+                    effective_layer = layer_name
+                    effective_layer_upper = layer_upper
+                    if not effective_layer_upper or effective_layer_upper == "0":
+                        candidate = parent_effective_layer or layer_name or ""
+                        effective_layer = candidate
+                        effective_layer_upper = candidate.upper() if candidate else ""
+                    if kind in {"TEXT", "MTEXT", "ATTRIB", "ATTDEF", "MLEADER", "RTEXT"}:
+                        entity_type = "ATTRIB" if kind in {"ATTRIB", "ATTDEF"} else kind
+                        coords = _extract_coords(entity)
+                        coords = _apply_transform_point(flattened.transform, coords)
+                        text_height = _extract_text_height(entity)
+                        if isinstance(text_height, (int, float)):
+                            text_height = float(text_height) * _transform_scale_hint(flattened.transform)
+                        counted_block_text = False
+                        counted_block_attr = False
+                        for fragment, is_mtext in _iter_entity_text_fragments(entity):
+                            normalized = _normalize_table_fragment(fragment)
+                            if not normalized:
+                                continue
+                            normalized_upper = normalized.upper()
+                            if kind in {"ATTRIB", "ATTDEF"}:
+                                attrib_count += 1
+                                if active_block and not counted_block_attr:
+                                    _block_stats_entry(active_block)["att"] += 1
+                                    counted_block_attr = True
+                            elif kind == "MLEADER":
+                                mleader_count += 1
+                            if active_block and not counted_block_text and kind not in {"ATTRIB", "ATTDEF"}:
+                                _block_stats_entry(active_block)["texts"] += 1
+                                counted_block_text = True
+                            if (
+                                not hint_logged
+                                and "SEE SHEET 2 FOR HOLE CHART" in normalized_upper
+                            ):
+                                print(
+                                    "[HINT] Chart may live on an alternate sheet/block; ensure its INSERT is present and not on a frozen/off layer."
+                                )
+                                hint_logged = True
+                            match = _FOLLOW_SHEET_DIRECTIVE_RE.search(normalized)
+                            if match:
+                                directive_entry = {
+                                    "layout": layout_name,
+                                    "token": match.group("target"),
+                                    "text": normalized,
+                                }
+                                follow_sheet_directive = directive_entry
+                                follow_sheet_directives.append(directive_entry)
+                            entry = {
+                                "layout_index": layout_index,
+                                "layout_name": layout_name,
+                                "text": normalized,
+                                "x": coords[0],
+                                "y": coords[1],
+                                "order": counter,
+                                "from_block": from_block,
+                                "height": text_height,
+                                "layer": layer_name,
+                                "layer_upper": layer_upper,
+                                "effective_layer": effective_layer,
+                                "effective_layer_upper": effective_layer_upper,
+                                "block_name": active_block,
+                                "block_stack": list(flattened.block_stack),
+                                "entity_type": entity_type,
+                            }
+                            counter += 1
+                            collected_entries.append(entry)
+                            entries_by_layout[layout_index].append(entry)
+                            layer_token = effective_layer or layer_name
+                            if layer_token:
+                                upper_token = layer_token.upper()
+                                if upper_token and upper_token not in scanned_layers_map:
+                                    scanned_layers_map[upper_token] = layer_token
+                            kept_count += 1
+                            if _TRACE_ACAD and active_block:
+                                stats_entry = _block_stats_entry(active_block)
+                                if kind in {"ATTRIB", "ATTDEF"}:
+                                    stats_entry["att"] += 1
+                                else:
+                                    stats_entry["texts"] += 1
+                            if (
+                                active_block
+                                and isinstance(text_height, (int, float))
+                                and float(text_height) > 0
+                            ):
+                                block_height_samples[active_block].append(float(text_height))
+                            if is_mtext:
+                                mtext_fragments += 1
+                            else:
+                                text_fragments += 1
+                            if from_block:
+                                from_blocks_count += 1
+                    elif kind == "INSERT":
+                        dxf_obj = getattr(entity, "dxf", None)
+                        block_name = None
+                        if dxf_obj is not None:
+                            block_name = getattr(dxf_obj, "name", None)
+                        if block_name is None:
+                            block_name = getattr(entity, "name", None)
+                        name_str = block_name.strip() if isinstance(block_name, str) else None
+                        if active_block:
+                            _block_stats_entry(active_block)["nested_inserts"] += 1
+                        if name_str:
+                            _block_stats_entry(name_str)
+                        is_preferred_block = False
+                        if name_str:
+                            name_upper = name_str.upper()
+                            if name_upper in normalized_block_allow:
+                                is_preferred_block = True
+                            elif any(pattern.search(name_str) for pattern in block_regex_patterns):
+                                is_preferred_block = True
+                            elif _PREFERRED_BLOCK_NAME_RE.search(name_str):
+                                is_preferred_block = True
+                        if is_preferred_block and name_str:
+                            if name_str not in preferred_block_names:
+                                preferred_block_names.append(name_str)
+                            bbox = _compute_entity_bbox(
+                                entity,
+                                include_virtual=True,
+                                transform=flattened.transform,
+                            )
+                            if bbox is not None:
+                                try:
+                                    xmin, xmax, ymin, ymax = (
+                                        float(bbox[0]),
+                                        float(bbox[1]),
+                                        float(bbox[2]),
+                                        float(bbox[3]),
+                                    )
+                                except Exception:
+                                    xmin = xmax = ymin = ymax = 0.0
+                                bbox_entry = [xmin, xmax, ymin, ymax]
+                                preferred_block_rois.append(
+                                    {
+                                        "name": name_str,
+                                        "layer": effective_layer or layer_name,
+                                        "bbox": bbox_entry,
+                                        "block_stack": list(flattened.block_stack),
+                                        "from_block": flattened.from_block,
+                                    }
+                                )
+    
+                print(
+                    f"[TEXT-SCAN] layout={layout_name} text={text_fragments} "
+                    f"mtext={mtext_fragments} kept={kept_count} from_blocks={from_blocks_count}"
+                )
                 if _TRACE_ACAD:
-                    print(f"[LAYOUT] {layout_label} texts=0/0 tables={layout_tables}")
-                return False
-
-            seen_entities: set[int] = set()
-            text_fragments = 0
-            mtext_fragments = 0
-            kept_count = 0
-            from_blocks_count = 0
-            counter = 0
-
-            flattened_entities = list(flatten_entities(layout_obj, depth=_MAX_INSERT_DEPTH))
-            if not flattened_entities and base_entities:
-                for entity in base_entities:
-                    flattened_entities.append(
-                        FlattenedEntity(
-                            entity=entity,
-                            transform=_IDENTITY_TRANSFORM,
-                            from_block=False,
-                            block_name=None,
-                            block_stack=tuple(),
-                            depth=0,
-                            layer="",
-                            layer_upper="",
-                            effective_layer="",
-                            effective_layer_upper="",
+                    print(
+                        f"[LAYOUT] {layout_label} texts={text_fragments}/{mtext_fragments} "
+                        f"tables={layout_tables}"
+                    )
+                return True
+    
+            try:
+                initial_layouts = iter_layouts(doc, layout_filters)
+            except RuntimeError:
+                table_lines = []
+                raise
+    
+            if isinstance(_LAST_TEXT_TABLE_DEBUG, dict):
+                _LAST_TEXT_TABLE_DEBUG["layout_sequence"] = [
+                    str(name or "") for name, _ in initial_layouts
+                ]
+    
+            for name, _ in initial_layouts:
+                if isinstance(name, str):
+                    all_layout_names.add(name)
+    
+            layouts_manager = getattr(doc, "layouts", None)
+            raw_names = getattr(layouts_manager, "names", None) if layouts_manager is not None else None
+            if raw_names is not None:
+                try:
+                    names_iter = raw_names() if callable(raw_names) else raw_names
+                except Exception:
+                    names_iter = None
+                if names_iter is not None:
+                    try:
+                        for candidate in names_iter:
+                            if isinstance(candidate, str):
+                                all_layout_names.add(candidate)
+                    except Exception:
+                        pass
+    
+            get_layout = getattr(layouts_manager, "get", None) if layouts_manager is not None else None
+            layout_queue: deque[tuple[int, Any, Any, str]] = deque(
+                (index, layout_name, layout_obj, "initial")
+                for index, (layout_name, layout_obj) in enumerate(initial_layouts)
+            )
+            next_layout_index = len(initial_layouts)
+            queued_layout_names: set[str] = {
+                _normalize_layout_key(layout_name)
+                for layout_name, _layout_obj in initial_layouts
+            }
+    
+            def _enqueue_follow_layout(name: str) -> None:
+                nonlocal next_layout_index
+                normalized = _normalize_layout_key(name)
+                layout_obj = None
+                if callable(get_layout):
+                    try:
+                        layout_obj = get_layout(name)
+                    except Exception:
+                        layout_obj = None
+                if normalized in queued_layout_names:
+                    return
+                queued_layout_names.add(normalized)
+                layout_queue.append((next_layout_index, name, layout_obj, "follow"))
+                next_layout_index += 1
+    
+            def _update_follow_targets() -> None:
+                nonlocal follow_sheet_target_layouts
+                if not (follow_sheet_directive or follow_sheet_target_layout):
+                    return
+                catalog = list(dict.fromkeys(name for name in all_layout_names if isinstance(name, str)))
+                if not catalog:
+                    catalog = layout_names_seen if layout_names_seen else list(layout_names.values())
+                new_targets: list[str] = []
+                token_value = None
+                if isinstance(follow_sheet_directive, Mapping):
+                    token_value = follow_sheet_directive.get("token")
+                if token_value:
+                    target_label, resolved_layout, resolved_found = _resolve_follow_sheet_layout(
+                        token_value or "", catalog
+                    )
+                    follow_sheet_requests[target_label] = {
+                        "token": token_value,
+                        "target": target_label,
+                        "resolved": resolved_layout,
+                        "found": resolved_found,
+                    }
+                    if resolved_layout and resolved_found:
+                        new_targets.append(resolved_layout)
+                if follow_sheet_target_layout:
+                    new_targets.append(follow_sheet_target_layout)
+                if new_targets:
+                    existing = set(follow_sheet_target_layouts)
+                    for target in new_targets:
+                        if target not in existing:
+                            follow_sheet_target_layouts.append(target)
+                            existing.add(target)
+    
+            while layout_queue:
+                layout_index, layout_name, layout_obj, source = layout_queue.popleft()
+                if not _scan_layout_entities(layout_index, layout_name, layout_obj, source=source):
+                    continue
+                _update_follow_targets()
+                for target_layout in follow_sheet_target_layouts:
+                    _enqueue_follow_layout(target_layout)
+    
+            if isinstance(_LAST_TEXT_TABLE_DEBUG, dict):
+                _LAST_TEXT_TABLE_DEBUG["layouts"] = list(expanded_layouts)
+                _LAST_TEXT_TABLE_DEBUG["follow_sheet_targets"] = list(follow_sheet_target_layouts)
+    
+            if _TRACE_ACAD and block_stats:
+                for block_name, stats in block_stats.items():
+                    display_name = block_name or "-"
+                    print(
+                        f"[BLOCK] {display_name} texts={stats['texts']} "
+                        f"att={stats['att']} nested_inserts={stats['nested_inserts']}"
+                    )
+    
+            if preferred_block_names:
+                print(f"[TEXT-SCAN] preferred_blocks={preferred_block_names}")
+            _LAST_TEXT_TABLE_DEBUG["preferred_blocks"] = list(preferred_block_names)
+            _LAST_TEXT_TABLE_DEBUG["attrib_lines"] = attrib_count
+            _LAST_TEXT_TABLE_DEBUG["mleader_lines"] = mleader_count
+            print(
+                f"[TEXT-SCAN] attrib_lines={attrib_count} mleader_lines={mleader_count} "
+                f"depth_max={_MAX_INSERT_DEPTH} allow_layers={allowlist_display}"
+            )
+    
+            def _format_layer_summary(counts: Mapping[str, int]) -> str:
+                if not counts:
+                    return "{}"
+                top = sorted(counts.items(), key=lambda item: (-item[1], item[0]))[:5]
+                return "{" + ", ".join(f"{name or '-'}:{count}" for name, count in top) + "}"
+    
+            def _count_layers(entries: Iterable[Mapping[str, Any]]) -> dict[str, int]:
+                counts: dict[str, int] = defaultdict(int)
+                for entry in entries:
+                    layer_key = str(
+                        entry.get("effective_layer")
+                        or entry.get("layer")
+                        or "",
+                    ).strip()
+                    counts[layer_key] += 1
+                return dict(counts)
+    
+            def _count_layouts(entries: Iterable[Mapping[str, Any]]) -> dict[str, int]:
+                counts: dict[str, int] = defaultdict(int)
+                for entry in entries:
+                    layout_key = str(
+                        entry.get("layout_name")
+                        or entry.get("layout_index")
+                        or "",
+                    ).strip()
+                    counts[layout_key] += 1
+                return dict(counts)
+    
+            layer_counts_pre = _count_layers(collected_entries)
+            total_layer_hits = sum(layer_counts_pre.values())
+            if total_layer_hits == 0:
+                if isinstance(_LAST_TEXT_TABLE_DEBUG, dict):
+                    _LAST_TEXT_TABLE_DEBUG["layer_counts_pre"] = dict(layer_counts_pre)
+                    _LAST_TEXT_TABLE_DEBUG["layout_counts_pre"] = {}
+                    _LAST_TEXT_TABLE_DEBUG["scanned_layers"] = sorted(
+                        scanned_layers_map.values(), key=lambda value: value.upper()
+                    )
+                    _LAST_TEXT_TABLE_DEBUG["scanned_layouts"] = list(layout_names_seen)
+                raise RuntimeError("No text found before layer filtering…")
+            layout_counts_pre = _count_layouts(collected_entries)
+            if debug_scan_enabled:
+                layout_display = ", ".join(
+                    str(name) for name in layout_names_seen if isinstance(name, str)
+                )
+                if not layout_display:
+                    layout_display = "-"
+                print(f"[TEXT-SCAN] layouts=[{layout_display}]")
+                layout_type_counts: dict[str, Counter[str]] = {}
+                for layout_index, layout_entries in entries_by_layout.items():
+                    layout_name = layout_names.get(layout_index, layout_index)
+                    name_str = str(layout_name)
+                    counter = layout_type_counts.setdefault(name_str, Counter())
+                    for entry in layout_entries:
+                        entry_type = str(entry.get("entity_type") or "")
+                        if entry_type == "ATTDEF":
+                            entry_type = "ATTRIB"
+                        if entry_type:
+                            counter[entry_type] += 1
+                preferred_types = ("TEXT", "MTEXT", "ATTRIB", "MLEADER", "RTEXT")
+                reported: set[str] = set()
+                for layout_name in layout_names_seen:
+                    name_str = str(layout_name)
+                    counter = layout_type_counts.get(name_str, Counter())
+                    parts = [f"{type_name}={int(counter.get(type_name, 0))}" for type_name in preferred_types]
+                    print(
+                        "[TEXT-SCAN] layout={name} {summary}".format(
+                            name=name_str or "-",
+                            summary=" ".join(parts),
                         )
                     )
-
-            for flattened in flattened_entities:
-                entity = flattened.entity
-                parent_effective_layer = getattr(flattened, "parent_effective_layer", None)
-                active_block = getattr(flattened, "block_name", None)
-                from_block = bool(getattr(flattened, "from_block", False))
-                marker = id(entity)
-                if marker in seen_entities:
-                    continue
-                seen_entities.add(marker)
-                parent_effective_layer = flattened.effective_layer
-                active_block = flattened.block_name
-                from_block = bool(flattened.from_block)
-                try:
-                    dxftype = entity.dxftype()
-                except Exception:
-                    dxftype = None
-                kind = str(dxftype or "").upper()
-                parent_effective_layer = getattr(flattened, "effective_layer", None)
-                from_block = bool(getattr(flattened, "from_block", False))
-                active_block = getattr(flattened, "block_name", None)
-                layer_name = _extract_layer(entity)
-                layer_upper = layer_name.upper() if layer_name else ""
-                effective_layer = layer_name
-                effective_layer_upper = layer_upper
-                if not effective_layer_upper or effective_layer_upper == "0":
-                    candidate = parent_effective_layer or layer_name or ""
-                    effective_layer = candidate
-                    effective_layer_upper = candidate.upper() if candidate else ""
-                if kind in {"TEXT", "MTEXT", "ATTRIB", "ATTDEF", "MLEADER", "RTEXT"}:
-                    entity_type = "ATTRIB" if kind in {"ATTRIB", "ATTDEF"} else kind
-                    coords = _extract_coords(entity)
-                    coords = _apply_transform_point(flattened.transform, coords)
-                    text_height = _extract_text_height(entity)
-                    if isinstance(text_height, (int, float)):
-                        text_height = float(text_height) * _transform_scale_hint(flattened.transform)
-                    counted_block_text = False
-                    counted_block_attr = False
-                    for fragment, is_mtext in _iter_entity_text_fragments(entity):
-                        normalized = _normalize_table_fragment(fragment)
-                        if not normalized:
-                            continue
-                        normalized_upper = normalized.upper()
-                        if kind in {"ATTRIB", "ATTDEF"}:
-                            attrib_count += 1
-                            if active_block and not counted_block_attr:
-                                _block_stats_entry(active_block)["att"] += 1
-                                counted_block_attr = True
-                        elif kind == "MLEADER":
-                            mleader_count += 1
-                        if active_block and not counted_block_text and kind not in {"ATTRIB", "ATTDEF"}:
-                            _block_stats_entry(active_block)["texts"] += 1
-                            counted_block_text = True
-                        if (
-                            not hint_logged
-                            and "SEE SHEET 2 FOR HOLE CHART" in normalized_upper
-                        ):
-                            print(
-                                "[HINT] Chart may live on an alternate sheet/block; ensure its INSERT is present and not on a frozen/off layer."
-                            )
-                            hint_logged = True
-                        match = _FOLLOW_SHEET_DIRECTIVE_RE.search(normalized)
-                        if match:
-                            directive_entry = {
-                                "layout": layout_name,
-                                "token": match.group("target"),
-                                "text": normalized,
-                            }
-                            follow_sheet_directive = directive_entry
-                            follow_sheet_directives.append(directive_entry)
-                        entry = {
-                            "layout_index": layout_index,
-                            "layout_name": layout_name,
-                            "text": normalized,
-                            "x": coords[0],
-                            "y": coords[1],
-                            "order": counter,
-                            "from_block": from_block,
-                            "height": text_height,
-                            "layer": layer_name,
-                            "layer_upper": layer_upper,
-                            "effective_layer": effective_layer,
-                            "effective_layer_upper": effective_layer_upper,
-                            "block_name": active_block,
-                            "block_stack": list(flattened.block_stack),
-                            "entity_type": entity_type,
-                        }
-                        counter += 1
-                        collected_entries.append(entry)
-                        entries_by_layout[layout_index].append(entry)
-                        layer_token = effective_layer or layer_name
-                        if layer_token:
-                            upper_token = layer_token.upper()
-                            if upper_token and upper_token not in scanned_layers_map:
-                                scanned_layers_map[upper_token] = layer_token
-                        kept_count += 1
-                        if _TRACE_ACAD and active_block:
-                            stats_entry = _block_stats_entry(active_block)
-                            if kind in {"ATTRIB", "ATTDEF"}:
-                                stats_entry["att"] += 1
-                            else:
-                                stats_entry["texts"] += 1
-                        if (
-                            active_block
-                            and isinstance(text_height, (int, float))
-                            and float(text_height) > 0
-                        ):
-                            block_height_samples[active_block].append(float(text_height))
-                        if is_mtext:
-                            mtext_fragments += 1
-                        else:
-                            text_fragments += 1
-                        if from_block:
-                            from_blocks_count += 1
-                elif kind == "INSERT":
-                    dxf_obj = getattr(entity, "dxf", None)
-                    block_name = None
-                    if dxf_obj is not None:
-                        block_name = getattr(dxf_obj, "name", None)
-                    if block_name is None:
-                        block_name = getattr(entity, "name", None)
-                    name_str = block_name.strip() if isinstance(block_name, str) else None
-                    if active_block:
-                        _block_stats_entry(active_block)["nested_inserts"] += 1
-                    if name_str:
-                        _block_stats_entry(name_str)
-                    is_preferred_block = False
-                    if name_str:
-                        name_upper = name_str.upper()
-                        if name_upper in normalized_block_allow:
-                            is_preferred_block = True
-                        elif any(pattern.search(name_str) for pattern in block_regex_patterns):
-                            is_preferred_block = True
-                        elif _PREFERRED_BLOCK_NAME_RE.search(name_str):
-                            is_preferred_block = True
-                    if is_preferred_block and name_str:
-                        if name_str not in preferred_block_names:
-                            preferred_block_names.append(name_str)
-                        bbox = _compute_entity_bbox(
-                            entity,
-                            include_virtual=True,
-                            transform=flattened.transform,
+                    reported.add(name_str)
+                for extra_name in sorted(set(layout_type_counts) - reported):
+                    counter = layout_type_counts.get(extra_name, Counter())
+                    parts = [f"{type_name}={int(counter.get(type_name, 0))}" for type_name in preferred_types]
+                    print(
+                        "[TEXT-SCAN] layout={name} {summary}".format(
+                            name=extra_name or "-",
+                            summary=" ".join(parts),
                         )
-                        if bbox is not None:
-                            try:
-                                xmin, xmax, ymin, ymax = (
-                                    float(bbox[0]),
-                                    float(bbox[1]),
-                                    float(bbox[2]),
-                                    float(bbox[3]),
-                                )
-                            except Exception:
-                                xmin = xmax = ymin = ymax = 0.0
-                            bbox_entry = [xmin, xmax, ymin, ymax]
-                            preferred_block_rois.append(
-                                {
-                                    "name": name_str,
-                                    "layer": effective_layer or layer_name,
-                                    "bbox": bbox_entry,
-                                    "block_stack": list(flattened.block_stack),
-                                    "from_block": flattened.from_block,
-                                }
-                            )
-
-            print(
-                f"[TEXT-SCAN] layout={layout_name} text={text_fragments} "
-                f"mtext={mtext_fragments} kept={kept_count} from_blocks={from_blocks_count}"
-            )
-            if _TRACE_ACAD:
-                print(
-                    f"[LAYOUT] {layout_label} texts={text_fragments}/{mtext_fragments} "
-                    f"tables={layout_tables}"
-                )
-            return True
-
-        try:
-            initial_layouts = iter_layouts(doc, layout_filters)
-        except RuntimeError:
-            table_lines = []
-            raise
-
-        if isinstance(_LAST_TEXT_TABLE_DEBUG, dict):
-            _LAST_TEXT_TABLE_DEBUG["layout_sequence"] = [
-                str(name or "") for name, _ in initial_layouts
-            ]
-
-        for name, _ in initial_layouts:
-            if isinstance(name, str):
-                all_layout_names.add(name)
-
-        layouts_manager = getattr(doc, "layouts", None)
-        raw_names = getattr(layouts_manager, "names", None) if layouts_manager is not None else None
-        if raw_names is not None:
-            try:
-                names_iter = raw_names() if callable(raw_names) else raw_names
-            except Exception:
-                names_iter = None
-            if names_iter is not None:
-                try:
-                    for candidate in names_iter:
-                        if isinstance(candidate, str):
-                            all_layout_names.add(candidate)
-                except Exception:
-                    pass
-
-        get_layout = getattr(layouts_manager, "get", None) if layouts_manager is not None else None
-        layout_queue: deque[tuple[int, Any, Any, str]] = deque(
-            (index, layout_name, layout_obj, "initial")
-            for index, (layout_name, layout_obj) in enumerate(initial_layouts)
-        )
-        next_layout_index = len(initial_layouts)
-        queued_layout_names: set[str] = {
-            _normalize_layout_key(layout_name)
-            for layout_name, _layout_obj in initial_layouts
-        }
-
-        def _enqueue_follow_layout(name: str) -> None:
-            nonlocal next_layout_index
-            normalized = _normalize_layout_key(name)
-            layout_obj = None
-            if callable(get_layout):
-                try:
-                    layout_obj = get_layout(name)
-                except Exception:
-                    layout_obj = None
-            if normalized in queued_layout_names:
-                return
-            queued_layout_names.add(normalized)
-            layout_queue.append((next_layout_index, name, layout_obj, "follow"))
-            next_layout_index += 1
-
-        def _update_follow_targets() -> None:
-            nonlocal follow_sheet_target_layouts
-            if not (follow_sheet_directive or follow_sheet_target_layout):
-                return
-            catalog = list(dict.fromkeys(name for name in all_layout_names if isinstance(name, str)))
-            if not catalog:
-                catalog = layout_names_seen if layout_names_seen else list(layout_names.values())
-            new_targets: list[str] = []
-            token_value = None
-            if isinstance(follow_sheet_directive, Mapping):
-                token_value = follow_sheet_directive.get("token")
-            if token_value:
-                target_label, resolved_layout, resolved_found = _resolve_follow_sheet_layout(
-                    token_value or "", catalog
-                )
-                follow_sheet_requests[target_label] = {
-                    "token": token_value,
-                    "target": target_label,
-                    "resolved": resolved_layout,
-                    "found": resolved_found,
-                }
-                if resolved_layout and resolved_found:
-                    new_targets.append(resolved_layout)
-            if follow_sheet_target_layout:
-                new_targets.append(follow_sheet_target_layout)
-            if new_targets:
-                existing = set(follow_sheet_target_layouts)
-                for target in new_targets:
-                    if target not in existing:
-                        follow_sheet_target_layouts.append(target)
-                        existing.add(target)
-
-        while layout_queue:
-            layout_index, layout_name, layout_obj, source = layout_queue.popleft()
-            if not _scan_layout_entities(layout_index, layout_name, layout_obj, source=source):
-                continue
-            _update_follow_targets()
-            for target_layout in follow_sheet_target_layouts:
-                _enqueue_follow_layout(target_layout)
-
-        if isinstance(_LAST_TEXT_TABLE_DEBUG, dict):
-            _LAST_TEXT_TABLE_DEBUG["layouts"] = list(expanded_layouts)
-            _LAST_TEXT_TABLE_DEBUG["follow_sheet_targets"] = list(follow_sheet_target_layouts)
-
-        if _TRACE_ACAD and block_stats:
-            for block_name, stats in block_stats.items():
-                display_name = block_name or "-"
-                print(
-                    f"[BLOCK] {display_name} texts={stats['texts']} "
-                    f"att={stats['att']} nested_inserts={stats['nested_inserts']}"
-                )
-
-        if preferred_block_names:
-            print(f"[TEXT-SCAN] preferred_blocks={preferred_block_names}")
-        _LAST_TEXT_TABLE_DEBUG["preferred_blocks"] = list(preferred_block_names)
-        _LAST_TEXT_TABLE_DEBUG["attrib_lines"] = attrib_count
-        _LAST_TEXT_TABLE_DEBUG["mleader_lines"] = mleader_count
-        print(
-            f"[TEXT-SCAN] attrib_lines={attrib_count} mleader_lines={mleader_count} "
-            f"depth_max={_MAX_INSERT_DEPTH} allow_layers={allowlist_display}"
-        )
-
-        def _format_layer_summary(counts: Mapping[str, int]) -> str:
-            if not counts:
-                return "{}"
-            top = sorted(counts.items(), key=lambda item: (-item[1], item[0]))[:5]
-            return "{" + ", ".join(f"{name or '-'}:{count}" for name, count in top) + "}"
-
-        def _count_layers(entries: Iterable[Mapping[str, Any]]) -> dict[str, int]:
-            counts: dict[str, int] = defaultdict(int)
-            for entry in entries:
-                layer_key = str(
-                    entry.get("effective_layer")
-                    or entry.get("layer")
-                    or "",
-                ).strip()
-                counts[layer_key] += 1
-            return dict(counts)
-
-        def _count_layouts(entries: Iterable[Mapping[str, Any]]) -> dict[str, int]:
-            counts: dict[str, int] = defaultdict(int)
-            for entry in entries:
-                layout_key = str(
-                    entry.get("layout_name")
-                    or entry.get("layout_index")
-                    or "",
-                ).strip()
-                counts[layout_key] += 1
-            return dict(counts)
-
-        layer_counts_pre = _count_layers(collected_entries)
-        total_layer_hits = sum(layer_counts_pre.values())
-        if total_layer_hits == 0:
+                    )
+            print(f"[TEXT-SCAN] kept_by_layer(pre)={_format_layer_summary(layer_counts_pre)}")
             if isinstance(_LAST_TEXT_TABLE_DEBUG, dict):
                 _LAST_TEXT_TABLE_DEBUG["layer_counts_pre"] = dict(layer_counts_pre)
-                _LAST_TEXT_TABLE_DEBUG["layout_counts_pre"] = {}
+                _LAST_TEXT_TABLE_DEBUG["layout_counts_pre"] = dict(layout_counts_pre)
                 _LAST_TEXT_TABLE_DEBUG["scanned_layers"] = sorted(
                     scanned_layers_map.values(), key=lambda value: value.upper()
                 )
                 _LAST_TEXT_TABLE_DEBUG["scanned_layouts"] = list(layout_names_seen)
-            raise RuntimeError("No text found before layer filtering…")
-        layout_counts_pre = _count_layouts(collected_entries)
-        if debug_scan_enabled:
-            layout_display = ", ".join(
-                str(name) for name in layout_names_seen if isinstance(name, str)
-            )
-            if not layout_display:
-                layout_display = "-"
-            print(f"[TEXT-SCAN] layouts=[{layout_display}]")
-            layout_type_counts: dict[str, Counter[str]] = {}
-            for layout_index, layout_entries in entries_by_layout.items():
-                layout_name = layout_names.get(layout_index, layout_index)
-                name_str = str(layout_name)
-                counter = layout_type_counts.setdefault(name_str, Counter())
-                for entry in layout_entries:
-                    entry_type = str(entry.get("entity_type") or "")
-                    if entry_type == "ATTDEF":
-                        entry_type = "ATTRIB"
-                    if entry_type:
-                        counter[entry_type] += 1
-            preferred_types = ("TEXT", "MTEXT", "ATTRIB", "MLEADER", "RTEXT")
-            reported: set[str] = set()
-            for layout_name in layout_names_seen:
-                name_str = str(layout_name)
-                counter = layout_type_counts.get(name_str, Counter())
-                parts = [f"{type_name}={int(counter.get(type_name, 0))}" for type_name in preferred_types]
-                print(
-                    "[TEXT-SCAN] layout={name} {summary}".format(
-                        name=name_str or "-",
-                        summary=" ".join(parts),
-                    )
-                )
-                reported.add(name_str)
-            for extra_name in sorted(set(layout_type_counts) - reported):
-                counter = layout_type_counts.get(extra_name, Counter())
-                parts = [f"{type_name}={int(counter.get(type_name, 0))}" for type_name in preferred_types]
-                print(
-                    "[TEXT-SCAN] layout={name} {summary}".format(
-                        name=extra_name or "-",
-                        summary=" ".join(parts),
-                    )
-                )
-        print(f"[TEXT-SCAN] kept_by_layer(pre)={_format_layer_summary(layer_counts_pre)}")
-        if isinstance(_LAST_TEXT_TABLE_DEBUG, dict):
-            _LAST_TEXT_TABLE_DEBUG["layer_counts_pre"] = dict(layer_counts_pre)
-            _LAST_TEXT_TABLE_DEBUG["layout_counts_pre"] = dict(layout_counts_pre)
-            _LAST_TEXT_TABLE_DEBUG["scanned_layers"] = sorted(
-                scanned_layers_map.values(), key=lambda value: value.upper()
-            )
-            _LAST_TEXT_TABLE_DEBUG["scanned_layouts"] = list(layout_names_seen)
-            if debug_scan_enabled:
-                _LAST_TEXT_TABLE_DEBUG["layout_entity_counts"] = {
-                    name: {key: int(value) for key, value in counter.items()}
-                    for name, counter in layout_type_counts.items()
-                }
-
-        if include_patterns or exclude_patterns:
-            def _matches_any(patterns: list[re.Pattern[str]], values: list[str]) -> bool:
-                for pattern in patterns:
-                    for value in values:
-                        if value and pattern.search(value):
-                            return True
-                return False
-
-            regex_filtered: list[dict[str, Any]] = []
-            for entry in collected_entries:
-                layer_text = str(
-                    entry.get("effective_layer")
-                    or entry.get("layer")
-                    or "",
-                )
-                upper_text = str(
-                    entry.get("effective_layer_upper")
-                    or entry.get("layer_upper")
-                    or layer_text.upper()
-                )
-                values = [layer_text, upper_text]
-                include_ok = True
-                if include_patterns:
-                    include_ok = _matches_any(include_patterns, values)
-                exclude_hit = False
-                if include_ok and exclude_patterns:
-                    exclude_hit = _matches_any(exclude_patterns, values)
-                if include_ok and not exclude_hit:
-                    regex_filtered.append(entry)
-            kept = len(regex_filtered)
-            dropped = len(collected_entries) - kept
-            print(
-                "[LAYER] regex include={incl} exclude={excl} kept={kept} dropped={dropped}".format(
-                    incl=include_display or "-",
-                    excl=exclude_display or "-",
-                    kept=kept,
-                    dropped=dropped,
-                )
-            )
-            collected_entries = regex_filtered
-            layer_counts_regex = _count_layers(collected_entries)
-            layout_counts_regex = _count_layouts(collected_entries)
-            if isinstance(_LAST_TEXT_TABLE_DEBUG, dict):
-                _LAST_TEXT_TABLE_DEBUG["layer_counts_post_regex"] = dict(layer_counts_regex)
-                _LAST_TEXT_TABLE_DEBUG["layout_counts_post_regex"] = dict(layout_counts_regex)
-
-        if resolved_allowlist is not None:
-            filtered_entries: list[dict[str, Any]] = []
-            for layout_index in layout_order:
-                layout_entries = entries_by_layout.get(layout_index)
-                if not layout_entries:
-                    continue
-                layout_name = layout_names.get(layout_index, str(layout_index))
-                original_layout_lines = list(layout_entries)
-                kept_for_layout = [
-                    entry
-                    for entry in layout_entries
-                    if not (entry.get("effective_layer_upper") or "")
-                    or (entry.get("effective_layer_upper") or "")
-                    in resolved_allowlist
-                ]
-                kept_count = len(kept_for_layout)
-                if kept_count == 0:
-                    print(
-                        "[LAYER] layout={layout} allow={allow} kept=0 → fallback=no-filter".format(
-                            layout=layout_name,
-                            allow=allowlist_display,
-                        )
-                    )
-                    lines_for_layout = original_layout_lines
-                else:
-                    print(
-                        "[LAYER] layout={layout} allow={allow} kept={count}".format(
-                            layout=layout_name,
-                            allow=allowlist_display,
-                            count=kept_count,
-                        )
-                    )
-                    lines_for_layout = list(kept_for_layout)
-                filtered_entries.extend(lines_for_layout)
-        else:
-            filtered_entries = list(collected_entries)
-
-        layer_counts_post = _count_layers(filtered_entries)
-        layout_counts_post = _count_layouts(filtered_entries)
-        print(
-            f"[TEXT-SCAN] kept_by_layer(post-allow)={_format_layer_summary(layer_counts_post)}"
-        )
-
-        collected_entries = filtered_entries
-        if isinstance(_LAST_TEXT_TABLE_DEBUG, dict):
-            _LAST_TEXT_TABLE_DEBUG["layer_counts_post_allow"] = dict(layer_counts_post)
-            _LAST_TEXT_TABLE_DEBUG["layout_counts_post_allow"] = dict(layout_counts_post)
-            _LAST_TEXT_TABLE_DEBUG["collected_entities"] = [
-                {
-                    "layout": str(entry.get("layout_name") or ""),
-                    "layer": str(
+                if debug_scan_enabled:
+                    _LAST_TEXT_TABLE_DEBUG["layout_entity_counts"] = {
+                        name: {key: int(value) for key, value in counter.items()}
+                        for name, counter in layout_type_counts.items()
+                    }
+    
+            if include_patterns or exclude_patterns:
+                def _matches_any(patterns: list[re.Pattern[str]], values: list[str]) -> bool:
+                    for pattern in patterns:
+                        for value in values:
+                            if value and pattern.search(value):
+                                return True
+                    return False
+    
+                regex_filtered: list[dict[str, Any]] = []
+                for entry in collected_entries:
+                    layer_text = str(
                         entry.get("effective_layer")
                         or entry.get("layer")
-                        or ""
-                    ),
-                    "type": str(entry.get("entity_type") or ""),
-                    "x": entry.get("x"),
-                    "y": entry.get("y"),
-                    "height": entry.get("height"),
-                    "text": str(entry.get("text") or ""),
-                }
-                for entry in collected_entries
-            ]
-
-        if roi_hint_effective is None and preferred_block_rois:
-            block_hint: Mapping[str, Any] | None = None
-            for block_info in preferred_block_rois:
-                bbox = block_info.get("bbox")
-                if not bbox:
-                    continue
-                name = block_info.get("name")
-                layer = block_info.get("layer")
-                heights = block_height_samples.get(str(name) if name else "")
-                median_height = (
-                    statistics.median(heights)
-                    if heights
-                    else 0.0
-                )
-                pad = 2.0 * median_height if median_height > 0 else 6.0
-                block_hint = {
-                    "source": "BLOCK",
-                    "name": name,
-                    "layer": layer,
-                    "bbox": [
-                        float(bbox[0]),
-                        float(bbox[1]),
-                        float(bbox[2]),
-                        float(bbox[3]),
-                    ],
-                    "pad": pad,
-                    "median_height": median_height,
-                }
-                break
-            if block_hint is not None:
-                roi_hint_effective = block_hint
-                _LAST_TEXT_TABLE_DEBUG["roi_hint"] = dict(block_hint)
-                bbox_vals = block_hint.get("bbox")
-                if (
-                    isinstance(bbox_vals, (list, tuple))
-                    and len(bbox_vals) == 4
-                    and all(isinstance(val, (int, float)) for val in bbox_vals)
-                ):
-                    print(
-                        "[ROI] seeded_from=BLOCK name={name} layer={layer} box=[{xmin:.1f}..{xmax:.1f}, {ymin:.1f}..{ymax:.1f}]".format(
-                            name=block_hint.get("name") or "-",
-                            layer=block_hint.get("layer") or "-",
-                            xmin=float(bbox_vals[0]),
-                            xmax=float(bbox_vals[1]),
-                            ymin=float(bbox_vals[2]),
-                            ymax=float(bbox_vals[3]),
-                        )
+                        or "",
                     )
-
-        if follow_sheet_target_layout:
-            follow_sheet_target_layouts.append(follow_sheet_target_layout)
-        follow_sheet_target_layouts = list(dict.fromkeys(follow_sheet_target_layouts))
-        if isinstance(_LAST_TEXT_TABLE_DEBUG, dict):
-            _LAST_TEXT_TABLE_DEBUG["follow_sheet_targets"] = list(follow_sheet_target_layouts)
-
-        if follow_sheet_requests:
-            info_entries: list[dict[str, Any]] = []
-            for request in follow_sheet_requests.values():
-                token_value = request.get("token")
-                target_label = request.get("target") or (
-                    f"SHEET ({token_value})" if token_value else "SHEET ()"
-                )
-                resolved_layout = request.get("resolved")
-                resolved_found = bool(request.get("found")) and bool(resolved_layout)
+                    upper_text = str(
+                        entry.get("effective_layer_upper")
+                        or entry.get("layer_upper")
+                        or layer_text.upper()
+                    )
+                    values = [layer_text, upper_text]
+                    include_ok = True
+                    if include_patterns:
+                        include_ok = _matches_any(include_patterns, values)
+                    exclude_hit = False
+                    if include_ok and exclude_patterns:
+                        exclude_hit = _matches_any(exclude_patterns, values)
+                    if include_ok and not exclude_hit:
+                        regex_filtered.append(entry)
+                kept = len(regex_filtered)
+                dropped = len(collected_entries) - kept
                 print(
-                    f"[HINT] follow-sheet target=\"{target_label}\" found={resolved_found}"
+                    "[LAYER] regex include={incl} exclude={excl} kept={kept} dropped={dropped}".format(
+                        incl=include_display or "-",
+                        excl=exclude_display or "-",
+                        kept=kept,
+                        dropped=dropped,
+                    )
                 )
-                info_map = {
-                    "target": target_label,
-                    "resolved": resolved_layout if resolved_found else None,
-                    "texts": 0,
-                    "tables": 0,
-                }
-                if resolved_found and resolved_layout:
-                    target_upper = str(resolved_layout).strip().upper()
-                    texts_count = sum(
-                        1
-                        for entry in collected_entries
-                        if str(entry.get("layout_name") or "").strip().upper()
-                        == target_upper
-                    )
-                    tables_count = _count_tables_for_layout_name(resolved_layout)
-                    print(
-                        f"[LAYOUT] {resolved_layout} texts={texts_count} tables={tables_count}"
-                    )
-                    info_map["texts"] = texts_count
-                    info_map["tables"] = tables_count
-                info_entries.append(info_map)
-            if isinstance(_LAST_TEXT_TABLE_DEBUG, dict):
-                if len(info_entries) == 1:
-                    _LAST_TEXT_TABLE_DEBUG["follow_sheet_info"] = info_entries[0]
-                else:
-                    _LAST_TEXT_TABLE_DEBUG["follow_sheet_info"] = info_entries
-
-        if not collected_entries:
-            fallback_lines = _collect_table_text_lines(doc, layout_filters=layout_filters)
-            if fallback_lines:
-                combined_fallback_lines = list(fallback_lines)
-            combined_fallback_lines = [
-                " ".join(str(line or "").split())
-                for line in combined_fallback_lines
-                if str(line or "").strip()
-            ]
-
-            fallback_entries: list[dict[str, Any]] = []
-            if ordered_layout_lines:
-                entries_by_layout = defaultdict(list)
-                layout_names = {}
-                layout_order = []
-                for idx, (layout_label, text_value) in enumerate(ordered_layout_lines):
-                    layout_key = layout_label or "FALLBACK"
-                    layout_index_effective = layout_index_map.setdefault(
-                        layout_key, len(layout_index_map)
-                    )
-                    if layout_index_effective not in layout_order:
-                        layout_order.append(layout_index_effective)
-                    layout_names[layout_index_effective] = layout_key
-                    entry = {
-                        "layout_index": layout_index_effective,
-                        "layout_name": layout_key,
-                        "text": text_value,
-                        "x": None,
-                        "y": None,
-                        "order": idx,
-                        "from_block": False,
-                        "height": None,
-                        "layer": "",
-                        "layer_upper": "",
-                        "effective_layer": "",
-                        "effective_layer_upper": "",
-                        "block_name": None,
-                        "block_stack": [],
-                    }
-                    fallback_entries.append(entry)
-                    entries_by_layout[layout_index_effective].append(entry)
-            elif combined_fallback_lines:
-                entries_by_layout = defaultdict(list)
-                layout_names = {}
-                layout_order = []
-                for idx, text_value in enumerate(combined_fallback_lines):
-                    entry = {
-                        "layout_index": 0,
-                        "layout_name": "FALLBACK",
-                        "text": text_value,
-                        "x": None,
-                        "y": None,
-                        "order": idx,
-                        "from_block": False,
-                        "height": None,
-                        "layer": "",
-                        "layer_upper": "",
-                        "effective_layer": "",
-                        "effective_layer_upper": "",
-                        "block_name": None,
-                        "block_stack": [],
-                    }
-                    fallback_entries.append(entry)
-                if fallback_entries:
-                    entries_by_layout[0] = list(fallback_entries)
-                    layout_names[0] = "FALLBACK"
-                    layout_order.append(0)
-
-            if fallback_entries:
-                collected_entries = fallback_entries
+                collected_entries = regex_filtered
+                layer_counts_regex = _count_layers(collected_entries)
+                layout_counts_regex = _count_layouts(collected_entries)
                 if isinstance(_LAST_TEXT_TABLE_DEBUG, dict):
-                    if ordered_layout_lines or combined_fallback_lines:
-                        debug_lines = [
-                            text for _, text in ordered_layout_lines
-                        ] or combined_fallback_lines
-                        _LAST_TEXT_TABLE_DEBUG["fallback_text_stream"] = list(debug_lines)
-                    debug_layouts = list(_LAST_TEXT_TABLE_DEBUG.get("layouts") or [])
-                    for name in fallback_layout_names or ["FALLBACK"]:
-                        if name and name not in debug_layouts:
-                            debug_layouts.append(name)
-                    _LAST_TEXT_TABLE_DEBUG["layouts"] = debug_layouts
-                    if fallback_follow_entries:
-                        info_entries: list[dict[str, Any]] = []
-                        for follow_entry in fallback_follow_entries:
-                            target_label = follow_entry.get("target")
-                            resolved_layout = follow_entry.get("resolved")
-                            resolved_found = bool(follow_entry.get("found")) and bool(
-                                resolved_layout
+                    _LAST_TEXT_TABLE_DEBUG["layer_counts_post_regex"] = dict(layer_counts_regex)
+                    _LAST_TEXT_TABLE_DEBUG["layout_counts_post_regex"] = dict(layout_counts_regex)
+    
+            if current_allowlist is not None:
+                filtered_entries: list[dict[str, Any]] = []
+                for layout_index in layout_order:
+                    layout_entries = entries_by_layout.get(layout_index)
+                    if not layout_entries:
+                        continue
+                    layout_name = layout_names.get(layout_index, str(layout_index))
+                    original_layout_lines = list(layout_entries)
+                    kept_for_layout = [
+                        entry
+                        for entry in layout_entries
+                        if not (entry.get("effective_layer_upper") or "")
+                        or (entry.get("effective_layer_upper") or "")
+                        in current_allowlist
+                    ]
+                    kept_count = len(kept_for_layout)
+                    if kept_count == 0:
+                        print(
+                            "[LAYER] layout={layout} allow={allow} kept=0 → fallback=no-filter".format(
+                                layout=layout_name,
+                                allow=allowlist_display,
                             )
-                            info_map = {
-                                "target": target_label,
-                                "resolved": resolved_layout if resolved_found else None,
-                                "texts": len(
-                                    layout_line_map.get(
-                                        resolved_layout or target_label or "", []
-                                    )
-                                ),
-                                "tables": 0,
-                            }
-                            info_entries.append(info_map)
-                        if info_entries:
-                            if len(info_entries) == 1:
-                                _LAST_TEXT_TABLE_DEBUG["follow_sheet_info"] = info_entries[0]
-                            else:
-                                _LAST_TEXT_TABLE_DEBUG["follow_sheet_info"] = info_entries
-                            targets_payload = []
-                            for info in info_entries:
-                                resolved = info.get("resolved") or info.get("target")
-                                if resolved and resolved not in targets_payload:
-                                    targets_payload.append(resolved)
-                            if targets_payload:
-                                existing_targets = _LAST_TEXT_TABLE_DEBUG.get(
-                                    "follow_sheet_targets"
-                                )
-                                if isinstance(existing_targets, list):
-                                    targets = list(existing_targets)
-                                elif existing_targets:
-                                    targets = [existing_targets]
-                                else:
-                                    targets = []
-                                for candidate in targets_payload:
-                                    if candidate not in targets:
-                                        targets.append(candidate)
-                                _LAST_TEXT_TABLE_DEBUG["follow_sheet_targets"] = targets
+                        )
+                        lines_for_layout = original_layout_lines
+                    else:
+                        print(
+                            "[LAYER] layout={layout} allow={allow} kept={count}".format(
+                                layout=layout_name,
+                                allow=allowlist_display,
+                                count=kept_count,
+                            )
+                        )
+                        lines_for_layout = list(kept_for_layout)
+                    filtered_entries.extend(lines_for_layout)
             else:
-                _LAST_TEXT_TABLE_DEBUG["rows_txt_count"] = 0
-                _LAST_TEXT_TABLE_DEBUG["text_row_count"] = 0
-                table_lines = []
-                print("[TEXT-SCAN] rows_txt count=0")
-                print("[TEXT-SCAN] parsed rows: 0")
-                return table_lines
-
-        def _entry_sort_key(entry: dict[str, Any]) -> tuple[float, float, int, int]:
-            x_val = entry.get("x")
-            y_val = entry.get("y")
-            try:
-                y_key = -float(y_val) if y_val is not None else float("inf")
-            except Exception:
-                y_key = float("inf")
-            try:
-                x_key = float(x_val) if x_val is not None else float("inf")
-            except Exception:
-                x_key = float("inf")
-            return (y_key, x_key, int(entry.get("layout_index", 0)), int(entry.get("order", 0)))
-
-        collected_entries.sort(key=_entry_sort_key)
-
-        candidate_entries: list[dict[str, Any]] = []
-        row_active = False
-        continuation_budget = 0
-        for idx, entry in enumerate(collected_entries):
-            stripped = entry.get("text", "").strip()
-            if not stripped:
-                row_active = False
-                continuation_budget = 0
-                continue
-            next_text = (
-                collected_entries[idx + 1].get("text", "")
-                if idx + 1 < len(collected_entries)
-                else None
+                filtered_entries = list(collected_entries)
+    
+            layer_counts_post = _count_layers(filtered_entries)
+            layout_counts_post = _count_layouts(filtered_entries)
+            print(
+                f"[TEXT-SCAN] kept_by_layer(post-allow)={_format_layer_summary(layer_counts_post)}"
             )
-            row_start = _is_row_start(stripped, next_text=next_text)
-            token_hit = _has_candidate_token(stripped)
-            keep_line = False
-            if row_start:
-                row_active = True
-                continuation_budget = 3
-                keep_line = True
-            elif token_hit:
-                keep_line = True
-                if row_active:
-                    continuation_budget = max(continuation_budget, 1)
-                row_active = row_active or token_hit
-            elif row_active and continuation_budget > 0:
-                keep_line = True
-                continuation_budget -= 1
-            else:
-                row_active = False
-                continuation_budget = 0
-            if keep_line:
-                candidate_entries.append(entry)
-
-        if debug_enabled and candidate_entries:
-            limit = min(40, len(candidate_entries))
-            print(f"[TEXT-SCAN] candidates[0..{limit - 1}]:")
-            for idx, entry in enumerate(candidate_entries[:40]):
+    
+            am_bor_pre_count = _lookup_layer_count(layer_counts_pre, "AM_BOR")
+            am_bor_post_count = _lookup_layer_count(layer_counts_post, "AM_BOR")
+            am_bor_drop_count = max(am_bor_pre_count - am_bor_post_count, 0)
+    
+            collected_entries = filtered_entries
+            if isinstance(_LAST_TEXT_TABLE_DEBUG, dict):
+                _LAST_TEXT_TABLE_DEBUG["layer_counts_post_allow"] = dict(layer_counts_post)
+                _LAST_TEXT_TABLE_DEBUG["layout_counts_post_allow"] = dict(layout_counts_post)
+                _LAST_TEXT_TABLE_DEBUG["collected_entities"] = [
+                    {
+                        "layout": str(entry.get("layout_name") or ""),
+                        "layer": str(
+                            entry.get("effective_layer")
+                            or entry.get("layer")
+                            or ""
+                        ),
+                        "type": str(entry.get("entity_type") or ""),
+                        "x": entry.get("x"),
+                        "y": entry.get("y"),
+                        "height": entry.get("height"),
+                        "text": str(entry.get("text") or ""),
+                    }
+                    for entry in collected_entries
+                ]
+    
+            if roi_hint_effective is None and preferred_block_rois:
+                block_hint: Mapping[str, Any] | None = None
+                for block_info in preferred_block_rois:
+                    bbox = block_info.get("bbox")
+                    if not bbox:
+                        continue
+                    name = block_info.get("name")
+                    layer = block_info.get("layer")
+                    heights = block_height_samples.get(str(name) if name else "")
+                    median_height = (
+                        statistics.median(heights)
+                        if heights
+                        else 0.0
+                    )
+                    pad = 2.0 * median_height if median_height > 0 else 6.0
+                    block_hint = {
+                        "source": "BLOCK",
+                        "name": name,
+                        "layer": layer,
+                        "bbox": [
+                            float(bbox[0]),
+                            float(bbox[1]),
+                            float(bbox[2]),
+                            float(bbox[3]),
+                        ],
+                        "pad": pad,
+                        "median_height": median_height,
+                    }
+                    break
+                if block_hint is not None:
+                    roi_hint_effective = block_hint
+                    _LAST_TEXT_TABLE_DEBUG["roi_hint"] = dict(block_hint)
+                    bbox_vals = block_hint.get("bbox")
+                    if (
+                        isinstance(bbox_vals, (list, tuple))
+                        and len(bbox_vals) == 4
+                        and all(isinstance(val, (int, float)) for val in bbox_vals)
+                    ):
+                        print(
+                            "[ROI] seeded_from=BLOCK name={name} layer={layer} box=[{xmin:.1f}..{xmax:.1f}, {ymin:.1f}..{ymax:.1f}]".format(
+                                name=block_hint.get("name") or "-",
+                                layer=block_hint.get("layer") or "-",
+                                xmin=float(bbox_vals[0]),
+                                xmax=float(bbox_vals[1]),
+                                ymin=float(bbox_vals[2]),
+                                ymax=float(bbox_vals[3]),
+                            )
+                        )
+    
+            if follow_sheet_target_layout:
+                follow_sheet_target_layouts.append(follow_sheet_target_layout)
+            follow_sheet_target_layouts = list(dict.fromkeys(follow_sheet_target_layouts))
+            if isinstance(_LAST_TEXT_TABLE_DEBUG, dict):
+                _LAST_TEXT_TABLE_DEBUG["follow_sheet_targets"] = list(follow_sheet_target_layouts)
+    
+            if follow_sheet_requests:
+                info_entries: list[dict[str, Any]] = []
+                for request in follow_sheet_requests.values():
+                    token_value = request.get("token")
+                    target_label = request.get("target") or (
+                        f"SHEET ({token_value})" if token_value else "SHEET ()"
+                    )
+                    resolved_layout = request.get("resolved")
+                    resolved_found = bool(request.get("found")) and bool(resolved_layout)
+                    print(
+                        f"[HINT] follow-sheet target=\"{target_label}\" found={resolved_found}"
+                    )
+                    info_map = {
+                        "target": target_label,
+                        "resolved": resolved_layout if resolved_found else None,
+                        "texts": 0,
+                        "tables": 0,
+                    }
+                    if resolved_found and resolved_layout:
+                        target_upper = str(resolved_layout).strip().upper()
+                        texts_count = sum(
+                            1
+                            for entry in collected_entries
+                            if str(entry.get("layout_name") or "").strip().upper()
+                            == target_upper
+                        )
+                        tables_count = _count_tables_for_layout_name(resolved_layout)
+                        print(
+                            f"[LAYOUT] {resolved_layout} texts={texts_count} tables={tables_count}"
+                        )
+                        info_map["texts"] = texts_count
+                        info_map["tables"] = tables_count
+                    info_entries.append(info_map)
+                if isinstance(_LAST_TEXT_TABLE_DEBUG, dict):
+                    if len(info_entries) == 1:
+                        _LAST_TEXT_TABLE_DEBUG["follow_sheet_info"] = info_entries[0]
+                    else:
+                        _LAST_TEXT_TABLE_DEBUG["follow_sheet_info"] = info_entries
+    
+            if not collected_entries:
+                fallback_lines = _collect_table_text_lines(doc, layout_filters=layout_filters)
+                if fallback_lines:
+                    combined_fallback_lines = list(fallback_lines)
+                combined_fallback_lines = [
+                    " ".join(str(line or "").split())
+                    for line in combined_fallback_lines
+                    if str(line or "").strip()
+                ]
+    
+                fallback_entries: list[dict[str, Any]] = []
+                if ordered_layout_lines:
+                    entries_by_layout = defaultdict(list)
+                    layout_names = {}
+                    layout_order = []
+                    for idx, (layout_label, text_value) in enumerate(ordered_layout_lines):
+                        layout_key = layout_label or "FALLBACK"
+                        layout_index_effective = layout_index_map.setdefault(
+                            layout_key, len(layout_index_map)
+                        )
+                        if layout_index_effective not in layout_order:
+                            layout_order.append(layout_index_effective)
+                        layout_names[layout_index_effective] = layout_key
+                        entry = {
+                            "layout_index": layout_index_effective,
+                            "layout_name": layout_key,
+                            "text": text_value,
+                            "x": None,
+                            "y": None,
+                            "order": idx,
+                            "from_block": False,
+                            "height": None,
+                            "layer": "",
+                            "layer_upper": "",
+                            "effective_layer": "",
+                            "effective_layer_upper": "",
+                            "block_name": None,
+                            "block_stack": [],
+                        }
+                        fallback_entries.append(entry)
+                        entries_by_layout[layout_index_effective].append(entry)
+                elif combined_fallback_lines:
+                    entries_by_layout = defaultdict(list)
+                    layout_names = {}
+                    layout_order = []
+                    for idx, text_value in enumerate(combined_fallback_lines):
+                        entry = {
+                            "layout_index": 0,
+                            "layout_name": "FALLBACK",
+                            "text": text_value,
+                            "x": None,
+                            "y": None,
+                            "order": idx,
+                            "from_block": False,
+                            "height": None,
+                            "layer": "",
+                            "layer_upper": "",
+                            "effective_layer": "",
+                            "effective_layer_upper": "",
+                            "block_name": None,
+                            "block_stack": [],
+                        }
+                        fallback_entries.append(entry)
+                    if fallback_entries:
+                        entries_by_layout[0] = list(fallback_entries)
+                        layout_names[0] = "FALLBACK"
+                        layout_order.append(0)
+    
+                if fallback_entries:
+                    collected_entries = fallback_entries
+                    if isinstance(_LAST_TEXT_TABLE_DEBUG, dict):
+                        if ordered_layout_lines or combined_fallback_lines:
+                            debug_lines = [
+                                text for _, text in ordered_layout_lines
+                            ] or combined_fallback_lines
+                            _LAST_TEXT_TABLE_DEBUG["fallback_text_stream"] = list(debug_lines)
+                        debug_layouts = list(_LAST_TEXT_TABLE_DEBUG.get("layouts") or [])
+                        for name in fallback_layout_names or ["FALLBACK"]:
+                            if name and name not in debug_layouts:
+                                debug_layouts.append(name)
+                        _LAST_TEXT_TABLE_DEBUG["layouts"] = debug_layouts
+                        if fallback_follow_entries:
+                            info_entries: list[dict[str, Any]] = []
+                            for follow_entry in fallback_follow_entries:
+                                target_label = follow_entry.get("target")
+                                resolved_layout = follow_entry.get("resolved")
+                                resolved_found = bool(follow_entry.get("found")) and bool(
+                                    resolved_layout
+                                )
+                                info_map = {
+                                    "target": target_label,
+                                    "resolved": resolved_layout if resolved_found else None,
+                                    "texts": len(
+                                        layout_line_map.get(
+                                            resolved_layout or target_label or "", []
+                                        )
+                                    ),
+                                    "tables": 0,
+                                }
+                                info_entries.append(info_map)
+                            if info_entries:
+                                if len(info_entries) == 1:
+                                    _LAST_TEXT_TABLE_DEBUG["follow_sheet_info"] = info_entries[0]
+                                else:
+                                    _LAST_TEXT_TABLE_DEBUG["follow_sheet_info"] = info_entries
+                                targets_payload = []
+                                for info in info_entries:
+                                    resolved = info.get("resolved") or info.get("target")
+                                    if resolved and resolved not in targets_payload:
+                                        targets_payload.append(resolved)
+                                if targets_payload:
+                                    existing_targets = _LAST_TEXT_TABLE_DEBUG.get(
+                                        "follow_sheet_targets"
+                                    )
+                                    if isinstance(existing_targets, list):
+                                        targets = list(existing_targets)
+                                    elif existing_targets:
+                                        targets = [existing_targets]
+                                    else:
+                                        targets = []
+                                    for candidate in targets_payload:
+                                        if candidate not in targets:
+                                            targets.append(candidate)
+                                    _LAST_TEXT_TABLE_DEBUG["follow_sheet_targets"] = targets
+                else:
+                    _LAST_TEXT_TABLE_DEBUG["rows_txt_count"] = 0
+                    _LAST_TEXT_TABLE_DEBUG["text_row_count"] = 0
+                    table_lines = []
+                    print("[TEXT-SCAN] rows_txt count=0")
+                    print("[TEXT-SCAN] parsed rows: 0")
+                    return (0, 0, 0)
+    
+            def _entry_sort_key(entry: dict[str, Any]) -> tuple[float, float, int, int]:
                 x_val = entry.get("x")
                 y_val = entry.get("y")
-                if isinstance(x_val, (int, float)):
-                    x_display = f"{float(x_val):.3f}"
-                else:
-                    x_display = "-"
-                if isinstance(y_val, (int, float)):
-                    y_display = f"{float(y_val):.3f}"
-                else:
-                    y_display = "-"
-                block_display = entry.get("block_name") or "-"
-                print(
-                    f"  [{idx:02d}] (x={x_display} y={y_display}) block={block_display} "
-                    f"text=\"{entry.get('text', '')}\""
+                try:
+                    y_key = -float(y_val) if y_val is not None else float("inf")
+                except Exception:
+                    y_key = float("inf")
+                try:
+                    x_key = float(x_val) if x_val is not None else float("inf")
+                except Exception:
+                    x_key = float("inf")
+                return (y_key, x_key, int(entry.get("layout_index", 0)), int(entry.get("order", 0)))
+    
+            collected_entries.sort(key=_entry_sort_key)
+    
+            candidate_entries = []
+            row_active = False
+            continuation_budget = 0
+            for idx, entry in enumerate(collected_entries):
+                stripped = entry.get("text", "").strip()
+                if not stripped:
+                    row_active = False
+                    continuation_budget = 0
+                    continue
+                next_text = (
+                    collected_entries[idx + 1].get("text", "")
+                    if idx + 1 < len(collected_entries)
+                    else None
                 )
+                row_start = _is_row_start(stripped, next_text=next_text)
+                token_hit = _has_candidate_token(stripped)
+                keep_line = False
+                if row_start:
+                    row_active = True
+                    continuation_budget = 3
+                    keep_line = True
+                elif token_hit:
+                    keep_line = True
+                    if row_active:
+                        continuation_budget = max(continuation_budget, 1)
+                    row_active = row_active or token_hit
+                elif row_active and continuation_budget > 0:
+                    keep_line = True
+                    continuation_budget -= 1
+                else:
+                    row_active = False
+                    continuation_budget = 0
+                if keep_line:
+                    candidate_entries.append(entry)
+    
+            if debug_enabled and candidate_entries:
+                limit = min(40, len(candidate_entries))
+                print(f"[TEXT-SCAN] candidates[0..{limit - 1}]:")
+                for idx, entry in enumerate(candidate_entries[:40]):
+                    x_val = entry.get("x")
+                    y_val = entry.get("y")
+                    if isinstance(x_val, (int, float)):
+                        x_display = f"{float(x_val):.3f}"
+                    else:
+                        x_display = "-"
+                    if isinstance(y_val, (int, float)):
+                        y_display = f"{float(y_val):.3f}"
+                    else:
+                        y_display = "-"
+                    block_display = entry.get("block_name") or "-"
+                    print(
+                        f"  [{idx:02d}] (x={x_display} y={y_display}) block={block_display} "
+                        f"text=\"{entry.get('text', '')}\""
+                    )
+    
+            normalized_entries: list[dict[str, Any]] = []
+            normalized_lines: list[str] = []
+            for entry in candidate_entries:
+                raw_line = str(entry.get("text", ""))
+                match = _match_row_quantity(raw_line)
+                if match:
+                    prefix = raw_line[: match.start()].strip(" |")
+                    suffix = raw_line[match.end() :].strip()
+                    row_token = match.group(0).strip()
+                    parts = [row_token]
+                    if prefix:
+                        parts.append(prefix)
+                    if suffix:
+                        parts.append(suffix)
+                    normalized_line = " ".join(parts)
+                else:
+                    normalized_line = raw_line
+                normalized_line = " ".join(normalized_line.split())
+                entry_copy = dict(entry)
+                entry_copy["normalized_text"] = normalized_line
+                normalized_entries.append(entry_copy)
+                normalized_lines.append(normalized_line)
+    
+            candidate_entries = normalized_entries
+            table_lines = normalized_lines
+    
+            debug_candidates: list[dict[str, Any]] = []
+            for entry in candidate_entries:
+                debug_candidates.append(
+                    {
+                        "layout": entry.get("layout_name"),
+                        "in_block": bool(entry.get("from_block")),
+                        "block": entry.get("block_name"),
+                        "x": entry.get("x"),
+                        "y": entry.get("y"),
+                        "text": entry.get("normalized_text")
+                        or entry.get("text")
+                        or "",
+                    }
+                )
+            _LAST_TEXT_TABLE_DEBUG["candidates"] = debug_candidates
+    
+            current_row: list[str] = []
+            for idx, entry in enumerate(candidate_entries):
+                line = entry.get("normalized_text", "").strip()
+                if not line:
+                    continue
+                next_line = (
+                    candidate_entries[idx + 1].get("normalized_text", "")
+                    if idx + 1 < len(candidate_entries)
+                    else None
+                )
+                if _is_row_start(line, next_text=next_line):
+                    if current_row:
+                        merged_rows.append(" ".join(current_row))
+                    current_row = [line]
+                elif current_row:
+                    current_row.append(line)
+            if current_row:
+                merged_rows.append(" ".join(current_row))
+    
+            rows_txt_initial = len(merged_rows)
+            _LAST_TEXT_TABLE_DEBUG["rows_txt_count"] = rows_txt_initial
+            _LAST_TEXT_TABLE_DEBUG["rows_txt_lines"] = list(merged_rows)
+            print(f"[TEXT-SCAN] rows_txt count={len(merged_rows)}")
+            for idx, row_text in enumerate(merged_rows[:10]):
+                print(f"  [{idx:02d}] {row_text}")
+    
+            return (am_bor_pre_count, am_bor_post_count, am_bor_drop_count)
 
-        normalized_entries: list[dict[str, Any]] = []
-        normalized_lines: list[str] = []
-        for entry in candidate_entries:
-            raw_line = str(entry.get("text", ""))
-            match = _match_row_quantity(raw_line)
-            if match:
-                prefix = raw_line[: match.start()].strip(" |")
-                suffix = raw_line[match.end() :].strip()
-                row_token = match.group(0).strip()
-                parts = [row_token]
-                if prefix:
-                    parts.append(prefix)
-                if suffix:
-                    parts.append(suffix)
-                normalized_line = " ".join(parts)
-            else:
-                normalized_line = raw_line
-            normalized_line = " ".join(normalized_line.split())
-            entry_copy = dict(entry)
-            entry_copy["normalized_text"] = normalized_line
-            normalized_entries.append(entry_copy)
-            normalized_lines.append(normalized_line)
-
-        candidate_entries = normalized_entries
-        table_lines = normalized_lines
-
-        debug_candidates: list[dict[str, Any]] = []
-        for entry in candidate_entries:
-            debug_candidates.append(
-                {
-                    "layout": entry.get("layout_name"),
-                    "in_block": bool(entry.get("from_block")),
-                    "block": entry.get("block_name"),
-                    "x": entry.get("x"),
-                    "y": entry.get("y"),
-                    "text": entry.get("normalized_text")
-                    or entry.get("text")
-                    or "",
-                }
-            )
-        _LAST_TEXT_TABLE_DEBUG["candidates"] = debug_candidates
-
-        current_row: list[str] = []
-        for idx, entry in enumerate(candidate_entries):
-            line = entry.get("normalized_text", "").strip()
-            if not line:
-                continue
-            next_line = (
-                candidate_entries[idx + 1].get("normalized_text", "")
-                if idx + 1 < len(candidate_entries)
-                else None
-            )
-            if _is_row_start(line, next_text=next_line):
-                if current_row:
-                    merged_rows.append(" ".join(current_row))
-                current_row = [line]
-            elif current_row:
-                current_row.append(line)
-        if current_row:
-            merged_rows.append(" ".join(current_row))
-
-        rows_txt_initial = len(merged_rows)
-        _LAST_TEXT_TABLE_DEBUG["rows_txt_count"] = rows_txt_initial
-        _LAST_TEXT_TABLE_DEBUG["rows_txt_lines"] = list(merged_rows)
-        print(f"[TEXT-SCAN] rows_txt count={len(merged_rows)}")
-        for idx, row_text in enumerate(merged_rows[:10]):
-            print(f"  [{idx:02d}] {row_text}")
-
+        am_bor_pre_count, am_bor_post_count, am_bor_drop_count = _perform_text_scan(resolved_allowlist)
+        if (
+            resolved_allowlist is not None
+            and am_bor_pre_count >= 20
+            and am_bor_post_count == 0
+            and rows_txt_initial < 8
+        ):
+            tokens = list(resolved_allowlist)
+            token_set = {str(token).upper() for token in tokens}
+            if "AM_BOR" not in token_set:
+                drop_display = f"{am_bor_drop_count}+" if am_bor_drop_count >= 100 else str(am_bor_drop_count)
+                print(
+                    f"[TEXT-SCAN] auto-retry including AM_BOR (dropped {drop_display} lines on first pass)"
+                )
+                if isinstance(_LAST_TEXT_TABLE_DEBUG, dict):
+                    _LAST_TEXT_TABLE_DEBUG.setdefault("auto_retry", {})["include_am_bor"] = {
+                        "dropped": int(am_bor_drop_count),
+                        "pre": int(am_bor_pre_count),
+                    }
+                tokens.append("AM_BOR")
+                resolved_allowlist = _normalize_layer_allowlist(tokens)
+                allowlist_display = (
+                    "None"
+                    if resolved_allowlist is None
+                    else "{" + ",".join(sorted(resolved_allowlist) or []) + "}"
+                )
+                am_bor_pre_count, am_bor_post_count, am_bor_drop_count = _perform_text_scan(resolved_allowlist)
+        
         def _parse_rows(row_texts: list[str]) -> tuple[list[dict[str, Any]], dict[str, int], int]:
             families: dict[str, int] = {}
             parsed: list[dict[str, Any]] = []
