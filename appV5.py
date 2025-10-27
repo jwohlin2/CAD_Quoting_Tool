@@ -50,6 +50,10 @@ from cad_quoter.app.quote_doc import (
     build_material_detail_lines,
     _sanitize_render_text,
 )
+from cad_quoter.app.quote_appendix import (
+    RenderState as AppendixRenderState,
+    render_appendix as render_quote_appendix,
+)
 from cad_quoter.pricing.machining_report import _drill_time_model
 from cad_quoter.utils.number_parse import NUM_DEC_RE, NUM_FRAC_RE, _to_inch
 from cad_quoter.utils.render_utils.tables import ascii_table
@@ -15646,362 +15650,94 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
         if lines and lines[-1] != "":
             _push(lines, "")
 
-    def _format_dotted_line(label: str, value_text: str, *, indent: str = "  ") -> str:
-        base = f"{indent}{label}"
-        try:
-            total_width = int(page_width)
-        except Exception:
-            total_width = 74
-        total_width = max(32, min(120, total_width))
-        spacing = total_width - len(base) - len(value_text) - 1
-        if spacing < 2:
-            return f"{base} {value_text}"
-        return f"{base}{'.' * spacing} {value_text}"
-
-    section_counter = 0
-    quick_sections: list[list[str]] = []
-
-    def _start_section(title: str) -> list[str]:
-        nonlocal section_counter
-        heading = f"{chr(ord('A') + section_counter)}) {title}"
-        section_counter += 1
-        block: list[str] = [heading]
-        quick_sections.append(block)
-        return block
-
-    if slider_sample_points:
-        qty_display: str
-        if isinstance(qty, int) and qty > 0:
-            qty_display = str(qty)
-        else:
-            qty_display = str(max(1, int(round(_safe_float(qty, 1.0)))))
-        section_lines = _start_section(f"Margin Slider (Qty = {qty_display})")
-        for point in sorted(slider_sample_points, key=lambda p: p.get("margin_pct", 0.0)):
-            label_text = f"{str(point.get('label') or '')} margin".strip()
-            if not label_text:
-                label_text = "Margin"
-            if point.get("is_current"):
-                label_text = f"{label_text} (current)"
-            amount_text = fmt_money(_safe_float(point.get("unit_price"), 0.0), point.get("currency", currency))
-            section_lines.append(_format_dotted_line(label_text, amount_text))
-
-    current_qty = qty if isinstance(qty, int) and qty > 0 else max(1, int(round(_safe_float(qty, 1.0))))
-    direct_per_part = max(0.0, _safe_float(directs, 0.0))
-    labor_machine_per_part = max(0.0, _safe_float(machine_labor_total, 0.0))
-    amortized_per_part = max(0.0, _safe_float(nre_per_part, 0.0))
-    amortized_per_lot = amortized_per_part * max(1, current_qty)
-    pass_through_lot = max(0.0, _safe_float(pass_through_total, 0.0))
-    vendor_items_lot = max(0.0, _safe_float(vendor_items_total, 0.0))
-    direct_fixed_lot = pass_through_lot + vendor_items_lot
-    divisor = max(1, current_qty)
-    direct_variable_per_part = max(0.0, direct_per_part - (direct_fixed_lot / divisor))
-
-    qty_candidates_raw = [1, 2, 5, 10]
-    if current_qty not in qty_candidates_raw:
-        qty_candidates_raw.append(current_qty)
-    qty_candidates = sorted({q for q in qty_candidates_raw if isinstance(q, int) and q > 0})
-
-    qty_break_rows: list[tuple[int, float, float, float, float]] = []
-    for candidate_qty in qty_candidates:
-        labor_part = labor_machine_per_part + (amortized_per_lot / candidate_qty if candidate_qty > 0 else 0.0)
-        direct_part = direct_variable_per_part + (direct_fixed_lot / candidate_qty if candidate_qty > 0 else 0.0)
-        base_subtotal_candidate = labor_part + direct_part
-        subtotal_with_expedite = base_subtotal_candidate * (1.0 + max(0.0, expedite_pct_value))
-        final_candidate = subtotal_with_expedite * (1.0 + max(0.0, margin_pct_value))
-        qty_break_rows.append(
-            (
-                candidate_qty,
-                round(labor_part, 2),
-                round(direct_part, 2),
-                round(subtotal_with_expedite, 2),
-                round(final_candidate, 2),
+    def _resolve_llm_debug_enabled(
+        result_map: Any,
+        breakdown_map: Any,
+        params_map: Any,
+        fallback_map: Any,
+    ) -> bool:
+        for source in (result_map, breakdown_map, params_map, fallback_map):
+            override = _extract_llm_debug_override(
+                source if isinstance(source, _MappingABC) else None
             )
-        )
+            if override is not None:
+                return bool(override)
+        return bool(APP_ENV.llm_debug_enabled)
 
-    if qty_break_rows:
-        heading_text = f"Qty break (assumes same ops; programming amortized; {_pct_label(margin_pct_value)} margin"
-        if expedite_pct_value > 0:
-            heading_text += f"; expedite {_pct_label(expedite_pct_value)}"
-        heading_text += ")"
-        section_lines = _start_section(heading_text)
-        qty_headers = [
-            "Qty",
-            "Labor $/part",
-            "Directs $/part",
-            "Subtotal",
-            "Final",
-        ]
-        qty_rows_formatted = [
-            [
-                row_qty,
-                fmt_money(labor_val, currency),
-                fmt_money(direct_val, currency),
-                fmt_money(subtotal_val, currency),
-                fmt_money(final_val, currency),
-            ]
-            for row_qty, labor_val, direct_val, subtotal_val, final_val in qty_break_rows
-        ]
-        qty_table = ascii_table(
-            qty_headers,
-            qty_rows_formatted,
-            col_widths=[5, 16, 16, 15, 15],
-            col_aligns=["R", "R", "R", "R", "R"],
-            header_aligns=["C", "C", "C", "C", "C"],
-        )
-        section_lines.extend(f"  {line}" for line in qty_table.splitlines())
+    appendix_context: dict[str, Any] = {
+        "applied_pcts": applied_pcts,
+        "breakdown": breakdown,
+        "result": result,
+        "params": params,
+        "totals": totals,
+        "subtotal": subtotal,
+        "decision_state": decision_state,
+        "replace_line": replace_line,
+        "format_row": _format_row,
+        "final_price_row_index": final_price_row_index,
+        "safe_float": _safe_float,
+        "compute_pricing_ladder": _compute_pricing_ladder,
+        "currency": currency,
+        "fmt_money": fmt_money,
+        "pct_formatter": _pct,
+        "row_fn": row,
+        "qty": locals().get("qty"),
+        "directs": directs,
+        "machine_labor_total": machine_labor_total,
+        "nre_per_part": nre_per_part,
+        "pass_through_total": pass_through_total,
+        "vendor_items_total": vendor_items_total,
+        "ascii_table": ascii_table,
+        "write_wrapped": write_wrapped,
+        "llm_notes": llm_notes,
+        "explanation_lines": explanation_lines,
+        "why_lines": why_lines,
+        "why_parts": why_parts,
+        "bucket_why_summary_line": bucket_why_summary_line,
+        "append_removal_debug_if_enabled": append_removal_debug_if_enabled,
+        "removal_summary_for_display": removal_summary_for_display,
+        "planner_result": locals().get("planner_result"),
+        "process_plan_summary_local": locals().get("process_plan_summary_local"),
+        "process_rows_rendered": process_rows_rendered,
+        "bucket_state": bucket_state,
+        "explain_quote": explain_quote,
+        "hour_trace_data": hour_trace_data,
+        "geometry_for_explainer": geometry_for_explainer,
+        "planner_bucket_view": locals().get("planner_bucket_view"),
+        "canonical_bucket_rollup": locals().get("canonical_bucket_rollup"),
+        "hour_summary_entries": hour_summary_entries,
+        "process_meta": locals().get("process_meta"),
+        "bucket_minutes_detail": bucket_minutes_detail,
+        "resolve_llm_debug_enabled": _resolve_llm_debug_enabled,
+        "app_env_llm_debug_enabled": APP_ENV.llm_debug_enabled,
+        "coerce_float_or_none": _coerce_float_or_none,
+    }
 
-    other_quick_entries: list[dict[str, Any]] = []
-    if quick_what_if_entries:
-        for entry in quick_what_if_entries:
-            margin_present = entry.get("margin_pct") is not None
-            label_lower = str(entry.get("label") or "").strip().lower()
-            if slider_sample_points and margin_present and "margin" in label_lower:
-                continue
-            other_quick_entries.append(entry)
+    appendix_state = AppendixRenderState(
+        lines=lines,
+        emit=lambda text: _push(lines, text),
+        ensure_blank_line=_ensure_blank_line,
+        divider=divider,
+        page_width=page_width,
+        context=appendix_context,
+    )
+    appendix_result = render_quote_appendix(appendix_state)
 
-    if other_quick_entries:
-        section_lines = _start_section("Other quick toggles")
-        quick_toggle_rows: list[list[str]] = []
-        for entry in other_quick_entries:
-            label_text = str(entry.get("label") or "").strip() or "Scenario"
-            amount_val = _safe_float(entry.get("unit_price"), 0.0)
-            amount_text = fmt_money(amount_val, entry.get("currency", currency))
-            delta_val = entry.get("delta")
-            if delta_val is not None:
-                delta_float = _safe_float(delta_val, 0.0)
-                if delta_float < -0.01:
-                    delta_prefix = "-"
-                elif abs(delta_float) <= 0.01:
-                    delta_prefix = "±"
-                else:
-                    delta_prefix = "+"
-                delta_text = fmt_money(abs(delta_float), entry.get("currency", currency))
-                delta_display = f"{delta_prefix}{delta_text}"
-            else:
-                delta_display = ""
-            detail_text = str(entry.get("detail") or "").strip()
-            quick_toggle_rows.append([
-                f"{label_text}:",
-                amount_text,
-                delta_display,
-                detail_text,
-            ])
-        quick_toggle_table = ascii_table(
-            ["Scenario", "Unit price", "Δ", "Notes"],
-            quick_toggle_rows,
-            col_widths=[24, 12, 10, 20],
-            col_aligns=["L", "R", "C", "L"],
-            header_aligns=["L", "C", "C", "L"],
-        )
-        section_lines.extend(f"  {line}" for line in quick_toggle_table.splitlines())
-
-    quick_section_lines: list[str] = []
-    for block in quick_sections:
-        if quick_section_lines and quick_section_lines[-1] != "":
-            quick_section_lines.append("")
-        quick_section_lines.extend(block)
-
-    while quick_section_lines and quick_section_lines[-1] == "":
-        quick_section_lines.pop()
-
-    if quick_section_lines:
-        _ensure_blank_line()
-        _push(lines, "QUICK WHAT-IFS (INTERNAL KNOBS)")
-        _push(lines, divider)
-        _push(lines, "Quick What-Ifs")
-        for text_line in quick_section_lines:
-            _push(lines, text_line)
-        _ensure_blank_line()
-
-    # ---- LLM adjustments bullets (optional) ---------------------------------
-    if llm_notes:
-        _push(lines, "LLM Adjustments")
-        _push(lines, divider)
-        import textwrap as _tw
-        for n in llm_notes:
-            for w in _tw.wrap(str(n), width=page_width):
-                _push(lines, f"- {w}")
-        _push(lines, "")
-
-    if not explanation_lines:
-        plan_info_for_explainer: Mapping[str, Any] | None = None
-        plan_info_payload: dict[str, Any] = {}
-
-        process_plan_for_explainer: Mapping[str, Any] | None = None
-        process_plan_candidate = locals().get("process_plan_summary_local")
-        if isinstance(process_plan_candidate, _MappingABC) and process_plan_candidate:
-            process_plan_for_explainer = process_plan_candidate
-        elif isinstance(breakdown, _MappingABC):
-            candidate_summary = breakdown.get("process_plan")
-            if isinstance(candidate_summary, _MappingABC) and candidate_summary:
-                process_plan_for_explainer = candidate_summary
-        if isinstance(process_plan_for_explainer, _MappingABC) and process_plan_for_explainer:
-            plan_info_payload["process_plan_summary"] = process_plan_for_explainer
-
-        if isinstance(breakdown, _MappingABC):
-            process_plan_map = breakdown.get("process_plan")
-            if isinstance(process_plan_map, _MappingABC) and process_plan_map:
-                plan_info_payload.setdefault("process_plan", process_plan_map)
-            plan_pricing_map = breakdown.get("process_plan_pricing")
-            if isinstance(plan_pricing_map, _MappingABC) and plan_pricing_map:
-                plan_info_payload.setdefault("pricing", plan_pricing_map)
-
-        planner_pricing_for_explainer: Mapping[str, Any] | None = None
-        if isinstance(breakdown, _MappingABC):
-            candidate_planner = breakdown.get("process_plan_pricing")
-            if isinstance(candidate_planner, _MappingABC) and candidate_planner:
-                planner_pricing_for_explainer = candidate_planner
-        if (
-            planner_pricing_for_explainer is None
-            and isinstance(result, _MappingABC)
-        ):
-            candidate_planner = result.get("process_plan_pricing")
-            if isinstance(candidate_planner, _MappingABC) and candidate_planner:
-                planner_pricing_for_explainer = candidate_planner
-        if planner_pricing_for_explainer is None:
-            candidate_planner = locals().get("planner_result")
-            if isinstance(candidate_planner, _MappingABC) and candidate_planner:
-                planner_pricing_for_explainer = candidate_planner
-
-        if isinstance(planner_pricing_for_explainer, _MappingABC) and planner_pricing_for_explainer:
-            plan_info_payload["planner_pricing"] = planner_pricing_for_explainer
-
-        bucket_plan_info: dict[str, Any] = {}
-        if isinstance(bucket_state, PlannerBucketRenderState):
-            extra_map = getattr(bucket_state, "extra", None)
-            if isinstance(extra_map, _MappingABC) and extra_map:
-                try:
-                    bucket_plan_info.update(dict(extra_map))
-                except Exception:
-                    for key, value in extra_map.items():
-                        bucket_plan_info[key] = value
-            bucket_minutes_detail_map = getattr(bucket_state, "bucket_minutes_detail", None)
-            if isinstance(bucket_minutes_detail_map, _MappingABC) and bucket_minutes_detail_map:
-                bucket_plan_info.setdefault(
-                    "bucket_minutes_detail_for_render",
-                    bucket_minutes_detail_map,
-                )
-        if bucket_plan_info:
-            plan_info_payload["bucket_state_extra"] = bucket_plan_info
-
-        if process_rows_rendered:
-            plan_info_payload.setdefault(
-                "process_rows_rendered",
-                [
-                    (
-                        name,
-                        minutes,
-                        machine,
-                        labor,
-                        total,
-                    )
-                    for (name, minutes, machine, labor, total) in process_rows_rendered
-                ],
-            )
-
-        if plan_info_payload:
-            plan_info_for_explainer = plan_info_payload
-
-        try:
-            explanation_text = explain_quote(
-                breakdown,
-                hour_trace=hour_trace_data,
-                geometry=geometry_for_explainer,
-                render_state=bucket_state,
-                plan_info=plan_info_for_explainer,
-            )
-        except Exception:
-            explanation_text = ""
-        if explanation_text:
-            for line in str(explanation_text).splitlines():
-                text = line.strip()
-                if text:
-                    explanation_lines.append(text)
-
-    if explanation_lines:
-        why_lines.extend(explanation_lines)
-    if why_lines:
-        why_parts.extend(why_lines)
-
-    if bucket_why_summary_line:
-        summary_text = bucket_why_summary_line.strip()
-        if summary_text and summary_text not in why_parts:
-            why_parts.append(summary_text)
-
-    if why_parts:
-        if lines and lines[-1]:
-            _push(lines, "")
-        _push(lines, "Why this price")
-        _push(lines, divider)
-        for part in why_parts:
-            write_wrapped(part, "  ")
-        if lines[-1]:
-            _push(lines, "")
-        # Append the compact removal debug table (if available)
-        append_removal_debug_if_enabled(lines, removal_summary_for_display)
-
-    # ──────────────────────────────────────────────────────────────────────────
-    # Nice, compact sanity check at the very end (only when debug is enabled)
-    # Shows whether drilling hours are consistent across views:
-    #  - planner bucket minutes
-    #  - canonical bucket rollup (minutes)
-    #  - hour summary entry
-    #  - process_meta['drilling']['hr']
-    # ──────────────────────────────────────────────────────────────────────────
-    try:
-        _llm_dbg = _resolve_llm_debug_enabled(result, breakdown, params, {"llm_debug_enabled": True})
-    except Exception:
-        _llm_dbg = bool(APP_ENV.llm_debug_enabled)
-    if _llm_dbg:
-        try:
-            # Pull minutes from planner bucket view if available
-            _planner_min = None
-            _canon_min = None
-            _hsum_hr = None
-            _meta_hr = None
-
-            _pbv = locals().get("planner_bucket_view")
-            if isinstance(_pbv, _MappingABC):
-                _buckets = _pbv.get("buckets") if isinstance(_pbv.get("buckets"), _MappingABC) else {}
-                _drill = _buckets.get("Drilling") or _buckets.get("drilling") if isinstance(_buckets, _MappingABC) else None
-                if isinstance(_drill, _MappingABC):
-                    _planner_min = _coerce_float_or_none(_drill.get("minutes"))
-
-            _canon = locals().get("canonical_bucket_rollup")
-            if isinstance(_canon, _MappingABC):
-                _canon_min = _coerce_float_or_none(_canon.get("drilling"))
-                if _canon_min is not None:
-                    _canon_min = round(float(_canon_min) * 60.0, 1)  # hours→minutes
-
-            _hsum = locals().get("hour_summary_entries")
-            if isinstance(_hsum, _MappingABC):
-                # hour_summary_entries: {label: (hr, include_flag)}
-                for _label, (_hr, _inc) in _hsum.items():
-                    if str(_label).strip().lower() == "drilling":
-                        _hsum_hr = _coerce_float_or_none(_hr)
-                        break
-
-            _pmeta = locals().get("process_meta")
-            if isinstance(_pmeta, _MappingABC):
-                _meta_hr = _coerce_float_or_none((_pmeta.get("drilling") or {}).get("hr"))
-
-            _push(lines, "DEBUG — Drilling sanity")
-            _push(lines, divider)
-            def _fmt(x, unit):
-                return "—" if x is None or not math.isfinite(float(x)) else f"{float(x):.2f} {unit}"
-            _push(lines, 
-                "  bucket(planner): "
-                + _fmt(_planner_min, "min")
-                + "   canonical: "
-                + _fmt(_canon_min, "min")
-                + "   hour_summary: "
-                + _fmt(_hsum_hr, "hr")
-                + "   meta: "
-                + _fmt(_meta_hr, "hr")
-            )
-            _push(lines, "")
-        except Exception:
-            pass
+    quick_what_if_entries = appendix_result.quick_what_ifs
+    slider_sample_points = appendix_result.slider_sample_points
+    margin_slider_payload = appendix_result.margin_slider
+    why_parts = appendix_result.why_parts
+    ladder_totals = appendix_result.ladder_totals
+    expedite_pct_value = appendix_result.expedite_pct
+    margin_pct_value = appendix_result.margin_pct
+    subtotal_before_margin = appendix_result.subtotal_before_margin
+    expedite_cost = appendix_result.expedite_cost
+    price = appendix_result.final_price
+    ladder_subtotal = appendix_result.ladder_subtotal
+    subtotal_before_margin_val = appendix_result.subtotal_before_margin
+    final_price_val = appendix_result.final_price
+    expedite_amount_val = appendix_result.expedite_cost
+    ladder_subtotal_val = appendix_result.ladder_subtotal
 
     # ------------------------------------------------------------------
     # Final cross-check before rendering the quote to text. Verify that

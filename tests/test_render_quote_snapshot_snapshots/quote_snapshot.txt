@@ -102,3 +102,7 @@ Why this price
   Pass-through items  Shipping: $65.00; Consumables: $35.00.
   Process buckets - Machine $450.00; Labor $555.00; largest bucket(s):
   Milling $540.00, Grinding $330.00, Finishing/Deburr $80.00
+
+DEBUG - Drilling sanity
+--------------------------------------------------------------------------
+  bucket(planner): -   canonical: -   hour_summary: 1.50 hr   meta: 1.50 hr
