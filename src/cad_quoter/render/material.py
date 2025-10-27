@@ -1,4 +1,4 @@
-"""Stub non-recurring engineering section renderer."""
+"""Stub material section renderer."""
 
 from __future__ import annotations
 
@@ -8,7 +8,7 @@ if TYPE_CHECKING:  # pragma: no cover - imports for type checking only
     from . import RenderState
 
 
-def render_nre(state: "RenderState") -> list[str]:
-    """Return the legacy NRE section lines."""
+def render_material(state: "RenderState") -> list[str]:
+    """Return the legacy material section lines."""
 
     return []
