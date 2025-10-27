@@ -227,6 +227,54 @@ def test_admin_note_line_is_ignored() -> None:
     assert rows[0].get("qty") == 2
 
 
+def test_anchor_rows_are_authoritative_over_roi() -> None:
+    anchor_rows = [
+        {"qty": 2, "desc": "(2) 5/8-11 TAP"},
+        {"qty": 2, "desc": "(2) #10-32 TAP"},
+        {"qty": 4, "desc": "(4) .75 C'BORE ; \"R\" (.339) DRILL ; 1/8-NPT"},
+    ]
+    roi_rows = [
+        {"qty": 2, "desc": "(2) 5/8-11 TAP"},
+        {"qty": 12, "desc": ".12 R"},
+    ]
+
+    merged, dedup, authoritative = geo_extractor._combine_text_rows(
+        anchor_rows,
+        roi_rows,
+        roi_rows,
+    )
+
+    assert authoritative
+    assert merged == anchor_rows
+    assert dedup == 0
+
+
+def test_merge_table_lines_ignores_numeric_ladder_noise() -> None:
+    merged = geo_extractor._merge_table_lines(
+        [
+            "(2) Ø0.250 DRILL THRU",
+            "BREAK ALL .12 R",
+            "1 1 2 2 3 3 4 4 5 5 6 6 7 7 8 8 9 9",
+        ]
+    )
+
+    assert merged == ["(2) Ø0.250 DRILL THRU"]
+
+
+def test_fallback_semicolon_row_remains_single_entry() -> None:
+    result = geo_extractor._fallback_text_table(
+        [
+            "(4) .75 C'BORE ; \"R\" (.339) DRILL ;",
+            "1/8-NPT",
+        ]
+    )
+
+    rows = result.get("rows") or []
+    assert len(rows) == 1
+    assert rows[0].get("qty") == 4
+    assert "1/8-NPT" in rows[0].get("desc", "")
+
+
 def test_anchor_height_filter_drops_small_text() -> None:
     entries = [
         {"normalized_text": "(2) Ø0.250 DRILL", "height": 0.20},

@@ -2663,6 +2663,24 @@ def _is_row_start(text: str, *, next_text: str | None = None) -> bool:
     return bool(_ROW_ANCHOR_RE.match(text))
 
 
+def _roi_is_row_starter(text: str) -> bool:
+    if not text:
+        return False
+    return bool(_ROW_ANCHOR_RE.match(text))
+
+
+def _roi_is_admin_noise(text: str) -> bool:
+    if not text:
+        return False
+    return bool(_ADMIN_ROW_DROP_RE.search(text))
+
+
+def _roi_is_numeric_ladder(text: str) -> bool:
+    if not text:
+        return False
+    return bool(_NUMERIC_LADDER_RE.match(text))
+
+
 def _normalize_candidate_text(text: Any) -> str:
     try:
         base = str(text or "")
@@ -2720,6 +2738,37 @@ def _unique_rows_in_order(
             seen.add(key)
             unique_rows.append(dict(row))
     return unique_rows, dropped
+
+
+def _combine_text_rows(
+    anchor_rows: Iterable[Mapping[str, Any]] | None,
+    primary_rows: Iterable[Mapping[str, Any]] | None,
+    roi_rows: Iterable[Mapping[str, Any]] | None,
+) -> tuple[list[dict[str, Any]], int, bool]:
+    authoritative_rows: list[dict[str, Any]] = []
+    if anchor_rows:
+        for row in anchor_rows:
+            if isinstance(row, Mapping):
+                authoritative_rows.append(dict(row))
+        if authoritative_rows:
+            return authoritative_rows, 0, True
+
+    merged: list[dict[str, Any]] = []
+    seen: set[tuple[int, str]] = set()
+    dedup_dropped = 0
+    for source in (primary_rows, roi_rows):
+        if not source:
+            continue
+        for row in source:
+            if not isinstance(row, Mapping):
+                continue
+            key = _norm_row_key(row)
+            if key in seen:
+                dedup_dropped += 1
+                continue
+            seen.add(key)
+            merged.append(dict(row))
+    return merged, dedup_dropped, False
 
 
 def _compute_anchor_height(entries: Iterable[Mapping[str, Any]]) -> tuple[float, int]:
@@ -2949,20 +2998,20 @@ def _detect_row_side(desc: str) -> str:
 
 def _merge_table_lines(lines: Iterable[str]) -> list[str]:
     merged: list[str] = []
-    current: list[str] | None = None
-    buffer: list[str] = []
+    current: list[str] = []
     for raw_line in lines:
-        candidate = (raw_line or "").strip()
-        if candidate:
-            buffer.append(candidate)
-    for index, line in enumerate(buffer):
-        next_line = buffer[index + 1] if index + 1 < len(buffer) else None
-        if _is_row_start(line, next_text=next_line):
+        candidate = " ".join(str(raw_line or "").split()).strip()
+        if not candidate:
+            continue
+        if _roi_is_admin_noise(candidate) or _roi_is_numeric_ladder(candidate):
+            continue
+        if _roi_is_row_starter(candidate):
             if current:
                 merged.append(" ".join(current))
-            current = [line]
-        elif current:
-            current.append(line)
+            current = [candidate]
+            continue
+        if current:
+            current.append(candidate)
     if current:
         merged.append(" ".join(current))
     return merged
@@ -5541,7 +5590,10 @@ def read_text_table(
 
         parsed_rows, families, total_qty = _parse_rows(merged_rows)
         anchor_rows_primary = list(parsed_rows)
-        print(f"[TEXT-SCAN] pass=anchor rows={len(anchor_rows_primary)}")
+        anchor_mode = "authoritative" if anchor_rows_primary else "fallback"
+        print(
+            f"[TEXT-SCAN] pass=anchor rows={len(anchor_rows_primary)} ({anchor_mode})"
+        )
 
         if follow_sheet_target_layouts:
             follow_debug_entries: list[dict[str, Any]] = []
@@ -5947,27 +5999,35 @@ def read_text_table(
     _PROMOTED_ROWS_LOGGED = False
 
     columnar_result: dict[str, Any] | None = None
-    if isinstance(columnar_table_info, Mapping):
-        columnar_result = dict(columnar_table_info)
-        promoted_rows, promoted_qty_sum = _prepare_columnar_promoted_rows(columnar_result)
-        columnar_result["rows"] = promoted_rows
-        if promoted_qty_sum > 0:
-            columnar_result["hole_count"] = promoted_qty_sum
-        columnar_result["source_label"] = "text_table (column-mode+stripe)"
-
     column_selected = False
-    if columnar_result:
-        existing_score = _score_table(primary_result)
-        fallback_score = _score_table(columnar_result)
-        if fallback_score[1] > 0 and (
-            fallback_score > existing_score or force_columnar
-        ):
-            primary_result = columnar_result
-            column_selected = True
-            _print_promoted_rows_once(columnar_result.get("rows", []))
+    roi_rows_primary: list[dict[str, Any]] = []
+    if not anchor_rows_primary:
+        if isinstance(columnar_table_info, Mapping):
+            columnar_result = dict(columnar_table_info)
+            promoted_rows, promoted_qty_sum = _prepare_columnar_promoted_rows(
+                columnar_result
+            )
+            columnar_result["rows"] = promoted_rows
+            if promoted_qty_sum > 0:
+                columnar_result["hole_count"] = promoted_qty_sum
+            columnar_result["source_label"] = "text_table (column-mode+stripe)"
 
-    roi_rows_primary = _normalize_table_rows(columnar_result.get("rows")) if columnar_result else []
-    print(f"[TEXT-SCAN] pass=roi rows={len(roi_rows_primary)}")
+        if columnar_result:
+            existing_score = _score_table(primary_result)
+            fallback_score = _score_table(columnar_result)
+            if fallback_score[1] > 0 and (
+                fallback_score > existing_score or force_columnar
+            ):
+                primary_result = columnar_result
+                column_selected = True
+                _print_promoted_rows_once(columnar_result.get("rows", []))
+
+        roi_rows_primary = (
+            _normalize_table_rows(columnar_result.get("rows"))
+            if columnar_result
+            else []
+        )
+        print(f"[TEXT-SCAN] pass=roi rows={len(roi_rows_primary)}")
 
     if primary_result is None:
         fallback = _fallback_text_table(lines)
@@ -5992,33 +6052,14 @@ def read_text_table(
         return {}
 
     primary_rows = _normalize_table_rows(primary_result.get("rows"))
-    row_sources: list[list[dict[str, Any]]] = []
-    if anchor_rows_primary:
-        row_sources.append(list(anchor_rows_primary))
-        if roi_rows_primary:
-            row_sources.append(list(roi_rows_primary))
-        if primary_rows:
-            anchor_keys = {
-                _norm_row_key(row)
-                for row in anchor_rows_primary
-                if isinstance(row, Mapping)
-            }
-            extras = [
-                row
-                for row in primary_rows
-                if isinstance(row, Mapping) and _norm_row_key(row) not in anchor_keys
-            ]
-            if extras:
-                row_sources.append(extras)
-    else:
-        if primary_rows:
-            row_sources.append(list(primary_rows))
-        if roi_rows_primary:
-            row_sources.append(list(roi_rows_primary))
-
-    merged_unique_rows, dedup_dropped = _unique_rows_in_order(row_sources)
-    print(f"[TEXT-SCAN] merge_dedup final_rows={len(merged_unique_rows)}")
-    print(f"[TEXT-SCAN] dedup dropped={dedup_dropped}")
+    merged_unique_rows, dedup_dropped, anchor_authoritative = _combine_text_rows(
+        anchor_rows_primary,
+        primary_rows,
+        roi_rows_primary,
+    )
+    if not anchor_authoritative:
+        print(f"[TEXT-SCAN] merge_dedup final_rows={len(merged_unique_rows)}")
+        print(f"[TEXT-SCAN] dedup dropped={dedup_dropped}")
     primary_result = dict(primary_result)
     primary_result["rows"] = merged_unique_rows
     final_qty_sum = _sum_qty(merged_unique_rows)
