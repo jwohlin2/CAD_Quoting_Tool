@@ -2958,7 +2958,7 @@ def classify_op_row(desc: str | None) -> list[dict[str, Any]]:
         has_tap_word = bool(_TAP_TOKEN_RE.search(segment))
         if is_npt:
             kinds.append(("npt", None))
-        if is_npt or has_tap_word or has_thread_tap:
+        if has_tap_word or has_thread_tap:
             kinds.append(("tap", None))
         if _COUNTERBORE_TOKEN_RE.search(segment):
             kinds.append(("cbore", None))
@@ -4766,6 +4766,7 @@ def read_text_table(
             layout_order = []
             merged_rows = []
             parsed_rows = []
+            total_qty = 0
             text_rows_info = None
             rows_txt_initial = 0
             anchor_rows_primary = []
@@ -6158,6 +6159,20 @@ def read_text_table(
         am_bor_pre_count, am_bor_post_count, am_bor_drop_count = _perform_text_scan(
             resolved_allowlist
         )
+        if isinstance(anchor_authoritative_result, Mapping):
+            anchor_result = dict(anchor_authoritative_result)
+            rows_for_debug = anchor_result.get("rows")
+            if isinstance(rows_for_debug, Iterable) and not isinstance(
+                rows_for_debug, list
+            ):
+                rows_for_debug = list(rows_for_debug)
+            if isinstance(_LAST_TEXT_TABLE_DEBUG, dict):
+                if isinstance(rows_for_debug, list):
+                    _LAST_TEXT_TABLE_DEBUG["rows"] = list(rows_for_debug)
+                    _LAST_TEXT_TABLE_DEBUG["text_row_count"] = len(rows_for_debug)
+                else:
+                    _LAST_TEXT_TABLE_DEBUG["rows"] = []
+            return anchor_result
         def _parse_rows(row_texts: list[str]) -> tuple[list[dict[str, Any]], dict[str, int], int]:
             families: dict[str, int] = {}
             parsed: list[dict[str, Any]] = []
@@ -6218,7 +6233,7 @@ def read_text_table(
             anchor_authoritative_result = {
                 "rows": anchor_payload_rows,
                 "hole_count": anchor_qty_total,
-                "provenance_holes": "HOLE TABLE",
+                "provenance_holes": "HOLE TABLE (anchor)",
                 "source": "text_table",
                 "header_validated": True,
                 "anchor_authoritative": True,
@@ -6357,9 +6372,10 @@ def read_text_table(
                 f"[TEXT-SCAN] fallback clusters={len(clusters)} "
                 f"chosen_rows={len(fallback_parsed)} qty_sum={fallback_qty}"
             )
+            current_total_qty = locals().get("total_qty", 0)
             if fallback_parsed and (
                 (fallback_qty, len(fallback_parsed))
-                > (total_qty, len(parsed_rows))
+                > (current_total_qty, len(parsed_rows))
             ):
                 merged_rows = fallback_rows
                 parsed_rows = fallback_parsed
@@ -8764,7 +8780,11 @@ def read_geo(
                 provenance = dict(provenance)
                 geo["provenance"] = provenance
             if isinstance(provenance, dict):
-                provenance["holes"] = "HOLE TABLE"
+                provenance["holes"] = (
+                    "HOLE TABLE (anchor)"
+                    if getattr(state, "anchor_authoritative", False)
+                    else "HOLE TABLE"
+                )
             manifest_payload = ops_manifest(publish_rows, geom_holes=geom_census)
             if manifest_payload:
                 ops_summary["manifest"] = manifest_payload
