@@ -148,6 +148,7 @@ from cad_quoter.render import (
     RenderState as QuoteRenderState,
     render_quote_sections as render_quote_sections_helper,
 )
+from cad_quoter.render.writer import QuoteWriter
 
 try:
     from cad_quoter.geometry.dxf_text import (
@@ -4815,7 +4816,6 @@ from cad_quoter.utils.scrap import (
 )
 from cad_quoter.utils.render_utils.tables import (
     ascii_table,
-    draw_kv_table,
     render_process_sections,
 )
 from cad_quoter.app.planner_helpers import _process_plan_job
@@ -8442,7 +8442,6 @@ def roughly_equal(a: float | int | str | None, b: float | int | str | None, *, e
         eps_val = 0.0
     return math.isclose(a_val, b_val, rel_tol=0.0, abs_tol=abs(eps_val))
 
-import textwrap
 from typing import (
     Any,
     Dict,
@@ -10455,47 +10454,32 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
     # ---- header --------------------------------------------------------------
     doc_builder = QuoteDocRecorder(divider)
 
-    class _QuoteLines(list[str]):
-        def append(self, text: str) -> None:  # type: ignore[override]
-            sanitized = _sanitize_render_text(text)
-            previous = self[-1] if self else None
-            super().append(sanitized)
-            doc_builder.observe_line(len(self) - 1, sanitized, previous)
+    writer = QuoteWriter(
+        divider=divider,
+        page_width=page_width,
+        currency=currency,
+        recorder=doc_builder,
+    )
 
-    lines: list[str] = _QuoteLines()
+    lines: list[str] = writer.lines
 
     def append_line(value: Any) -> None:
-        _push(lines, value)
+        writer.line(value)
 
     def append_lines(values: Iterable[str]) -> None:
-        for value in values:
-            append_line(value)
+        writer.extend(values)
 
     def replace_line(index: int, text: str) -> None:
-        sanitized = _sanitize_render_text(text)
-        if 0 <= index < len(lines):
-            lines[index] = sanitized
-        doc_builder.replace_line(index, sanitized)
+        writer.replace(index, text)
 
-    def write_line(s: str, indent: str = ""):
-        append_line(f"{indent}{s}")
+    def write_line(s: str, indent: str = "") -> None:
+        writer.line(s, indent=indent)
 
-    def write_wrapped(text: str, indent: str = ""):
-        if text is None:
-            return
-        txt = _sanitize_render_text(text).strip()
-        if not txt:
-            return
-        wrapper = textwrap.TextWrapper(width=max(10, page_width - len(indent)))
-        for chunk in wrapper.wrap(txt):
-            write_line(chunk, indent)
+    def write_wrapped(text: str, indent: str = "") -> None:
+        writer.wrap(text, indent=indent)
 
-    def write_detail(detail: str, indent: str = "    "):
-        if not detail:
-            return
-        sanitized_detail = _sanitize_render_text(detail)
-        for segment in (s.strip() for s in sanitized_detail.split(";")):
-            write_wrapped(segment, indent)
+    def write_detail(detail: str, indent: str = "    ") -> None:
+        writer.detail(detail, indent=indent)
 
     bucket_diag_env = os.getenv("SHOW_BUCKET_DIAGNOSTICS")
     show_bucket_diagnostics_flag = _is_truthy_flag(bucket_diag_env) or bool(
@@ -10531,11 +10515,11 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
             col_widths.append(width)
 
         if lines and lines[-1] != "":
-            append_line("")
+            writer.blank()
 
         diagnostic_banner = "=== Planner diagnostics (not billed) ==="
-        append_line(diagnostic_banner)
-        append_line("=" * min(page_width, len(diagnostic_banner)))
+        writer.line(diagnostic_banner)
+        writer.line("=" * min(page_width, len(diagnostic_banner)))
 
         table_text = ascii_table(
             headers,
@@ -10549,72 +10533,21 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
         if len(table_lines) >= 4:
             header_cells = table_lines[1].strip("|").split("|")
             separator_line = " | ".join("-" * width for width in col_widths)
-            append_line(" | ".join(header_cells))
-            append_line(separator_line)
+            writer.line(" | ".join(header_cells))
+            writer.line(separator_line)
             for body_line in table_lines[3:-1]:
                 if not body_line.startswith("|"):
                     continue
                 body_cells = body_line.strip("|").split("|")
-                append_line(" | ".join(body_cells))
+                writer.line(" | ".join(body_cells))
 
-        append_line("")
+        writer.blank()
 
-    def _is_total_label(label: str) -> bool:
-        clean = str(label or "").strip()
-        if not clean:
-            return False
-        clean = clean.rstrip(":")
-        clean = clean.lstrip("= ")
-        return clean.lower().startswith("total")
+    def row(label: str, val: float, indent: str = "") -> None:
+        writer.row(label, val, indent=indent)
 
-    def _maybe_insert_total_separator(width: int) -> None:
-        if not lines:
-            return
-        width = max(0, int(width))
-        if width <= 0:
-            return
-        if lines[-1] == divider:
-            return
-        pad = max(0, page_width - width)
-        short_divider = " " * pad + "-" * width
-        if lines[-1] == short_divider:
-            return
-        append_line(short_divider)
-
-    def _render_kv_line(label: str, value: str, indent: str = "") -> str:
-        left = f"{indent}{label}"
-        right = value
-        right_width = max(len(right), 1)
-        pad = max(1, page_width - len(left) - len(right))
-        left_width = len(left) + pad
-        table_text = draw_kv_table(
-            [(left, right)],
-            left_width=left_width,
-            right_width=right_width,
-            left_align="L",
-            right_align="R",
-        )
-        for line in table_text.splitlines():
-            if line.startswith("|") and line.endswith("|"):
-                body = line[1:-1]
-                try:
-                    left_segment, right_segment = body.split("|", 1)
-                    return f"{left_segment}{right_segment}"
-                except ValueError:
-                    break
-        return f"{left}{' ' * pad}{right}"
-
-    def row(label: str, val: float, indent: str = ""):
-        right = _m(val)
-        if _is_total_label(label):
-            _maybe_insert_total_separator(len(right))
-        append_line(_render_kv_line(label, right, indent))
-
-    def hours_row(label: str, val: float, indent: str = ""):
-        right = _h(val)
-        if _is_total_label(label):
-            _maybe_insert_total_separator(len(right))
-        append_line(_render_kv_line(label, right, indent))
+    def hours_row(label: str, val: float, indent: str = "") -> None:
+        writer.hours_row(label, val, indent=indent)
 
     def _is_extra_segment(segment: str) -> bool:
         try:
@@ -15562,30 +15495,30 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
         f"actions={ops_counts.get('actions_total', 0)}"
     )
 
-    lines.append("OPERATION AUDIT – Action counts")
-    lines.append("-" * 66)
-    lines.append(f" Drills:        {_tallies.get('drill', 0)}")
-    lines.append(
+    writer.line("OPERATION AUDIT – Action counts")
+    writer.line("-" * 66)
+    writer.line(f" Drills:        {_tallies.get('drill', 0)}")
+    writer.line(
         " Taps:          "
         f"{_tallies.get('tap', 0)}  (Front {ops_counts.get('taps_front', 0)} / Back {ops_counts.get('taps_back', 0)})"
     )
-    lines.append(
+    writer.line(
         " Counterbores:  "
         f"{_tallies.get('counterbore', 0)}  (Front {ops_counts.get('counterbores_front', 0)} / Back {ops_counts.get('counterbores_back', 0)})"
     )
-    lines.append(f" Spot:          {_tallies.get('spot', 0)}")
-    lines.append(f" Counterdrill:  {_tallies.get('counterdrill', 0)}")
-    lines.append(f" Jig-grind:     {_tallies.get('jig-grind', 0)}")
+    writer.line(f" Spot:          {_tallies.get('spot', 0)}")
+    writer.line(f" Counterdrill:  {_tallies.get('counterdrill', 0)}")
+    writer.line(f" Jig-grind:     {_tallies.get('jig-grind', 0)}")
     actions_total = sum(
         _tallies.get(key, 0)
         for key in ("drill", "tap", "counterbore", "counterdrill", "spot", "jig-grind")
     )
-    lines.append(f" Actions total: {actions_total}")
-    lines.append("")
+    writer.line(f" Actions total: {actions_total}")
+    writer.blank()
 
     # ---- Pricing ladder ------------------------------------------------------
-    _push(lines, "Pricing Ladder")
-    _push(lines, divider)
+    writer.line("Pricing Ladder")
+    writer.line(divider)
 
     override_sources: list[Mapping[str, Any]] = []
 
