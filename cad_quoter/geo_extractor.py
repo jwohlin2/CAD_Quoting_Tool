@@ -1441,6 +1441,7 @@ def collect_all_text(
     min_height: float | None = None,
     layers_include: Any = None,
     layers_exclude: Any = None,
+    layouts: Iterable[str] | None = None,
 ) -> list[dict[str, Any]]:
     """Return a list of raw text records from the DXF document.
 
@@ -1467,13 +1468,26 @@ def collect_all_text(
         Normalized plain-text content.
     ``raw``
         Original raw content, when exposed by the entity.
+
+    When ``layouts`` is provided, only entries from layouts whose names
+    (case-insensitive) are included in the iterable are returned.
     """
+
+    allowed_layouts: set[str] | None = None
+    if layouts:
+        allowed_layouts = {
+            value.casefold()
+            for value in layouts
+            if isinstance(value, str) and value.strip()
+        } or None
 
     layouts = _iter_text_layout_spaces(doc, include_paperspace)
     depth = _MAX_INSERT_DEPTH if include_blocks else 0
     records: list[dict[str, Any]] = []
 
     for layout_name, layout in layouts:
+        if allowed_layouts is not None and layout_name.casefold() not in allowed_layouts:
+            continue
         if layout is None:
             continue
         try:
