@@ -262,6 +262,11 @@ def _normalize_circle_entry(entry: Mapping[str, Any]) -> dict[str, float] | None
         result["y"] = y_norm
     if dia_norm is not None:
         result["dia"] = dia_norm
+    radius_value = radius_norm if radius_norm is not None else None
+    if radius_value is None and dia_norm is not None:
+        radius_value = dia_norm / 2.0
+    if radius_value is not None:
+        result["radius"] = radius_value
     return result or None
 
 
@@ -942,20 +947,24 @@ def main(argv: Sequence[str] | None = None) -> int:
 
     def _format_ops_counts(
         counts: Mapping[str, Any] | None,
-        order: Sequence[tuple[str, str]],
+        order: Sequence[tuple[object, str]],
     ) -> str:
-        if not isinstance(counts, Mapping):
-            return "Drill 0"
         parts: list[str] = []
-        for key, label_text in order:
-            value = counts.get(key)
-            try:
-                value_int = int(round(float(value)))
-            except Exception:
-                continue
+        for key_variant, label_text in order:
+            keys: tuple[str, ...]
+            if isinstance(key_variant, (list, tuple)):
+                keys = tuple(str(item) for item in key_variant)
+            else:
+                keys = (str(key_variant),)
+            value_int = 0
+            for key in keys:
+                source = counts.get(key) if isinstance(counts, Mapping) else None
+                value_int = _int_from_value(source)
+                if isinstance(counts, Mapping) and key in counts:
+                    break
             parts.append(f"{label_text} {value_int}")
         if not parts:
-            parts.append("Drill 0")
+            return "Drill 0"
         return " | ".join(parts)
 
     def _counts_value(counts: Mapping[str, Any] | None, *keys: str) -> int:
@@ -1189,11 +1198,11 @@ def main(argv: Sequence[str] | None = None) -> int:
         + _format_ops_counts(
             table_counts,
             (
-                ("drill_only", "Drill"),
+                (("drill_only", "drill"), "Drill"),
                 ("tap", "Tap"),
-                ("counterbore", f"C{apost}bore"),
-                ("counterdrill", f"C{apost}drill"),
-                ("jig_grind", "Jig"),
+                (("counterbore", "cbore"), f"C{apost}bore"),
+                (("counterdrill", "cdrill"), f"C{apost}drill"),
+                (("jig_grind", "jig"), "Jig"),
             ),
         )
     )
@@ -1201,7 +1210,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         "[OPS] geom : "
         + _format_ops_counts(
             geom_counts,
-            (("drill_residual", "Drill"),),
+            ((("drill_residual", "drill"), "Drill"),),
         )
     )
     print(
@@ -1211,9 +1220,9 @@ def main(argv: Sequence[str] | None = None) -> int:
             (
                 ("drill", "Drill"),
                 ("tap", "Tap"),
-                ("counterbore", f"C{apost}bore"),
-                ("counterdrill", f"C{apost}drill"),
-                ("jig_grind", "Jig"),
+                (("counterbore", "cbore"), f"C{apost}bore"),
+                (("counterdrill", "cdrill"), f"C{apost}drill"),
+                (("jig_grind", "jig"), "Jig"),
             ),
         )
     )
@@ -1397,28 +1406,50 @@ def main(argv: Sequence[str] | None = None) -> int:
         circle_samples = _gather_circle_samples(*geom_candidates)
         guard_drop_samples = _collect_guard_drops(*geom_candidates)
 
-        if circle_samples:
-            limit = min(5, len(circle_samples))
+        combined_samples: list[tuple[dict[str, Any], str]] = []
+        combined_samples.extend((sample, "kept") for sample in circle_samples)
+        combined_samples.extend((sample, "dropped") for sample in guard_drop_samples)
+
+        if combined_samples:
+            limit = min(10, len(combined_samples))
             print(
-                "[CIRCLES] samples_shown={shown} total_samples={total}".format(
+                "[CIRCLES] samples_shown={shown} kept_total={kept} dropped_total={dropped}".format(
                     shown=limit,
-                    total=len(circle_samples),
+                    kept=len(circle_samples),
+                    dropped=len(guard_drop_samples),
                 )
             )
-            for idx, sample in enumerate(circle_samples[:limit]):
+            for idx, (sample, status) in enumerate(combined_samples[:limit]):
                 x_display = _format_float_str(sample.get("x"))
                 y_display = _format_float_str(sample.get("y"))
-                dia_display = _format_float_str(sample.get("dia"))
+                radius_source = sample.get("radius")
+                has_radius = radius_source not in (None, "")
+                if not has_radius:
+                    radius_source = sample.get("dia")
+                radius_number = _coerce_float(radius_source)
+                if radius_number is not None and not has_radius:
+                    radius_number = radius_number / 2.0
+                radius_display = _format_float_str(radius_number)
+                status_label = "kept" if status == "kept" else "dropped"
+                reason_value: str | None = None
+                for reason_key in ("reason", "guard", "note"):
+                    candidate = sample.get(reason_key)
+                    if candidate not in (None, ""):
+                        reason_value = str(candidate)
+                        break
+                if reason_value and reason_value != "-":
+                    status_label = f"{status_label} ({reason_value})"
                 print(
-                    "[CIRCLE {idx:02d}] X={x} Y={y} DIA={dia}".format(
+                    "[CIRCLE {idx:02d}] X={x} Y={y} R={radius} STATUS={status}".format(
                         idx=idx,
                         x=x_display,
                         y=y_display,
-                        dia=dia_display,
+                        radius=radius_display,
+                        status=status_label,
                     )
                 )
         else:
-            print("[CIRCLES] sample centers unavailable")
+            print("[CIRCLES] sample circles unavailable")
 
         if guard_drop_samples:
             guard_counts: dict[str, int] = {}
@@ -1430,21 +1461,6 @@ def main(argv: Sequence[str] | None = None) -> int:
                 f"{name}:{count}" for name, count in summary_items[:5]
             )
             print(f"[CIRCLES] guard_drop_counts={summary_display or '-'}")
-            limit = min(5, len(guard_drop_samples))
-            for idx, sample in enumerate(guard_drop_samples[:limit]):
-                guard_label = str(sample.get("guard") or "-")
-                x_display = _format_float_str(sample.get("x"))
-                y_display = _format_float_str(sample.get("y"))
-                dia_display = _format_float_str(sample.get("dia"))
-                print(
-                    "[CIRCLE-DROP {idx:02d}] GUARD={guard} X={x} Y={y} DIA={dia}".format(
-                        idx=idx,
-                        guard=guard_label,
-                        x=x_display,
-                        y=y_display,
-                        dia=dia_display,
-                    )
-                )
         else:
             print("[CIRCLES] guard drop samples unavailable")
 
