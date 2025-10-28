@@ -7162,6 +7162,7 @@ def read_text_table(
                         "y": entry.get("y"),
                         "height": entry.get("height"),
                         "text": str(entry.get("text") or ""),
+                        "from_block": bool(entry.get("from_block")),
                     }
                     for entry in collected_entries
                 ]

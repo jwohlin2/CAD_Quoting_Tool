@@ -876,6 +876,163 @@ def _format_float_str(value: Any) -> str:
     return f"{number:.3f}"
 
 
+def _compile_regex_patterns_for_audit(
+    patterns: Iterable[Any] | None,
+) -> list[re.Pattern[str]]:
+    compiled: list[re.Pattern[str]] = []
+    if not patterns:
+        return compiled
+    for pattern in patterns:
+        text = str(pattern or "").strip()
+        if not text:
+            continue
+        try:
+            compiled.append(re.compile(text, re.IGNORECASE))
+        except re.error:
+            continue
+    return compiled
+
+
+def _chart_height_value(entry: Mapping[str, Any]) -> float | None:
+    value = entry.get("height")
+    number = _coerce_float(value)
+    if number is None or not math.isfinite(number):
+        return None
+    if number <= 0:
+        return None
+    return float(number)
+
+
+def _print_chart_audit(
+    debug_info: Mapping[str, Any] | None,
+    *,
+    tables_found: int,
+    text_min_height: float | None = None,
+) -> None:
+    if not isinstance(debug_info, Mapping):
+        return
+    raw_entities = debug_info.get("collected_entities")
+    if not isinstance(raw_entities, Sequence):
+        return
+    chart_entries: list[Mapping[str, Any]] = []
+    for entry in raw_entities:
+        if not isinstance(entry, Mapping):
+            continue
+        layout_name = str(entry.get("layout") or "")
+        if "CHART" not in layout_name.upper():
+            continue
+        chart_entries.append(entry)
+    if not chart_entries:
+        return
+
+    text_raw = len(chart_entries)
+    in_blocks = sum(1 for entry in chart_entries if bool(entry.get("from_block")))
+
+    include_patterns = _compile_regex_patterns_for_audit(
+        debug_info.get("layer_regex_include")
+    )
+    exclude_patterns = _compile_regex_patterns_for_audit(
+        debug_info.get("layer_regex_exclude")
+    )
+
+    def _matches(patterns: Sequence[re.Pattern[str]], layer: str) -> bool:
+        for pattern in patterns:
+            try:
+                if pattern.search(layer):
+                    return True
+            except re.error:
+                continue
+        return False
+
+    filtered_layer: list[Mapping[str, Any]] = []
+    for entry in chart_entries:
+        layer_name = str(entry.get("layer") or "")
+        include_ok = True
+        if include_patterns:
+            include_ok = _matches(include_patterns, layer_name)
+        if not include_ok:
+            continue
+        if exclude_patterns and _matches(exclude_patterns, layer_name):
+            continue
+        filtered_layer.append(entry)
+    kept_by_layer = len(filtered_layer)
+
+    height_threshold: float | None = None
+    if text_min_height is not None:
+        try:
+            candidate = float(text_min_height)
+        except Exception:
+            candidate = None
+        if candidate is not None and math.isfinite(candidate) and candidate > 0:
+            height_threshold = candidate
+
+    filtered_height: list[Mapping[str, Any]] = []
+    for entry in filtered_layer:
+        height_value = _chart_height_value(entry)
+        if height_threshold is not None:
+            if height_value is None or height_value < height_threshold:
+                continue
+        filtered_height.append(entry)
+    kept_by_height = len(filtered_height)
+
+    height_samples = [
+        value
+        for entry in chart_entries
+        for value in [_chart_height_value(entry)]
+        if value is not None
+    ]
+    if height_samples:
+        min_display = f"{min(height_samples):.3f}"
+        med_display = f"{statistics.median(height_samples):.3f}"
+        max_display = f"{max(height_samples):.3f}"
+    else:
+        min_display = med_display = max_display = "-"
+
+    layer_counter: Counter[str] = Counter()
+    for entry in chart_entries:
+        layer_name = str(entry.get("layer") or "").strip()
+        if not layer_name:
+            layer_name = "-"
+        layer_counter[layer_name] += 1
+    if layer_counter:
+        top_layers = sorted(layer_counter.items(), key=lambda item: (-item[1], item[0]))
+        top_layers_display = ", ".join(
+            f"{name}:{count}" for name, count in top_layers[:3]
+        )
+    else:
+        top_layers_display = "-"
+
+    tables_count = int(tables_found)
+    print(
+        "[AUDIT] CHART text_raw={text_raw} in_blocks={in_blocks} "
+        "kept_by_layer={kept} kept_by_height={height} tables={tables}".format(
+            text_raw=text_raw,
+            in_blocks=in_blocks,
+            kept=kept_by_layer,
+            height=kept_by_height,
+            tables=tables_count,
+        )
+    )
+    print(f"Top layers: {top_layers_display}")
+    print(f"Min/Med/Max heights: {min_display} / {med_display} / {max_display}")
+
+    def _significant_gap(raw: int, kept: int) -> bool:
+        if raw <= 0:
+            return False
+        if kept <= 0:
+            return raw >= 5
+        return raw >= kept * 3 and raw - kept >= 5
+
+    if (
+        tables_count == 0
+        and _significant_gap(text_raw, kept_by_layer)
+        and _significant_gap(text_raw, kept_by_height)
+    ):
+        print(
+            "[AUDIT] Recommendation: lower --text-min-height or adjust layer include."
+        )
+
+
 def _am_bor_included_from_candidates(*candidates: Mapping[str, Any] | None) -> bool:
     for candidate in candidates:
         if not isinstance(candidate, Mapping):
@@ -2748,6 +2905,12 @@ def main(argv: Sequence[str] | None = None) -> int:
         )
 
     debug_info = geo_extractor.get_last_text_table_debug() or {}
+
+    _print_chart_audit(
+        debug_info,
+        tables_found=tables_found,
+        text_min_height=args.text_min_height,
+    )
 
     if text_csv_path == "-" and debug_info:
         fallback_entities = debug_info.get("collected_entities")
