@@ -9696,40 +9696,24 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
 ) -> str:
     """Pretty printer for a full quote with auto-included non-zero lines."""
 
-    overrides = (
-        ("prefer_removal_drilling_hours", True),
-        ("separate_machine_labor", True),
-        ("machine_rate_per_hr", 45.0),
-        ("labor_rate_per_hr", 45.0),
-        ("milling_attended_fraction", 1.0),
-    )
-
     cfg_obj: QuoteConfiguration | Any = cfg or QuoteConfiguration(
         default_params=copy.deepcopy(PARAMS_DEFAULT)
     )
-    for name, value in overrides:
-        try:
-            setattr(cfg_obj, name, value)
-        except Exception:
-            cfg_obj = QuoteConfiguration(default_params=copy.deepcopy(PARAMS_DEFAULT))
-            for name2, value2 in overrides:
-                setattr(cfg_obj, name2, value2)
-            break
+    cfg_obj = apply_render_overrides(cfg_obj, default_params=PARAMS_DEFAULT)
 
     cfg = cfg_obj
 
-    breakdown    = result.get("breakdown", {}) or {}
+    breakdown_input = result.get("breakdown", {}) or {}
+    breakdown, breakdown_mutable = ensure_mutable_breakdown(breakdown_input)
+    if breakdown_mutable is not breakdown_input and isinstance(result, _MutableMappingABC):
+        try:
+            result["breakdown"] = breakdown_mutable
+        except Exception:
+            pass
 
     state_payload: Any | None = None
 
-    # Ensure a mutable view of the breakdown for downstream helpers that update it
-    try:
-        if isinstance(breakdown, _MutableMappingABC):
-            breakdown_mutable = typing.cast(MutableMapping[str, Any], breakdown)
-        else:
-            breakdown_mutable = dict(breakdown)
-    except Exception:
-        breakdown_mutable = {}
+    breakdown_mutable = typing.cast(MutableMapping[str, Any], breakdown_mutable)
     if isinstance(result, _MappingABC):
         state_payload = result.get("quote_state")
 
