@@ -116,3 +116,6 @@ environment.【F:appV5.py†L62-L79】
   operators know which environment variables or API keys must be provided.
 * Capture the output of `python appV5.py --print-env` as part of your deployment
   verification record.
+
+* Confirm any auxiliary scripts or notebooks import helpers directly from the `cad_quoter` namespace; the legacy compatibility shim has been removed.
+
