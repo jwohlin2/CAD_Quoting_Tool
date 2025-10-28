@@ -21,6 +21,7 @@ from fnmatch import fnmatchcase
 
 from cad_quoter import geometry
 from cad_quoter.geometry import convert_dwg_to_dxf
+from cad_quoter.geometry.mtext_utils import normalize_mtext_plain_text
 from cad_quoter.geometry.dxf_enrich import detect_units_scale
 from cad_quoter.vendors import ezdxf as _ezdxf_vendor
 
@@ -1801,19 +1802,24 @@ def _extract_entity_text_payload(
         }
 
     if canonical_kind == "MTEXT":
-        plain_text = None
+        plain_text: str | None = None
         plain_method = getattr(entity, "plain_text", None)
         if callable(plain_method):
             try:
-                plain_text = plain_method()
+                plain_candidate = plain_method()
             except Exception:
-                plain_text = None
+                plain_candidate = None
+            else:
+                if plain_candidate is not None:
+                    plain_text = str(plain_candidate)
         raw = _first_text_value(
             getattr(entity, "text", None),
             getattr(entity, "raw_text", None),
             getattr(dxf_obj, "text", None),
             getattr(dxf_obj, "content", None),
         )
+        if plain_text is None and raw is not None:
+            plain_text = normalize_mtext_plain_text(raw)
         text_value = plain_text or raw
         if text_value is None:
             return None
@@ -1830,18 +1836,23 @@ def _extract_entity_text_payload(
         mtext = getattr(context, "mtext", None) if context is not None else None
         if mtext is None:
             return None
-        plain_text = None
+        plain_text: str | None = None
         plain_method = getattr(mtext, "plain_text", None)
         if callable(plain_method):
             try:
-                plain_text = plain_method()
+                plain_candidate = plain_method()
             except Exception:
-                plain_text = None
+                plain_candidate = None
+            else:
+                if plain_candidate is not None:
+                    plain_text = str(plain_candidate)
         raw = _first_text_value(
             getattr(mtext, "text", None),
             getattr(getattr(mtext, "dxf", None), "text", None),
             getattr(mtext, "raw_text", None),
         )
+        if plain_text is None and raw is not None:
+            plain_text = normalize_mtext_plain_text(raw)
         text_value = plain_text or raw
         if text_value is None:
             return None
