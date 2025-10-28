@@ -636,6 +636,16 @@ if _GEO_DIA_MAX_IN <= 0.0:
     _GEO_DIA_MAX_IN = 2.0
 if _GEO_DIA_MAX_IN < _GEO_DIA_MIN_IN:
     _GEO_DIA_MAX_IN = _GEO_DIA_MIN_IN
+_GEO_DRILL_RADIUS_MIN_IN = max(_env_float("GEO_DRILL_RADIUS_MIN_IN", default=0.04), 0.0)
+_GEO_DRILL_RADIUS_MAX_IN = _env_float("GEO_DRILL_RADIUS_MAX_IN", default=2.0)
+if _GEO_DRILL_RADIUS_MAX_IN <= 0.0:
+    _GEO_DRILL_RADIUS_MAX_IN = 2.0
+if (
+    _GEO_DRILL_RADIUS_MAX_IN
+    and _GEO_DRILL_RADIUS_MIN_IN
+    and _GEO_DRILL_RADIUS_MAX_IN < _GEO_DRILL_RADIUS_MIN_IN
+):
+    _GEO_DRILL_RADIUS_MAX_IN = _GEO_DRILL_RADIUS_MIN_IN
 _GEO_CIRCLE_Z_ABS_MAX = 1e-6
 _GEO_CIRCLE_DEDUP_DIGITS = 3
 _GEO_CIRCLE_CENTER_GROUP_DIGITS = 3
@@ -8916,6 +8926,7 @@ def geom_hole_census(doc: Any) -> dict[str, Any]:
     circle_records: list[dict[str, float]] = []
     total_candidates = 0
     layer_filter_dropped = 0
+    radius_guard_dropped = 0
 
     def _allow_block(name: str | None) -> bool:
         nonlocal blocks_included, blocks_skipped
@@ -8988,6 +8999,13 @@ def geom_hole_census(doc: Any) -> dict[str, Any]:
         if diameter_in < _GEO_DIA_MIN_IN:
             continue
         if _GEO_DIA_MAX_IN and diameter_in > _GEO_DIA_MAX_IN:
+            continue
+        radius_in = diameter_in / 2.0
+        if radius_in < _GEO_DRILL_RADIUS_MIN_IN:
+            radius_guard_dropped += 1
+            continue
+        if _GEO_DRILL_RADIUS_MAX_IN and radius_in > _GEO_DRILL_RADIUS_MAX_IN:
+            radius_guard_dropped += 1
             continue
         total_candidates += 1
         tx_in = float(tx) * to_in
@@ -9081,10 +9099,20 @@ def geom_hole_census(doc: Any) -> dict[str, Any]:
         for rec in circle_records:
             px = float(rec["x"])
             py = float(rec["y"])
-            if xmin <= px <= xmax and ymin <= py <= ymax:
-                filtered.append(rec)
-            else:
+            radius = max(float(rec.get("dia_in", 0.0)) / 2.0, 0.0)
+            circle_xmin = px - radius
+            circle_xmax = px + radius
+            circle_ymin = py - radius
+            circle_ymax = py + radius
+            if (
+                circle_xmax < xmin
+                or circle_xmin > xmax
+                or circle_ymax < ymin
+                or circle_ymin > ymax
+            ):
                 dropped_outside += 1
+                continue
+            filtered.append(rec)
         kept_records = filtered
         applied_bbox = (xmin, xmax, ymin, ymax)
         if dropped_outside > 0:
@@ -9135,6 +9163,8 @@ def geom_hole_census(doc: Any) -> dict[str, Any]:
             )
         )
     print(f"[GEOM] layer-filter dropped={layer_filter_dropped}")
+    if radius_guard_dropped > 0:
+        print(f"[GEOM] radius-guard dropped={radius_guard_dropped}")
 
     groups_counter = defaultdict(int)
     residual_holes: list[dict[str, float]] = []
@@ -9177,6 +9207,7 @@ def geom_hole_census(doc: Any) -> dict[str, Any]:
         "non_drill_centers": [],
         "dropped_concentric": int(concentric_dropped),
         "dropped_outside_bbox": int(dropped_outside),
+        "dropped_radius_guard": int(radius_guard_dropped),
         "raw_unique_count": int(raw_unique_count),
         "total_candidates": int(total_candidates),
     }
