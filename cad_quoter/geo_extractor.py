@@ -4571,6 +4571,19 @@ def _extract_mechanical_table_from_blocks(doc: Any) -> Mapping[str, Any] | None:
 
 _FALLBACK_ACTION_KINDS = {"tap", "counterbore", "drill", "counterdrill"}
 _FALLBACK_TRAILING_LADDER_RE = re.compile(r"(?:\s*\d+){3,}$")
+_FALLBACK_ROW_PREFIX_RE = re.compile(
+    r"""
+    ^\s*
+    (
+        \(?\d+\)?(?:\s+|[x×X]\b)     # (4) ..., 4X ... style prefixes
+        |
+        \d+\s*(?:REQD|REQUIRED)\b       # 2 REQD
+        |
+        QTY[-:\s]*\d+                    # QTY 3 / QTY-3 / QTY:3
+    )
+    """,
+    re.IGNORECASE | re.VERBOSE,
+)
 _ANCHOR_TERMINATOR_RE = re.compile(
     r"^(?:NOTES?|TOLERANCES?|REVISION|TITLE|DRAWN\s+BY)\b",
     re.IGNORECASE,
@@ -4594,19 +4607,22 @@ def _prepare_fallback_lines(lines: Iterable[str]) -> list[str]:
 
     stitched: list[str] = []
     current: list[str] = []
+    consumed = 0
     for line in cleaned:
-        if _FALLBACK_ROW_START_RE.match(line):
+        if _FALLBACK_ROW_START_RE.match(line) or _FALLBACK_ROW_PREFIX_RE.match(line):
             if current:
                 stitched.append(" ".join(current).strip())
             current = [line]
+            consumed += 1
             continue
         if current:
             current.append(line)
+            consumed += 1
     if current:
         stitched.append(" ".join(current).strip())
 
-    if not stitched and cleaned:
-        stitched = _merge_table_lines(cleaned)
+    if not stitched or consumed != len(cleaned):
+        return _merge_table_lines(cleaned)
 
     return stitched
 

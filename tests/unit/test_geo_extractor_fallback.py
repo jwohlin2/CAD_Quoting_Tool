@@ -73,3 +73,21 @@ def test_publish_fallback_from_rows_txt_multiaction() -> None:
         notes = [row for row in rows if "BREAK" in row["desc"].upper()]
         assert not notes, "notes should be ignored"
 
+
+def test_prepare_fallback_lines_with_prefixed_quantities() -> None:
+    lines = [
+        "4X 1/4-20 TAP",
+        "FROM BACK",
+        "QTY 3 .250 DRILL",
+        "THRU",
+        "2 REQD .562 COUNTERBORE",
+        "X .125 DEEP",
+    ]
+
+    stitched = geo_extractor._prepare_fallback_lines(lines)
+
+    assert stitched == [
+        "4X 1/4-20 TAP FROM BACK",
+        "QTY 3 .250 DRILL THRU",
+        "2 REQD .562 COUNTERBORE X .125 DEEP",
+    ]
