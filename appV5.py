@@ -148,7 +148,12 @@ from cad_quoter.render import (
     RenderState as QuoteRenderState,
     render_quote_sections as render_quote_sections_helper,
 )
-from cad_quoter.render.writer import QuoteWriter
+from cad_quoter.render.payloads import (
+    build_cost_breakdown_payload,
+    build_price_drivers_payload,
+    build_summary_payload,
+    _render_as_float,
+)
 
 try:
     from cad_quoter.geometry.dxf_text import (
@@ -9689,40 +9694,24 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
 ) -> str:
     """Pretty printer for a full quote with auto-included non-zero lines."""
 
-    overrides = (
-        ("prefer_removal_drilling_hours", True),
-        ("separate_machine_labor", True),
-        ("machine_rate_per_hr", 45.0),
-        ("labor_rate_per_hr", 45.0),
-        ("milling_attended_fraction", 1.0),
-    )
-
     cfg_obj: QuoteConfiguration | Any = cfg or QuoteConfiguration(
         default_params=copy.deepcopy(PARAMS_DEFAULT)
     )
-    for name, value in overrides:
-        try:
-            setattr(cfg_obj, name, value)
-        except Exception:
-            cfg_obj = QuoteConfiguration(default_params=copy.deepcopy(PARAMS_DEFAULT))
-            for name2, value2 in overrides:
-                setattr(cfg_obj, name2, value2)
-            break
+    cfg_obj = apply_render_overrides(cfg_obj, default_params=PARAMS_DEFAULT)
 
     cfg = cfg_obj
 
-    breakdown    = result.get("breakdown", {}) or {}
+    breakdown_input = result.get("breakdown", {}) or {}
+    breakdown, breakdown_mutable = ensure_mutable_breakdown(breakdown_input)
+    if breakdown_mutable is not breakdown_input and isinstance(result, _MutableMappingABC):
+        try:
+            result["breakdown"] = breakdown_mutable
+        except Exception:
+            pass
 
     state_payload: Any | None = None
 
-    # Ensure a mutable view of the breakdown for downstream helpers that update it
-    try:
-        if isinstance(breakdown, _MutableMappingABC):
-            breakdown_mutable = typing.cast(MutableMapping[str, Any], breakdown)
-        else:
-            breakdown_mutable = dict(breakdown)
-    except Exception:
-        breakdown_mutable = {}
+    breakdown_mutable = typing.cast(MutableMapping[str, Any], breakdown_mutable)
     if isinstance(result, _MappingABC):
         state_payload = result.get("quote_state")
 
@@ -10930,22 +10919,6 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
     removal = (result or {}).get("removal_summary") or {}
     mins = float(removal.get("total_minutes") or 0.0)
 
-    def _has_planner_drilling_bucket(candidate: Any) -> bool:
-        if isinstance(candidate, _MappingABC):
-            items_iter = candidate.items()
-        elif isinstance(candidate, dict):
-            items_iter = candidate.items()
-        else:
-            return False
-        for raw_key, raw_value in items_iter:
-            key_text = str(raw_key or "").strip().lower()
-            if key_text == "drilling":
-                return True
-            if key_text == "buckets" and raw_value is not candidate:
-                if _has_planner_drilling_bucket(raw_value):
-                    return True
-        return False
-
     buckets = (breakdown or {}).get("planner_buckets") or {}
     bucket_view_candidate: Any = None
     if isinstance(breakdown, _MappingABC):
@@ -10955,9 +10928,9 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
 
     planner_has_drilling_bucket = False
     if not planner_has_drilling_bucket:
-        planner_has_drilling_bucket = _has_planner_drilling_bucket(bucket_view_candidate)
+        planner_has_drilling_bucket = detect_planner_drilling(bucket_view_candidate)
     if not planner_has_drilling_bucket:
-        planner_has_drilling_bucket = _has_planner_drilling_bucket(buckets)
+        planner_has_drilling_bucket = detect_planner_drilling(buckets)
 
     state_payload: MutableMapping[str, Any]
     if isinstance(result, _MappingABC):
@@ -10986,6 +10959,9 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
         lines=lines,
         recorder=doc_builder,
     )
+
+    if not planner_has_drilling_bucket:
+        planner_has_drilling_bucket = render_state_has_planner_drilling(quote_render_state)
     for segment in render_quote_sections_helper(quote_render_state):
         for segment_line in segment:
             append_line(segment_line)
@@ -16046,139 +16022,47 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
     # Final cross-check before rendering the quote to text. Verify that
     # drilling minutes/rows remain aligned and capture a snapshot of
     # related financial signals for post-run debugging.
-    try:
-        process_plan_map: Mapping[str, Any] | None = None
-        for candidate in (
-            locals().get("process_plan_summary_local"),
-            breakdown.get("process_plan") if isinstance(breakdown, _MappingABC) else None,
-        ):
-            if isinstance(candidate, _MappingABC):
-                process_plan_map = candidate
-                break
-
-        drilling_plan = (
-            process_plan_map.get("drilling")
-            if isinstance(process_plan_map, _MappingABC)
-            else None
-        )
-        drill_min_card = _safe_float(
-            (drilling_plan or {}).get("total_minutes_billed"),
-            default=0.0,
-        )
-        if drill_min_card <= 0.0 and isinstance(drilling_plan, _MappingABC):
-            drill_min_card = _safe_float(
-                drilling_plan.get("total_minutes_with_toolchange"),
-                default=0.0,
-            )
-
-        bucket_minutes_map = (
-            breakdown.get("bucket_minutes_detail")
-            if isinstance(breakdown, _MappingABC)
-            else None
-        )
-        if not isinstance(bucket_minutes_map, _MutableMappingABC):
-            bucket_minutes_map = bucket_minutes_detail if isinstance(bucket_minutes_detail, dict) else {}
-        drill_min_row = _safe_float(
-            (bucket_minutes_map or {}).get("drilling"),
-            default=0.0,
-        )
-        programming_hr = 0.0
-        if isinstance(nre_detail, _MappingABC):
-            programming_detail = nre_detail.get("programming")
-            if isinstance(programming_detail, _MappingABC):
-                programming_hr = _safe_float(
-                    programming_detail.get("prog_hr"),
-                    default=0.0,
-                )
-
-        material_block_dbg = (
-            breakdown.get("material")
-            if isinstance(breakdown, _MappingABC)
-            else None
-        )
-        material_cost = _safe_float(
-            (material_block_dbg or {}).get("total_cost"),
-            default=0.0,
-        )
-
-        direct_costs = _safe_float(
-            (breakdown if isinstance(breakdown, _MappingABC) else {}).get("total_direct_costs"),
-            default=0.0,
-        )
-
-        dbg = {
-            "drill_min_card": float(drill_min_card),
-            "drill_min_row": float(drill_min_row),
-            "programming_hr": float(programming_hr),
-            "material_cost": float(material_cost),
-            "direct_costs": float(direct_costs),
-            "ladder_subtotal": float(ladder_subtotal),
-        }
-        logger.debug("[render_quote] drill guard snapshot: %s", jdump(dbg, default=None))
-    except Exception:
-        logger.exception("Failed to run final drilling debug block")
+    render_drilling_guard(
+        logger=logger,
+        jdump=jdump,
+        safe_float=_safe_float,
+        breakdown=breakdown,
+        process_plan_summary=locals().get("process_plan_summary_local"),
+        bucket_minutes_detail=bucket_minutes_detail,
+        nre_detail=nre_detail,
+        ladder_subtotal=ladder_subtotal,
+    )
 
     # --- Structured render payload ------------------------------------------
-    def _render_as_float(value: Any, default: float = 0.0) -> float:
-        try:
-            return float(value)
-        except Exception:
-            return default
-
-    try:
-        qty_float = float(quote_qty or 0.0)
-    except Exception:
-        qty_float = 0.0
-    if qty_float > 0 and abs(round(qty_float) - qty_float) < 1e-9:
-        summary_qty: int | float = int(round(qty_float))
-    else:
-        summary_qty = qty_float if qty_float > 0 else quote_qty
-
-    margin_pct_value = _render_as_float(applied_pcts.get("MarginPct"), 0.0)
-    expedite_pct_value = _render_as_float(applied_pcts.get("ExpeditePct"), 0.0)
-    expedite_amount = _render_as_float(expedite_cost, 0.0)
-    subtotal_before_margin_val = _render_as_float(subtotal_before_margin, 0.0)
-    final_price_val = _render_as_float(price, 0.0)
-    margin_amount = max(0.0, final_price_val - subtotal_before_margin_val)
-    labor_total_amount = _render_as_float(
-        (breakdown or {}).get("total_labor_cost"),
-        _render_as_float(ladder_labor, 0.0),
+    summary_payload, summary_metrics = build_summary_payload(
+        quote_qty=quote_qty,
+        subtotal_before_margin=subtotal_before_margin,
+        price=price,
+        applied_pcts=applied_pcts,
+        expedite_cost=expedite_cost,
+        breakdown=breakdown,
+        ladder_labor=ladder_labor,
+        total_direct_costs_value=total_direct_costs_value,
+        currency=currency,
     )
-    direct_total_amount = _render_as_float(total_direct_costs_value, 0.0)
 
-    summary_payload = {
-        "qty": summary_qty,
-        "final_price": round(final_price_val, 2),
-        "unit_price": round(final_price_val, 2),
-        "subtotal_before_margin": round(subtotal_before_margin_val, 2),
-        "margin_pct": float(margin_pct_value),
-        "margin_amount": round(margin_amount, 2),
-        "expedite_pct": float(expedite_pct_value),
-        "expedite_amount": round(expedite_amount, 2),
-        "currency": currency,
-    }
+    subtotal_before_margin_val = summary_metrics["subtotal_before_margin"]
+    final_price_val = summary_metrics["final_price"]
+    margin_amount = summary_metrics["margin_amount"]
+    expedite_amount = summary_metrics["expedite_amount"]
+    labor_total_amount = summary_metrics["labor_total_amount"]
+    direct_total_amount = summary_metrics["direct_total_amount"]
 
-    driver_details: list[str] = []
-    seen_driver_details: set[str] = set()
-    for detail in list(why_parts) + list(llm_notes):
-        text = str(detail).strip()
-        if not text:
-            continue
-        key = text.lower()
-        if key in seen_driver_details:
-            continue
-        seen_driver_details.add(key)
-        driver_details.append(text)
-    price_drivers_payload = [{"detail": detail} for detail in driver_details]
+    price_drivers_payload = build_price_drivers_payload(why_parts, llm_notes)
 
-    cost_breakdown_payload: list[tuple[str, float]] = []
-    cost_breakdown_payload.append(("Machine & Labor", round(labor_total_amount, 2)))
-    cost_breakdown_payload.append(("Direct Costs", round(direct_total_amount, 2)))
-    if expedite_amount > 0:
-        cost_breakdown_payload.append(("Expedite", round(expedite_amount, 2)))
-    cost_breakdown_payload.append(("Subtotal before Margin", round(subtotal_before_margin_val, 2)))
-    cost_breakdown_payload.append(("Margin", round(margin_amount, 2)))
-    cost_breakdown_payload.append(("Final Price", round(final_price_val, 2)))
+    cost_breakdown_payload = build_cost_breakdown_payload(
+        labor_total_amount=labor_total_amount,
+        direct_total_amount=direct_total_amount,
+        expedite_amount=expedite_amount,
+        subtotal_before_margin=subtotal_before_margin_val,
+        margin_amount=margin_amount,
+        final_price=final_price_val,
+    )
 
     materials_entries: list[dict[str, Any]] = []
     material_label_text = str(
