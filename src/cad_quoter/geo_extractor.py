@@ -550,28 +550,9 @@ def _env_flag(name: str) -> bool:
 
 _DEFAULT_LAYER_ALLOWLIST = frozenset({"BALLOON"})
 _GEO_EXCLUDE_LAYERS_DEFAULT = r"^(AM_BOR|DEFPOINTS|PAPER)$"
-_GEO_EXCLUDE_ENV = os.environ.get("GEO_EXCLUDE_LAYERS")
-if _GEO_EXCLUDE_ENV:
-    merged = ",".join(part for part in _GEO_EXCLUDE_ENV.splitlines())
-    exclude_tokens = [token.strip() for token in merged.split(",") if token.strip()]
-    if exclude_tokens:
-        DEFAULT_TEXT_LAYER_EXCLUDE_REGEX: tuple[str, ...] = tuple(
-            token if token.startswith("^") else f"^({token})$" for token in exclude_tokens
-        )
-    else:
-        DEFAULT_TEXT_LAYER_EXCLUDE_REGEX = (_GEO_EXCLUDE_LAYERS_DEFAULT,)
-else:
-    DEFAULT_TEXT_LAYER_EXCLUDE_REGEX = (_GEO_EXCLUDE_LAYERS_DEFAULT,)
-_TEXT_LAYER_EXCLUDE_ENV = os.environ.get("CAD_QUOTER_TEXT_LAYER_EXCLUDE")
-if _TEXT_LAYER_EXCLUDE_ENV is not None:
-    env_pattern = _TEXT_LAYER_EXCLUDE_ENV.strip()
-    if env_pattern:
-        if env_pattern.startswith("^"):
-            DEFAULT_TEXT_LAYER_EXCLUDE_REGEX = (env_pattern,)
-        else:
-            DEFAULT_TEXT_LAYER_EXCLUDE_REGEX = (f"^({env_pattern})$",)
-    else:
-        DEFAULT_TEXT_LAYER_EXCLUDE_REGEX = tuple()
+DEFAULT_TEXT_LAYER_EXCLUDE_REGEX: tuple[str, ...] = (
+    _GEO_EXCLUDE_LAYERS_DEFAULT,
+)
 
 _GEOM_BLOCK_EXCLUDE_RE = re.compile(r"^(TITLE|BORDER|CHART|FRAME|AM_.*)$", re.IGNORECASE)
 
@@ -4637,6 +4618,9 @@ def read_text_table(
 
     include_patterns = _compile_layer_patterns(layer_include_regex)
     exclude_patterns = _compile_layer_patterns(layer_exclude_regex)
+    base_exclude = re.compile(_GEO_EXCLUDE_LAYERS_DEFAULT, re.IGNORECASE)
+    if not any(pattern.pattern == base_exclude.pattern for pattern in exclude_patterns):
+        exclude_patterns.insert(0, base_exclude)
     include_display = [pattern.pattern for pattern in include_patterns]
     exclude_display = [pattern.pattern for pattern in exclude_patterns]
     allowlist_display = (
@@ -4655,6 +4639,8 @@ def read_text_table(
     text_rows_info: dict[str, Any] | None = None
     merged_rows: list[str] = []
     parsed_rows: list[dict[str, Any]] = []
+    families: dict[str, int] = {}
+    total_qty = 0
     columnar_table_info: dict[str, Any] | None = None
     columnar_debug_info: dict[str, Any] | None = None
     anchor_rows_primary: list[dict[str, Any]] = []
@@ -4752,6 +4738,7 @@ def read_text_table(
             current_allowlist: _LayerAllowlist | None,
         ) -> tuple[int, int, int]:
             nonlocal table_lines, text_rows_info, merged_rows, parsed_rows
+            nonlocal families, total_qty
             nonlocal columnar_table_info, columnar_debug_info, roi_hint_effective, rows_txt_initial
             nonlocal anchor_rows_primary, roi_rows_primary, anchor_authoritative_result
             nonlocal anchor_is_authoritative, secondary_anchor_candidate
@@ -4759,6 +4746,8 @@ def read_text_table(
             nonlocal collected_entries, candidate_entries, entries_by_layout, layout_names
             nonlocal layout_order, see_sheet_hint_text, see_sheet_hint_logged
             nonlocal am_bor_included
+            families = {}
+            total_qty = 0
             collected_entries = []
             candidate_entries = []
             entries_by_layout = defaultdict(list)
@@ -5462,12 +5451,11 @@ def read_text_table(
                         filtered_entries.extend(kept_for_layout)
                     else:
                         print(
-                            "[LAYER] layout={layout} allow={allow} kept=0 (using regex-filtered set)".format(
+                            "[LAYER] layout={layout} allow={allow} kept=0".format(
                                 layout=layout_name,
                                 allow=allowlist_display,
                             )
                         )
-                        filtered_entries.extend(layout_entries)
             else:
                 filtered_entries = list(collected_entries)
     
