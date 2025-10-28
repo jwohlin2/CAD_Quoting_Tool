@@ -7,7 +7,6 @@ import importlib
 import json
 import math
 import os
-import re
 import statistics
 import sys
 from collections import Counter
@@ -33,6 +32,7 @@ from cad_quoter.geo_extractor import (
     TextScanOpts,
     extract_for_app,
 )
+from cad_quoter.geometry.mtext_utils import normalize_mtext_plain_text
 
 DEFAULT_SAMPLE_PATH = REPO_ROOT / "Cad Files" / "301_redacted.dwg"
 ARTIFACT_DIR = REPO_ROOT / "out"
@@ -445,16 +445,6 @@ def _resolve_handle(entity: Any) -> str | None:
     if handle in (None, ""):
         return None
     return str(handle)
-
-
-def _normalize_mtext_plain_text(raw_text: str) -> str:
-    """Return plain text for ``raw_text`` extracted from an MTEXT entity."""
-
-    text = raw_text.replace("\\P", "\n").replace("\\~", "~")
-    text = re.sub(r"\\[AaCcFfHh][^;]*;", "", text)
-    return text
-
-
 def _extract_text_strings(entity: Any, etype: str) -> tuple[str | None, str | None]:
     raw_text: str | None = None
     plain_text: str | None = None
@@ -471,7 +461,7 @@ def _extract_text_strings(entity: Any, etype: str) -> tuple[str | None, str | No
             except Exception:
                 plain_text = None
         if plain_text is None and raw_text is not None:
-            plain_text = _normalize_mtext_plain_text(raw_text)
+            plain_text = normalize_mtext_plain_text(raw_text)
     elif etype in {"TEXT", "ATTRIB", "ATTDEF"}:
         if dxf is not None and hasattr(dxf, "text"):
             try:
@@ -499,7 +489,7 @@ def _extract_text_strings(entity: Any, etype: str) -> tuple[str | None, str | No
                 except Exception:
                     plain_text = None
             if plain_text is None and raw_text is not None:
-                plain_text = _normalize_mtext_plain_text(raw_text)
+                plain_text = normalize_mtext_plain_text(raw_text)
             if hasattr(mtext_obj, "destroy"):
                 try:
                     mtext_obj.destroy()
@@ -511,7 +501,7 @@ def _extract_text_strings(entity: Any, etype: str) -> tuple[str | None, str | No
             except Exception:
                 raw_text = None
         if raw_text is not None and plain_text is None:
-            plain_text = _normalize_mtext_plain_text(raw_text)
+            plain_text = normalize_mtext_plain_text(raw_text)
 
     if plain_text is None and raw_text is not None:
         plain_text = raw_text
