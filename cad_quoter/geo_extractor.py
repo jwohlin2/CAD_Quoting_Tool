@@ -4,7 +4,7 @@
 from __future__ import annotations
 
 from collections import Counter, defaultdict, deque
-from collections.abc import Iterable, Mapping, Sequence
+from collections.abc import Iterable, Mapping, MutableMapping, Sequence
 from dataclasses import dataclass
 from fractions import Fraction
 import inspect
@@ -62,12 +62,13 @@ _TAP_THREAD_TOKEN_RE = re.compile(
     re.IGNORECASE,
 )
 _NPT_TOKEN_RE = re.compile(r"\bN\.?P\.?T\.?\b", re.IGNORECASE)
+_PIPE_TAP_TOKEN_RE = re.compile(r"\bPIPE\s+TAP\b", re.IGNORECASE)
 _COUNTERBORE_TOKEN_RE = re.compile(
     r"\b(?:C['’]?\s*BORE|CBORE|COUNTERBORE)\b", re.IGNORECASE
 )
 _COUNTERSINK_TOKEN_RE = re.compile(r"\b(?:C['’]?\s*SINK|CSK|COUNTERSINK)\b", re.IGNORECASE)
 _COUNTERDRILL_TOKEN_RE = re.compile(
-    r"\b(?:C['’]?\s*DRILL|COUNTER\s*DRILL|CTR\s*DRILL|C['’]DRILL)\b",
+    r"\b(?:C['’]?\s*DRILL|COUNTER\s*DRILL|CTR\s*DRILL|C['’]DRILL|CENTER\s*DRILL)\b",
     re.IGNORECASE,
 )
 _JIG_GRIND_TOKEN_RE = re.compile(
@@ -91,8 +92,8 @@ _DRILL_SIZE_PATTERNS: tuple[re.Pattern[str], ...] = (
 )
 _OPS_MANIFEST_KEYS = (
     "tap",
-    "cbore",
-    "cdrill",
+    "counterbore",
+    "counterdrill",
     "csink",
     "drill",
     "jig_grind",
@@ -210,6 +211,27 @@ def _point2d(value: Any) -> tuple[float, float] | None:
         except Exception:
             return None
     return None
+
+
+def _layer_name_is_excluded(layer_name: str | None) -> bool:
+    if not layer_name:
+        return False
+    try:
+        normalized = str(layer_name).strip()
+    except Exception:
+        normalized = ""
+    if not normalized:
+        return False
+    upper_name = normalized.upper()
+    for prefix in _GEO_CIRCLE_LAYER_EXCLUDE_PREFIXES:
+        if upper_name.startswith(prefix):
+            return True
+    for pattern in _GEO_CIRCLE_LAYER_EXCLUDE_GLOBS:
+        if fnmatchcase(upper_name, pattern):
+            return True
+    if _GEO_CIRCLE_LAYER_BLACKLIST_RE.search(normalized):
+        return True
+    return False
 
 
 def _point3d(value: Any) -> tuple[float, float, float] | None:
@@ -573,6 +595,25 @@ DEFAULT_TEXT_LAYER_EXCLUDE_REGEX: tuple[str, ...] = (
 )
 
 _GEOM_BLOCK_EXCLUDE_RE = re.compile(r"^(TITLE|BORDER|CHART|FRAME|AM_.*)$", re.IGNORECASE)
+_GEO_CIRCLE_LAYER_EXCLUDE_PREFIXES: tuple[str, ...] = (
+    "AM_BOR",
+    "BORDER",
+    "TITLE",
+    "FRAME",
+    "CHART",
+    "SHEET",
+    "NOTES",
+    "NOTE",
+    "DIM",
+    "ANNO",
+    "CENTER",
+    "CNTR",
+    "SYMBOL",
+    "SYMB",
+    "DEFPOINTS",
+    "PAPER",
+)
+_GEO_CIRCLE_LAYER_EXCLUDE_GLOBS: tuple[str, ...] = ("SHEET*",)
 _GEO_CIRCLE_LAYER_BLACKLIST_RE = re.compile(
     r"^(AM_BOR|BORDER|TITLE|FRAME|CHART|SHEET|NOTES?|DIM|CENTER|CNTR|SY(M|MB)OL|DEFPOINTS|PAPER)$",
     re.IGNORECASE,
@@ -587,16 +628,28 @@ _GEO_H_ANCHOR_MIN = max(_GEO_H_ANCHOR_MIN, 0.0)
 _GEO_H_ANCHOR_HARD_MIN = 0.04
 
 _GEO_DIA_MIN_IN = max(
-    _env_float("GEO_DIA_MIN_IN", "GEO_CIRCLE_DIAM_MIN_IN", default=0.09),
+    _env_float("GEO_DIA_MIN_IN", "GEO_CIRCLE_DIAM_MIN_IN", default=0.04),
     0.0,
 )
-_GEO_DIA_MAX_IN = _env_float("GEO_DIA_MAX_IN", "GEO_CIRCLE_DIAM_MAX_IN", default=3.0)
+_GEO_DIA_MAX_IN = _env_float("GEO_DIA_MAX_IN", "GEO_CIRCLE_DIAM_MAX_IN", default=2.0)
 if _GEO_DIA_MAX_IN <= 0.0:
-    _GEO_DIA_MAX_IN = 3.0
+    _GEO_DIA_MAX_IN = 2.0
 if _GEO_DIA_MAX_IN < _GEO_DIA_MIN_IN:
     _GEO_DIA_MAX_IN = _GEO_DIA_MIN_IN
+_GEO_DRILL_RADIUS_MIN_IN = max(_env_float("GEO_DRILL_RADIUS_MIN_IN", default=0.04), 0.0)
+_GEO_DRILL_RADIUS_MAX_IN = _env_float("GEO_DRILL_RADIUS_MAX_IN", default=2.0)
+if _GEO_DRILL_RADIUS_MAX_IN <= 0.0:
+    _GEO_DRILL_RADIUS_MAX_IN = 2.0
+if (
+    _GEO_DRILL_RADIUS_MAX_IN
+    and _GEO_DRILL_RADIUS_MIN_IN
+    and _GEO_DRILL_RADIUS_MAX_IN < _GEO_DRILL_RADIUS_MIN_IN
+):
+    _GEO_DRILL_RADIUS_MAX_IN = _GEO_DRILL_RADIUS_MIN_IN
 _GEO_CIRCLE_Z_ABS_MAX = 1e-6
 _GEO_CIRCLE_DEDUP_DIGITS = 3
+_GEO_CIRCLE_CENTER_GROUP_DIGITS = 3
+_GEO_BBOX_MARGIN_IN = 0.25
 
 
 @dataclass(slots=True)
@@ -2830,7 +2883,11 @@ def _parse_number_token(token: str) -> float | None:
 
 
 def _format_ref_value(value: float) -> str:
-    return f"{value:.4f}\""
+    text = f"{value:.4f}"
+    text = text.rstrip("0").rstrip(".")
+    if not text:
+        text = "0"
+    return f"{text}\""
 
 
 def _has_candidate_token(text: str) -> bool:
@@ -2964,7 +3021,8 @@ def classify_op_row(desc: str | None) -> list[dict[str, Any]]:
         if not segment:
             continue
         kinds: list[tuple[str, str | None]] = []
-        is_npt = bool(_NPT_TOKEN_RE.search(segment))
+        is_pipe_tap = bool(_PIPE_TAP_TOKEN_RE.search(segment))
+        is_npt = bool(_NPT_TOKEN_RE.search(segment) or is_pipe_tap)
         is_cdrill = bool(_COUNTERDRILL_TOKEN_RE.search(segment))
         has_thread_tap = bool(_TAP_THREAD_TOKEN_RE.search(segment))
         has_tap_word = bool(_TAP_WORD_TOKEN_RE.search(segment))
@@ -2974,11 +3032,11 @@ def classify_op_row(desc: str | None) -> list[dict[str, Any]]:
         if is_npt or has_tap:
             kinds.append(("tap", None))
         if _COUNTERBORE_TOKEN_RE.search(segment):
-            kinds.append(("cbore", None))
+            kinds.append(("counterbore", None))
         if _COUNTERSINK_TOKEN_RE.search(segment):
             kinds.append(("csink", None))
         if is_cdrill:
-            kinds.append(("cdrill", None))
+            kinds.append(("counterdrill", None))
         if _JIG_GRIND_TOKEN_RE.search(segment):
             kinds.append(("jig_grind", None))
         if _SPOT_TOKEN_RE.search(segment):
@@ -2996,7 +3054,10 @@ def classify_op_row(desc: str | None) -> list[dict[str, Any]]:
             if key in seen_local:
                 continue
             seen_local.add(key)
-            results.append({"kind": kind, "qty": 0, "size": size_text})
+            entry = {"kind": kind, "qty": 0, "size": size_text}
+            if kind == "tap" and is_npt:
+                entry["tap_type"] = "npt"
+            results.append(entry)
 
     return results
 
@@ -3080,6 +3141,7 @@ def ops_manifest(
         manifest["geom"] = {
             "drill": geom_drill_total,
             "residual_drill": geom_unsized,
+            "drill_residual": geom_unsized,
             "total": geom_drill_total,
         }
         manifest["geom_drill_count"] = geom_drill_total
@@ -3384,6 +3446,20 @@ def _detect_row_side(desc: str) -> str:
     return ""
 
 
+def _line_is_table_row_start(text: str) -> bool:
+    if not text:
+        return False
+    candidate = str(text).strip()
+    if not candidate:
+        return False
+    for pattern in _ROW_QUANTITY_PATTERNS:
+        if pattern.match(candidate):
+            return True
+    if re.match(r"^\s*QTY\b", candidate, re.IGNORECASE):
+        return True
+    return False
+
+
 def _merge_table_lines(lines: Iterable[str]) -> list[str]:
     merged: list[str] = []
     current: list[str] = []
@@ -3393,13 +3469,20 @@ def _merge_table_lines(lines: Iterable[str]) -> list[str]:
             continue
         if _roi_is_admin_noise(candidate) or _roi_is_numeric_ladder(candidate):
             continue
-        if _roi_is_row_starter(candidate):
+        starts_new_row = False
+        if _ROW_QUANTITY_PATTERNS[0].match(candidate) or _ROW_QUANTITY_PATTERNS[1].match(candidate):
+            starts_new_row = True
+        elif not current and _line_is_table_row_start(candidate):
+            starts_new_row = True
+        if starts_new_row:
             if current:
                 merged.append(" ".join(current))
             current = [candidate]
             continue
         if current:
             current.append(candidate)
+        else:
+            current = [candidate]
     if current:
         merged.append(" ".join(current))
     return merged
@@ -4473,8 +4556,12 @@ def _extract_mechanical_table_from_blocks(doc: Any) -> Mapping[str, Any] | None:
     return best_result
 
 
-_FALLBACK_ACTION_KINDS = {"tap", "cbore", "drill", "cdrill", "csink", "spot", "jig_grind"}
+_FALLBACK_ACTION_KINDS = {"tap", "counterbore", "drill", "counterdrill"}
 _FALLBACK_TRAILING_LADDER_RE = re.compile(r"(?:\s*\d+){3,}$")
+_ANCHOR_TERMINATOR_RE = re.compile(
+    r"^(?:NOTES?|TOLERANCES?|REVISION|TITLE|DRAWN\s+BY)\b",
+    re.IGNORECASE,
+)
 
 
 def _prepare_fallback_lines(lines: Iterable[str]) -> list[str]:
@@ -4483,6 +4570,305 @@ def _prepare_fallback_lines(lines: Iterable[str]) -> list[str]:
     except Exception:
         candidate = []
     return _merge_table_lines(candidate)
+
+
+def _coerce_float_optional(value: Any) -> float | None:
+    try:
+        result = float(value)
+    except Exception:
+        return None
+    if not math.isfinite(result):
+        return None
+    return result
+
+
+def _coerce_layout_index(value: Any) -> int:
+    try:
+        return int(value)
+    except Exception:
+        try:
+            return int(float(value))
+        except Exception:
+            return 0
+
+
+def _normalize_entry_text(entry: Mapping[str, Any]) -> str:
+    text = entry.get("normalized_text")
+    if text:
+        return _normalize_candidate_text(text)
+    return _normalize_candidate_text(entry.get("text"))
+
+
+def _entry_band_sort_key(entry: Mapping[str, Any]) -> tuple[float, float, int]:
+    x_val = entry.get("x")
+    y_val = entry.get("y")
+    order_val = entry.get("order", 0)
+    try:
+        y_key = -float(y_val) if y_val is not None else float("inf")
+    except Exception:
+        y_key = float("inf")
+    try:
+        x_key = float(x_val) if x_val is not None else float("inf")
+    except Exception:
+        x_key = float("inf")
+    try:
+        order_key = int(order_val)
+    except Exception:
+        order_key = 0
+    return (y_key, x_key, order_key)
+
+
+def _extract_anchor_band_lines(context: Mapping[str, Any] | None) -> list[str]:
+    if not isinstance(context, Mapping):
+        return []
+
+    raw_entries = context.get("entries")
+    raw_anchor_entries = context.get("anchor_entries")
+    if not isinstance(raw_entries, Iterable) or not isinstance(raw_anchor_entries, Iterable):
+        return []
+
+    entries: list[dict[str, Any]] = []
+    for entry in raw_entries:
+        if not isinstance(entry, Mapping):
+            continue
+        entry_copy = dict(entry)
+        entry_copy["normalized_text"] = _normalize_entry_text(entry_copy)
+        entries.append(entry_copy)
+
+    anchor_entries: list[dict[str, Any]] = []
+    for entry in raw_anchor_entries:
+        if not isinstance(entry, Mapping):
+            continue
+        entry_copy = dict(entry)
+        entry_copy["normalized_text"] = _normalize_entry_text(entry_copy)
+        anchor_entries.append(entry_copy)
+
+    if not entries or not anchor_entries:
+        return []
+
+    anchor_layouts = {
+        _coerce_layout_index(item.get("layout_index")) for item in anchor_entries
+    }
+    if not anchor_layouts:
+        return []
+
+    layout_order_raw = context.get("layout_order")
+    layout_sequence: list[int]
+    if isinstance(layout_order_raw, Iterable):
+        layout_sequence = []
+        for idx in layout_order_raw:
+            layout_idx = _coerce_layout_index(idx)
+            if layout_idx in anchor_layouts and layout_idx not in layout_sequence:
+                layout_sequence.append(layout_idx)
+    else:
+        layout_sequence = []
+    if not layout_sequence:
+        layout_sequence = sorted(anchor_layouts)
+
+    entries_by_layout: defaultdict[int, list[dict[str, Any]]] = defaultdict(list)
+    for entry in entries:
+        layout_idx = _coerce_layout_index(entry.get("layout_index"))
+        if layout_idx in anchor_layouts:
+            entries_by_layout[layout_idx].append(entry)
+
+    anchor_height = 0.0
+    try:
+        anchor_height = float(context.get("anchor_height") or 0.0)
+    except Exception:
+        anchor_height = 0.0
+    if anchor_height < 0:
+        anchor_height = 0.0
+
+    height_lower = anchor_height * 0.6 if anchor_height > 0 else None
+    height_upper = anchor_height * 1.4 if anchor_height > 0 else None
+    height_stop_lower = anchor_height * 0.3 if anchor_height > 0 else None
+    height_stop_upper = anchor_height * 1.7 if anchor_height > 0 else None
+
+    anchor_y_values: list[float] = []
+    anchor_x_bounds: dict[int, list[float | None]] = {}
+    for entry in anchor_entries:
+        y_val = _coerce_float_optional(entry.get("y"))
+        if y_val is not None:
+            anchor_y_values.append(y_val)
+        layout_idx = _coerce_layout_index(entry.get("layout_index"))
+        bounds = anchor_x_bounds.setdefault(layout_idx, [None, None])
+        x_val = _coerce_float_optional(entry.get("x"))
+        width_val = _coerce_float_optional(entry.get("width"))
+        if x_val is None:
+            continue
+        right_val = x_val
+        if width_val is not None and width_val > 0:
+            right_val = x_val + width_val
+        if bounds[0] is None or x_val < bounds[0]:
+            bounds[0] = x_val
+        if bounds[1] is None or (right_val is not None and right_val > bounds[1]):
+            bounds[1] = right_val
+
+    anchor_center_y: float | None = None
+    band_y_low: float | None = None
+    band_y_high: float | None = None
+    row_spacing_est = 0.0
+    if anchor_y_values:
+        sorted_anchor_y = sorted(anchor_y_values)
+        try:
+            anchor_center_y = float(statistics.median(sorted_anchor_y))
+        except Exception:
+            anchor_center_y = float(sorted_anchor_y[0])
+        diffs = [
+            abs(sorted_anchor_y[idx] - sorted_anchor_y[idx - 1])
+            for idx in range(1, len(sorted_anchor_y))
+            if abs(sorted_anchor_y[idx] - sorted_anchor_y[idx - 1]) > 0
+        ]
+        if diffs:
+            try:
+                row_spacing_est = float(statistics.median(diffs))
+            except Exception:
+                row_spacing_est = float(diffs[0])
+        if (not row_spacing_est or row_spacing_est <= 0) and len(sorted_anchor_y) >= 2:
+            span = abs(sorted_anchor_y[-1] - sorted_anchor_y[0])
+            divider = max(len(sorted_anchor_y) - 1, 1)
+            row_spacing_est = span / divider if divider else span
+        if (not row_spacing_est or row_spacing_est <= 0) and anchor_height > 0:
+            row_spacing_est = anchor_height * 2.5
+        if not row_spacing_est or row_spacing_est <= 0:
+            row_spacing_est = anchor_height if anchor_height > 0 else 1.0
+        band_half_height = row_spacing_est * 8.0
+        if anchor_height > 0:
+            band_half_height = max(band_half_height, anchor_height * 12.0)
+        band_y_low = anchor_center_y - band_half_height
+        band_y_high = anchor_center_y + band_half_height
+    elif anchor_height > 0:
+        row_spacing_est = anchor_height * 2.5
+
+    if row_spacing_est <= 0 and anchor_height > 0:
+        row_spacing_est = anchor_height
+    if row_spacing_est <= 0:
+        row_spacing_est = 1.0
+
+    layout_x_extents: dict[int, tuple[float | None, float | None]] = {}
+    for layout_idx, layout_entries in entries_by_layout.items():
+        min_x: float | None = None
+        max_x: float | None = None
+        for entry in layout_entries:
+            x_val = _coerce_float_optional(entry.get("x"))
+            width_val = _coerce_float_optional(entry.get("width"))
+            if x_val is None:
+                continue
+            right_val = x_val
+            if width_val is not None and width_val > 0:
+                right_val = x_val + width_val
+            if min_x is None or x_val < min_x:
+                min_x = x_val
+            if max_x is None or (right_val is not None and right_val > max_x):
+                max_x = right_val
+        layout_x_extents[layout_idx] = (min_x, max_x)
+
+    x_margin = 0.0
+    if anchor_height > 0:
+        x_margin = max(x_margin, anchor_height * 4.0)
+    if row_spacing_est > 0:
+        x_margin = max(x_margin, row_spacing_est * 0.5)
+
+    band_x_bounds: dict[int, tuple[float | None, float | None]] = {}
+    for layout_idx in layout_sequence:
+        anchor_bounds = anchor_x_bounds.get(layout_idx, [None, None])
+        layout_bounds = layout_x_extents.get(layout_idx, (None, None))
+        left = anchor_bounds[0] if anchor_bounds else None
+        right = anchor_bounds[1] if anchor_bounds else None
+        if left is None:
+            left = layout_bounds[0]
+        if right is None:
+            right = layout_bounds[1]
+        if left is not None and right is not None and right < left:
+            left, right = right, left
+        if left is not None and x_margin:
+            left -= x_margin
+        if right is not None and x_margin:
+            right += x_margin
+        band_x_bounds[layout_idx] = (left, right)
+
+    band_lines: list[str] = []
+    for layout_idx in layout_sequence:
+        records = entries_by_layout.get(layout_idx, [])
+        if not records:
+            continue
+        sorted_records = sorted(records, key=_entry_band_sort_key)
+        layout_lines: list[str] = []
+        started = False
+        x_bounds = band_x_bounds.get(layout_idx)
+        x_left_bound = x_bounds[0] if x_bounds else None
+        x_right_bound = x_bounds[1] if x_bounds else None
+        if (
+            x_left_bound is not None
+            and x_right_bound is not None
+            and x_right_bound < x_left_bound
+        ):
+            x_left_bound, x_right_bound = x_right_bound, x_left_bound
+        for record in sorted_records:
+            y_val = _coerce_float_optional(record.get("y"))
+            if (
+                band_y_low is not None
+                and band_y_high is not None
+                and y_val is not None
+            ):
+                low = band_y_low if band_y_low <= band_y_high else band_y_high
+                high = band_y_high if band_y_high >= band_y_low else band_y_low
+                if y_val < low or y_val > high:
+                    continue
+
+            if x_left_bound is not None or x_right_bound is not None:
+                x_val = _coerce_float_optional(record.get("x"))
+                width_val = _coerce_float_optional(record.get("width"))
+                left = x_val
+                right = x_val
+                if left is not None and width_val is not None and width_val > 0:
+                    right = left + width_val
+                if left is not None and right is not None:
+                    if x_left_bound is not None and right < x_left_bound:
+                        continue
+                    if x_right_bound is not None and left > x_right_bound:
+                        continue
+
+            text = _normalize_entry_text(record)
+            if not text:
+                continue
+            if _roi_is_admin_noise(text):
+                continue
+            if not started:
+                if _line_is_table_row_start(text) or re.search(r"\bQTY\b", text, re.IGNORECASE):
+                    started = True
+                else:
+                    continue
+            if _ANCHOR_TERMINATOR_RE.search(text):
+                break
+            height_val = record.get("height")
+            height_float = (
+                float(height_val)
+                if isinstance(height_val, (int, float)) and math.isfinite(height_val)
+                else None
+            )
+            if (
+                anchor_height > 0
+                and height_float is not None
+                and height_float > 0
+            ):
+                if (
+                    height_stop_lower is not None
+                    and height_stop_upper is not None
+                    and (height_float < height_stop_lower or height_float > height_stop_upper)
+                ):
+                    if layout_lines or started:
+                        break
+                    continue
+                if (
+                    (height_lower is not None and height_float < height_lower)
+                    or (height_upper is not None and height_float > height_upper)
+                ):
+                    continue
+            layout_lines.append(text)
+        band_lines.extend(layout_lines)
+
+    return band_lines
 
 
 def _build_fallback_rows_from_lines(lines: Iterable[str]) -> tuple[list[dict[str, Any]], dict[str, int], int]:
@@ -4542,33 +4928,43 @@ def _build_fallback_rows_from_lines(lines: Iterable[str]) -> tuple[list[dict[str
         for fragment_text, action in candidate_fragments:
             ref_text, ref_value = _extract_row_reference(fragment_text)
             side_value = action.get("side") or _detect_row_side(fragment_text) or side_hint
-            normalized_key = (
-                qty_int,
-                fragment_text.upper(),
-                (side_value or "").upper(),
-                (ref_text or base_ref_text or "").upper(),
-            )
-            if normalized_key in seen_keys:
-                continue
-            seen_keys.add(normalized_key)
+            if side_value == "both":
+                sides_to_emit = ["front", "back"]
+            else:
+                fallback_side = side_value or "front"
+                sides_to_emit = [fallback_side]
 
-            row: dict[str, Any] = {
-                "hole": "",
-                "ref": ref_text or base_ref_text or "",
-                "qty": qty_int,
-                "desc": fragment_text,
-            }
-            if side_value:
-                row["side"] = side_value
-            if action.get("npt"):
-                row["npt"] = True
-            rows.append(row)
-            total_qty += qty_int
+            for side_option in sides_to_emit:
+                normalized_key = (
+                    qty_int,
+                    fragment_text.upper(),
+                    (side_option or "").upper(),
+                    (ref_text or base_ref_text or "").upper(),
+                )
+                if normalized_key in seen_keys:
+                    continue
+                seen_keys.add(normalized_key)
 
-            value_for_family = ref_value if ref_value is not None else base_ref_value
-            if value_for_family is not None:
-                key = f"{float(value_for_family):.4f}".rstrip("0").rstrip(".")
-                families[key] = families.get(key, 0) + qty_int
+                row: dict[str, Any] = {
+                    "hole": "",
+                    "ref": ref_text or base_ref_text or "",
+                    "qty": qty_int,
+                    "desc": fragment_text,
+                }
+                if side_option:
+                    row["side"] = side_option
+                if action.get("npt"):
+                    row["npt"] = True
+                tap_type = action.get("tap_type")
+                if tap_type:
+                    row["tap_type"] = tap_type
+                rows.append(row)
+                total_qty += qty_int
+
+                value_for_family = ref_value if ref_value is not None else base_ref_value
+                if value_for_family is not None:
+                    key = f"{float(value_for_family):.4f}".rstrip("0").rstrip(".")
+                    families[key] = families.get(key, 0) + qty_int
 
     return rows, families, total_qty
 
@@ -4586,7 +4982,7 @@ def _fallback_text_table(lines: Iterable[str]) -> dict[str, Any]:
     if families:
         result["hole_diam_families_in"] = families
     result["provenance_holes"] = "HOLE TABLE"
-    result["source"] = "text_table"
+    result["source"] = "text_fallback"
     return result
 
 
@@ -4603,7 +4999,7 @@ def _publish_fallback_from_rows_txt(rows_txt: Iterable[Any]) -> dict[str, Any]:
         "rows": rows,
         "hole_count": total_qty,
         "provenance_holes": "HOLE TABLE (fallback)",
-        "source": "text_table",
+        "source": "text_fallback",
     }
     if families:
         result["hole_diam_families_in"] = families
@@ -4746,6 +5142,8 @@ def read_text_table(
     base_exclude = re.compile(_GEO_EXCLUDE_LAYERS_DEFAULT, re.IGNORECASE)
     if not any(pattern.pattern == base_exclude.pattern for pattern in exclude_patterns):
         exclude_patterns.insert(0, base_exclude)
+    base_exclude_pattern_text = base_exclude.pattern
+    am_bor_band_layouts = {"CHART", "SHEET (B)"}
     include_display = [pattern.pattern for pattern in include_patterns]
     exclude_display = [pattern.pattern for pattern in exclude_patterns]
     allowlist_display = (
@@ -4761,6 +5159,8 @@ def read_text_table(
     fallback_candidate: Mapping[str, Any] | None = None
     best_candidate: Mapping[str, Any] | None = None
     best_score: tuple[int, int] = (0, 0)
+    helper_score: tuple[int, int] = (0, 0)
+    legacy_score: tuple[int, int] = (0, 0)
     text_rows_info: dict[str, Any] | None = None
     merged_rows: list[str] = []
     parsed_rows: list[dict[str, Any]] = []
@@ -4776,6 +5176,7 @@ def read_text_table(
     confidence_high = False
     anchor_authoritative_result: dict[str, Any] | None = None
     secondary_anchor_candidate: dict[str, Any] | None = None
+    anchor_band_context: dict[str, Any] | None = None
 
     helper_missing = helper is None
     if helper_missing and isinstance(_LAST_TEXT_TABLE_DEBUG, dict):
@@ -4817,6 +5218,7 @@ def read_text_table(
         nonlocal rows_txt_initial, doc, resolved_allowlist
         nonlocal anchor_rows_primary, roi_rows_primary, anchor_authoritative_result
         nonlocal anchor_is_authoritative
+        nonlocal anchor_band_context
         if table_lines is not None:
             return table_lines
 
@@ -4870,6 +5272,7 @@ def read_text_table(
             nonlocal columnar_table_info, columnar_debug_info, roi_hint_effective, rows_txt_initial
             nonlocal anchor_rows_primary, roi_rows_primary, anchor_authoritative_result
             nonlocal anchor_is_authoritative, secondary_anchor_candidate
+            nonlocal anchor_band_context
             nonlocal allowlist_display, follow_sheet_target_layouts
             nonlocal collected_entries, candidate_entries, entries_by_layout, layout_names
             nonlocal layout_order, see_sheet_hint_text, see_sheet_hint_logged
@@ -4889,6 +5292,7 @@ def read_text_table(
             anchor_rows_primary = []
             roi_rows_primary = []
             secondary_anchor_candidate = None
+            anchor_band_context = None
             hint_logged = False
             attrib_count = 0
             mleader_count = 0
@@ -5501,11 +5905,24 @@ def read_text_table(
                     }
     
             if include_patterns or exclude_patterns:
-                def _matches_any(patterns: list[re.Pattern[str]], values: list[str]) -> bool:
+                def _matches_any(
+                    patterns: list[re.Pattern[str]],
+                    values: list[str],
+                    *,
+                    skip_base_am_bor: bool = False,
+                ) -> bool:
                     for pattern in patterns:
                         for value in values:
-                            if value and pattern.search(value):
-                                return True
+                            if not value:
+                                continue
+                            match = pattern.search(value)
+                            if not match:
+                                continue
+                            if skip_base_am_bor and pattern.pattern == base_exclude_pattern_text:
+                                matched_text = match.group(0) if match else value
+                                if str(matched_text or "").strip().upper() == "AM_BOR":
+                                    continue
+                            return True
                     return False
 
                 regex_filtered: list[dict[str, Any]] = []
@@ -5520,13 +5937,28 @@ def read_text_table(
                         or entry.get("layer_upper")
                         or layer_text.upper()
                     )
+                    layout_name_value = entry.get("layout_name")
+                    if not layout_name_value:
+                        layout_idx = entry.get("layout_index")
+                        layout_name_value = layout_names.get(layout_idx, layout_idx)
+                    layout_upper = str(layout_name_value or "").strip().upper()
                     values = [layer_text, upper_text]
                     include_ok = True
                     if include_patterns:
                         include_ok = _matches_any(include_patterns, values)
                     exclude_hit = False
                     if include_ok and exclude_patterns:
-                        exclude_hit = _matches_any(list(exclude_patterns), values)
+                        entry_is_am_bor = str(layer_text or "").strip().upper() == "AM_BOR" or (
+                            str(upper_text or "").strip().upper() == "AM_BOR"
+                        )
+                        skip_base_am_bor = (
+                            layout_upper in am_bor_band_layouts and entry_is_am_bor
+                        )
+                        exclude_hit = _matches_any(
+                            list(exclude_patterns),
+                            values,
+                            skip_base_am_bor=skip_base_am_bor,
+                        )
                     if include_ok and not exclude_hit:
                         regex_filtered.append(entry)
                 kept = len(regex_filtered)
@@ -5933,10 +6365,13 @@ def read_text_table(
                     candidate_entries_local.append(entry_copy)
                 if not candidate_entries_local:
                     return None
-                anchor_height, _anchor_count = _compute_anchor_height(candidate_entries_local)
-                if anchor_height > 0 and candidate_entries_local:
+                h_anchor_local, _anchor_count = _compute_anchor_height(
+                    candidate_entries_local
+                )
+                h_anchor_local = float(h_anchor_local or 0.20)
+                if _anchor_count > 0 and h_anchor_local > 0 and candidate_entries_local:
                     filtered_by_height = _filter_entries_by_anchor_height(
-                        candidate_entries_local, anchor_height=anchor_height
+                        candidate_entries_local, anchor_height=h_anchor_local
                     )
                     if filtered_by_height:
                         candidate_entries_local = [dict(entry) for entry in filtered_by_height]
@@ -6134,12 +6569,13 @@ def read_text_table(
             candidate_entries = normalized_entries
             table_lines = normalized_lines
 
-            anchor_height, anchor_count = _compute_anchor_height(candidate_entries)
-            print(f"[TEXT-SCAN] anchors={anchor_count} h_anchor={anchor_height:.2f}")
+            h_anchor, anchor_count = _compute_anchor_height(candidate_entries)
+            h_anchor = float(h_anchor or 0.20)
+            print(f"[TEXT-SCAN] anchors={anchor_count} h_anchor={h_anchor:.2f}")
             total_by_height = len(candidate_entries)
-            if anchor_height > 0 and candidate_entries:
+            if anchor_count > 0 and h_anchor > 0 and candidate_entries:
                 filtered_entries = _filter_entries_by_anchor_height(
-                    candidate_entries, anchor_height=anchor_height
+                    candidate_entries, anchor_height=h_anchor
                 )
                 kept_count = len(filtered_entries)
                 if kept_count != total_by_height:
@@ -6346,6 +6782,84 @@ def read_text_table(
         )
 
         if anchor_is_authoritative:
+            anchor_layouts: set[int] = set()
+            layout_band_ranges: dict[int, tuple[float, float]] = {}
+            for entry in candidate_entries:
+                normalized = entry.get("normalized_text") or entry.get("text")
+                if not _line_is_table_row_start(normalized):
+                    continue
+                layout_idx = _coerce_layout_index(entry.get("layout_index"))
+                anchor_layouts.add(layout_idx)
+                y_val = entry.get("y")
+                if isinstance(y_val, (int, float)):
+                    y_float = float(y_val)
+                    low_high = layout_band_ranges.get(layout_idx)
+                    if low_high is None:
+                        layout_band_ranges[layout_idx] = (y_float, y_float)
+                    else:
+                        low, high = low_high
+                        layout_band_ranges[layout_idx] = (
+                            min(low, y_float),
+                            max(high, y_float),
+                        )
+            anchor_layouts = {idx for idx in anchor_layouts if idx is not None}
+            if anchor_layouts:
+                anchor_band_entries: list[dict[str, Any]] = []
+                band_drop_counts: defaultdict[int, int] = defaultdict(int)
+                for entry in collected_entries:
+                    if not isinstance(entry, Mapping):
+                        continue
+                    layout_idx = _coerce_layout_index(entry.get("layout_index"))
+                    if layout_idx not in anchor_layouts:
+                        continue
+                    entry_copy = dict(entry)
+                    entry_copy["normalized_text"] = _normalize_candidate_text(
+                        entry_copy.get("normalized_text") or entry_copy.get("text")
+                    )
+                    layout_name_value = layout_names.get(layout_idx, layout_idx)
+                    layout_upper = str(layout_name_value or "").strip().upper()
+                    if layout_upper in am_bor_band_layouts:
+                        band_limits = layout_band_ranges.get(layout_idx)
+                        if band_limits is not None:
+                            y_val = entry_copy.get("y")
+                            if isinstance(y_val, (int, float)):
+                                y_float = float(y_val)
+                                lower, upper = band_limits
+                                band_min = min(lower, upper)
+                                band_max = max(lower, upper)
+                                if anchor_height > 0:
+                                    band_margin = max(anchor_height * 1.5, 6.0)
+                                else:
+                                    band_margin = max((band_max - band_min) * 0.5, 6.0)
+                                lower_bound = band_min - band_margin
+                                upper_bound = band_max + band_margin
+                                if y_float < lower_bound or y_float > upper_bound:
+                                    band_drop_counts[layout_idx] += 1
+                                    continue
+                    anchor_band_entries.append(entry_copy)
+                if band_drop_counts:
+                    for layout_idx, drop_count in band_drop_counts.items():
+                        layout_name = layout_names.get(layout_idx, layout_idx)
+                        print(
+                            "[BAND] layout={layout} trimmed={count}".format(
+                                layout=layout_name,
+                                count=drop_count,
+                            )
+                        )
+                anchor_band_context = {
+                    "entries": anchor_band_entries,
+                    "anchor_entries": [
+                        dict(entry)
+                        for entry in candidate_entries
+                        if _line_is_table_row_start(
+                            entry.get("normalized_text") or entry.get("text")
+                        )
+                    ],
+                    "anchor_height": h_anchor,
+                    "layout_order": [
+                        idx for idx in layout_order if _coerce_layout_index(idx) in anchor_layouts
+                    ],
+                }
             anchor_payload_rows = [dict(row) for row in anchor_rows_primary]
             anchor_authoritative_result = {
                 "rows": anchor_payload_rows,
@@ -6760,6 +7274,31 @@ def read_text_table(
             if legacy_score[1] > 0 and legacy_score > best_score:
                 best_candidate = legacy_map
                 best_score = legacy_score
+
+    if (
+        anchor_is_authoritative
+        and len(anchor_rows_primary) <= 3
+        and helper_score[1] == 0
+        and legacy_score[1] == 0
+        and isinstance(anchor_band_context, Mapping)
+    ):
+        band_lines = _extract_anchor_band_lines(anchor_band_context)
+        if band_lines:
+            if isinstance(_LAST_TEXT_TABLE_DEBUG, dict):
+                _LAST_TEXT_TABLE_DEBUG["anchor_band_lines"] = list(band_lines)
+            anchor_band_result = _fallback_text_table(band_lines)
+            if anchor_band_result:
+                fallback_candidate = anchor_band_result
+                band_score = _score_table(anchor_band_result)
+                if band_score[1] > 0 and band_score > best_score:
+                    best_candidate = anchor_band_result
+                    best_score = band_score
+                anchor_authoritative_result = dict(anchor_band_result)
+                anchor_rows_primary = _normalize_table_rows(
+                    anchor_band_result.get("rows")
+                )
+                anchor_qty_total = _sum_qty(anchor_rows_primary)
+                text_rows_info = dict(anchor_band_result)
 
     primary_result: dict[str, Any] | None = None
     if isinstance(anchor_authoritative_result, Mapping):
@@ -7633,18 +8172,21 @@ def classify_action(fragment: str) -> dict[str, Any]:
     if not text:
         return result
 
-    if _TAP_WORD_TOKEN_RE.search(text) or _TAP_THREAD_TOKEN_RE.search(text) or _NPT_TOKEN_RE.search(text):
+    is_pipe_tap = bool(_PIPE_TAP_TOKEN_RE.search(text))
+    is_npt = bool(_NPT_TOKEN_RE.search(text) or is_pipe_tap)
+    if _TAP_WORD_TOKEN_RE.search(text) or _TAP_THREAD_TOKEN_RE.search(text) or is_npt:
         result["kind"] = "tap"
-        if _NPT_TOKEN_RE.search(text):
+        if is_npt:
             result["npt"] = True
+            result["tap_type"] = "npt"
         return result
 
     if _COUNTERBORE_TOKEN_RE.search(upper):
-        result["kind"] = "cbore"
+        result["kind"] = "counterbore"
         return result
 
     if _COUNTERDRILL_TOKEN_RE.search(upper):
-        result["kind"] = "cdrill"
+        result["kind"] = "counterdrill"
         return result
 
     if _COUNTERSINK_TOKEN_RE.search(upper):
@@ -7682,6 +8224,47 @@ def _normalize_geom_holes_payload(
 ) -> dict[str, Any]:
     groups_counter: defaultdict[float, int] = defaultdict(int)
     total_candidates: list[int] = []
+    residual_centers: set[tuple[float, float]] = set()
+    non_drill_centers: set[tuple[float, float]] = set()
+    residual_hole_keys: set[tuple[float, float, float]] = set()
+    residual_holes_payload: list[dict[str, float]] = []
+
+    def _center_key(point: tuple[float, float]) -> tuple[float, float]:
+        return (
+            round(float(point[0]), _GEO_CIRCLE_CENTER_GROUP_DIGITS),
+            round(float(point[1]), _GEO_CIRCLE_CENTER_GROUP_DIGITS),
+        )
+
+    def _consume_centers(source: Any, target: set[tuple[float, float]]) -> None:
+        if source is None:
+            return
+        if isinstance(source, Mapping):
+            if "x" in source or "y" in source:
+                point = _point2d(source)
+                if point is not None:
+                    target.add(_center_key(point))
+                return
+            for key in ("center", "point"):
+                if key in source:
+                    point = _point2d(source.get(key))
+                    if point is not None:
+                        target.add(_center_key(point))
+            for value in source.values():
+                if isinstance(value, Mapping) or (
+                    isinstance(value, Sequence)
+                    and not isinstance(value, (str, bytes, bytearray))
+                ):
+                    _consume_centers(value, target)
+            return
+        if isinstance(source, Sequence) and not isinstance(
+            source, (str, bytes, bytearray)
+        ):
+            for item in source:
+                _consume_centers(item, target)
+            return
+        point = _point2d(source)
+        if point is not None:
+            target.add(_center_key(point))
 
     def _ingest_group(entry: Mapping[str, Any]) -> None:
         dia_candidate = (
@@ -7720,6 +8303,38 @@ def _normalize_geom_holes_payload(
                     total_candidates.append(int(float(total_val)))
                 except Exception:
                     pass
+            _consume_centers(source.get("residual_centers"), residual_centers)
+            holes_value = source.get("residual_holes")
+            _consume_centers(holes_value, residual_centers)
+            if isinstance(holes_value, Sequence):
+                for hole in holes_value:
+                    if not isinstance(hole, Mapping):
+                        continue
+                    point = _point2d(hole)
+                    if point is None:
+                        continue
+                    dia_val = (
+                        hole.get("dia_in")
+                        or hole.get("diam_in")
+                        or hole.get("diameter_in")
+                        or hole.get("diameter")
+                    )
+                    try:
+                        hx, hy = float(point[0]), float(point[1])
+                        hd = float(dia_val) if dia_val is not None else 0.0
+                    except Exception:
+                        continue
+                    key = (
+                        round(hx, _GEO_CIRCLE_CENTER_GROUP_DIGITS),
+                        round(hy, _GEO_CIRCLE_CENTER_GROUP_DIGITS),
+                        round(hd, 4),
+                    )
+                    if key in residual_hole_keys:
+                        continue
+                    residual_hole_keys.add(key)
+                    residual_holes_payload.append({"x": hx, "y": hy, "dia_in": hd})
+            _consume_centers(source.get("centers"), residual_centers)
+            _consume_centers(source.get("non_drill_centers"), non_drill_centers)
             for key in ("hole_count", "hole_count_geom", "hole_count_geom_dedup"):
                 value = source.get(key)
                 if value not in (None, ""):
@@ -7753,6 +8368,8 @@ def _normalize_geom_holes_payload(
             for item in source:
                 if isinstance(item, Mapping):
                     _ingest_group(item)
+                else:
+                    _consume_centers(item, residual_centers)
 
     _ingest_source(geom_holes)
     _ingest_source(hole_sets)
@@ -7765,7 +8382,27 @@ def _normalize_geom_holes_payload(
     total = sum(entry["count"] for entry in groups)
     if total <= 0 and total_candidates:
         total = max(total_candidates)
-    return {"groups": groups, "total": total}
+    residual_center_list = sorted(residual_centers)
+    non_drill_center_list = sorted(non_drill_centers)
+    residual_candidate_set = {
+        key for key in residual_centers if key not in non_drill_centers
+    }
+    payload: dict[str, Any] = {
+        "groups": groups,
+        "total": int(total),
+        "center_count": len(residual_center_list),
+        "residual_centers": [
+            {"x": center[0], "y": center[1]} for center in residual_center_list
+        ],
+        "non_drill_centers": [
+            {"x": center[0], "y": center[1]} for center in non_drill_center_list
+        ],
+        "residual_candidates": len(residual_candidate_set),
+        "residual_holes": residual_holes_payload,
+    }
+    if not payload["total"] and residual_center_list:
+        payload["total"] = len(residual_center_list)
+    return payload
 
 
 def ops_manifest(
@@ -7774,11 +8411,98 @@ def ops_manifest(
     *,
     hole_sets: Any = None,
 ) -> dict[str, Any]:
-    table_keys = ("drill", "tap", "cbore", "cdrill", "csink", "jig_grind", "spot")
+    table_keys = (
+        "drill",
+        "tap",
+        "counterbore",
+        "counterdrill",
+        "csink",
+        "jig_grind",
+        "spot",
+        "unknown",
+    )
     table_counts: dict[str, int] = {key: 0 for key in table_keys}
     details: dict[str, Any] = {"npt": 0, "drill_sized": 0, "drill_sizes": {}}
 
     rows_iter = chart_rows or []
+    drill_groups: Counter[tuple[str, str]] = Counter()
+    tap_implied_candidates: list[tuple[int, tuple[str, str] | None, Any]] = []
+
+    def _row_value(row_obj: Any, key: str) -> Any:
+        if isinstance(row_obj, Mapping):
+            return row_obj.get(key)
+        return getattr(row_obj, key, None)
+
+    def _normalize_key_token(value: Any) -> str:
+        if value is None:
+            return ""
+        text = str(value).strip()
+        return text.upper()
+
+    def _row_group_key(row_obj: Any, desc: str) -> tuple[str, str] | None:
+        hole_token = _normalize_key_token(
+            _row_value(row_obj, "hole") or _row_value(row_obj, "hole_id")
+        )
+        ref_token = _normalize_key_token(
+            _row_value(row_obj, "ref")
+            or _row_value(row_obj, "drill_ref")
+            or _row_value(row_obj, "pilot")
+        )
+        if not ref_token:
+            extracted_ref, _ = _extract_row_reference(desc)
+            ref_token = _normalize_key_token(extracted_ref)
+        if hole_token or ref_token:
+            return (hole_token, ref_token)
+        return None
+
+    def _set_row_drill_implied(row_obj: Any, value: bool) -> None:
+        if isinstance(row_obj, MutableMapping):
+            tags_value = row_obj.get("tags")
+            if not isinstance(tags_value, MutableMapping):
+                if value:
+                    row_obj["tags"] = {"drill_implied": True}
+                else:
+                    if "tags" in row_obj:
+                        try:
+                            row_obj.pop("tags")
+                        except Exception:
+                            pass
+                return
+            if value:
+                tags_value["drill_implied"] = True
+            else:
+                tags_value.pop("drill_implied", None)
+                if not tags_value:
+                    try:
+                        row_obj.pop("tags")
+                    except Exception:
+                        pass
+            return
+
+        tags_value = getattr(row_obj, "tags", None)
+        if not isinstance(tags_value, MutableMapping):
+            if value:
+                try:
+                    setattr(row_obj, "tags", {"drill_implied": True})
+                except Exception:
+                    pass
+            else:
+                if hasattr(row_obj, "tags"):
+                    try:
+                        delattr(row_obj, "tags")
+                    except Exception:
+                        pass
+            return
+        if value:
+            tags_value["drill_implied"] = True
+        else:
+            tags_value.pop("drill_implied", None)
+            if not tags_value:
+                try:
+                    delattr(row_obj, "tags")
+                except Exception:
+                    pass
+
     for row in rows_iter:
         if not isinstance(row, Mapping):
             continue
@@ -7795,57 +8519,176 @@ def ops_manifest(
                 desc_source = row[key]
                 break
         desc_text = str(desc_source or "")
+        group_key = _row_group_key(row, desc_text)
+        row_has_drill = False
+        row_has_tap = False
         fragments = split_actions(desc_text) or [desc_text]
         for fragment in fragments:
             action = classify_action(fragment)
             kind = action.get("kind") or ""
             if kind not in table_counts:
-                continue
+                kind = "unknown"
             table_counts[kind] += qty
             if kind == "tap" and action.get("npt"):
                 details["npt"] += qty
+                row_has_tap = True
+            elif kind == "tap":
+                row_has_tap = True
             if kind == "drill":
+                row_has_drill = True
                 size_token = action.get("size")
                 if size_token:
                     details["drill_sized"] += qty
                     size_map = details.setdefault("drill_sizes", {})
                     size_map[size_token] = size_map.get(size_token, 0) + qty
 
+        if row_has_drill and not row_has_tap and group_key:
+            drill_groups[group_key] += qty
+        if row_has_tap and not row_has_drill:
+            tap_implied_candidates.append((qty, group_key, row))
+        elif row_has_tap:
+            _set_row_drill_implied(row, False)
+
+    def _apply_aliases(counts: dict[str, int]) -> dict[str, int]:
+        if "counterbore" in counts and "cbore" not in counts:
+            counts["cbore"] = counts["counterbore"]
+        if "counterdrill" in counts and "cdrill" not in counts:
+            counts["cdrill"] = counts["counterdrill"]
+        return counts
+
+    table_counts = _apply_aliases(table_counts)
+
+    implied_drill_total = 0
+    leftover_drill = Counter(drill_groups)
+    for qty, key, row in tap_implied_candidates:
+        matched = 0
+        if key is not None and leftover_drill.get(key, 0) > 0:
+            available = leftover_drill[key]
+            matched = min(available, qty)
+            leftover_drill[key] -= matched
+        implied_qty = qty - matched
+        if implied_qty > 0:
+            implied_drill_total += implied_qty
+            _set_row_drill_implied(row, True)
+        else:
+            _set_row_drill_implied(row, False)
+    details["drill_implied_from_taps"] = implied_drill_total
+
     geom_info = _normalize_geom_holes_payload(geom_holes, hole_sets)
+
+    def _center_key(point: tuple[float, float]) -> tuple[float, float]:
+        return (
+            round(float(point[0]), _GEO_CIRCLE_CENTER_GROUP_DIGITS),
+            round(float(point[1]), _GEO_CIRCLE_CENTER_GROUP_DIGITS),
+        )
+
+    def _collect_centers(candidate: Any) -> set[tuple[float, float]]:
+        centers: set[tuple[float, float]] = set()
+        if candidate is None:
+            return centers
+        if isinstance(candidate, Mapping):
+            if "x" in candidate or "y" in candidate:
+                point = _point2d(candidate)
+                if point is not None:
+                    centers.add(_center_key(point))
+                    return centers
+            for value in candidate.values():
+                if isinstance(value, Mapping) or (
+                    isinstance(value, Sequence)
+                    and not isinstance(value, (str, bytes, bytearray))
+                ):
+                    centers.update(_collect_centers(value))
+            return centers
+        if isinstance(candidate, Sequence) and not isinstance(
+            candidate, (str, bytes, bytearray)
+        ):
+            for item in candidate:
+                centers.update(_collect_centers(item))
+            return centers
+        point = _point2d(candidate)
+        if point is not None:
+            centers.add(_center_key(point))
+        return centers
+
+    residual_centers_set = _collect_centers(
+        geom_info.get("residual_centers") or geom_info.get("residual_holes")
+    )
+    non_drill_centers_set = _collect_centers(geom_info.get("non_drill_centers"))
+    residual_candidate_set = {
+        center for center in residual_centers_set if center not in non_drill_centers_set
+    }
+
     geom_total = int(geom_info.get("total") or 0)
+    center_count_val = int(geom_info.get("center_count") or 0)
+    if center_count_val > geom_total:
+        geom_total = center_count_val
+    if len(residual_centers_set) > geom_total:
+        geom_total = len(residual_centers_set)
     sized_drill_qty = int(details.get("drill_sized") or 0)
     text_drill_qty = _coerce_positive_int(table_counts.get("drill")) or 0
+    residual_candidate_total = len(residual_candidate_set)
+    if not residual_candidate_total:
+        try:
+            residual_candidate_total = int(geom_info.get("residual_candidates") or 0)
+        except Exception:
+            residual_candidate_total = 0
+    geom_residual_base = residual_candidate_total if residual_candidate_total else geom_total
     geom_residual = (
-        max(geom_total - text_drill_qty, 0)
-        if geom_total and text_drill_qty
-        else geom_total
+        max(geom_residual_base - text_drill_qty, 0)
+        if geom_residual_base and text_drill_qty
+        else geom_residual_base
     )
 
-    total_counts = dict(table_counts)
-    table_drill_total = table_counts.get("drill", 0)
-    if geom_total > 0:
-        if sized_drill_qty:
-            total_counts["drill"] = max(table_drill_total, geom_residual)
-        else:
-            total_counts["drill"] = max(table_drill_total, geom_total)
-    else:
-        total_counts["drill"] = table_drill_total
+    table_drill_only = int(table_counts.get("drill", 0))
+    table_tap = int(table_counts.get("tap", 0))
+    table_counterbore = int(table_counts.get("cbore", 0))
+    table_counterdrill = int(table_counts.get("cdrill", 0))
+    table_jig = int(table_counts.get("jig_grind", 0))
+
+    table_manifest: dict[str, int] = {
+        "drill_only": table_drill_only,
+        "tap": table_tap,
+        "counterbore": table_counterbore,
+        "counterdrill": table_counterdrill,
+        "jig_grind": table_jig,
+        "drill": table_drill_only,
+        "cbore": table_counterbore,
+        "cdrill": table_counterdrill,
+        "csink": int(table_counts.get("csink", 0)),
+        "spot": int(table_counts.get("spot", 0)),
+        "unknown": int(table_counts.get("unknown", 0)),
+    }
+
+    total_drill = table_drill_only + geom_residual + implied_drill_total
+    total_counts: dict[str, int] = {
+        "drill": total_drill,
+        "tap": table_tap,
+        "counterbore": table_counterbore,
+        "counterdrill": table_counterdrill,
+        "jig_grind": table_jig,
+        "cbore": table_counterbore,
+        "cdrill": table_counterdrill,
+    }
+
+    total_counts = _apply_aliases(total_counts)
 
     text_info = {"estimated_total_drills": int(table_counts.get("drill", 0))}
 
+    geom_manifest = {
+        "drill": geom_total,
+        "groups": geom_info.get("groups", []),
+        "total": geom_total,
+        "drill_residual": geom_residual,
+        "residual_drill": geom_residual,
+    }
+
     manifest = {
-        "table": table_counts,
-        "geom": {
-            "drill": geom_total,
-            "groups": geom_info.get("groups", []),
-            "total": geom_total,
-        },
+        "table": table_manifest,
+        "geom": geom_manifest,
         "total": total_counts,
         "details": details,
         "text": text_info,
     }
-    if geom_total:
-        manifest["geom"]["residual_drill"] = geom_residual
     return manifest
 
 
@@ -8191,6 +9034,7 @@ def geom_hole_census(doc: Any) -> dict[str, Any]:
     circle_records: list[dict[str, float]] = []
     total_candidates = 0
     layer_filter_dropped = 0
+    radius_guard_dropped = 0
 
     def _allow_block(name: str | None) -> bool:
         nonlocal blocks_included, blocks_skipped
@@ -8221,10 +9065,9 @@ def geom_hole_census(doc: Any) -> dict[str, Any]:
             or layer_upper
             or ""
         )
-        if layer_name:
-            if _GEO_CIRCLE_LAYER_BLACKLIST_RE.search(layer_name):
-                layer_filter_dropped += 1
-                continue
+        if _layer_name_is_excluded(layer_name) or _layer_name_is_excluded(layer_upper):
+            layer_filter_dropped += 1
+            continue
         if layer_upper:
             if any(pattern.search(layer_upper) for pattern in exclude_patterns):
                 layer_filter_dropped += 1
@@ -8265,6 +9108,13 @@ def geom_hole_census(doc: Any) -> dict[str, Any]:
             continue
         if _GEO_DIA_MAX_IN and diameter_in > _GEO_DIA_MAX_IN:
             continue
+        radius_in = diameter_in / 2.0
+        if radius_in < _GEO_DRILL_RADIUS_MIN_IN:
+            radius_guard_dropped += 1
+            continue
+        if _GEO_DRILL_RADIUS_MAX_IN and radius_in > _GEO_DRILL_RADIUS_MAX_IN:
+            radius_guard_dropped += 1
+            continue
         total_candidates += 1
         tx_in = float(tx) * to_in
         ty_in = float(ty) * to_in
@@ -8278,10 +9128,7 @@ def geom_hole_census(doc: Any) -> dict[str, Any]:
         seen_circle_keys.add(dedup_key)
         circle_records.append({"x": tx_in, "y": ty_in, "dia_in": float(diameter_in)})
 
-    unique_count = len(seen_circle_keys)
-    if total_candidates or unique_count:
-        print(f"[GEOM] unique circles after dedup: {unique_count} (was {total_candidates})")
-    print(f"[GEOM] layer-filter dropped={layer_filter_dropped}")
+    raw_unique_count = len(circle_records)
 
     def _cluster_bbox_from_circle_records(
         records: Sequence[Mapping[str, float]]
@@ -8332,14 +9179,7 @@ def geom_hole_census(doc: Any) -> dict[str, Any]:
     else:
         cluster_bbox = _cluster_bbox_from_circle_records(circle_records)
         if cluster_bbox is not None:
-            xmin, xmax, ymin, ymax = cluster_bbox
-            margin = 0.25
-            part_bbox_in = (
-                xmin - margin,
-                xmax + margin,
-                ymin - margin,
-                ymax + margin,
-            )
+            part_bbox_in = cluster_bbox
     if part_bbox_in is None and dims_hint:
         dims_bbox = _bbox_from_dims(
             tuple(dims_hint),
@@ -8350,8 +9190,15 @@ def geom_hole_census(doc: Any) -> dict[str, Any]:
 
     kept_records = list(circle_records)
     dropped_outside = 0
+    applied_bbox: tuple[float, float, float, float] | None = None
     if part_bbox_in is not None:
         xmin, xmax, ymin, ymax = part_bbox_in
+        margin = _GEO_BBOX_MARGIN_IN
+        if margin and math.isfinite(margin) and margin > 0.0:
+            xmin -= margin
+            xmax += margin
+            ymin -= margin
+            ymax += margin
         if xmin > xmax:
             xmin, xmax = xmax, xmin
         if ymin > ymax:
@@ -8360,11 +9207,22 @@ def geom_hole_census(doc: Any) -> dict[str, Any]:
         for rec in circle_records:
             px = float(rec["x"])
             py = float(rec["y"])
-            if xmin <= px <= xmax and ymin <= py <= ymax:
-                filtered.append(rec)
-            else:
+            radius = max(float(rec.get("dia_in", 0.0)) / 2.0, 0.0)
+            circle_xmin = px - radius
+            circle_xmax = px + radius
+            circle_ymin = py - radius
+            circle_ymax = py + radius
+            if (
+                circle_xmax < xmin
+                or circle_xmin > xmax
+                or circle_ymax < ymin
+                or circle_ymin > ymax
+            ):
                 dropped_outside += 1
+                continue
+            filtered.append(rec)
         kept_records = filtered
+        applied_bbox = (xmin, xmax, ymin, ymax)
         if dropped_outside > 0:
             print(
                 "[GEOM] bbox=[{xmin:.1f}..{xmax:.1f}, {ymin:.1f}..{ymax:.1f}] "
@@ -8378,9 +9236,54 @@ def geom_hole_census(doc: Any) -> dict[str, Any]:
                 )
             )
 
+    def _collapse_concentric(
+        records: Sequence[Mapping[str, float]]
+    ) -> tuple[list[dict[str, float]], int]:
+        grouped: defaultdict[tuple[int, int], list[dict[str, float]]] = defaultdict(list)
+        for rec in records:
+            cx = round(float(rec.get("x", 0.0)), _GEO_CIRCLE_CENTER_GROUP_DIGITS)
+            cy = round(float(rec.get("y", 0.0)), _GEO_CIRCLE_CENTER_GROUP_DIGITS)
+            grouped[(cx, cy)].append(dict(rec))
+        kept: list[dict[str, float]] = []
+        dropped_count = 0
+        for items in grouped.values():
+            if not items:
+                continue
+            items_sorted = sorted(items, key=lambda item: float(item.get("dia_in", 0.0)))
+            kept.append(items_sorted[0])
+            dropped_count += max(len(items_sorted) - 1, 0)
+        return kept, dropped_count
+
+    collapsed_records, concentric_dropped = _collapse_concentric(kept_records)
+    kept_records = collapsed_records
+
+    final_unique_count = len(kept_records)
+    if total_candidates or final_unique_count:
+        print(
+            "[GEOM] unique circles after dedup: {} (was {})".format(
+                final_unique_count, total_candidates
+            )
+        )
+    if concentric_dropped > 0 and raw_unique_count:
+        print(
+            "[GEOM] concentric collapse dropped={} from raw_unique={}".format(
+                concentric_dropped, raw_unique_count
+            )
+        )
+    print(f"[GEOM] layer-filter dropped={layer_filter_dropped}")
+    if radius_guard_dropped > 0:
+        print(f"[GEOM] radius-guard dropped={radius_guard_dropped}")
+
     groups_counter = defaultdict(int)
+    residual_holes: list[dict[str, float]] = []
     for rec in kept_records:
-        dia_key = round(float(rec.get("dia_in", 0.0)), 4)
+        hole_record = {
+            "x": float(rec.get("x", 0.0)),
+            "y": float(rec.get("y", 0.0)),
+            "dia_in": float(rec.get("dia_in", 0.0)),
+        }
+        residual_holes.append(hole_record)
+        dia_key = round(float(hole_record.get("dia_in", 0.0)), 4)
         if dia_key > 0:
             groups_counter[dia_key] += 1
 
@@ -8389,8 +9292,8 @@ def geom_hole_census(doc: Any) -> dict[str, Any]:
         for diameter, count in sorted(groups_counter.items())
         if count > 0
     ]
-    total = sum(entry["count"] for entry in groups)
     circle_total = sum(groups_counter.values())
+    total = circle_total
     model_circles = circle_total
     print(
         "[GEOM] counted circles: total={} from model={} paperspace=0 "
@@ -8398,7 +9301,28 @@ def geom_hole_census(doc: Any) -> dict[str, Any]:
             circle_total, model_circles, blocks_included, blocks_skipped
         )
     )
-    return {"groups": groups, "total": total}
+    residual_centers_payload = [
+        {"x": hole["x"], "y": hole["y"]}
+        for hole in residual_holes
+    ]
+    payload: dict[str, Any] = {
+        "groups": groups,
+        "total": int(total),
+        "center_count": len(residual_holes),
+        "residual_candidates": len(residual_holes),
+        "residual_holes": residual_holes,
+        "residual_centers": residual_centers_payload,
+        "non_drill_centers": [],
+        "dropped_concentric": int(concentric_dropped),
+        "dropped_outside_bbox": int(dropped_outside),
+        "dropped_radius_guard": int(radius_guard_dropped),
+        "raw_unique_count": int(raw_unique_count),
+        "total_candidates": int(total_candidates),
+    }
+    if applied_bbox is not None:
+        payload["bbox_in"] = applied_bbox
+        payload["bbox_margin_in"] = float(_GEO_BBOX_MARGIN_IN)
+    return payload
 
 
 def promote_table_to_geo(
@@ -8579,6 +9503,116 @@ def extract_hole_table(
         "provenance": provenance,
         "layouts_seen": layouts_seen,
         "layer_policy": layer_policy,
+    }
+
+
+# new façade — lightweight adapter
+def extract_for_app(
+    doc_or_path: Any,
+    *,
+    layouts: Mapping[str, Any] | Iterable[str] | str | None = None,
+    text_layer_exclude: Iterable[str] | str | None = None,
+) -> dict[str, Any]:
+    """
+    Returns:
+      {
+        "rows": [...],                # table rows with qty/desc
+        "qty_sum": int,
+        "source": "acad_table|text_table|text_fallback|geom",
+        "provenance": str|None,       # e.g., "HOLE TABLE (anchor)"
+        "geom": { "groups": [...], "total": int },   # dedup'd hole circles
+        "manifest": { "table": {...}, "geom": {...}, "total": {...}, "details": {...}, "text": {...} }
+      }
+    """
+
+    doc = doc_or_path
+    if isinstance(doc_or_path, (str, os.PathLike, Path)):
+        path_obj = Path(doc_or_path)
+        try:
+            doc = _load_doc_for_path(path_obj, use_oda=True)
+        except Exception:
+            doc = None
+
+    if doc is None:
+        geom_payload = _normalize_geom_holes_payload(None)
+        manifest = ops_manifest([], geom_holes=geom_payload)
+        return {
+            "rows": [],
+            "qty_sum": 0,
+            "source": "geom",
+            "provenance": None,
+            "geom": geom_payload,
+            "manifest": manifest,
+        }
+
+    selected_info: Mapping[str, Any] | dict[str, Any] = {}
+    selected_rows: list[dict[str, Any]] = []
+    selected_source = "geom"
+
+    try:
+        acad_info = read_acad_table(doc) or {}
+    except Exception:
+        acad_info = {}
+    acad_rows = _normalize_table_rows(acad_info.get("rows"))
+    if acad_rows:
+        selected_info = dict(acad_info)
+        selected_rows = acad_rows
+        selected_source = "acad_table"
+    else:
+        text_kwargs: dict[str, Any] = {}
+        if layouts is not None:
+            text_kwargs["layout_filters"] = layouts
+        if text_layer_exclude is not None:
+            text_kwargs["layer_exclude_regex"] = text_layer_exclude
+        try:
+            text_info = read_text_table(doc, **text_kwargs) or {}
+        except (NoTextRowsError, RuntimeError):
+            text_info = {}
+        except Exception:
+            text_info = {}
+        text_rows = _normalize_table_rows(text_info.get("rows"))
+        if text_rows:
+            selected_info = dict(text_info)
+            selected_rows = text_rows
+            selected_source = "text_table"
+        else:
+            try:
+                fallback_lines = _collect_table_text_lines(
+                    doc, layout_filters=layouts
+                )
+            except Exception:
+                fallback_lines = []
+            fallback_info = _fallback_text_table(fallback_lines) or {}
+            fallback_rows = _normalize_table_rows(fallback_info.get("rows"))
+            if fallback_rows:
+                selected_info = dict(fallback_info)
+                selected_rows = fallback_rows
+                selected_source = "text_fallback"
+
+    provenance = None
+    if isinstance(selected_info, Mapping):
+        provenance_candidate = selected_info.get("provenance_holes")
+        if provenance_candidate not in (None, ""):
+            provenance_text = str(provenance_candidate).strip()
+            provenance = provenance_text or None
+
+    qty_sum = _sum_qty(selected_rows)
+
+    try:
+        geom_source = geom_hole_census(doc)
+    except Exception:
+        geom_source = None
+    geom_payload = _normalize_geom_holes_payload(geom_source)
+
+    manifest = ops_manifest(selected_rows, geom_holes=geom_payload)
+
+    return {
+        "rows": selected_rows,
+        "qty_sum": qty_sum,
+        "source": selected_source,
+        "provenance": provenance,
+        "geom": geom_payload,
+        "manifest": manifest,
     }
 
 
@@ -9107,21 +10141,17 @@ def read_geo(
         if isinstance(totals_map, Mapping):
             ops_summary["totals"] = dict(totals_map)
 
-        def _format_ops_counts(counts: Mapping[str, Any]) -> str:
-            display_order = (
-                ("drill", "Drill"),
-                ("tap", "Tap"),
-                ("cbore", "C'bore"),
-                ("cdrill", "C'drill"),
-                ("jig_grind", "Jig"),
-                ("csink", "C'sink"),
-                ("spot", "Spot"),
-            )
+        def _format_ops_counts(
+            counts: Mapping[str, Any] | None,
+            order: Sequence[tuple[str, str]],
+        ) -> str:
+            if not isinstance(counts, Mapping):
+                return "Drill 0"
             parts: list[str] = []
-            for key, label in display_order:
+            for key, label in order:
                 value = counts.get(key)
                 try:
-                    value_int = int(float(value))
+                    value_int = int(round(float(value)))
                 except Exception:
                     continue
                 parts.append(f"{label} {value_int}")
@@ -9132,10 +10162,41 @@ def read_geo(
         table_counts = manifest_payload.get("table") if isinstance(manifest_payload, Mapping) else {}
         geom_counts = manifest_payload.get("geom") if isinstance(manifest_payload, Mapping) else {}
         total_counts = manifest_payload.get("total") if isinstance(manifest_payload, Mapping) else {}
-        geom_display = {"drill": geom_counts.get("drill", 0)} if isinstance(geom_counts, Mapping) else {"drill": 0}
-        print(f"[OPS] table: {_format_ops_counts(table_counts)}")
-        print(f"[OPS] geom : {_format_ops_counts(geom_display)}")
-        print(f"[OPS] total: {_format_ops_counts(total_counts)}")
+        print(
+            "[OPS] table: "
+            + _format_ops_counts(
+                table_counts,
+                (
+                    ("drill_only", "Drill"),
+                    ("tap", "Tap"),
+                    ("counterbore", "C'bore"),
+                    ("counterdrill", "C'drill"),
+                    ("jig_grind", "Jig"),
+                ),
+            )
+        )
+        print(
+            "[OPS] geom : "
+            + _format_ops_counts(
+                geom_counts,
+                (
+                    ("drill_residual", "Drill"),
+                ),
+            )
+        )
+        print(
+            "[OPS] total: "
+            + _format_ops_counts(
+                total_counts,
+                (
+                    ("drill", "Drill"),
+                    ("tap", "Tap"),
+                    ("counterbore", "C'bore"),
+                    ("counterdrill", "C'drill"),
+                    ("jig_grind", "Jig"),
+                ),
+            )
+        )
         
         def _int_from(value: Any) -> int:
             try:
@@ -9143,9 +10204,9 @@ def read_geo(
             except Exception:
                 return 0
 
-        text_drill_total = _int_from(table_counts.get("drill")) if isinstance(table_counts, Mapping) else 0
-        text_cbore_total = _int_from(table_counts.get("cbore")) if isinstance(table_counts, Mapping) else 0
-        text_cdrill_total = _int_from(table_counts.get("cdrill")) if isinstance(table_counts, Mapping) else 0
+        text_drill_total = _int_from(table_counts.get("drill_only")) if isinstance(table_counts, Mapping) else 0
+        text_cbore_total = _int_from(table_counts.get("counterbore")) if isinstance(table_counts, Mapping) else 0
+        text_cdrill_total = _int_from(table_counts.get("counterdrill")) if isinstance(table_counts, Mapping) else 0
         text_ops_total = text_drill_total + text_cbore_total + text_cdrill_total
         text_manifest = manifest_payload.get("text") if isinstance(manifest_payload, Mapping) else {}
         text_estimated_total_drills = 0
@@ -9175,13 +10236,8 @@ def read_geo(
             best_table,
             current_table_info,
         )
-        suspect_overcount = False
-        if geom_total > 0:
-            if text_ops_total > 0 and float(geom_total) > 1.6 * float(text_ops_total):
-                suspect_overcount = True
-            elif am_bor_in_text_flow and geom_total > 150:
-                suspect_overcount = True
-        if suspect_overcount:
+        total_drill_count = _int_from(total_counts.get("drill")) if isinstance(total_counts, Mapping) else 0
+        if total_drill_count > 100 or (total_drill_count != 0 and total_drill_count < 50):
             print("[GEOM] suspect overcount – check layer blacklist or bbox guard")
         if (
             am_bor_in_text_flow
@@ -9475,6 +10531,132 @@ def _read_geo_payload_from_path(
     return payload
 
 
+def extract_for_app(doc: Any, *, opts: Mapping[str, Any] | None = None, **read_kwargs: Any) -> dict[str, Any]:
+    """Return a normalized payload suitable for application diagnostics."""
+
+    payload_raw = read_geo(doc, **read_kwargs)
+    payload: dict[str, Any]
+    if isinstance(payload_raw, Mapping):
+        payload = dict(payload_raw)
+    else:
+        payload = {}
+
+    geo_obj = payload.get("geo") if isinstance(payload, Mapping) else None
+    if isinstance(geo_obj, Mapping):
+        geo_map = geo_obj if isinstance(geo_obj, dict) else dict(geo_obj)
+    else:
+        geo_map = {}
+    payload["geo"] = geo_map
+
+    ops_summary_candidate = payload.get("ops_summary")
+    ops_summary_map = _ensure_ops_summary_map(ops_summary_candidate)
+    if not ops_summary_map and isinstance(geo_map, Mapping):
+        ops_summary_map = _ensure_ops_summary_map(geo_map.get("ops_summary"))
+    payload["ops_summary"] = ops_summary_map
+
+    def _rows_list(value: Any) -> list[Mapping[str, Any]]:
+        if isinstance(value, list):
+            return [entry for entry in value if isinstance(entry, Mapping)]
+        if isinstance(value, Iterable) and not isinstance(value, (str, bytes, bytearray)):
+            return [entry for entry in value if isinstance(entry, Mapping)]
+        return []
+
+    rows_list = _rows_list(payload.get("rows"))
+    if not rows_list and isinstance(ops_summary_map, Mapping):
+        rows_list = _rows_list(ops_summary_map.get("rows"))
+    if rows_list:
+        payload["rows"] = list(rows_list)
+
+    qty_sum: int
+    qty_value = payload.get("qty_sum")
+    if isinstance(qty_value, (int, float)):
+        qty_sum = int(float(qty_value))
+    else:
+        qty_sum = _sum_qty(rows_list)
+    payload["qty_sum"] = qty_sum
+
+    holes_source = payload.get("provenance_holes")
+    if holes_source is None and isinstance(geo_map, Mapping):
+        provenance = geo_map.get("provenance")
+        if isinstance(provenance, Mapping):
+            holes_source = provenance.get("holes")
+    if holes_source is not None:
+        payload["provenance_holes"] = holes_source
+
+    hole_count = payload.get("hole_count")
+    if hole_count in (None, "") and isinstance(geo_map, Mapping):
+        hole_count = geo_map.get("hole_count")
+    try:
+        if hole_count not in (None, ""):
+            hole_count = int(float(hole_count))
+    except Exception:
+        pass
+    if hole_count in (None, ""):
+        hole_count = qty_sum
+    payload["hole_count"] = hole_count
+
+    source = payload.get("source")
+    if source in (None, "") and isinstance(ops_summary_map, Mapping):
+        source = ops_summary_map.get("source")
+    if source not in (None, ""):
+        payload["source"] = source
+
+    def _extract_hole_sets_from_geo(candidate: Mapping[str, Any] | None) -> Any:
+        if not isinstance(candidate, Mapping):
+            return None
+        direct = candidate.get("hole_sets")
+        if direct is not None:
+            return direct
+        nested = candidate.get("geo")
+        if isinstance(nested, Mapping):
+            return _extract_hole_sets_from_geo(nested)
+        return None
+
+    hole_sets_payload = _extract_hole_sets_from_geo(geo_map)
+    geom_holes_payload = payload.get("geom_holes")
+    if not isinstance(geom_holes_payload, Mapping) and isinstance(geo_map, Mapping):
+        geom_candidate = geo_map.get("geom_holes")
+        if isinstance(geom_candidate, Mapping):
+            geom_holes_payload = geom_candidate
+
+    manifest_payload = ops_manifest(
+        rows_list,
+        geom_holes=geom_holes_payload if isinstance(geom_holes_payload, Mapping) else None,
+        hole_sets=hole_sets_payload,
+    )
+    payload["ops_manifest"] = dict(manifest_payload)
+
+    opts_map = dict(opts or {})
+    errors: dict[str, str] = {}
+    try:
+        hole_table = extract_hole_table(doc, opts=opts_map) or {}
+    except Exception as exc:
+        errors["extract_hole_table"] = str(exc)
+        hole_table = {}
+    if isinstance(hole_table, Mapping):
+        payload["extract_hole_table"] = dict(hole_table)
+    else:
+        payload["extract_hole_table"] = {}
+
+    result: dict[str, Any] = {
+        "payload": payload,
+        "rows": rows_list,
+        "qty_sum": qty_sum,
+        "hole_count": hole_count,
+        "source": source,
+        "provenance_holes": holes_source,
+        "ops_summary": ops_summary_map,
+        "geom_holes": geom_holes_payload if isinstance(geom_holes_payload, Mapping) else None,
+        "hole_sets": hole_sets_payload,
+        "manifest": manifest_payload,
+        "ops_manifest": manifest_payload,
+        "published": bool(rows_list),
+        "extract_hole_table": payload.get("extract_hole_table", {}),
+        "errors": errors,
+    }
+    return result
+
+
 def extract_geo_from_path(
     path: str,
     *,
@@ -9579,6 +10761,7 @@ __all__ = [
     "NoTextRowsError",
     "NO_TEXT_ROWS_MESSAGE",
     "read_geo",
+    "extract_for_app",
     "extract_geo_from_path",
     "read_acad_table",
     "rows_from_acad_table",
