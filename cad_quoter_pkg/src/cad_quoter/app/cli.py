@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import os
 import json
 import sys
 from collections.abc import Mapping as _MappingABC
@@ -76,7 +77,11 @@ def main(
     try:
         import datetime as _dt
 
-        with open("debug.log", "w", encoding="ascii", errors="replace") as _dbg:
+        debug_dir = os.path.join(os.getcwd(), "debug")
+        os.makedirs(debug_dir, exist_ok=True)
+        debug_log_path = os.path.join(debug_dir, "debug.log")
+
+        with open(debug_log_path, "w", encoding="ascii", errors="replace") as _dbg:
             _dbg.write(f"[app] start { _dt.datetime.now().isoformat() }\n")
     except Exception:
         pass

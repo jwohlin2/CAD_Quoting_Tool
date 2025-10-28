@@ -254,8 +254,12 @@ def append_debug_log(*lines: str) -> None:
     if not lines:
         return
 
+    log_dir = os.path.join(os.getcwd(), "debug")
+    log_path = os.path.join(log_dir, "debug.log")
+
     try:
-        with open("debug.log", "a", encoding="ascii", errors="replace") as log:
+        os.makedirs(log_dir, exist_ok=True)
+        with open(log_path, "a", encoding="ascii", errors="replace") as log:
             for line in lines:
                 text = str(line)
                 log.write(text)
