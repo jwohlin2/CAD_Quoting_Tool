@@ -61,8 +61,14 @@ _TAP_THREAD_TOKEN_RE = re.compile(
     re.IGNORECASE,
 )
 _NPT_TOKEN_RE = re.compile(r"\bN\.?P\.?T\.?\b", re.IGNORECASE)
-_COUNTERBORE_TOKEN_RE = re.compile(r"\b(?:C['’]?\s*BORE|CBORE)\b", re.IGNORECASE)
-_COUNTERSINK_TOKEN_RE = re.compile(r"\b(?:C['’]?\s*SINK|CSK|COUNTERSINK)\b", re.IGNORECASE)
+_COUNTERBORE_TOKEN_RE = re.compile(
+    r"\b(?:C['’]?\s*BORE|CBORE|COUNTER\s*BORE|COUNTERBORE)\b",
+    re.IGNORECASE,
+)
+_COUNTERSINK_TOKEN_RE = re.compile(
+    r"\b(?:C['’]?\s*SINK|CSK|COUNTER\s*SINK|COUNTERSINK)\b",
+    re.IGNORECASE,
+)
 _COUNTERDRILL_TOKEN_RE = re.compile(
     r"\b(?:C['’]?\s*DRILL|COUNTER\s*DRILL|CTR\s*DRILL|C['’]DRILL)\b",
     re.IGNORECASE,
