@@ -3080,6 +3080,7 @@ def ops_manifest(
         manifest["geom"] = {
             "drill": geom_drill_total,
             "residual_drill": geom_unsized,
+            "drill_residual": geom_unsized,
             "total": geom_drill_total,
         }
         manifest["geom_drill_count"] = geom_drill_total
@@ -7830,27 +7831,54 @@ def ops_manifest(
         else geom_total
     )
 
-    total_counts = dict(table_counts)
-    table_drill_total = table_counts.get("drill", 0)
-    if geom_total > 0:
-        total_counts["drill"] = table_drill_total + geom_residual
-    else:
-        total_counts["drill"] = table_drill_total
+    table_drill_only = int(table_counts.get("drill", 0))
+    table_tap = int(table_counts.get("tap", 0))
+    table_counterbore = int(table_counts.get("cbore", 0))
+    table_counterdrill = int(table_counts.get("cdrill", 0))
+    table_jig = int(table_counts.get("jig_grind", 0))
+
+    table_manifest: dict[str, int] = {
+        "drill_only": table_drill_only,
+        "tap": table_tap,
+        "counterbore": table_counterbore,
+        "counterdrill": table_counterdrill,
+        "jig_grind": table_jig,
+        "drill": table_drill_only,
+        "cbore": table_counterbore,
+        "cdrill": table_counterdrill,
+        "csink": int(table_counts.get("csink", 0)),
+        "spot": int(table_counts.get("spot", 0)),
+        "unknown": int(table_counts.get("unknown", 0)),
+    }
+
+    total_drill = table_drill_only + geom_residual + table_tap
+    total_counts: dict[str, int] = {
+        "drill": total_drill,
+        "tap": table_tap,
+        "counterbore": table_counterbore,
+        "counterdrill": table_counterdrill,
+        "jig_grind": table_jig,
+        "cbore": table_counterbore,
+        "cdrill": table_counterdrill,
+    }
 
     text_info = {"estimated_total_drills": int(table_counts.get("drill", 0))}
 
+    geom_manifest = {
+        "drill": geom_total,
+        "groups": geom_info.get("groups", []),
+        "total": geom_total,
+        "drill_residual": geom_residual,
+        "residual_drill": geom_residual,
+    }
+
     manifest = {
-        "table": table_counts,
-        "geom": {
-            "drill": geom_total,
-            "groups": geom_info.get("groups", []),
-            "total": geom_total,
-        },
+        "table": table_manifest,
+        "geom": geom_manifest,
         "total": total_counts,
         "details": details,
         "text": text_info,
     }
-    manifest["geom"]["residual_drill"] = geom_residual
     return manifest
 
 
@@ -9222,21 +9250,17 @@ def read_geo(
         if isinstance(totals_map, Mapping):
             ops_summary["totals"] = dict(totals_map)
 
-        def _format_ops_counts(counts: Mapping[str, Any]) -> str:
-            display_order = (
-                ("drill", "Drill"),
-                ("tap", "Tap"),
-                ("cbore", "C'bore"),
-                ("cdrill", "C'drill"),
-                ("jig_grind", "Jig"),
-                ("csink", "C'sink"),
-                ("spot", "Spot"),
-            )
+        def _format_ops_counts(
+            counts: Mapping[str, Any] | None,
+            order: Sequence[tuple[str, str]],
+        ) -> str:
+            if not isinstance(counts, Mapping):
+                return "Drill 0"
             parts: list[str] = []
-            for key, label in display_order:
+            for key, label in order:
                 value = counts.get(key)
                 try:
-                    value_int = int(float(value))
+                    value_int = int(round(float(value)))
                 except Exception:
                     continue
                 parts.append(f"{label} {value_int}")
@@ -9247,10 +9271,41 @@ def read_geo(
         table_counts = manifest_payload.get("table") if isinstance(manifest_payload, Mapping) else {}
         geom_counts = manifest_payload.get("geom") if isinstance(manifest_payload, Mapping) else {}
         total_counts = manifest_payload.get("total") if isinstance(manifest_payload, Mapping) else {}
-        geom_display = {"drill": geom_counts.get("drill", 0)} if isinstance(geom_counts, Mapping) else {"drill": 0}
-        print(f"[OPS] table: {_format_ops_counts(table_counts)}")
-        print(f"[OPS] geom : {_format_ops_counts(geom_display)}")
-        print(f"[OPS] total: {_format_ops_counts(total_counts)}")
+        print(
+            "[OPS] table: "
+            + _format_ops_counts(
+                table_counts,
+                (
+                    ("drill_only", "Drill"),
+                    ("tap", "Tap"),
+                    ("counterbore", "C'bore"),
+                    ("counterdrill", "C'drill"),
+                    ("jig_grind", "Jig"),
+                ),
+            )
+        )
+        print(
+            "[OPS] geom : "
+            + _format_ops_counts(
+                geom_counts,
+                (
+                    ("drill_residual", "Drill"),
+                ),
+            )
+        )
+        print(
+            "[OPS] total: "
+            + _format_ops_counts(
+                total_counts,
+                (
+                    ("drill", "Drill"),
+                    ("tap", "Tap"),
+                    ("counterbore", "C'bore"),
+                    ("counterdrill", "C'drill"),
+                    ("jig_grind", "Jig"),
+                ),
+            )
+        )
         
         def _int_from(value: Any) -> int:
             try:
@@ -9258,9 +9313,9 @@ def read_geo(
             except Exception:
                 return 0
 
-        text_drill_total = _int_from(table_counts.get("drill")) if isinstance(table_counts, Mapping) else 0
-        text_cbore_total = _int_from(table_counts.get("cbore")) if isinstance(table_counts, Mapping) else 0
-        text_cdrill_total = _int_from(table_counts.get("cdrill")) if isinstance(table_counts, Mapping) else 0
+        text_drill_total = _int_from(table_counts.get("drill_only")) if isinstance(table_counts, Mapping) else 0
+        text_cbore_total = _int_from(table_counts.get("counterbore")) if isinstance(table_counts, Mapping) else 0
+        text_cdrill_total = _int_from(table_counts.get("counterdrill")) if isinstance(table_counts, Mapping) else 0
         text_ops_total = text_drill_total + text_cbore_total + text_cdrill_total
         text_manifest = manifest_payload.get("text") if isinstance(manifest_payload, Mapping) else {}
         text_estimated_total_drills = 0
@@ -9290,13 +9345,8 @@ def read_geo(
             best_table,
             current_table_info,
         )
-        suspect_overcount = False
-        if geom_total > 0:
-            if text_ops_total > 0 and float(geom_total) > 1.6 * float(text_ops_total):
-                suspect_overcount = True
-            elif am_bor_in_text_flow and geom_total > 150:
-                suspect_overcount = True
-        if suspect_overcount:
+        total_drill_count = _int_from(total_counts.get("drill")) if isinstance(total_counts, Mapping) else 0
+        if total_drill_count > 100 or (total_drill_count != 0 and total_drill_count < 50):
             print("[GEOM] suspect overcount – check layer blacklist or bbox guard")
         if (
             am_bor_in_text_flow

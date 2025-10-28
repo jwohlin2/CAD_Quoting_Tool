@@ -354,12 +354,12 @@ def test_ops_manifest_combines_table_and_geom() -> None:
     geom_counts = manifest.get("geom", {})
     text_info = manifest.get("text", {})
 
-    assert table_counts.get("drill") == 4
+    assert table_counts.get("drill_only") == 4
     assert table_counts.get("tap") == 2
     assert geom_counts.get("drill") == 10
-    assert geom_counts.get("residual_drill") == 6
+    assert geom_counts.get("drill_residual") == 6
     assert geom_counts.get("total") == 10
-    assert total_counts.get("drill") == 10
+    assert total_counts.get("drill") == 12
     assert text_info.get("estimated_total_drills") == 4
 
 
