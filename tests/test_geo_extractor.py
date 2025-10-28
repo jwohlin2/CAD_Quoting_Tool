@@ -1,8 +1,13 @@
 from __future__ import annotations
 
 from collections import Counter
+import json
+import subprocess
 import sys
 import types
+from pathlib import Path
+
+import pytest
 
 _geometry_stub = types.ModuleType("cad_quoter.geometry")
 _geometry_stub.convert_dwg_to_dxf = lambda *_args, **_kwargs: None
@@ -122,3 +127,90 @@ def test_table_authoritative_no_pilot_add() -> None:
     assert manifest["table"]["drill"] == 4
     assert manifest["details"].get("drill_implied_from_taps") == 0
     assert manifest["total"]["drill"] == manifest["table"]["drill"]
+
+
+def test_text_dumper_smoke(tmp_path: Path) -> None:
+    pytest.importorskip("ezdxf")
+
+    sample_path = Path(__file__).resolve().parents[1] / "Cad Files" / "zeus1.dxf"
+    if not sample_path.exists():
+        pytest.skip("Sample DXF is not available")
+
+    dump_dir = tmp_path / "text-dump"
+    dump_dir.mkdir()
+
+    cmd = [
+        sys.executable,
+        "-m",
+        "cad_quoter.geo_dump",
+        str(sample_path),
+        "--dump-all-text",
+        "--dump-dir",
+        str(dump_dir),
+        "--dump-rows-csv",
+        "__AUTO__",
+        "--no-layer-filter",
+        "--no-exclude-layer",
+    ]
+
+    result = subprocess.run(
+        cmd,
+        check=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+    )
+
+    jsonl_candidates = [
+        dump_dir / "dxf_text_dump_full.jsonl",
+        dump_dir / "dxf_text_dump.jsonl",
+    ]
+    csv_candidates = [
+        dump_dir / "dxf_text_dump_full.csv",
+        dump_dir / "dxf_text_dump.csv",
+    ]
+
+    jsonl_path = next((path for path in jsonl_candidates if path.exists()), None)
+    csv_path = next((path for path in csv_candidates if path.exists()), None)
+
+    assert jsonl_path is not None, f"No text dump JSONL produced. stdout:\n{result.stdout}"
+    assert csv_path is not None, f"No text dump CSV produced. stdout:\n{result.stdout}"
+
+    entries: list[dict[str, object]] = []
+    with jsonl_path.open(encoding="utf-8") as handle:
+        for line in handle:
+            data = line.strip()
+            if not data:
+                continue
+            entries.append(json.loads(data))
+
+    chart_entries = [
+        entry
+        for entry in entries
+        if str(entry.get("layout") or "").strip().upper() == "CHART"
+    ]
+    assert (
+        len(chart_entries) >= 50
+    ), f"Expected at least 50 CHART entries, found {len(chart_entries)}"
+
+    token_sources: list[str] = []
+    for entry in entries:
+        text_value = entry.get("text")
+        raw_value = entry.get("raw")
+        if isinstance(text_value, str):
+            token_sources.append(text_value)
+        if isinstance(raw_value, str):
+            token_sources.append(raw_value)
+
+    table_path = dump_dir / "hole_table_rows.csv"
+    if table_path.exists():
+        token_sources.append(table_path.read_text(encoding="utf-8"))
+
+    required_tokens = ["HOLE TABLE", "5/8-11 TAP", "#10-32 TAP", "C'BORE"]
+    normalized_sources = [source.lower() for source in token_sources]
+
+    for token in required_tokens:
+        token_lower = token.lower()
+        assert any(
+            token_lower in source for source in normalized_sources
+        ), f"Token '{token}' not found in text dump outputs"
