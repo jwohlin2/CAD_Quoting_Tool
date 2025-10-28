@@ -6190,14 +6190,14 @@ def read_text_table(
                     families[key] = families.get(key, 0) + qty_val
             return (parsed, families, total)
 
-            parsed_rows, families, total_qty = _parse_rows(merged_rows)
-            anchor_rows_primary = list(parsed_rows)
-            anchor_qty_total = _sum_qty(anchor_rows_primary)
-            anchor_is_authoritative = len(anchor_rows_primary) >= 2
-            anchor_mode = "authoritative" if anchor_is_authoritative else "fallback"
-            print(
-                f"[TEXT-SCAN] pass=anchor rows={len(anchor_rows_primary)} ({anchor_mode})"
-            )
+        parsed_rows, families, total_qty = _parse_rows(merged_rows)
+        anchor_rows_primary = list(parsed_rows)
+        anchor_qty_total = _sum_qty(anchor_rows_primary)
+        anchor_is_authoritative = len(anchor_rows_primary) >= 2
+        anchor_mode = "authoritative" if anchor_is_authoritative else "fallback"
+        print(
+            f"[TEXT-SCAN] pass=anchor rows={len(anchor_rows_primary)} ({anchor_mode})"
+        )
 
         if anchor_is_authoritative:
             anchor_payload_rows = [dict(row) for row in anchor_rows_primary]
