@@ -1874,8 +1874,12 @@ def _resolve_app_callable(name: str) -> Callable[..., Any] | None:
     try:
         module = _load_app_module()
     except Exception:
-        return None
-    return getattr(module, name, None)
+        module = None
+    if module is not None:
+        candidate = getattr(module, name, None)
+        if candidate is not None:
+            return candidate
+    return globals().get(name)
 
 
 def _describe_helper(helper: Any) -> str:
@@ -4571,6 +4575,74 @@ def _publish_fallback_from_rows_txt(rows_txt: Iterable[Any]) -> dict[str, Any]:
     }
     if families:
         result["hole_diam_families_in"] = families
+    return result
+
+
+def extract_hole_table_from_text(
+    doc: Any,
+    rows_txt: Iterable[Any] | None = None,
+    *,
+    min_rows: int = 2,
+) -> dict[str, Any]:
+    """Fallback text helper for hole table extraction.
+
+    The helper mirrors the contract expected by :func:`read_text_table` while
+    avoiding crashes when no usable rows are discovered. Callers may supply raw
+    ``rows_txt`` (typically pre-merged lines). When omitted, the helper will
+    attempt to scan the provided ``doc`` for text entities using
+    :func:`_collect_table_text_lines`.
+    """
+
+    rows: list[dict[str, Any]] = []
+    total_qty = 0
+
+    if rows_txt is None:
+        try:
+            candidate_rows = _collect_table_text_lines(doc)
+        except Exception:
+            candidate_rows = []
+    else:
+        try:
+            candidate_rows = list(rows_txt)
+        except Exception:
+            candidate_rows = []
+
+    if not candidate_rows:
+        return {"rows": rows, "hole_count": total_qty}
+
+    fallback = _publish_fallback_from_rows_txt(candidate_rows)
+    if not fallback:
+        fallback = _fallback_text_table(candidate_rows)
+
+    if not fallback:
+        return {"rows": rows, "hole_count": total_qty}
+
+    raw_rows = fallback.get("rows")
+    if isinstance(raw_rows, list):
+        rows = [dict(row) for row in raw_rows if isinstance(row, Mapping)]
+    elif isinstance(raw_rows, Iterable) and not isinstance(
+        raw_rows, (str, bytes, bytearray)
+    ):
+        rows = [dict(row) for row in raw_rows if isinstance(row, Mapping)]
+
+    hole_count_value = fallback.get("hole_count")
+    try:
+        total_qty = int(hole_count_value)
+    except Exception:
+        total_qty = _sum_qty(rows)
+
+    if total_qty <= 0 and len(rows) < min_rows:
+        return {"rows": rows, "hole_count": total_qty}
+
+    result: dict[str, Any] = {
+        "rows": rows,
+        "hole_count": total_qty,
+        "provenance_holes": fallback.get("provenance_holes", "HOLE TABLE"),
+        "source": fallback.get("source", "text_table"),
+    }
+    families = fallback.get("hole_diam_families_in")
+    if isinstance(families, Mapping):
+        result["hole_diam_families_in"] = dict(families)
     return result
 
 
