@@ -359,7 +359,7 @@ def test_ops_manifest_combines_table_and_geom() -> None:
     assert geom_counts.get("drill") == 10
     assert geom_counts.get("residual_drill") == 6
     assert geom_counts.get("total") == 10
-    assert total_counts.get("drill") == 6
+    assert total_counts.get("drill") == 10
     assert text_info.get("estimated_total_drills") == 4
 
 
@@ -386,7 +386,7 @@ def test_manifest_reconcile_subtracts_sized_drills() -> None:
     manifest = geo_extractor.ops_manifest(rows, geom_holes=geom)
 
     assert manifest.get("details", {}).get("drill_sized") == 4
-    assert manifest.get("total", {}).get("drill") == 73
+    assert manifest.get("total", {}).get("drill") == 77
     assert manifest.get("text", {}).get("estimated_total_drills") == 4
 
 

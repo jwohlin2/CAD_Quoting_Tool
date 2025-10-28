@@ -7743,7 +7743,16 @@ def ops_manifest(
     *,
     hole_sets: Any = None,
 ) -> dict[str, Any]:
-    table_keys = ("drill", "tap", "cbore", "cdrill", "csink", "jig_grind", "spot")
+    table_keys = (
+        "drill",
+        "tap",
+        "cbore",
+        "cdrill",
+        "csink",
+        "jig_grind",
+        "spot",
+        "unknown",
+    )
     table_counts: dict[str, int] = {key: 0 for key in table_keys}
     details: dict[str, Any] = {"npt": 0, "drill_sized": 0, "drill_sizes": {}}
 
@@ -7769,7 +7778,7 @@ def ops_manifest(
             action = classify_action(fragment)
             kind = action.get("kind") or ""
             if kind not in table_counts:
-                continue
+                kind = "unknown"
             table_counts[kind] += qty
             if kind == "tap" and action.get("npt"):
                 details["npt"] += qty
@@ -7793,10 +7802,7 @@ def ops_manifest(
     total_counts = dict(table_counts)
     table_drill_total = table_counts.get("drill", 0)
     if geom_total > 0:
-        if sized_drill_qty:
-            total_counts["drill"] = max(table_drill_total, geom_residual)
-        else:
-            total_counts["drill"] = max(table_drill_total, geom_total)
+        total_counts["drill"] = table_drill_total + geom_residual
     else:
         total_counts["drill"] = table_drill_total
 
@@ -7813,8 +7819,7 @@ def ops_manifest(
         "details": details,
         "text": text_info,
     }
-    if geom_total:
-        manifest["geom"]["residual_drill"] = geom_residual
+    manifest["geom"]["residual_drill"] = geom_residual
     return manifest
 
 
