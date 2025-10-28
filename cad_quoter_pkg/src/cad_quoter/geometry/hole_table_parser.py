@@ -2,8 +2,11 @@
 
 from __future__ import annotations
 
+import csv
+import json
 import re
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 LETTER_DRILLS_INCH = {
@@ -89,6 +92,133 @@ class HoleRow:
     qty: int
     features: List[Dict[str, Any]]
     raw_desc: str
+
+
+_DEBUG_DIR = Path("debug")
+_DEBUG_ROWS_PATH = _DEBUG_DIR / "hole_table_rows.csv"
+_DEBUG_TOTALS_PATH = _DEBUG_DIR / "ops_table_totals.json"
+_DEBUG_FIELDNAMES = (
+    "qty",
+    "kind",
+    "side",
+    "tool",
+    "diam_token",
+    "depth_token",
+    "raw_text",
+)
+
+
+def _format_inches_token(value_mm: Optional[float]) -> str:
+    if value_mm is None:
+        return ""
+    inches = value_mm / INCH_TO_MM
+    token = f"{inches:.4f}".rstrip("0").rstrip(".")
+    return f"{token}\"" if token else ""
+
+
+def _format_depth_token(feature: Dict[str, Any]) -> str:
+    depth_mm = feature.get("depth_mm")
+    if depth_mm is not None:
+        return _format_inches_token(depth_mm)
+    if feature.get("thru"):
+        return "THRU"
+    return ""
+
+
+def _format_tool_token(kind: str, feature: Dict[str, Any]) -> str:
+    if kind == "tap":
+        thread = feature.get("thread")
+        if thread:
+            return str(thread)
+    dia_mm = feature.get("dia_mm")
+    if dia_mm is not None:
+        return _format_inches_token(dia_mm)
+    major_mm = feature.get("major_mm")
+    if major_mm is not None:
+        return _format_inches_token(major_mm)
+    return ""
+
+
+def _hole_rows_debug_records(rows: List[HoleRow]) -> tuple[list[dict[str, Any]], int]:
+    records: list[dict[str, Any]] = []
+    qty_sum = 0
+    for row in rows:
+        qty = int(getattr(row, "qty", 0) or 0)
+        raw_desc = getattr(row, "raw_desc", "")
+        features = list(getattr(row, "features", []) or [])
+        if not features:
+            records.append(
+                {
+                    "qty": qty,
+                    "kind": "",
+                    "side": "",
+                    "tool": "",
+                    "diam_token": "",
+                    "depth_token": "",
+                    "raw_text": raw_desc,
+                }
+            )
+            qty_sum += qty
+            continue
+        for feature in features:
+            if not isinstance(feature, dict):
+                continue
+            kind = str(feature.get("type") or "")
+            side = str(feature.get("from_face") or "")
+            diam_mm = feature.get("dia_mm") or feature.get("major_mm")
+            diam_token = _format_inches_token(diam_mm) if diam_mm is not None else ""
+            record = {
+                "qty": qty,
+                "kind": kind,
+                "side": side,
+                "tool": _format_tool_token(kind, feature),
+                "diam_token": diam_token,
+                "depth_token": _format_depth_token(feature),
+                "raw_text": raw_desc,
+            }
+            records.append(record)
+            qty_sum += qty
+    return records, qty_sum
+
+
+def _hole_rows_totals(records: list[dict[str, Any]]) -> dict[str, int]:
+    totals = {key: 0 for key in ("drill", "tap", "counterbore", "counterdrill", "jig_grind")}
+    for record in records:
+        raw_kind = str(record.get("kind") or "").lower()
+        kind = {
+            "cbore": "counterbore",
+            "counterbore": "counterbore",
+            "cdrill": "counterdrill",
+            "counterdrill": "counterdrill",
+        }.get(raw_kind, raw_kind)
+        if kind in totals:
+            try:
+                qty_val = int(record.get("qty") or 0)
+            except Exception:
+                qty_val = 0
+            totals[kind] += qty_val
+    return totals
+
+
+def _write_hole_table_debug(records: list[dict[str, Any]], qty_sum: int) -> None:
+    if not records:
+        return
+    try:
+        _DEBUG_DIR.mkdir(parents=True, exist_ok=True)
+        with _DEBUG_ROWS_PATH.open("w", newline="", encoding="utf-8") as handle:
+            writer = csv.DictWriter(handle, fieldnames=_DEBUG_FIELDNAMES)
+            writer.writeheader()
+            writer.writerows(records)
+        totals = _hole_rows_totals(records)
+        with _DEBUG_TOTALS_PATH.open("w", encoding="utf-8") as handle:
+            json.dump(totals, handle, indent=2, sort_keys=True)
+            handle.write("\n")
+        print(
+            f"[TABLE-DUMP] rows={len(records)} qty_sum={qty_sum} -> {_DEBUG_ROWS_PATH.as_posix()}"
+        )
+        print(f"[OPS] table totals -> {_DEBUG_TOTALS_PATH.as_posix()}")
+    except Exception:
+        pass
 
 
 def _depth_or_thru(desc: str) -> tuple[Optional[float], Optional[bool]]:
@@ -200,6 +330,12 @@ def parse_hole_table_lines(lines: List[str]) -> List[HoleRow]:
                 )
 
         rows.append(HoleRow(ref=ref, qty=qty, features=features, raw_desc=desc))
+
+    try:
+        records, qty_sum = _hole_rows_debug_records(rows)
+        _write_hole_table_debug(records, qty_sum)
+    except Exception:
+        pass
 
     return rows
 

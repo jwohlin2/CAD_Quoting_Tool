@@ -2,5 +2,8 @@
 latest_quote_full.txt
 latest_quote_simplified.txt
 
+# Debug artifacts
+debug/
+
 # IDE/editor configs
 .vscode/
