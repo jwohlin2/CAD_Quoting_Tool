@@ -5841,278 +5841,279 @@ def read_text_table(
                 "header_validated": True,
                 "anchor_authoritative": True,
             }
+            if families:
+                anchor_authoritative_result["hole_diam_families_in"] = dict(families)
             text_rows_info = dict(anchor_authoritative_result)
             if isinstance(_LAST_TEXT_TABLE_DEBUG, dict):
                 _LAST_TEXT_TABLE_DEBUG["anchor_authoritative"] = True
-            return (am_bor_pre_count, am_bor_post_count, am_bor_drop_count)
-
-        if follow_sheet_target_layouts:
-            follow_debug_entries: list[dict[str, Any]] = []
-            for follow_layout in follow_sheet_target_layouts:
-                target_upper = str(follow_layout).strip().upper()
-                follow_entries: list[dict[str, Any]] = []
-                for entry in collected_entries:
-                    layout_value = str(entry.get("layout_name") or "").strip()
-                    if layout_value.upper() != target_upper:
-                        continue
-                    text_value = str(entry.get("text") or "").strip()
-                    if not text_value:
-                        continue
-                    follow_entries.append(
-                        {
-                            "layout_name": layout_value,
-                            "from_block": bool(entry.get("from_block")),
-                            "x": entry.get("x"),
-                            "y": entry.get("y"),
-                            "height": entry.get("height"),
-                            "text": text_value,
-                            "normalized_text": text_value,
-                        }
-                    )
-                if not follow_entries:
-                    continue
-                follow_candidate, follow_debug_payload = _build_columnar_table_from_entries(
-                    follow_entries, roi_hint=roi_hint_effective
-                )
-                if isinstance(follow_debug_payload, Mapping):
-                    follow_debug_entry = dict(follow_debug_payload)
-                    follow_debug_entry["layout"] = follow_layout
-                    follow_debug_entries.append(follow_debug_entry)
-                candidate_score = _score_table(follow_candidate)
-                existing_score = _score_table(columnar_table_info)
-                if candidate_score > existing_score:
-                    columnar_table_info = follow_candidate
-                    if isinstance(follow_debug_payload, Mapping):
-                        columnar_debug_info = dict(follow_debug_payload)
-            if follow_debug_entries and isinstance(_LAST_TEXT_TABLE_DEBUG, dict):
-                if len(follow_debug_entries) == 1:
-                    _LAST_TEXT_TABLE_DEBUG["follow_sheet_debug"] = follow_debug_entries[0]
-                else:
-                    _LAST_TEXT_TABLE_DEBUG["follow_sheet_debug"] = follow_debug_entries
-
-        def _cluster_entries_by_y(
-            entries: list[dict[str, Any]]
-        ) -> list[list[dict[str, Any]]]:
-            valid = [entry for entry in entries if entry.get("normalized_text")]
-            if not valid:
-                return []
-
-            def _estimate_eps(values: list[dict[str, Any]]) -> float:
-                y_values: list[float] = []
-                for item in values:
-                    y_val = item.get("y")
-                    if isinstance(y_val, (int, float)):
-                        y_values.append(float(y_val))
-                if len(y_values) >= 2:
-                    diffs = [abs(y_values[i] - y_values[i + 1]) for i in range(len(y_values) - 1)]
-                    diffs = [diff for diff in diffs if diff > 0]
-                    if diffs:
-                        median_diff = statistics.median(diffs)
-                        if median_diff > 0:
-                            return max(4.0, median_diff * 0.75)
-                return 8.0
-
-            eps = _estimate_eps(valid)
-            for _ in range(3):
-                clusters: list[list[dict[str, Any]]] = []
-                current: list[dict[str, Any]] | None = None
-                prev_y: float | None = None
-                for entry in valid:
-                    y_val = entry.get("y")
-                    y_float = float(y_val) if isinstance(y_val, (int, float)) else None
-                    if current is None:
-                        current = [entry]
-                        clusters.append(current)
-                        prev_y = y_float
-                        continue
-                    if y_float is None or prev_y is None or abs(y_float - prev_y) > eps:
-                        current = [entry]
-                        clusters.append(current)
-                    else:
-                        current.append(entry)
-                    prev_y = y_float if y_float is not None else prev_y
-                if not clusters:
-                    return []
-                avg_cluster_size = len(valid) / len(clusters)
-                if avg_cluster_size >= 1.5 or eps >= 24.0:
-                    return clusters
-                eps *= 1.5
-            return clusters
-
-        def _clusters_to_rows(clusters: list[list[dict[str, Any]]]) -> list[str]:
-            rows: list[str] = []
-            for cluster in clusters:
-                def _x_key(value: Any) -> float:
-                    try:
-                        return float(value)
-                    except Exception:
-                        return float("inf")
-
-                ordered = sorted(
-                    cluster,
-                    key=lambda item: (
-                        _x_key(item.get("x")),
-                        int(item.get("order", 0)),
-                    ),
-                )
-                parts = [str(item.get("normalized_text", "")).strip() for item in ordered]
-                row_text = " ".join(part for part in parts if part)
-                row_text = " ".join(row_text.split())
-                if not row_text:
-                    continue
-                if not _HOLE_ACTION_TOKEN_RE.search(row_text):
-                    continue
-                rows.append(row_text)
-            return rows
-
-        if len(parsed_rows) < 8:
-            clusters = _cluster_entries_by_y(candidate_entries)
-            fallback_rows = _clusters_to_rows(clusters)
-            fallback_rows = [row for row in fallback_rows if row]
-            fallback_rows = _filter_and_dedupe_row_texts(fallback_rows)
-            fallback_parsed, fallback_families, fallback_qty = _parse_rows(fallback_rows)
-            print(
-                f"[TEXT-SCAN] fallback clusters={len(clusters)} "
-                f"chosen_rows={len(fallback_parsed)} qty_sum={fallback_qty}"
-            )
-            if fallback_parsed and (
-                (fallback_qty, len(fallback_parsed))
-                > (total_qty, len(parsed_rows))
-            ):
-                merged_rows = fallback_rows
-                parsed_rows = fallback_parsed
-                families = fallback_families
-                total_qty = fallback_qty
-
-        if merged_rows and len(parsed_rows) == len(merged_rows):
-            for idx, fallback_text in enumerate(merged_rows):
-                if idx >= len(parsed_rows):
-                    break
-                fallback_clean = " ".join(str(fallback_text or "").split())
-                if not fallback_clean:
-                    continue
-                current_desc = str(parsed_rows[idx].get("desc") or "")
-                if len(fallback_clean) > len(current_desc):
-                    if (
-                        _RE_TEXT_ROW_START.match(fallback_clean)
-                        and not _RE_TEXT_ROW_START.match(current_desc)
-                    ):
-                        continue
-                    leading_token = fallback_clean.split("|", 1)[0].strip()
-                    if (
-                        leading_token
-                        and len(leading_token) == 1
-                        and leading_token.isalpha()
-                        and not current_desc.startswith(f"{leading_token} |")
-                    ):
-                        continue
-                    parsed_rows[idx]["desc"] = fallback_clean
-
-        if rows_txt_initial > 0 and not parsed_rows:
-            print("[PATH-GUARD] rows_txt>0 but text_rows==0; forcing band/column pass")
-
-        chart_lines: list[dict[str, Any]] = []
-        sheet_lines: list[dict[str, Any]] = []
-        model_lines: list[dict[str, Any]] = []
-        other_lines: list[dict[str, Any]] = []
-        for entry in collected_entries:
-            text_value = str(entry.get("text") or "").strip()
-            if not text_value:
-                continue
-            record = {
-                "layout_name": entry.get("layout_name"),
-                "from_block": bool(entry.get("from_block")),
-                "block_name": entry.get("block_name"),
-                "x": entry.get("x"),
-                "y": entry.get("y"),
-                "height": entry.get("height"),
-                "text": text_value,
-                "normalized_text": text_value,
-            }
-            layout_name = str(entry.get("layout_name") or "")
-            lower_name = layout_name.lower()
-            if "chart" in lower_name:
-                chart_lines.append(record)
-            elif "sheet" in lower_name:
-                sheet_lines.append(record)
-            elif lower_name == "model":
-                model_lines.append(record)
-            else:
-                other_lines.append(record)
-        raw_lines = chart_lines + sheet_lines + model_lines
-        if not raw_lines:
-            raw_lines = list(other_lines)
-        _LAST_TEXT_TABLE_DEBUG["raw_lines"] = [
-            {
-                "layout": item.get("layout_name"),
-                "in_block": bool(item.get("from_block")),
-                "block": item.get("block_name"),
-                "x": item.get("x"),
-                "y": item.get("y"),
-                "text": item.get("text"),
-            }
-            for item in raw_lines
-        ]
-        block_count = sum(1 for item in raw_lines if item.get("from_block"))
-        print(
-            "[COLUMN] raw_lines total={total} (chart={chart} sheet={sheet} "
-            "model={model}) blocks={blocks}".format(
-                total=len(raw_lines),
-                chart=len(chart_lines),
-                sheet=len(sheet_lines),
-                model=len(model_lines),
-                blocks=block_count,
-            )
-        )
-        if raw_lines:
-            table_candidate, debug_payload = _build_columnar_table_from_entries(
-                raw_lines, roi_hint=roi_hint_effective
-            )
-            columnar_table_info = table_candidate
-            columnar_debug_info = debug_payload
-            if isinstance(debug_payload, Mapping):
-                _LAST_TEXT_TABLE_DEBUG["row_debug"] = list(
-                    debug_payload.get("row_debug", [])
-                )
-                _LAST_TEXT_TABLE_DEBUG["columns"] = list(
-                    debug_payload.get("columns", [])
-                )
-                _LAST_TEXT_TABLE_DEBUG["rows"] = list(
-                    debug_payload.get("rows_txt_fallback", [])
-                )
-                _LAST_TEXT_TABLE_DEBUG["bands"] = []
-                if "roi" in debug_payload:
-                    _LAST_TEXT_TABLE_DEBUG["roi"] = debug_payload.get("roi")
-
-        _LAST_TEXT_TABLE_DEBUG["rows_txt_count"] = len(merged_rows)
-        _LAST_TEXT_TABLE_DEBUG["rows_txt_lines"] = list(merged_rows)
-        print(f"[TEXT-SCAN] rows_txt count={len(merged_rows)}")
-        for idx, row_text in enumerate(merged_rows[:3]):
-            print(f"  [{idx:02d}] {row_text}")
-
-        _LAST_TEXT_TABLE_DEBUG["text_row_count"] = len(parsed_rows)
-        print(f"[TEXT-SCAN] parsed rows: {len(parsed_rows)}")
-        for idx, row in enumerate(parsed_rows[:3]):
-            ref_val = row.get("ref") or ""
-            side_val = row.get("side") or ""
-            desc_val = row.get("desc") or ""
-            if len(desc_val) > 80:
-                desc_val = desc_val[:77] + "..."
-            print(
-                f"  [{idx:02d}] qty={row.get('qty')} ref={ref_val or '-'} "
-                f"side={side_val or '-'} desc={desc_val}"
-            )
-
-        if parsed_rows:
-            text_rows_info = {
-                "rows": parsed_rows,
-                "hole_count": total_qty,
-                "provenance_holes": "HOLE TABLE",
-            }
-            if families:
-                text_rows_info["hole_diam_families_in"] = families
         else:
-            text_rows_info = None
+            if follow_sheet_target_layouts:
+                follow_debug_entries: list[dict[str, Any]] = []
+                for follow_layout in follow_sheet_target_layouts:
+                    target_upper = str(follow_layout).strip().upper()
+                    follow_entries: list[dict[str, Any]] = []
+                    for entry in collected_entries:
+                        layout_value = str(entry.get("layout_name") or "").strip()
+                        if layout_value.upper() != target_upper:
+                            continue
+                        text_value = str(entry.get("text") or "").strip()
+                        if not text_value:
+                            continue
+                        follow_entries.append(
+                            {
+                                "layout_name": layout_value,
+                                "from_block": bool(entry.get("from_block")),
+                                "x": entry.get("x"),
+                                "y": entry.get("y"),
+                                "height": entry.get("height"),
+                                "text": text_value,
+                                "normalized_text": text_value,
+                            }
+                        )
+                    if not follow_entries:
+                        continue
+                    follow_candidate, follow_debug_payload = _build_columnar_table_from_entries(
+                        follow_entries, roi_hint=roi_hint_effective
+                    )
+                    if isinstance(follow_debug_payload, Mapping):
+                        follow_debug_entry = dict(follow_debug_payload)
+                        follow_debug_entry["layout"] = follow_layout
+                        follow_debug_entries.append(follow_debug_entry)
+                    candidate_score = _score_table(follow_candidate)
+                    existing_score = _score_table(columnar_table_info)
+                    if candidate_score > existing_score:
+                        columnar_table_info = follow_candidate
+                        if isinstance(follow_debug_payload, Mapping):
+                            columnar_debug_info = dict(follow_debug_payload)
+                if follow_debug_entries and isinstance(_LAST_TEXT_TABLE_DEBUG, dict):
+                    if len(follow_debug_entries) == 1:
+                        _LAST_TEXT_TABLE_DEBUG["follow_sheet_debug"] = follow_debug_entries[0]
+                    else:
+                        _LAST_TEXT_TABLE_DEBUG["follow_sheet_debug"] = follow_debug_entries
+
+            def _cluster_entries_by_y(
+                entries: list[dict[str, Any]]
+            ) -> list[list[dict[str, Any]]]:
+                valid = [entry for entry in entries if entry.get("normalized_text")]
+                if not valid:
+                    return []
+
+                def _estimate_eps(values: list[dict[str, Any]]) -> float:
+                    y_values: list[float] = []
+                    for item in values:
+                        y_val = item.get("y")
+                        if isinstance(y_val, (int, float)):
+                            y_values.append(float(y_val))
+                    if len(y_values) >= 2:
+                        diffs = [abs(y_values[i] - y_values[i + 1]) for i in range(len(y_values) - 1)]
+                        diffs = [diff for diff in diffs if diff > 0]
+                        if diffs:
+                            median_diff = statistics.median(diffs)
+                            if median_diff > 0:
+                                return max(4.0, median_diff * 0.75)
+                    return 8.0
+
+                eps = _estimate_eps(valid)
+                for _ in range(3):
+                    clusters: list[list[dict[str, Any]]] = []
+                    current: list[dict[str, Any]] | None = None
+                    prev_y: float | None = None
+                    for entry in valid:
+                        y_val = entry.get("y")
+                        y_float = float(y_val) if isinstance(y_val, (int, float)) else None
+                        if current is None:
+                            current = [entry]
+                            clusters.append(current)
+                            prev_y = y_float
+                            continue
+                        if y_float is None or prev_y is None or abs(y_float - prev_y) > eps:
+                            current = [entry]
+                            clusters.append(current)
+                        else:
+                            current.append(entry)
+                        prev_y = y_float if y_float is not None else prev_y
+                    if not clusters:
+                        return []
+                    avg_cluster_size = len(valid) / len(clusters)
+                    if avg_cluster_size >= 1.5 or eps >= 24.0:
+                        return clusters
+                    eps *= 1.5
+                return clusters
+
+            def _clusters_to_rows(clusters: list[list[dict[str, Any]]]) -> list[str]:
+                rows: list[str] = []
+                for cluster in clusters:
+                    def _x_key(value: Any) -> float:
+                        try:
+                            return float(value)
+                        except Exception:
+                            return float("inf")
+
+                    ordered = sorted(
+                        cluster,
+                        key=lambda item: (
+                            _x_key(item.get("x")),
+                            int(item.get("order", 0)),
+                        ),
+                    )
+                    parts = [str(item.get("normalized_text", "")).strip() for item in ordered]
+                    row_text = " ".join(part for part in parts if part)
+                    row_text = " ".join(row_text.split())
+                    if not row_text:
+                        continue
+                    if not _HOLE_ACTION_TOKEN_RE.search(row_text):
+                        continue
+                    rows.append(row_text)
+                return rows
+
+            if len(parsed_rows) < 8:
+                clusters = _cluster_entries_by_y(candidate_entries)
+                fallback_rows = _clusters_to_rows(clusters)
+                fallback_rows = [row for row in fallback_rows if row]
+                fallback_rows = _filter_and_dedupe_row_texts(fallback_rows)
+                fallback_parsed, fallback_families, fallback_qty = _parse_rows(fallback_rows)
+                print(
+                    f"[TEXT-SCAN] fallback clusters={len(clusters)} "
+                    f"chosen_rows={len(fallback_parsed)} qty_sum={fallback_qty}"
+                )
+                if fallback_parsed and (
+                    (fallback_qty, len(fallback_parsed))
+                    > (total_qty, len(parsed_rows))
+                ):
+                    merged_rows = fallback_rows
+                    parsed_rows = fallback_parsed
+                    families = fallback_families
+                    total_qty = fallback_qty
+
+            if merged_rows and len(parsed_rows) == len(merged_rows):
+                for idx, fallback_text in enumerate(merged_rows):
+                    if idx >= len(parsed_rows):
+                        break
+                    fallback_clean = " ".join(str(fallback_text or "").split())
+                    if not fallback_clean:
+                        continue
+                    current_desc = str(parsed_rows[idx].get("desc") or "")
+                    if len(fallback_clean) > len(current_desc):
+                        if (
+                            _RE_TEXT_ROW_START.match(fallback_clean)
+                            and not _RE_TEXT_ROW_START.match(current_desc)
+                        ):
+                            continue
+                        leading_token = fallback_clean.split("|", 1)[0].strip()
+                        if (
+                            leading_token
+                            and len(leading_token) == 1
+                            and leading_token.isalpha()
+                            and not current_desc.startswith(f"{leading_token} |")
+                        ):
+                            continue
+                        parsed_rows[idx]["desc"] = fallback_clean
+
+            if rows_txt_initial > 0 and not parsed_rows:
+                print("[PATH-GUARD] rows_txt>0 but text_rows==0; forcing band/column pass")
+
+            chart_lines: list[dict[str, Any]] = []
+            sheet_lines: list[dict[str, Any]] = []
+            model_lines: list[dict[str, Any]] = []
+            other_lines: list[dict[str, Any]] = []
+            for entry in collected_entries:
+                text_value = str(entry.get("text") or "").strip()
+                if not text_value:
+                    continue
+                record = {
+                    "layout_name": entry.get("layout_name"),
+                    "from_block": bool(entry.get("from_block")),
+                    "block_name": entry.get("block_name"),
+                    "x": entry.get("x"),
+                    "y": entry.get("y"),
+                    "height": entry.get("height"),
+                    "text": text_value,
+                    "normalized_text": text_value,
+                }
+                layout_name = str(entry.get("layout_name") or "")
+                lower_name = layout_name.lower()
+                if "chart" in lower_name:
+                    chart_lines.append(record)
+                elif "sheet" in lower_name:
+                    sheet_lines.append(record)
+                elif lower_name == "model":
+                    model_lines.append(record)
+                else:
+                    other_lines.append(record)
+            raw_lines = chart_lines + sheet_lines + model_lines
+            if not raw_lines:
+                raw_lines = list(other_lines)
+            _LAST_TEXT_TABLE_DEBUG["raw_lines"] = [
+                {
+                    "layout": item.get("layout_name"),
+                    "in_block": bool(item.get("from_block")),
+                    "block": item.get("block_name"),
+                    "x": item.get("x"),
+                    "y": item.get("y"),
+                    "text": item.get("text"),
+                }
+                for item in raw_lines
+            ]
+            block_count = sum(1 for item in raw_lines if item.get("from_block"))
+            print(
+                "[COLUMN] raw_lines total={total} (chart={chart} sheet={sheet} "
+                "model={model}) blocks={blocks}".format(
+                    total=len(raw_lines),
+                    chart=len(chart_lines),
+                    sheet=len(sheet_lines),
+                    model=len(model_lines),
+                    blocks=block_count,
+                )
+            )
+            if raw_lines:
+                table_candidate, debug_payload = _build_columnar_table_from_entries(
+                    raw_lines, roi_hint=roi_hint_effective
+                )
+                columnar_table_info = table_candidate
+                columnar_debug_info = debug_payload
+                if isinstance(debug_payload, Mapping):
+                    _LAST_TEXT_TABLE_DEBUG["row_debug"] = list(
+                        debug_payload.get("row_debug", [])
+                    )
+                    _LAST_TEXT_TABLE_DEBUG["columns"] = list(
+                        debug_payload.get("columns", [])
+                    )
+                    _LAST_TEXT_TABLE_DEBUG["rows"] = list(
+                        debug_payload.get("rows_txt_fallback", [])
+                    )
+                    _LAST_TEXT_TABLE_DEBUG["bands"] = []
+                    if "roi" in debug_payload:
+                        _LAST_TEXT_TABLE_DEBUG["roi"] = debug_payload.get("roi")
+
+            _LAST_TEXT_TABLE_DEBUG["rows_txt_count"] = len(merged_rows)
+            _LAST_TEXT_TABLE_DEBUG["rows_txt_lines"] = list(merged_rows)
+            print(f"[TEXT-SCAN] rows_txt count={len(merged_rows)}")
+            for idx, row_text in enumerate(merged_rows[:3]):
+                print(f"  [{idx:02d}] {row_text}")
+
+            _LAST_TEXT_TABLE_DEBUG["text_row_count"] = len(parsed_rows)
+            print(f"[TEXT-SCAN] parsed rows: {len(parsed_rows)}")
+            for idx, row in enumerate(parsed_rows[:3]):
+                ref_val = row.get("ref") or ""
+                side_val = row.get("side") or ""
+                desc_val = row.get("desc") or ""
+                if len(desc_val) > 80:
+                    desc_val = desc_val[:77] + "..."
+                print(
+                    f"  [{idx:02d}] qty={row.get('qty')} ref={ref_val or '-'} "
+                    f"side={side_val or '-'} desc={desc_val}"
+                )
+
+            if parsed_rows:
+                text_rows_info = {
+                    "rows": parsed_rows,
+                    "hole_count": total_qty,
+                    "provenance_holes": "HOLE TABLE",
+                }
+                if families:
+                    text_rows_info["hole_diam_families_in"] = families
+            else:
+                text_rows_info = None
 
         return table_lines
 
