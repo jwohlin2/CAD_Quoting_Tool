@@ -264,6 +264,16 @@ class RenderState:
             breakdown_map.get("nre_cost_details")
         )
 
+        self.programming_rate = _coerce_rate_value(self.nre.get("programming_rate"))
+        if self.programming_rate <= 0:
+            self.programming_rate = _coerce_rate_value(self.rates.get("ProgrammerRate"))
+        if self.programming_rate <= 0:
+            self.programming_rate = _coerce_rate_value(self.rates.get("ProgrammingRate"))
+        self.programming_per_part = _coerce_rate_value(
+            self.nre.get("programming_per_part")
+        )
+        self.fixture_per_part = _coerce_rate_value(self.nre.get("fixture_per_part"))
+
         labor_costs_raw = _as_mapping(breakdown_map.get("labor_costs"))
         self.labor_cost_totals: dict[str, float] = {}
         for label, value in labor_costs_raw.items():
