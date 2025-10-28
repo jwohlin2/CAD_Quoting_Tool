@@ -269,7 +269,45 @@ def test_anchor_rows_are_authoritative_over_roi() -> None:
     assert buckets.get("tap") == 4
     assert buckets.get("cbore") == 4
     assert buckets.get("npt") == 4
-    assert buckets.get("drill_spec") == 4
+    assert buckets.get("drill") == 4
+
+
+def test_classify_op_row_splits_semicolons() -> None:
+    desc = "(4) .75Ø C'BORE AS SHOWN; \"R\" (.339Ø) DRILL THRU; 1/8- N.P.T."
+    items = geo_extractor.classify_op_row(desc)
+    assert items, "expected classifier items"
+    totals: dict[str, int] = {}
+    for item in items:
+        kind = item.get("kind")
+        assert isinstance(kind, str)
+        totals[kind] = totals.get(kind, 0) + 4
+    assert totals.get("cbore") == 4
+    assert totals.get("drill") == 4
+    assert totals.get("npt") == 4
+
+
+def test_classify_op_row_counterdrill_synonyms() -> None:
+    for text in ("C DRILL", "CTR DRILL", "C' DRILL"):
+        items = geo_extractor.classify_op_row(text)
+        assert any(item.get("kind") == "cdrill" for item in items)
+
+
+def test_ops_manifest_combines_table_and_geom() -> None:
+    rows = [
+        {"qty": 4, "desc": '\"R\" (.339Ø) DRILL THRU'},
+        {"qty": 2, "desc": "(2) 1/4-20 TAP"},
+    ]
+    hole_sets = [{"qty": 10}]
+
+    manifest = geo_extractor.ops_manifest(rows, hole_sets=hole_sets)
+
+    table_counts = manifest.get("table", {})
+    total_counts = manifest.get("total", {})
+
+    assert table_counts.get("drill") == 4
+    assert table_counts.get("tap") == 2
+    assert manifest.get("geom_drill_count") == 10
+    assert total_counts.get("drill") == 10
 
 
 def test_merge_table_lines_ignores_numeric_ladder_noise() -> None:

@@ -19,6 +19,7 @@ from cad_quoter.geo_extractor import (
     DEFAULT_TEXT_LAYER_EXCLUDE_REGEX,
     NO_TEXT_ROWS_MESSAGE,
     NoTextRowsError,
+    ops_manifest,
     read_geo,
 )
 
@@ -176,6 +177,18 @@ def _build_ops_totals_artifact(ops_summary: Mapping[str, object] | None) -> dict
         artifact["source"] = ops_summary["source"]
 
     return artifact or None
+
+
+def _extract_hole_sets(geo: Mapping[str, Any] | None) -> Any:
+    if not isinstance(geo, Mapping):
+        return None
+    hole_sets = geo.get("hole_sets")
+    if hole_sets:
+        return hole_sets
+    nested = geo.get("geo")
+    if isinstance(nested, Mapping):
+        return _extract_hole_sets(nested)
+    return None
 
 
 def _write_artifact(path: Path, payload: Mapping[str, object]) -> None:
@@ -681,6 +694,83 @@ def main(argv: Sequence[str] | None = None) -> int:
             prov=holes_source,
         )
     )
+
+    def _log_ops(label: str, counts: Mapping[str, Any] | None) -> None:
+        if not isinstance(counts, Mapping):
+            print(f"[OPS] {label}: <none>")
+            return
+        display_order = (
+            ("drill", "drill"),
+            ("tap", "tap"),
+            ("cbore", "cbore"),
+            ("cdrill", "cdrill"),
+            ("csink", "csink"),
+            ("jig_grind", "jig"),
+            ("spot", "spot"),
+            ("npt", "npt"),
+            ("unknown", "unknown"),
+        )
+        parts: list[str] = []
+        for key, label_text in display_order:
+            value = counts.get(key, 0)
+            try:
+                value_int = int(round(float(value)))
+            except Exception:
+                continue
+            if value_int <= 0:
+                continue
+            parts.append(f"{label_text}={value_int}")
+        if not parts:
+            parts.append("none=0")
+        print(f"[OPS] {label}: " + " ".join(parts))
+
+    hole_sets_payload = _extract_hole_sets(geo)
+    manifest_payload = ops_manifest(rows, hole_sets=hole_sets_payload)
+    table_counts = manifest_payload.get("table") if isinstance(manifest_payload, Mapping) else {}
+    geom_counts = manifest_payload.get("geom") if isinstance(manifest_payload, Mapping) else {}
+    total_counts = manifest_payload.get("total") if isinstance(manifest_payload, Mapping) else {}
+
+    _log_ops("table", table_counts)
+    if isinstance(geom_counts, Mapping) and geom_counts:
+        _log_ops("geom", geom_counts)
+    _log_ops("total", total_counts)
+
+    default_sample = "301_redacted.dwg"
+    try:
+        path_name = Path(path).name
+    except Exception:
+        path_name = ""
+    if path_name.lower() == default_sample:
+        print("[OPS] expect: Drill 77 | Jig 8 | Tap 21 | C'bore 60 | C'drill 3")
+        try:
+            drill_total = int(total_counts.get("drill", 0))
+        except Exception:
+            drill_total = 0
+        try:
+            jig_total = int(total_counts.get("jig_grind", 0))
+        except Exception:
+            jig_total = 0
+        try:
+            tap_total = int(total_counts.get("tap", 0))
+        except Exception:
+            tap_total = 0
+        try:
+            cbore_total = int(total_counts.get("cbore", 0))
+        except Exception:
+            cbore_total = 0
+        try:
+            cdrill_total = int(total_counts.get("cdrill", 0))
+        except Exception:
+            cdrill_total = 0
+        print(
+            "[OPS] actual: Drill {drill} | Jig {jig} | Tap {tap} | C'bore {cbore} | C'drill {cdrill}".format(
+                drill=drill_total,
+                jig=jig_total,
+                tap=tap_total,
+                cbore=cbore_total,
+                cdrill=cdrill_total,
+            )
+        )
 
     hole_rows_artifact = _build_hole_rows_artifact(
         rows,

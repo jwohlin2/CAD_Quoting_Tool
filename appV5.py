@@ -59,7 +59,7 @@ from cad_quoter.utils.number_parse import NUM_DEC_RE, NUM_FRAC_RE, _to_inch
 from cad_quoter.utils.render_utils.tables import ascii_table
 from cad_quoter.utils.render_state import RenderState
 from cad_quoter.utils.chart_buckets import classify_chart_rows as _classify_chart_rows
-from cad_quoter.geo_extractor import extract_hole_table
+from cad_quoter.geo_extractor import extract_hole_table, ops_manifest
 
 
 
@@ -14984,6 +14984,38 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
         anchor_flag=anchor_flag,
     )
 
+    manifest_payload: Mapping[str, Any] | dict[str, Any] = {}
+    manifest_table_counts: Mapping[str, Any] | None = None
+    manifest_geom_counts: Mapping[str, Any] | None = None
+    manifest_total_counts: Mapping[str, Any] | None = None
+    try:
+        manifest_rows = None
+        if isinstance(ops_summary_map, _MappingABC):
+            manifest_rows_candidate = ops_summary_map.get("rows")
+            if isinstance(manifest_rows_candidate, list):
+                manifest_rows = [
+                    row for row in manifest_rows_candidate if isinstance(row, Mapping)
+                ]
+            else:
+                manifest_rows = manifest_rows_candidate
+        core_geo_manifest = _get_core_geo_map(geo_map)
+        hole_sets_manifest = None
+        if isinstance(core_geo_manifest, Mapping):
+            hole_sets_manifest = core_geo_manifest.get("hole_sets")
+        manifest_payload = ops_manifest(manifest_rows, hole_sets=hole_sets_manifest)
+        if isinstance(manifest_payload, Mapping):
+            table_candidate = manifest_payload.get("table")
+            geom_candidate = manifest_payload.get("geom")
+            total_candidate = manifest_payload.get("total")
+            if isinstance(table_candidate, Mapping):
+                manifest_table_counts = table_candidate
+            if isinstance(geom_candidate, Mapping):
+                manifest_geom_counts = geom_candidate
+            if isinstance(total_candidate, Mapping):
+                manifest_total_counts = total_candidate
+    except Exception:
+        manifest_payload = {}
+
     ops_counts = audit_operations(
         planner_ops_rows_for_audit,
         removal_sections_text,
@@ -15243,6 +15275,28 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
         except Exception:
             return 0
 
+    manifest_totals_int: dict[str, int] = {}
+    manifest_table_int: dict[str, int] = {}
+    manifest_geom_int: dict[str, int] = {}
+    if isinstance(manifest_total_counts, Mapping):
+        for key, value in manifest_total_counts.items():
+            manifest_totals_int[key] = _safe_int(value)
+    if isinstance(manifest_table_counts, Mapping):
+        for key, value in manifest_table_counts.items():
+            manifest_table_int[key] = _safe_int(value)
+    if isinstance(manifest_geom_counts, Mapping):
+        for key, value in manifest_geom_counts.items():
+            manifest_geom_int[key] = _safe_int(value)
+
+    if manifest_totals_int:
+        tallies["drill"] = manifest_totals_int.get("drill", tallies.get("drill", 0))
+        tallies["tap"] = manifest_totals_int.get("tap", 0) + manifest_totals_int.get("npt", 0)
+        tallies["counterbore"] = manifest_totals_int.get("cbore", tallies.get("counterbore", 0))
+        tallies["counterdrill"] = manifest_totals_int.get("cdrill", tallies.get("counterdrill", 0))
+        tallies["jig-grind"] = manifest_totals_int.get("jig_grind", tallies.get("jig-grind", 0))
+    if manifest_table_int.get("spot"):
+        tallies["spot"] = max(tallies.get("spot", 0), manifest_table_int.get("spot", 0))
+
     base_state = (breakdown_mutable or breakdown) or {}
     source: Mapping[str, Any] | MutableMapping[str, Any] | None = None
     try:
@@ -15375,6 +15429,13 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
     cdrill_total = _safe_int(dops_map.get("counterdrill"))
     jig_total = _safe_int(dops_map.get("jig-grind"))
 
+    if manifest_totals_int:
+        drill_total = manifest_totals_int.get("drill", drill_total)
+        tap_total = manifest_totals_int.get("tap", 0) + manifest_totals_int.get("npt", 0)
+        cbore_total = manifest_totals_int.get("cbore", cbore_total)
+        cdrill_total = manifest_totals_int.get("cdrill", cdrill_total)
+        jig_total = manifest_totals_int.get("jig_grind", jig_total)
+
     _push(
         lines,
         f"[DEBUG] OPS TALLY (final) drill={drill_total}, tap={tap_total}, counterbore={cbore_total}, counterdrill={cdrill_total}, jig-grind={jig_total}",
@@ -15389,6 +15450,8 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
             spot_total_final = _safe_int(locals().get("spot_qty"))
         except Exception:
             spot_total_final = 0
+    if manifest_table_int.get("spot"):
+        spot_total_final = max(spot_total_final, manifest_table_int.get("spot", 0))
 
     _tallies = {
         "drill": drill_total,
@@ -15398,6 +15461,63 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
         "jig-grind": jig_total,
         "spot": max(0, spot_total_final),
     }
+
+    if manifest_totals_int:
+        drill_target = manifest_totals_int.get("drill", 0)
+        tap_target = manifest_totals_int.get("tap", 0) + manifest_totals_int.get("npt", 0)
+        cbore_target = manifest_totals_int.get("cbore", 0)
+        cdrill_target = manifest_totals_int.get("cdrill", 0)
+        jig_target = manifest_totals_int.get("jig_grind", 0)
+
+        drill_table_val = manifest_table_int.get("drill", 0)
+        tap_table_val = manifest_table_int.get("tap", 0) + manifest_table_int.get("npt", 0)
+        cbore_table_val = manifest_table_int.get("cbore", 0)
+        cdrill_table_val = manifest_table_int.get("cdrill", 0)
+        jig_table_val = manifest_table_int.get("jig_grind", 0)
+
+        drill_geom_val = manifest_geom_int.get("drill", 0)
+
+        extras_tokens: list[str] = []
+        if manifest_table_int.get("npt"):
+            extras_tokens.append(f"NPT {manifest_table_int['npt']}")
+        if manifest_table_int.get("spot"):
+            extras_tokens.append(f"Spot {manifest_table_int['spot']}")
+        if manifest_table_int.get("csink"):
+            extras_tokens.append(f"C'sink {manifest_table_int['csink']}")
+        if manifest_table_int.get("unknown"):
+            extras_tokens.append(f"Unknown {manifest_table_int['unknown']}")
+        extras_text = "" if not extras_tokens else " (" + ", ".join(extras_tokens) + ")"
+
+        print(
+            f"[OPS-REVIEW] target: Drill {drill_target} | Jig {jig_target} | Tap {tap_target} | C'bore {cbore_target} | C'drill {cdrill_target}"
+        )
+        print(
+            f"[OPS-REVIEW] table:  Drill {drill_table_val} | Tap {tap_table_val} | C'bore {cbore_table_val} | C'drill {cdrill_table_val} | Jig {jig_table_val}{extras_text}"
+        )
+        print(f"[OPS-REVIEW] geom :  Drill {drill_geom_val}")
+
+        actual_counts = {
+            "drill": _safe_int(ops_counts.get("drills")),
+            "tap": _safe_int(ops_counts.get("taps_total")) + _safe_int(ops_counts.get("npt")),
+            "cbore": _safe_int(ops_counts.get("counterbores_total")),
+            "cdrill": _safe_int(ops_counts.get("counterdrill")),
+            "jig": _safe_int(ops_counts.get("jig_grind")),
+        }
+        diff_tokens = []
+        if actual_counts["drill"] != drill_target:
+            diff_tokens.append(f"Drill Δ{actual_counts['drill'] - drill_target:+d}")
+        if actual_counts["tap"] != tap_target:
+            diff_tokens.append(f"Tap Δ{actual_counts['tap'] - tap_target:+d}")
+        if actual_counts["cbore"] != cbore_target:
+            diff_tokens.append(f"C'bore Δ{actual_counts['cbore'] - cbore_target:+d}")
+        if actual_counts["cdrill"] != cdrill_target:
+            diff_tokens.append(f"C'drill Δ{actual_counts['cdrill'] - cdrill_target:+d}")
+        if actual_counts["jig"] != jig_target:
+            diff_tokens.append(f"Jig Δ{actual_counts['jig'] - jig_target:+d}")
+        status = "OK" if not diff_tokens else "Δ " + "  ".join(diff_tokens)
+        print(
+            f"[OPS-REVIEW] total: Drill {actual_counts['drill']} | Jig {actual_counts['jig']} | Tap {actual_counts['tap']} | C'bore {actual_counts['cbore']} | C'drill {actual_counts['cdrill']}   {status}"
+        )
 
     print(
         f"[ops-audit] drills={ops_counts.get('drills', 0)} "
