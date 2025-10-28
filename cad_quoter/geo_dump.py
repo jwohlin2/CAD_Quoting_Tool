@@ -1041,8 +1041,26 @@ def main(argv: Sequence[str] | None = None) -> int:
     if args.dump_all_text:
         include_layers = _normalize_pattern_args(args.layers_include)
         exclude_layers = _normalize_pattern_args(args.layers_exclude)
-        if args.min_height is not None:
-            print(f"[TEXT-DUMP] min_height={args.min_height}")
+        dump_min_height = args.min_height
+        if dump_min_height is None:
+            dump_min_height = 0.0
+        if dump_min_height is not None:
+            if args.min_height is None:
+                print(f"[TEXT-DUMP] min_height={dump_min_height} (default for dump)")
+            else:
+                print(f"[TEXT-DUMP] min_height={dump_min_height}")
+
+        if not getattr(args, "no_exclude_layer", False):
+            default_exclude = {
+                pattern for pattern in DEFAULT_TEXT_LAYER_EXCLUDE_REGEX if pattern
+            }
+            if default_exclude:
+                filtered_layers = [
+                    pattern for pattern in exclude_layers if pattern not in default_exclude
+                ]
+                if len(filtered_layers) != len(exclude_layers):
+                    print("[TEXT-DUMP] ignoring default layer exclusions for dump-all-text")
+                    exclude_layers = filtered_layers
         if include_layers:
             print(f"[TEXT-DUMP] layers_include={sorted(set(include_layers))}")
         if exclude_layers:
@@ -1052,7 +1070,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 doc,
                 include_blocks=bool(args.include_blocks),
                 include_paperspace=bool(args.include_paperspace),
-                min_height=args.min_height,
+                min_height=dump_min_height,
                 layers_include=include_layers,
                 layers_exclude=exclude_layers,
             )
