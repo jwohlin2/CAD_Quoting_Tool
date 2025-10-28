@@ -4875,7 +4875,7 @@ from cad_quoter.ui.planner_render import (
     sane_minutes_or_zero,
     canonicalize_costs,
 )
-from cad_quoter.ui.process_render import RenderState as ProcessRenderState, render_process
+from cad_quoter.ui.process_render import RenderState as ProcessRenderState, render_process as render_process_ui
 from cad_quoter.ui.services import QuoteConfiguration
 from cad_quoter.pricing.validation import validate_quote_before_pricing
 from cad_quoter.utils.debug_tables import (
@@ -13172,52 +13172,26 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
         bucket_entries_for_totals_map=bucket_entries_for_totals_map,
         bucket_why_summary_line=bucket_why_summary_line,
     )
-    process_render_result = render_process(process_render_state)
-    process_section_lines = list(process_render_result.lines)
-    for note in process_render_result.why_lines:
+    process_render_result = render_process_ui(process_render_state)
+    quote_render_state.process_render_state = process_render_state
+    quote_render_state.process_render_result = process_render_result
+    quote_render_state.writer = writer
+
+    process_section = render_process_section(quote_render_state)
+
+    for note in process_section.why_lines:
         if note not in why_lines:
             why_lines.append(note)
-    if process_render_result.bucket_summary:
-        bucket_why_summary_line = process_render_result.bucket_summary
-    process_rows_rendered = list(process_render_state.process_rows_rendered)
-    process_rows_total = float(process_render_state.process_total_cost)
-    process_rows_minutes = float(process_render_state.process_total_minutes)
-    process_section_start = len(lines)
-    lines.extend(process_section_lines)
-    proc_total_rendered = process_rows_total
-    hrs_total_rendered = process_rows_minutes / 60.0 if process_rows_minutes > 0 else 0.0
-    proc_machine = sum(row[2] for row in process_rows_rendered)
-    proc_labor = sum(row[3] for row in process_rows_rendered)
-    machine_sum = proc_machine
-    labor_sum = proc_labor
-    if process_rows_rendered:
-        top_rows = sorted(
-            process_rows_rendered,
-            key=lambda r: r[4],
-            reverse=True,
-        )[:3]
-        top_lines = [
-            f"{name} ${total:,.2f}" for (name, _, _, _, total) in top_rows
-        ]
-        for line in top_lines:
-            if line not in why_lines:
-                why_lines.append(line)
-        summary_bits: list[str] = [
-            f"Machine {_m(machine_sum)}",
-            f"Labor {_m(labor_sum)}",
-        ]
-        top_summary = [
-            f"{name} {_m(total)}" for (name, _, _, _, total) in top_rows if total > 0
-        ]
-        if top_summary:
-            summary_bits.append("largest bucket(s): " + ", ".join(top_summary))
-        bucket_why_summary_line = "Process buckets — " + "; ".join(summary_bits)
-    if proc_total_rendered or hrs_total_rendered:
-        for offset, text in enumerate(lines[process_section_start:]):
-            stripped = str(text or "").strip()
-            if stripped.lower().startswith("total") and "$" in stripped:
-                quote_render_state.process_total_row_index = process_section_start + offset
-                break
+    if process_section.bucket_summary:
+        bucket_why_summary_line = process_section.bucket_summary
+
+    process_rows_rendered = list(process_section.rows)
+    proc_total_rendered = float(process_section.total_cost)
+    hrs_total_rendered = (
+        process_section.total_minutes / 60.0 if process_section.total_minutes > 0 else 0.0
+    )
+    machine_sum = float(process_section.machine_total)
+    labor_sum = float(process_section.labor_total)
     proc_total = proc_total_rendered
 
     # ---- Pass-Through & Direct (auto include non-zeros; sorted desc) --------
@@ -24724,3 +24698,4 @@ _PRINTED_CHART_DEBUG_KEYS = False
 
 
 
+from cad_quoter.render.process import render_process as render_process_section
