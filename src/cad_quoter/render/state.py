@@ -182,6 +182,10 @@ class RenderState:
     total_process_cost_row_index: int = -1
     total_direct_costs_row_index: int = -1
     process_total_row_index: int = -1
+    material_cost_components: Mapping[str, Any] | None = None
+    material_component_total: float | None = None
+    material_component_net: float | None = None
+    material_net_cost: float | None = None
     lines: list[str] | None = None
     recorder: QuoteDocRecorder | None = None
     deferred_replacements: list[tuple[int, str]] = field(default_factory=list)
