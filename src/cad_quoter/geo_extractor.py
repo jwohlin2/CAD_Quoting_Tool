@@ -4658,6 +4658,7 @@ def read_text_table(
     rows_txt_initial = 0
     confidence_high = False
     anchor_authoritative_result: dict[str, Any] | None = None
+    secondary_anchor_candidate: dict[str, Any] | None = None
 
     helper_missing = helper is None
     if helper_missing and isinstance(_LAST_TEXT_TABLE_DEBUG, dict):
@@ -4746,7 +4747,7 @@ def read_text_table(
             nonlocal table_lines, text_rows_info, merged_rows, parsed_rows
             nonlocal columnar_table_info, columnar_debug_info, roi_hint_effective, rows_txt_initial
             nonlocal anchor_rows_primary, roi_rows_primary, anchor_authoritative_result
-            nonlocal anchor_is_authoritative
+            nonlocal anchor_is_authoritative, secondary_anchor_candidate
             nonlocal allowlist_display, follow_sheet_target_layouts
             nonlocal collected_entries, candidate_entries, entries_by_layout, layout_names
             nonlocal layout_order, see_sheet_hint_text, see_sheet_hint_logged
@@ -4761,6 +4762,7 @@ def read_text_table(
             rows_txt_initial = 0
             anchor_rows_primary = []
             roi_rows_primary = []
+            secondary_anchor_candidate = None
             hint_logged = False
             attrib_count = 0
             mleader_count = 0
@@ -5722,6 +5724,185 @@ def read_text_table(
                 except Exception:
                     x_key = float("inf")
                 return (y_key, x_key, int(entry.get("layout_index", 0)), int(entry.get("order", 0)))
+
+            layout_hint_pattern = re.compile(r"(SHEET|CHART|SHT)", re.IGNORECASE)
+
+            def _scan_secondary_layout(
+                layout_index: int,
+                layout_entries: list[dict[str, Any]],
+            ) -> dict[str, Any] | None:
+                filtered_entries = [
+                    entry
+                    for entry in layout_entries
+                    if str(entry.get("normalized_text") or entry.get("text") or "").strip()
+                ]
+                if not filtered_entries:
+                    return None
+                ordered_entries = sorted(filtered_entries, key=_entry_sort_key)
+                candidate_entries_local: list[dict[str, Any]] = []
+                row_active = False
+                continuation_budget = 0
+                for idx, entry in enumerate(ordered_entries):
+                    base_text = entry.get("normalized_text") or entry.get("text") or ""
+                    stripped = str(base_text).strip()
+                    if not stripped:
+                        row_active = False
+                        continuation_budget = 0
+                        continue
+                    if _ADMIN_ROW_DROP_RE.search(stripped):
+                        row_active = False
+                        continuation_budget = 0
+                        continue
+                    if idx + 1 < len(ordered_entries):
+                        next_source = (
+                            ordered_entries[idx + 1].get("normalized_text")
+                            or ordered_entries[idx + 1].get("text")
+                            or ""
+                        )
+                        next_text = str(next_source)
+                    else:
+                        next_text = None
+                    row_start = _is_row_start(stripped, next_text=next_text)
+                    token_hit = _has_candidate_token(stripped)
+                    keep_line = False
+                    if row_start:
+                        row_active = True
+                        continuation_budget = 3
+                        keep_line = True
+                    elif token_hit:
+                        keep_line = True
+                        if row_active:
+                            continuation_budget = max(continuation_budget, 1)
+                        row_active = row_active or token_hit
+                    elif row_active and continuation_budget > 0:
+                        keep_line = True
+                        continuation_budget -= 1
+                    else:
+                        row_active = False
+                        continuation_budget = 0
+                    if not keep_line:
+                        continue
+                    normalized_line = stripped
+                    match = _match_row_quantity(normalized_line)
+                    if match:
+                        prefix = normalized_line[: match.start()].strip(" |")
+                        suffix = normalized_line[match.end() :].strip()
+                        row_token = match.group(0).strip()
+                        parts = [row_token]
+                        if prefix:
+                            parts.append(prefix)
+                        if suffix:
+                            parts.append(suffix)
+                        normalized_line = " ".join(parts)
+                    normalized_line = " ".join(normalized_line.split())
+                    if _should_drop_candidate_line(normalized_line):
+                        continue
+                    entry_copy = dict(entry)
+                    entry_copy["normalized_text"] = normalized_line
+                    candidate_entries_local.append(entry_copy)
+                if not candidate_entries_local:
+                    return None
+                anchor_height, _anchor_count = _compute_anchor_height(candidate_entries_local)
+                if anchor_height > 0 and candidate_entries_local:
+                    filtered_by_height = _filter_entries_by_anchor_height(
+                        candidate_entries_local, anchor_height=anchor_height
+                    )
+                    if filtered_by_height:
+                        candidate_entries_local = [dict(entry) for entry in filtered_by_height]
+                table_lines_local = [
+                    str(entry.get("normalized_text") or "") for entry in candidate_entries_local
+                ]
+                row_data: list[dict[str, Any]] = []
+                current_texts: list[str] = []
+                current_positions: list[float] = []
+                for idx, entry in enumerate(candidate_entries_local):
+                    line = str(entry.get("normalized_text", "")).strip()
+                    if not line or _ADMIN_ROW_DROP_RE.search(line):
+                        continue
+                    if idx + 1 < len(candidate_entries_local):
+                        next_line = str(
+                            candidate_entries_local[idx + 1].get("normalized_text", "") or ""
+                        )
+                    else:
+                        next_line = None
+                    entry_y = entry.get("y")
+                    if _is_row_start(line, next_text=next_line):
+                        if current_texts:
+                            text = " ".join(current_texts)
+                            avg_y = (
+                                sum(current_positions) / len(current_positions)
+                                if current_positions
+                                else None
+                            )
+                            row_data.append({"text": text, "y": avg_y})
+                        current_texts = [line]
+                        current_positions = []
+                        if isinstance(entry_y, (int, float)):
+                            current_positions.append(float(entry_y))
+                    elif current_texts:
+                        current_texts.append(line)
+                        if isinstance(entry_y, (int, float)):
+                            current_positions.append(float(entry_y))
+                if current_texts:
+                    text = " ".join(current_texts)
+                    avg_y = sum(current_positions) / len(current_positions) if current_positions else None
+                    row_data.append({"text": text, "y": avg_y})
+                merged_texts = [row.get("text") for row in row_data if row.get("text")]
+                deduped_rows = _filter_and_dedupe_row_texts(merged_texts)
+                if len(deduped_rows) < 3:
+                    return None
+                y_positions: list[float] = []
+                for row_text in deduped_rows:
+                    match_row = next((row for row in row_data if row.get("text") == row_text), None)
+                    if match_row is None:
+                        continue
+                    y_val = match_row.get("y")
+                    if isinstance(y_val, (int, float)) and math.isfinite(float(y_val)):
+                        y_positions.append(float(y_val))
+                if len(y_positions) < 3:
+                    return None
+                y_positions_sorted = sorted(y_positions, reverse=True)
+                diffs = [
+                    abs(y_positions_sorted[i] - y_positions_sorted[i + 1])
+                    for i in range(len(y_positions_sorted) - 1)
+                    if abs(y_positions_sorted[i] - y_positions_sorted[i + 1]) > 0
+                ]
+                if not diffs:
+                    return None
+                try:
+                    median_diff = float(statistics.median(diffs))
+                except Exception:
+                    median_diff = float(diffs[0]) if diffs else 0.0
+                if median_diff <= 0:
+                    return None
+                tolerance = max(0.5, 0.35 * median_diff)
+                consistent = sum(1 for diff in diffs if abs(diff - median_diff) <= tolerance)
+                required = max(1, int(math.ceil(len(diffs) * 0.6)))
+                if consistent < required:
+                    return None
+                anchor_count_effective = sum(
+                    1
+                    for entry in candidate_entries_local
+                    if _ROW_ANCHOR_RE.match(str(entry.get("normalized_text") or ""))
+                )
+                layout_name = str(layout_names.get(layout_index, layout_index))
+                score = (
+                    float(consistent),
+                    float(anchor_count_effective),
+                    float(len(deduped_rows)),
+                    -median_diff,
+                )
+                return {
+                    "layout_index": layout_index,
+                    "layout_name": layout_name,
+                    "rows_txt": list(deduped_rows),
+                    "entries": [dict(entry) for entry in candidate_entries_local],
+                    "table_lines": list(table_lines_local),
+                    "anchor_count": int(anchor_count_effective),
+                    "score": score,
+                    "median_gap": median_diff,
+                    "y_positions": y_positions_sorted,
+                }
     
             collected_entries.sort(key=_entry_sort_key)
     
@@ -5882,6 +6063,68 @@ def read_text_table(
             _LAST_TEXT_TABLE_DEBUG["rows_txt_count"] = rows_txt_initial
             _LAST_TEXT_TABLE_DEBUG["rows_txt_lines"] = list(merged_rows)
 
+            if see_sheet_hint_text:
+                best_secondary: dict[str, Any] | None = None
+                best_score: tuple[float, float, float, float] | None = None
+                for layout_index, layout_entries in entries_by_layout.items():
+                    layout_name = str(layout_names.get(layout_index, layout_index))
+                    if not layout_name or not layout_hint_pattern.search(layout_name):
+                        continue
+                    candidate = _scan_secondary_layout(layout_index, layout_entries)
+                    if candidate is None:
+                        continue
+                    score_raw = candidate.get("score")
+                    if (
+                        not isinstance(score_raw, tuple)
+                        or len(score_raw) != 4
+                    ):
+                        continue
+                    score_tuple = (
+                        float(score_raw[0]),
+                        float(score_raw[1]),
+                        float(score_raw[2]),
+                        float(score_raw[3]),
+                    )
+                    if best_score is None or score_tuple > best_score:
+                        best_secondary = candidate
+                        best_score = score_tuple
+                if best_secondary is not None:
+                    merged_rows = list(best_secondary.get("rows_txt", []))
+                    rows_txt_initial = len(merged_rows)
+                    table_lines = list(best_secondary.get("table_lines", [])) or list(merged_rows)
+                    candidate_entries = [
+                        dict(entry) for entry in best_secondary.get("entries", [])
+                    ]
+                    debug_candidates = []
+                    for entry in candidate_entries:
+                        debug_candidates.append(
+                            {
+                                "layout": entry.get("layout_name"),
+                                "in_block": bool(entry.get("from_block")),
+                                "block": entry.get("block_name"),
+                                "x": entry.get("x"),
+                                "y": entry.get("y"),
+                                "text": entry.get("normalized_text")
+                                or entry.get("text")
+                                or "",
+                            }
+                        )
+                    if debug_candidates:
+                        _LAST_TEXT_TABLE_DEBUG["candidates"] = debug_candidates
+                    _LAST_TEXT_TABLE_DEBUG["rows_txt_count"] = rows_txt_initial
+                    _LAST_TEXT_TABLE_DEBUG["rows_txt_lines"] = list(merged_rows)
+                    _LAST_TEXT_TABLE_DEBUG["secondary_sheet_layout"] = best_secondary.get(
+                        "layout_name"
+                    )
+                    _LAST_TEXT_TABLE_DEBUG["secondary_sheet_anchor_count"] = int(
+                        best_secondary.get("anchor_count") or 0
+                    )
+                    _LAST_TEXT_TABLE_DEBUG["secondary_sheet_median_gap"] = float(
+                        best_secondary.get("median_gap") or 0.0
+                    )
+                    secondary_anchor_candidate = dict(best_secondary)
+                    see_sheet_hint_logged = True
+
             if (
                 see_sheet_hint_text
                 and not see_sheet_hint_logged
@@ -5947,14 +6190,14 @@ def read_text_table(
                     families[key] = families.get(key, 0) + qty_val
             return (parsed, families, total)
 
-        parsed_rows, families, total_qty = _parse_rows(merged_rows)
-        anchor_rows_primary = list(parsed_rows)
-        anchor_qty_total = _sum_qty(anchor_rows_primary)
-        anchor_is_authoritative = len(anchor_rows_primary) >= 2
-        anchor_mode = "authoritative" if anchor_is_authoritative else "fallback"
-        print(
-            f"[TEXT-SCAN] pass=anchor rows={len(anchor_rows_primary)} ({anchor_mode})"
-        )
+            parsed_rows, families, total_qty = _parse_rows(merged_rows)
+            anchor_rows_primary = list(parsed_rows)
+            anchor_qty_total = _sum_qty(anchor_rows_primary)
+            anchor_is_authoritative = len(anchor_rows_primary) >= 2
+            anchor_mode = "authoritative" if anchor_is_authoritative else "fallback"
+            print(
+                f"[TEXT-SCAN] pass=anchor rows={len(anchor_rows_primary)} ({anchor_mode})"
+            )
 
         if anchor_is_authoritative:
             anchor_payload_rows = [dict(row) for row in anchor_rows_primary]
