@@ -15,6 +15,12 @@ from collections.abc import Iterable, Mapping
 from pathlib import Path
 from typing import Any, Sequence
 
+try:  # pragma: no cover - optional dependency guard
+    from ezdxf.math import Matrix44, Vec3
+except Exception:  # pragma: no cover - fallback for environments without ezdxf
+    Matrix44 = None  # type: ignore[assignment]
+    Vec3 = None  # type: ignore[assignment]
+
 REPO_ROOT = Path(__file__).resolve().parent.parent
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
@@ -360,6 +366,51 @@ def _resolve_xy_from_dxf(dxf: Any) -> tuple[float | None, float | None]:
     return (None, None)
 
 
+def _resolve_point_vec(dxf: Any) -> Vec3 | None:
+    if Vec3 is None:
+        return None
+    for attr in _INSERT_ATTRS:
+        if not hasattr(dxf, attr):
+            continue
+        try:
+            point = getattr(dxf, attr)
+        except Exception:
+            continue
+        if point is None:
+            continue
+        if hasattr(point, "x") and hasattr(point, "y"):
+            try:
+                x_val = _safe_float(point.x)
+                y_val = _safe_float(point.y)
+                z_val = _safe_float(getattr(point, "z", 0.0))
+            except Exception:
+                continue
+            return Vec3(x_val or 0.0, y_val or 0.0, z_val or 0.0)
+        if isinstance(point, Iterable) and not isinstance(point, (str, bytes, bytearray)):
+            try:
+                data = list(point)
+            except Exception:
+                continue
+            if not data:
+                continue
+            x_val = _safe_float(data[0]) or 0.0
+            y_val = _safe_float(data[1]) or 0.0
+            z_val = _safe_float(data[2]) if len(data) >= 3 else 0.0
+            return Vec3(x_val, y_val, z_val)
+    return None
+
+
+def _transform_direction(matrix: Matrix44 | None, vector: Vec3) -> Vec3:
+    if Matrix44 is None or matrix is None:
+        return vector
+    try:
+        return matrix.transform_direction(vector)
+    except Exception:
+        origin = matrix.transform(Vec3(0.0, 0.0, 0.0))
+        target = matrix.transform(vector)
+        return target - origin
+
+
 def _resolve_style_name(dxf: Any) -> str | None:
     if dxf is None:
         return None
@@ -530,9 +581,9 @@ def dump_all_text(doc: Any, out_dir: Path | str, opts: Mapping[str, Any] | None)
         layout_spaces = []
 
     records: list[dict[str, Any]] = []
-    max_depth = 8
     mleader_total = 0
     mleader_captured = 0
+    from_blocks_depth_max = 0
 
     def record_matches_filters(entry: Mapping[str, Any]) -> bool:
         layer_name = str(entry.get("layer") or "")
@@ -546,7 +597,117 @@ def dump_all_text(doc: Any, out_dir: Path | str, opts: Mapping[str, Any] | None)
                 return False
         return True
 
-    def build_record(entity: Any, layout_name: str, *, from_block: bool, block_name: str | None) -> dict[str, Any] | None:
+    def _compose_block_name(parts: Sequence[str]) -> str | None:
+        combined = [part for part in parts if part]
+        if not combined:
+            return None
+        return "|".join(combined)
+
+    def _apply_ocs_point(entity: Any, vector: Vec3 | None) -> Vec3 | None:
+        if Vec3 is None or vector is None:
+            return vector
+        ocs = None
+        if hasattr(entity, "ocs"):
+            try:
+                ocs = entity.ocs()
+            except Exception:
+                ocs = None
+        if ocs is None:
+            return vector
+        try:
+            return ocs.to_wcs(vector)
+        except Exception:
+            return vector
+
+    def _apply_ocs_direction(entity: Any, vector: Vec3 | None) -> Vec3 | None:
+        if Vec3 is None or vector is None:
+            return vector
+        ocs = None
+        if hasattr(entity, "ocs"):
+            try:
+                ocs = entity.ocs()
+            except Exception:
+                ocs = None
+        if ocs is None:
+            return vector
+        try:
+            origin = ocs.to_wcs(Vec3(0.0, 0.0, 0.0))
+            transformed = ocs.to_wcs(vector)
+        except Exception:
+            return vector
+        return transformed - origin
+
+    def _world_point(entity: Any, dxf: Any, matrix: Matrix44 | None) -> tuple[float | None, float | None]:
+        if Vec3 is None:
+            return _resolve_xy_from_dxf(dxf)
+        point = _resolve_point_vec(dxf)
+        if point is None:
+            x_val, y_val = _resolve_xy_from_dxf(dxf)
+            if x_val is None and y_val is None:
+                return (None, None)
+            if Vec3 is None:
+                return (x_val, y_val)
+            point = Vec3(x_val or 0.0, y_val or 0.0, 0.0)
+            point = _apply_ocs_point(entity, point) or point
+        else:
+            point = _apply_ocs_point(entity, point) or point
+        if Matrix44 is not None and matrix is not None:
+            try:
+                point = matrix.transform(point)
+            except Exception:
+                pass
+        return (_safe_float(point.x), _safe_float(point.y))
+
+    def _world_rotation(entity: Any, rotation_value: float | None, matrix: Matrix44 | None) -> float | None:
+        if rotation_value is None or Vec3 is None:
+            return rotation_value
+        radians = math.radians(rotation_value)
+        direction = Vec3(math.cos(radians), math.sin(radians), 0.0)
+        direction = _apply_ocs_direction(entity, direction) or direction
+        if Matrix44 is not None and matrix is not None:
+            try:
+                direction = _transform_direction(matrix, direction)
+            except Exception:
+                pass
+        try:
+            magnitude = float(direction.magnitude)
+        except Exception:
+            magnitude = None
+        if magnitude is None or magnitude <= 1e-9:
+            return rotation_value
+        try:
+            angle = math.degrees(math.atan2(direction.y, direction.x))
+        except Exception:
+            return rotation_value
+        normalized = angle % 360.0
+        if normalized < 0:
+            normalized += 360.0
+        return normalized
+
+    def _world_height(entity: Any, height_value: float | None, matrix: Matrix44 | None) -> float | None:
+        if height_value is None or Vec3 is None:
+            return height_value
+        axis = Vec3(0.0, height_value, 0.0)
+        axis = _apply_ocs_direction(entity, axis) or axis
+        if Matrix44 is not None and matrix is not None:
+            try:
+                axis = _transform_direction(matrix, axis)
+            except Exception:
+                pass
+        try:
+            magnitude = float(axis.magnitude)
+        except Exception:
+            return height_value
+        return magnitude
+
+    def build_record(
+        entity: Any,
+        layout_name: str,
+        *,
+        from_block: bool,
+        block_path: tuple[str, ...],
+        matrix: Matrix44 | None,
+    ) -> dict[str, Any] | None:
         dxf = getattr(entity, "dxf", None)
         try:
             etype = str(entity.dxftype()).upper()
@@ -564,17 +725,21 @@ def dump_all_text(doc: Any, out_dir: Path | str, opts: Mapping[str, Any] | None)
         height_candidate = _resolve_first_attr(dxf, _HEIGHT_ATTRS)
         width_candidate = _resolve_first_attr(dxf, ("width", "text_width", "char_width"))
         rotation_candidate = _resolve_first_attr(dxf, _ROTATION_ATTRS)
-        x_val, y_val = _resolve_xy_from_dxf(dxf)
+        x_val, y_val = _world_point(entity, dxf, matrix)
         style_value = _resolve_style_name(dxf)
         handle_value = _resolve_handle(entity)
-        block_value = None if not block_name else str(block_name)
+        block_value = _compose_block_name(block_path)
+        rotation_value = _safe_float(rotation_candidate)
+        rotation_world = _world_rotation(entity, rotation_value, matrix)
+        height_value = _safe_float(height_candidate)
+        height_world = _world_height(entity, height_value, matrix)
         entry = {
             "layout": str(layout_name or "").strip() or "-",
             "entity_type": etype or "-",
             "layer": layer_value,
-            "height": _safe_float(height_candidate),
+            "height": height_world,
             "width": _safe_float(width_candidate),
-            "rotation": _safe_float(rotation_candidate),
+            "rotation": rotation_world,
             "x": x_val,
             "y": y_val,
             "raw_text": raw_text or "",
@@ -583,30 +748,53 @@ def dump_all_text(doc: Any, out_dir: Path | str, opts: Mapping[str, Any] | None)
             "handle": handle_value,
             "block_name": block_value,
             "from_block": 1 if from_block else 0,
+            "block_path": list(block_path),
         }
         return entry
 
-    def walk_entity(entity: Any, layout_name: str, *, from_block: bool = False, block_name: str | None = None, depth_left: int = max_depth) -> None:
-        nonlocal mleader_total, mleader_captured
+    def walk_entity(
+        entity: Any,
+        layout_name: str,
+        *,
+        transform: Matrix44 | None,
+        block_path: tuple[str, ...] = (),
+    ) -> None:
+        nonlocal mleader_total, mleader_captured, from_blocks_depth_max
         if entity is None:
             return
         try:
             etype = str(entity.dxftype()).upper()
         except Exception:
             etype = ""
+        if block_path:
+            depth = len(block_path)
+            if depth > from_blocks_depth_max:
+                from_blocks_depth_max = depth
         if etype in {"TEXT", "MTEXT", "ATTRIB", "ATTDEF"}:
-            record = build_record(entity, layout_name, from_block=from_block, block_name=block_name)
+            record = build_record(
+                entity,
+                layout_name,
+                from_block=bool(block_path),
+                block_path=block_path,
+                matrix=transform,
+            )
             if record and record_matches_filters(record):
                 records.append(record)
             return
         if etype == "MLEADER":
             mleader_total += 1
-            record = build_record(entity, layout_name, from_block=from_block, block_name=block_name)
+            record = build_record(
+                entity,
+                layout_name,
+                from_block=bool(block_path),
+                block_path=block_path,
+                matrix=transform,
+            )
             if record and record.get("raw_text") and record_matches_filters(record):
                 records.append(record)
                 mleader_captured += 1
             return
-        if etype != "INSERT" or depth_left <= 0:
+        if etype != "INSERT":
             return
 
         insert_name = None
@@ -622,27 +810,47 @@ def dump_all_text(doc: Any, out_dir: Path | str, opts: Mapping[str, Any] | None)
                         insert_name = str(value)
                         break
 
+        combined_path: tuple[str, ...]
+        if insert_name:
+            combined_path = (*block_path, insert_name)
+        else:
+            combined_path = block_path
+
+        child_transform: Matrix44 | None = transform
+        if Matrix44 is not None:
+            matrix_value = None
+            try:
+                matrix_value = entity.matrix44()
+            except Exception:
+                matrix_value = None
+            if matrix_value is not None:
+                if child_transform is None:
+                    child_transform = matrix_value
+                else:
+                    try:
+                        child_transform = child_transform @ matrix_value
+                    except Exception:
+                        child_transform = matrix_value
+
         for attrib in _iter_insert_attribs(entity):
             walk_entity(
                 attrib,
                 layout_name,
-                from_block=True,
-                block_name=insert_name,
-                depth_left=depth_left - 1,
+                transform=child_transform,
+                block_path=combined_path,
             )
 
         virtual_entities: list[Any] = []
         try:
-            virtual_entities = list(entity.virtual_entities())
+            virtual_entities = list(entity.virtual_entities(deep=True))
         except Exception:
             virtual_entities = []
         for child in virtual_entities:
             walk_entity(
                 child,
                 layout_name,
-                from_block=True,
-                block_name=insert_name,
-                depth_left=depth_left - 1,
+                transform=child_transform,
+                block_path=combined_path,
             )
             if hasattr(child, "destroy"):
                 try:
@@ -654,7 +862,12 @@ def dump_all_text(doc: Any, out_dir: Path | str, opts: Mapping[str, Any] | None)
         if layout is None:
             continue
         for entity in layout:
-            walk_entity(entity, str(layout_name or ""))
+            walk_entity(
+                entity,
+                str(layout_name or ""),
+                transform=Matrix44() if Matrix44 is not None else None,
+                block_path=(),
+            )
 
     out_dir_path = Path(out_dir).expanduser()
     out_dir_path.mkdir(parents=True, exist_ok=True)
@@ -674,6 +887,7 @@ def dump_all_text(doc: Any, out_dir: Path | str, opts: Mapping[str, Any] | None)
 
     print(f"[TEXT-DUMP] full csv -> {csv_path}")
     print(f"[TEXT-DUMP] full jsonl -> {jsonl_path}")
+    print(f"[TEXT-DUMP] from_blocks_depth_max={from_blocks_depth_max}")
 
     return (records, csv_path, jsonl_path)
 
