@@ -141,6 +141,9 @@ def classify_chart_rows(
         if not categories:
             categories.add("unknown")
 
+        if "npt" in categories and "tap" in categories:
+            categories.discard("tap")
+
         for category in categories:
             totals[category] = totals.get(category, 0) + qty
 

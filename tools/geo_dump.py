@@ -89,6 +89,26 @@ def _payload_has_rows(payload: Mapping[str, object] | None) -> bool:
     return False
 
 
+def _int_from_value(value: Any) -> int:
+    try:
+        return int(round(float(value or 0)))
+    except Exception:
+        return 0
+
+
+def _am_bor_included_from_candidates(*candidates: Mapping[str, Any] | None) -> bool:
+    for candidate in candidates:
+        if not isinstance(candidate, Mapping):
+            continue
+        flag = candidate.get("am_bor_included")
+        if isinstance(flag, bool):
+            if flag:
+                return True
+        elif flag:
+            return True
+    return False
+
+
 def _ordered_hole_row(row: Mapping[str, object]) -> dict[str, object]:
     ordered: dict[str, object] = {}
     preferred_order = ("hole", "qty", "ref", "side", "desc")
@@ -732,7 +752,67 @@ def main(argv: Sequence[str] | None = None) -> int:
         if isinstance(geom_candidate, Mapping):
             geom_holes_payload = geom_candidate
 
+    def _normalize_count(value: Any) -> int | None:
+        try:
+            number = int(round(float(value)))
+        except Exception:
+            return None
+        return number if number >= 0 else None
+
     if isinstance(geom_holes_payload, Mapping):
+        raw_layer_counts = geom_holes_payload.get("layer_counts")
+        layers_iter: Iterable[Any]
+        if isinstance(raw_layer_counts, Mapping):
+            layers_iter = [
+                {"layer": key, "count": value}
+                for key, value in raw_layer_counts.items()
+            ]
+        elif isinstance(raw_layer_counts, Iterable) and not isinstance(
+            raw_layer_counts, (str, bytes, bytearray)
+        ):
+            layers_iter = list(raw_layer_counts)
+        else:
+            alt_layers = geom_holes_payload.get("layers") or geom_holes_payload.get(
+                "layer_histogram"
+            )
+            if isinstance(alt_layers, Mapping):
+                layers_iter = [
+                    {"layer": key, "count": value}
+                    for key, value in alt_layers.items()
+                ]
+            elif isinstance(alt_layers, Iterable) and not isinstance(
+                alt_layers, (str, bytes, bytearray)
+            ):
+                layers_iter = list(alt_layers)
+            else:
+                layers_iter = []
+        counts_by_layer: dict[str, int] = {}
+        for entry in layers_iter:
+            if not isinstance(entry, Mapping):
+                continue
+            layer_name_raw = str(entry.get("layer") or entry.get("name") or "").strip()
+            layer_name = layer_name_raw.upper()
+            count_val = _normalize_count(entry.get("count"))
+            if not layer_name or count_val in (None, 0):
+                continue
+            counts_by_layer[layer_name] = counts_by_layer.get(layer_name, 0) + count_val
+        if not counts_by_layer and isinstance(raw_layer_counts, Mapping):
+            for key, value in raw_layer_counts.items():
+                count_val = _normalize_count(value)
+                if count_val in (None, 0):
+                    continue
+                name_key = str(key).strip().upper()
+                if not name_key:
+                    continue
+                counts_by_layer[name_key] = counts_by_layer.get(name_key, 0) + count_val
+        if counts_by_layer:
+            layer_totals = sorted(counts_by_layer.items(), key=lambda item: (-item[1], item[0]))
+            top_layers = [f"{name or '-'}:{count}" for name, count in layer_totals[:5]]
+            display = ", ".join(top_layers)
+            if len(layer_totals) > 5:
+                display += ", …"
+            print(f"[GEOM] top layers: {display}")
+
         raw_contributors = geom_holes_payload.get("contributors")
         contributor_records: list[Mapping[str, Any]] = []
         if isinstance(raw_contributors, Mapping):
@@ -745,10 +825,8 @@ def main(argv: Sequence[str] | None = None) -> int:
             ]
         top_lines: list[str] = []
         for entry in contributor_records[:5]:
-            count_val = entry.get("count")
-            try:
-                count_int = int(round(float(count_val)))
-            except Exception:
+            count_val = _normalize_count(entry.get("count"))
+            if count_val in (None, 0):
                 continue
             layer_text = str(entry.get("layer") or "").strip().upper()
             block_text = str(entry.get("block") or "").strip().upper()
@@ -760,7 +838,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 label = block_text
             else:
                 label = "-"
-            top_lines.append(f"{label} : {count_int}")
+            top_lines.append(f"{label} : {count_val}")
         if top_lines:
             summary_display = "; ".join(top_lines) + ";"
             print(f"[GEOM] top contributors: {summary_display}")
@@ -784,6 +862,48 @@ def main(argv: Sequence[str] | None = None) -> int:
     print(f"[OPS] table: {_format_ops_counts(table_counts)}")
     print(f"[OPS] geom : {_format_ops_counts(geom_display)}")
     print(f"[OPS] total: {_format_ops_counts(total_counts)}")
+
+    text_drill_total = (
+        _int_from_value(table_counts.get("drill"))
+        if isinstance(table_counts, Mapping)
+        else 0
+    )
+    text_cbore_total = (
+        _int_from_value(table_counts.get("cbore"))
+        if isinstance(table_counts, Mapping)
+        else 0
+    )
+    text_cdrill_total = (
+        _int_from_value(table_counts.get("cdrill"))
+        if isinstance(table_counts, Mapping)
+        else 0
+    )
+    text_ops_total = text_drill_total + text_cbore_total + text_cdrill_total
+    geom_total = (
+        _int_from_value(geom_counts.get("total"))
+        if isinstance(geom_counts, Mapping)
+        else 0
+    )
+    if geom_total <= 0 and isinstance(geom_counts, Mapping):
+        geom_total = _int_from_value(geom_counts.get("drill"))
+    manifest_existing = (
+        ops_summary.get("manifest") if isinstance(ops_summary, Mapping) else None
+    )
+    am_bor_in_text_flow = _am_bor_included_from_candidates(
+        payload if isinstance(payload, Mapping) else None,
+        geo if isinstance(geo, Mapping) else None,
+        ops_summary if isinstance(ops_summary, Mapping) else None,
+        manifest_payload if isinstance(manifest_payload, Mapping) else None,
+        manifest_existing if isinstance(manifest_existing, Mapping) else None,
+    )
+    suspect_overcount = False
+    if geom_total > 0:
+        if text_ops_total > 0 and float(geom_total) > 1.6 * float(text_ops_total):
+            suspect_overcount = True
+        elif am_bor_in_text_flow and geom_total > 150:
+            suspect_overcount = True
+    if suspect_overcount:
+        print("[GEOM] suspect overcount – check layer blacklist or bbox guard")
 
     suspect_payload: Mapping[str, Any] | None = None
     if isinstance(manifest_payload, Mapping):
