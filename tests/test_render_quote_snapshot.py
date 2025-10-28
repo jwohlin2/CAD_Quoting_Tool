@@ -31,17 +31,13 @@ def _normalize_render_text(text: str) -> str:
 def test_render_quote_matches_snapshot() -> None:
     payload = _dummy_quote_payload()
 
-    divider = "-" * 74
     state = RenderState(
-        qty=int(payload.get("qty") or payload.get("breakdown", {}).get("qty") or 1),
-        result=payload,
-        breakdown=payload.get("breakdown"),
+        payload,
         page_width=74,
-        divider=divider,
         drill_debug_entries=payload.get("drill_debug"),
-        lines=[],
-        recorder=QuoteDocRecorder(divider),
     )
+    state.lines = []
+    state.recorder = QuoteDocRecorder(state.divider)
     render_quote_sections(state)
 
     logging.disable(logging.CRITICAL)

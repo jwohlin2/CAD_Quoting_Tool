@@ -472,6 +472,20 @@ def test_default_text_layer_excludes_do_not_filter_am_bor() -> None:
     assert any(pattern.search("AM_BOR") for pattern in patterns)
 
 
+def test_normalize_layer_allowlist_adds_defaults() -> None:
+    allowlist = geo_extractor._normalize_layer_allowlist(["AM_0"])
+
+    assert allowlist is not None
+    assert set(allowlist) == {"BALLOON", "AM_0"}
+
+
+def test_normalize_layer_allowlist_respects_explicit_default() -> None:
+    allowlist = geo_extractor._normalize_layer_allowlist(["BALLOON"])
+
+    assert allowlist is not None
+    assert tuple(allowlist) == ("BALLOON",)
+
+
 def test_read_geo_prefers_text_rows(monkeypatch: pytest.MonkeyPatch, fallback_doc: _DummyDoc) -> None:
     families = {"0.375": 3, "0.5": 2}
     text_rows = [

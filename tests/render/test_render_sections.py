@@ -8,16 +8,11 @@ from cad_quoter.utils.render_utils import QuoteDocRecorder
 
 @pytest.fixture
 def minimal_state() -> RenderState:
-    divider = "-" * 74
-    return RenderState(
-        qty=1,
-        result={},
-        breakdown={},
-        page_width=74,
-        divider=divider,
-        lines=[],
-        recorder=QuoteDocRecorder(divider),
-    )
+    payload: dict[str, object] = {"qty": 1, "breakdown": {}}
+    state = RenderState(payload, page_width=74)
+    state.lines = []
+    state.recorder = QuoteDocRecorder(state.divider)
+    return state
 
 
 def test_render_quote_sections_emits_summary(minimal_state: RenderState) -> None:

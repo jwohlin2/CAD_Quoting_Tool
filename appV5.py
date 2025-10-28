@@ -11026,10 +11026,20 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
     if not planner_has_drilling_bucket:
         planner_has_drilling_bucket = _has_planner_drilling_bucket(buckets)
 
+    state_payload: MutableMapping[str, Any]
+    if isinstance(result, _MappingABC):
+        state_payload = typing.cast(MutableMapping[str, Any], result)
+    elif isinstance(result, dict):
+        state_payload = result
+    else:
+        state_payload = typing.cast(MutableMapping[str, Any], {})
+
+    if "breakdown" not in state_payload and isinstance(breakdown, _MappingABC):
+        state_payload["breakdown"] = typing.cast(MutableMapping[str, Any], breakdown)
+    state_payload.setdefault("qty", qty)
+
     quote_render_state = QuoteRenderState(
-        qty=qty,
-        result=result if isinstance(result, _MappingABC) else None,
-        breakdown=breakdown if isinstance(breakdown, _MappingABC) else None,
+        state_payload,
         page_width=page_width,
         divider=divider,
         process_meta=process_meta,
