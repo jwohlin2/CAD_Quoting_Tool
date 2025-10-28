@@ -16090,77 +16090,16 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
     # Final cross-check before rendering the quote to text. Verify that
     # drilling minutes/rows remain aligned and capture a snapshot of
     # related financial signals for post-run debugging.
-    try:
-        process_plan_map: Mapping[str, Any] | None = None
-        for candidate in (
-            locals().get("process_plan_summary_local"),
-            breakdown.get("process_plan") if isinstance(breakdown, _MappingABC) else None,
-        ):
-            if isinstance(candidate, _MappingABC):
-                process_plan_map = candidate
-                break
-
-        drilling_plan = (
-            process_plan_map.get("drilling")
-            if isinstance(process_plan_map, _MappingABC)
-            else None
-        )
-        drill_min_card = _safe_float(
-            (drilling_plan or {}).get("total_minutes_billed"),
-            default=0.0,
-        )
-        if drill_min_card <= 0.0 and isinstance(drilling_plan, _MappingABC):
-            drill_min_card = _safe_float(
-                drilling_plan.get("total_minutes_with_toolchange"),
-                default=0.0,
-            )
-
-        bucket_minutes_map = (
-            breakdown.get("bucket_minutes_detail")
-            if isinstance(breakdown, _MappingABC)
-            else None
-        )
-        if not isinstance(bucket_minutes_map, _MutableMappingABC):
-            bucket_minutes_map = bucket_minutes_detail if isinstance(bucket_minutes_detail, dict) else {}
-        drill_min_row = _safe_float(
-            (bucket_minutes_map or {}).get("drilling"),
-            default=0.0,
-        )
-        programming_hr = 0.0
-        if isinstance(nre_detail, _MappingABC):
-            programming_detail = nre_detail.get("programming")
-            if isinstance(programming_detail, _MappingABC):
-                programming_hr = _safe_float(
-                    programming_detail.get("prog_hr"),
-                    default=0.0,
-                )
-
-        material_block_dbg = (
-            breakdown.get("material")
-            if isinstance(breakdown, _MappingABC)
-            else None
-        )
-        material_cost = _safe_float(
-            (material_block_dbg or {}).get("total_cost"),
-            default=0.0,
-        )
-
-        direct_costs = _safe_float(
-            (breakdown if isinstance(breakdown, _MappingABC) else {}).get("total_direct_costs"),
-            default=0.0,
-        )
-
-        dbg = {
-            "drill_min_card": float(drill_min_card),
-            "drill_min_row": float(drill_min_row),
-            "programming_hr": float(programming_hr),
-            "material_cost": float(material_cost),
-            "direct_costs": float(direct_costs),
-            "ladder_subtotal": float(ladder_subtotal),
-        }
-        logger.debug("[render_quote] drill guard snapshot: %s", jdump(dbg, default=None))
-    except Exception:
-        logger.exception("Failed to run final drilling debug block")
+    render_drilling_guard(
+        logger=logger,
+        jdump=jdump,
+        safe_float=_safe_float,
+        breakdown=breakdown,
+        process_plan_summary=locals().get("process_plan_summary_local"),
+        bucket_minutes_detail=bucket_minutes_detail,
+        nre_detail=nre_detail,
+        ladder_subtotal=ladder_subtotal,
+    )
 
     # --- Structured render payload ------------------------------------------
     summary_payload, summary_metrics = build_summary_payload(
