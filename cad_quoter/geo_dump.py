@@ -710,28 +710,18 @@ def main(argv: Sequence[str] | None = None) -> int:
         )
     )
 
-    def _format_ops_counts(counts: Mapping[str, Any] | None) -> str:
-        apost = "\u2019"
-        display_order = (
-            ("drill", "Drill"),
-            ("tap", "Tap"),
-            ("cbore", f"C{apost}bore"),
-            ("cdrill", f"C{apost}drill"),
-            ("jig_grind", "Jig"),
-            ("csink", f"C{apost}sink"),
-            ("spot", "Spot"),
-            ("npt", "NPT"),
-        )
+    def _format_ops_counts(
+        counts: Mapping[str, Any] | None,
+        order: Sequence[tuple[str, str]],
+    ) -> str:
         if not isinstance(counts, Mapping):
             return "Drill 0"
         parts: list[str] = []
-        for key, label_text in display_order:
+        for key, label_text in order:
             value = counts.get(key)
             try:
                 value_int = int(round(float(value)))
             except Exception:
-                value_int = 0
-            if value_int <= 0:
                 continue
             parts.append(f"{label_text} {value_int}")
         if not parts:
@@ -954,26 +944,53 @@ def main(argv: Sequence[str] | None = None) -> int:
     table_counts = manifest_payload.get("table") if isinstance(manifest_payload, Mapping) else {}
     geom_counts = manifest_payload.get("geom") if isinstance(manifest_payload, Mapping) else {}
     total_counts = manifest_payload.get("total") if isinstance(manifest_payload, Mapping) else {}
-    geom_display = {}
-    if isinstance(geom_counts, Mapping):
-        geom_display = {"drill": geom_counts.get("drill", 0)}
-
-    print(f"[OPS] table: {_format_ops_counts(table_counts)}")
-    print(f"[OPS] geom : {_format_ops_counts(geom_display)}")
-    print(f"[OPS] total: {_format_ops_counts(total_counts)}")
+    apost = "\u2019"
+    print(
+        "[OPS] table: "
+        + _format_ops_counts(
+            table_counts,
+            (
+                ("drill_only", "Drill"),
+                ("tap", "Tap"),
+                ("counterbore", f"C{apost}bore"),
+                ("counterdrill", f"C{apost}drill"),
+                ("jig_grind", "Jig"),
+            ),
+        )
+    )
+    print(
+        "[OPS] geom : "
+        + _format_ops_counts(
+            geom_counts,
+            (("drill_residual", "Drill"),),
+        )
+    )
+    print(
+        "[OPS] total: "
+        + _format_ops_counts(
+            total_counts,
+            (
+                ("drill", "Drill"),
+                ("tap", "Tap"),
+                ("counterbore", f"C{apost}bore"),
+                ("counterdrill", f"C{apost}drill"),
+                ("jig_grind", "Jig"),
+            ),
+        )
+    )
 
     text_drill_total = (
-        _int_from_value(table_counts.get("drill"))
+        _int_from_value(table_counts.get("drill_only"))
         if isinstance(table_counts, Mapping)
         else 0
     )
     text_cbore_total = (
-        _int_from_value(table_counts.get("cbore"))
+        _int_from_value(table_counts.get("counterbore"))
         if isinstance(table_counts, Mapping)
         else 0
     )
     text_cdrill_total = (
-        _int_from_value(table_counts.get("cdrill"))
+        _int_from_value(table_counts.get("counterdrill"))
         if isinstance(table_counts, Mapping)
         else 0
     )
@@ -995,13 +1012,12 @@ def main(argv: Sequence[str] | None = None) -> int:
         manifest_payload if isinstance(manifest_payload, Mapping) else None,
         manifest_existing if isinstance(manifest_existing, Mapping) else None,
     )
-    suspect_overcount = False
-    if geom_total > 0:
-        if text_ops_total > 0 and float(geom_total) > 1.6 * float(text_ops_total):
-            suspect_overcount = True
-        elif am_bor_in_text_flow and geom_total > 150:
-            suspect_overcount = True
-    if suspect_overcount:
+    total_drill_count = (
+        _int_from_value(total_counts.get("drill"))
+        if isinstance(total_counts, Mapping)
+        else 0
+    )
+    if total_drill_count > 100 or (total_drill_count and total_drill_count < 50):
         print("[GEOM] suspect overcount – check layer blacklist or bbox guard")
 
     suspect_payload: Mapping[str, Any] | None = None
