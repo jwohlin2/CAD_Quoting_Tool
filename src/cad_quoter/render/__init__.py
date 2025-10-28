@@ -3,20 +3,13 @@
 from __future__ import annotations
 
 from functools import cmp_to_key
-from typing import Any, Sequence
+from typing import Sequence
 
-from cad_quoter.app.quote_doc import (
-    build_quote_header_lines,
-    _sanitize_render_text,
-)
-
-try:  # Python 3.11+: ``collections.abc`` already exports ``MutableMapping``
-    from collections.abc import Mapping, MutableMapping
-except ImportError:  # pragma: no cover - fallback for older versions
-    from typing import Mapping, MutableMapping  # type: ignore
+from cad_quoter.app.quote_doc import _sanitize_render_text
 
 import textwrap
 
+from .header import render_header
 from .material import render_material
 from .nre import render_nre
 from .pass_through import render_pass_through
@@ -74,42 +67,7 @@ def _render_drill_debug(
 def render_summary(state: RenderState) -> tuple[list[str], list[str]]:
     """Return the QUOTE SUMMARY header and trailing separator lines."""
 
-    header_lines, pricing_source_value = build_quote_header_lines(
-        qty=state.qty,
-        result=state.result,
-        breakdown=state.breakdown,
-        page_width=state.page_width,
-        divider=state.divider,
-        process_meta=state.process_meta,
-        process_meta_raw=state.process_meta_raw,
-        hour_summary_entries=state.hour_summary_entries,
-        cfg=state.cfg,
-    )
-    state.pricing_source_value = pricing_source_value
-
-    breakdown = state.breakdown if isinstance(state.breakdown, MutableMapping) else None
-    result = state.result if isinstance(state.result, MutableMapping) else None
-
-    if breakdown is not None:
-        if pricing_source_value:
-            breakdown["pricing_source"] = pricing_source_value
-        else:
-            breakdown.pop("pricing_source", None)
-
-    if result is not None:
-        app_meta_container = result.setdefault("app_meta", {})
-        if isinstance(app_meta_container, MutableMapping):
-            if pricing_source_value and str(pricing_source_value).strip().lower() == "planner":
-                app_meta_container.setdefault("used_planner", True)
-
-        decision_state = result.get("decision_state") if isinstance(result, Mapping) else None
-        if isinstance(decision_state, MutableMapping):
-            baseline_state = decision_state.get("baseline")
-            if isinstance(baseline_state, MutableMapping):
-                if pricing_source_value:
-                    baseline_state["pricing_source"] = pricing_source_value
-                else:
-                    baseline_state.pop("pricing_source", None)
+    header_lines = render_header(state)
 
     suffix_lines: list[str] = []
     if state.material_warning_summary and state.material_warning_label:
@@ -177,6 +135,7 @@ def render_quote_sections(state: RenderState) -> list[list[str]]:
 
 
 __all__ = [
+    "render_header",
     "RenderState",
     "render_material",
     "render_nre",
