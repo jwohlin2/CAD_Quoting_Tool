@@ -122,3 +122,13 @@ def test_table_authoritative_no_pilot_add() -> None:
     assert manifest["table"]["drill"] == 4
     assert manifest["details"].get("drill_implied_from_taps") == 0
     assert manifest["total"]["drill"] == manifest["table"]["drill"]
+
+
+def test_non_authoritative_unsized_drill_rows_preserved() -> None:
+    rows = [{"qty": 10, "desc": "DRILL THRU"}]
+
+    manifest = geo_extractor.ops_manifest(rows, authoritative_table=False)
+
+    assert manifest["table"]["drill"] == 10
+    assert manifest["details"].get("drill_sized") == 0
+    assert manifest["total"]["drill"] == 10

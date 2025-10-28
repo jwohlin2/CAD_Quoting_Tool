@@ -8749,6 +8749,8 @@ def ops_manifest(
     table_counterdrill = int(table_counts.get("cdrill", 0))
     table_jig = int(table_counts.get("jig_grind", 0))
 
+    unsized_table_drill_qty = max(table_drill_only - sized_drill_qty, 0)
+
     table_manifest: dict[str, int] = {
         "drill_only": table_drill_only,
         "tap": table_tap,
@@ -8767,7 +8769,12 @@ def ops_manifest(
     if authoritative_table:
         total_drill = table_drill_only
     elif table_rows_present:
-        total_drill = sized_drill_qty + geom_residual + implied_drill_total
+        total_drill = (
+            sized_drill_qty
+            + unsized_table_drill_qty
+            + geom_residual
+            + implied_drill_total
+        )
     else:
         total_drill = max(geom_total, table_drill_total)
 
