@@ -16205,9 +16205,15 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
     )
 
     summary_margin_pct = summary_payload.get("margin_pct")
-    if summary_margin_pct is not None:
+    if margin_pct_value is None:
+        if summary_margin_pct is not None:
+            try:
+                margin_pct_value = float(summary_margin_pct)
+            except (TypeError, ValueError):
+                pass
+    else:
         try:
-            margin_pct_value = float(summary_margin_pct)
+            summary_payload["margin_pct"] = float(margin_pct_value)
         except (TypeError, ValueError):
             pass
 
