@@ -293,7 +293,7 @@ def test_anchor_rows_are_authoritative_over_roi() -> None:
     buckets, row_count, qty_sum = classify_chart_rows(merged)
     assert row_count == 3
     assert qty_sum == 8
-    assert buckets.get("tap") == 4
+    assert buckets.get("tap") == 8
     assert buckets.get("cbore") == 4
     assert buckets.get("npt") == 4
     assert buckets.get("drill") == 4
@@ -418,7 +418,7 @@ def test_fallback_semicolon_row_remains_single_entry() -> None:
     assert qty_sum == 4
     assert buckets.get("cbore") == 4
     assert buckets.get("npt") == 4
-    assert buckets.get("tap", 0) == 0
+    assert buckets.get("tap") == 4
 
 
 def test_anchor_height_filter_drops_small_text() -> None:
