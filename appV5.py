@@ -14988,32 +14988,53 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
     manifest_table_counts: Mapping[str, Any] | None = None
     manifest_geom_counts: Mapping[str, Any] | None = None
     manifest_total_counts: Mapping[str, Any] | None = None
-    try:
-        manifest_rows = None
-        if isinstance(ops_summary_map, _MappingABC):
-            manifest_rows_candidate = ops_summary_map.get("rows")
-            if isinstance(manifest_rows_candidate, list):
-                manifest_rows = [
-                    row for row in manifest_rows_candidate if isinstance(row, Mapping)
-                ]
-            else:
-                manifest_rows = manifest_rows_candidate
-        core_geo_manifest = _get_core_geo_map(geo_map)
-        hole_sets_manifest = None
-        if isinstance(core_geo_manifest, Mapping):
-            hole_sets_manifest = core_geo_manifest.get("hole_sets")
-        manifest_payload = ops_manifest(manifest_rows, hole_sets=hole_sets_manifest)
-        if isinstance(manifest_payload, Mapping):
-            table_candidate = manifest_payload.get("table")
-            geom_candidate = manifest_payload.get("geom")
-            total_candidate = manifest_payload.get("total")
-            if isinstance(table_candidate, Mapping):
-                manifest_table_counts = table_candidate
-            if isinstance(geom_candidate, Mapping):
-                manifest_geom_counts = geom_candidate
-            if isinstance(total_candidate, Mapping):
-                manifest_total_counts = total_candidate
-    except Exception:
+    manifest_source: Mapping[str, Any] | None = None
+    if isinstance(ops_summary_map, _MappingABC):
+        manifest_existing = ops_summary_map.get("manifest")
+        if isinstance(manifest_existing, Mapping):
+            manifest_source = manifest_existing
+    if manifest_source is None:
+        try:
+            manifest_rows = None
+            if isinstance(ops_summary_map, _MappingABC):
+                manifest_rows_candidate = ops_summary_map.get("rows")
+                if isinstance(manifest_rows_candidate, list):
+                    manifest_rows = [
+                        row for row in manifest_rows_candidate if isinstance(row, Mapping)
+                    ]
+                else:
+                    manifest_rows = manifest_rows_candidate
+            core_geo_manifest = _get_core_geo_map(geo_map)
+            hole_sets_manifest = None
+            geom_holes_manifest: Mapping[str, Any] | None = None
+            if isinstance(core_geo_manifest, Mapping):
+                hole_sets_manifest = core_geo_manifest.get("hole_sets")
+                geom_candidate = core_geo_manifest.get("geom_holes")
+                if isinstance(geom_candidate, Mapping):
+                    geom_holes_manifest = geom_candidate
+            if geom_holes_manifest is None and isinstance(geo_map, _MappingABC):
+                geom_candidate = geo_map.get("geom_holes")
+                if isinstance(geom_candidate, Mapping):
+                    geom_holes_manifest = geom_candidate
+            manifest_source = ops_manifest(
+                manifest_rows,
+                geom_holes=geom_holes_manifest,
+                hole_sets=hole_sets_manifest,
+            )
+        except Exception:
+            manifest_source = {}
+    if isinstance(manifest_source, Mapping):
+        manifest_payload = dict(manifest_source)
+        table_candidate = manifest_payload.get("table")
+        geom_candidate = manifest_payload.get("geom")
+        total_candidate = manifest_payload.get("total")
+        if isinstance(table_candidate, Mapping):
+            manifest_table_counts = table_candidate
+        if isinstance(geom_candidate, Mapping):
+            manifest_geom_counts = geom_candidate
+        if isinstance(total_candidate, Mapping):
+            manifest_total_counts = total_candidate
+    else:
         manifest_payload = {}
 
     ops_counts = audit_operations(

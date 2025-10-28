@@ -204,6 +204,33 @@ def test_read_text_table_auto_retries_excluded_am_bor(monkeypatch: pytest.Monkey
     assert any("Ø0.250" in str(row.get("desc")) for row in rows)
 
 
+def test_layer_filter_excludes_am_bor_from_post_counts(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    monkeypatch.setattr(geo_extractor, "_resolve_app_callable", lambda name: None)
+
+    class _LayeredMText(_DummyMText):
+        def __init__(self, text: str, layer: str) -> None:
+            super().__init__(text)
+            self.dxf = types.SimpleNamespace(layer=layer)
+
+    doc = _DummyDoc(
+        [
+            _LayeredMText("(2) Ø0.250 DRILL THRU", "AM_BOR"),
+            _LayeredMText("(3) Ø0.312 TAP FROM FRONT", "AM_BOR"),
+        ]
+    )
+
+    geo_extractor.read_text_table(doc)
+    out = capsys.readouterr().out
+
+    post_lines = [
+        line for line in out.splitlines() if "[TEXT-SCAN] kept_by_layer(post)=" in line
+    ]
+    assert post_lines, "expected kept_by_layer(post) line"
+    assert all("AM_BOR" not in line for line in post_lines)
+
+
 def test_numeric_ladder_line_is_dropped_in_fallback() -> None:
     payload = geo_extractor._publish_fallback_from_rows_txt(
         [
@@ -292,22 +319,68 @@ def test_classify_op_row_counterdrill_synonyms() -> None:
         assert any(item.get("kind") == "cdrill" for item in items)
 
 
+def test_split_actions_and_classify_action_counts() -> None:
+    desc = "(4) .75Ø C'BORE AS SHOWN; \"R\" (.339Ø) DRILL THRU AS SHOWN; 1/8- N.P.T."
+
+    fragments = geo_extractor.split_actions(desc)
+    assert len(fragments) == 3
+
+    totals: dict[str, int] = {}
+    for fragment in fragments:
+        action = geo_extractor.classify_action(fragment)
+        kind = action.get("kind")
+        assert isinstance(kind, str)
+        totals[kind] = totals.get(kind, 0) + 4
+        if kind == "tap":
+            assert action.get("npt") is True
+
+    assert totals.get("cbore") == 4
+    assert totals.get("drill") == 4
+    assert totals.get("tap") == 4
+
+
 def test_ops_manifest_combines_table_and_geom() -> None:
     rows = [
         {"qty": 4, "desc": '\"R\" (.339Ø) DRILL THRU'},
         {"qty": 2, "desc": "(2) 1/4-20 TAP"},
     ]
-    hole_sets = [{"qty": 10}]
+    geom_holes = {"groups": [{"dia_in": 0.25, "count": 10}], "total": 10}
 
-    manifest = geo_extractor.ops_manifest(rows, hole_sets=hole_sets)
+    manifest = geo_extractor.ops_manifest(rows, geom_holes=geom_holes)
 
     table_counts = manifest.get("table", {})
     total_counts = manifest.get("total", {})
+    geom_counts = manifest.get("geom", {})
 
     assert table_counts.get("drill") == 4
     assert table_counts.get("tap") == 2
-    assert manifest.get("geom_drill_count") == 10
-    assert total_counts.get("drill") == 10
+    assert geom_counts.get("drill") == 10
+    assert geom_counts.get("residual_drill") == 6
+    assert total_counts.get("drill") == 6
+
+
+def test_npt_counts_as_tap() -> None:
+    rows = [{"qty": 4, "desc": "1/8- N.P.T."}]
+
+    manifest = geo_extractor.ops_manifest(rows, geom_holes={"groups": [], "total": 0})
+
+    table_counts = manifest.get("table", {})
+    details = manifest.get("details", {})
+    total_counts = manifest.get("total", {})
+
+    assert table_counts.get("tap") == 4
+    assert details.get("npt") == 4
+    assert total_counts.get("tap") == 4
+
+
+def test_manifest_reconcile_subtracts_sized_drills() -> None:
+    rows = [{"qty": 4, "desc": '\"R\" (.339Ø) DRILL THRU'}]
+    geom = {"groups": [{"dia_in": 0.339, "count": 77}], "total": 77}
+
+    manifest = geo_extractor.ops_manifest(rows, geom_holes=geom)
+
+    assert manifest.get("details", {}).get("drill_sized") == 4
+    assert manifest.get("total", {}).get("drill") == 73
 
 
 def test_merge_table_lines_ignores_numeric_ladder_noise() -> None:
@@ -396,7 +469,7 @@ def test_default_text_layer_excludes_do_not_filter_am_bor() -> None:
         for pattern in geo_extractor.DEFAULT_TEXT_LAYER_EXCLUDE_REGEX
     ]
 
-    assert all(not pattern.match("AM_BOR") for pattern in patterns)
+    assert any(pattern.search("AM_BOR") for pattern in patterns)
 
 
 def test_read_geo_prefers_text_rows(monkeypatch: pytest.MonkeyPatch, fallback_doc: _DummyDoc) -> None:
@@ -476,6 +549,39 @@ def test_read_geo_promotes_rows_txt_fallback(
     refs = {row.get("ref") for row in rows}
     assert '0.2500"' in refs
     assert '0.3390"' in refs
+
+
+def test_anchor_wins_skips_roi_and_single_publish(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    doc = _DummyDoc(
+        [
+            _DummyMText("(2) Ø0.250 DRILL THRU"),
+            _DummyMText("(3) Ø0.312 TAP FROM FRONT"),
+            _DummyMText("(4) Ø0.201 DRILL THRU"),
+        ]
+    )
+
+    monkeypatch.setattr(geo_extractor, "_resolve_app_callable", lambda name: None)
+    monkeypatch.setattr(geo_extractor, "read_acad_table", lambda *args, **kwargs: {})
+    monkeypatch.setattr(geo_extractor, "extract_geometry", lambda _doc: {})
+    monkeypatch.setattr(
+        geo_extractor,
+        "geom_hole_census",
+        lambda _doc: {"groups": [], "total": 0},
+    )
+
+    geo_extractor.read_geo(doc)
+    captured = capsys.readouterr().out
+
+    assert "[TEXT-SCAN] pass=roi" not in captured
+    publish_lines = [
+        line
+        for line in captured.splitlines()
+        if line.startswith("[PATH] publish=")
+    ]
+    assert len(publish_lines) == 1
+    assert publish_lines[0].startswith("[PATH] publish=text_table")
 
 
 def test_read_geo_raises_when_no_text_rows(
