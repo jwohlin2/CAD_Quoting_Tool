@@ -454,7 +454,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument(
         "--dump-table",
         action="store_true",
-        help="Print the first 10 rebuilt rows (qty/kind/side/desc)",
+        help="Print the first 8 stitched rows (qty/kind/side/text)",
     )
     parser.add_argument(
         "--dump-circles",
@@ -1425,7 +1425,7 @@ def main(argv: Sequence[str] | None = None) -> int:
 
     if args.dump_table:
         if rebuilt_rows:
-            limit = min(10, len(rebuilt_rows))
+            limit = min(8, len(rebuilt_rows))
             print(f"[TABLE] dump_count={limit} rows_total={len(rebuilt_rows)}")
             for idx, row in enumerate(rebuilt_rows[:limit]):
                 qty_val = row.get("qty")
@@ -1441,16 +1441,16 @@ def main(argv: Sequence[str] | None = None) -> int:
                     side_val = row.get("face")
                 side_display = str(side_val) if side_val not in (None, "") else "-"
                 kind_display = _infer_row_kind(row)
-                desc_display = _row_desc(row)
-                if desc_display and len(desc_display) > 180:
-                    desc_display = desc_display[:177] + "…"
+                text_display = _row_desc(row)
+                if text_display and len(text_display) > 180:
+                    text_display = text_display[:177] + "…"
                 print(
-                    "[TABLE {idx:02d}] QTY={qty} KIND={kind} SIDE={side} DESC={desc}".format(
+                    "[TABLE {idx:02d}] qty={qty} kind={kind} side={side} text={text}".format(
                         idx=idx,
                         qty=qty_display,
                         kind=kind_display,
                         side=side_display,
-                        desc=desc_display,
+                        text=text_display,
                     )
                 )
         else:

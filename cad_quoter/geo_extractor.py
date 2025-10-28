@@ -3233,7 +3233,7 @@ def _combine_text_rows(
     return merged, dedup_dropped, False
 
 
-def _compute_anchor_height(entries: Iterable[Mapping[str, Any]]) -> tuple[float, int]:
+def _compute_anchor_h(entries: Iterable[Mapping[str, Any]]) -> tuple[float, int]:
     heights: list[float] = []
     count = 0
     for entry in entries:
@@ -3258,7 +3258,7 @@ def _compute_anchor_height(entries: Iterable[Mapping[str, Any]]) -> tuple[float,
     return (anchor_h, count)
 
 
-def _filter_entries_by_anchor_height(
+def _filter_entries_by_anchor_h(
     entries: Iterable[Mapping[str, Any]],
     *,
     anchor_h: float,
@@ -4720,19 +4720,6 @@ def _extract_anchor_band_lines(context: Mapping[str, Any] | None) -> list[str]:
         if layout_idx in anchor_layouts:
             entries_by_layout[layout_idx].append(entry)
 
-    anchor_h = 0.0
-    try:
-        anchor_h = float(context.get("anchor_height") or 0.0)
-    except Exception:
-        anchor_h = 0.0
-    if anchor_h < 0:
-        anchor_h = 0.0
-
-    height_lower = anchor_h * 0.6 if anchor_h > 0 else None
-    height_upper = anchor_h * 1.4 if anchor_h > 0 else None
-    height_stop_lower = height_lower
-    height_stop_upper = height_upper
-
     anchors = [
         entry
         for entry in anchor_entries
@@ -4742,6 +4729,26 @@ def _extract_anchor_band_lines(context: Mapping[str, Any] | None) -> list[str]:
             )
         )
     ]
+    anchor_h = 0.0
+    try:
+        anchor_h = float(
+            context.get("anchor_h")
+            if isinstance(context, Mapping)
+            else 0.0
+        )
+        if anchor_h == 0.0 and isinstance(context, Mapping):
+            legacy_anchor = context.get("anchor_height")
+            if isinstance(legacy_anchor, (int, float)):
+                anchor_h = float(legacy_anchor)
+    except Exception:
+        anchor_h = 0.0
+    if anchor_h < 0:
+        anchor_h = 0.0
+
+    height_lower = anchor_h * 0.6 if anchor_h > 0 else None
+    height_upper = anchor_h * 1.4 if anchor_h > 0 else None
+    height_stop_lower = anchor_h * 0.3 if anchor_h > 0 else None
+    height_stop_upper = anchor_h * 1.7 if anchor_h > 0 else None
     print(
         f"[TEXT-SCAN] anchors={len(anchors)} h_anchor={anchor_h:.2f}"
         if anchors
@@ -5277,7 +5284,6 @@ def read_text_table(
     base_exclude = re.compile(_GEO_EXCLUDE_LAYERS_DEFAULT, re.IGNORECASE)
     if not any(pattern.pattern == base_exclude.pattern for pattern in exclude_patterns):
         exclude_patterns.insert(0, base_exclude)
-    base_exclude_pattern_text = base_exclude.pattern
     am_bor_band_layouts = {"CHART", "SHEET (B)"}
     include_display = [pattern.pattern for pattern in include_patterns]
     exclude_display = [pattern.pattern for pattern in exclude_patterns]
@@ -6043,8 +6049,6 @@ def read_text_table(
                 def _matches_any(
                     patterns: list[re.Pattern[str]],
                     values: list[str],
-                    *,
-                    skip_base_am_bor: bool = False,
                 ) -> bool:
                     for pattern in patterns:
                         for value in values:
@@ -6053,10 +6057,6 @@ def read_text_table(
                             match = pattern.search(value)
                             if not match:
                                 continue
-                            if skip_base_am_bor and pattern.pattern == base_exclude_pattern_text:
-                                matched_text = match.group(0) if match else value
-                                if str(matched_text or "").strip().upper() == "AM_BOR":
-                                    continue
                             return True
                     return False
 
@@ -6083,16 +6083,9 @@ def read_text_table(
                         include_ok = _matches_any(include_patterns, values)
                     exclude_hit = False
                     if include_ok and exclude_patterns:
-                        entry_is_am_bor = str(layer_text or "").strip().upper() == "AM_BOR" or (
-                            str(upper_text or "").strip().upper() == "AM_BOR"
-                        )
-                        skip_base_am_bor = (
-                            layout_upper in am_bor_band_layouts and entry_is_am_bor
-                        )
                         exclude_hit = _matches_any(
                             list(exclude_patterns),
                             values,
-                            skip_base_am_bor=skip_base_am_bor,
                         )
                     if include_ok and not exclude_hit:
                         regex_filtered.append(entry)
@@ -6162,6 +6155,11 @@ def read_text_table(
             am_bor_pre_count = _lookup_layer_count(layer_counts_pre, "AM_BOR")
             am_bor_post_count = _lookup_layer_count(layer_counts_post, "AM_BOR")
             am_bor_drop_count = max(am_bor_pre_count - am_bor_post_count, 0)
+
+            if am_bor_post_count > 0:
+                raise AssertionError(
+                    "AM_BOR layer must be excluded from text scan results",
+                )
     
             collected_entries = filtered_entries
             if isinstance(_LAST_TEXT_TABLE_DEBUG, dict):
@@ -6500,12 +6498,12 @@ def read_text_table(
                     candidate_entries_local.append(entry_copy)
                 if not candidate_entries_local:
                     return None
-                anchor_h_local, _anchor_count = _compute_anchor_height(
+                anchor_h_local, _anchor_count = _compute_anchor_h(
                     candidate_entries_local
                 )
                 anchor_h_local = float(anchor_h_local or 0.20)
                 if _anchor_count > 0 and anchor_h_local > 0 and candidate_entries_local:
-                    filtered_by_height = _filter_entries_by_anchor_height(
+                    filtered_by_height = _filter_entries_by_anchor_h(
                         candidate_entries_local, anchor_h=anchor_h_local
                     )
                     if filtered_by_height:
@@ -6704,8 +6702,6 @@ def read_text_table(
             candidate_entries = normalized_entries
             table_lines = normalized_lines
 
-            anchor_h, anchor_count = _compute_anchor_height(candidate_entries)
-            anchor_h = float(anchor_h or 0.20)
             anchors = [
                 entry
                 for entry in candidate_entries
@@ -6716,6 +6712,12 @@ def read_text_table(
                 )
             ]
             anchor_count = len(anchors)
+            anchor_h = 0.0
+            if anchor_count:
+                anchor_h, counted = _compute_anchor_h(anchors)
+                if counted <= 0:
+                    anchor_h = 0.0
+                anchor_h = float(anchor_h or 0.20)
             print(
                 f"[TEXT-SCAN] anchors={len(anchors)} h_anchor={anchor_h:.2f}"
                 if anchors
@@ -6723,7 +6725,7 @@ def read_text_table(
             )
             total_by_height = len(candidate_entries)
             if anchor_count > 0 and anchor_h > 0 and candidate_entries:
-                filtered_entries = _filter_entries_by_anchor_height(
+                filtered_entries = _filter_entries_by_anchor_h(
                     candidate_entries, anchor_h=anchor_h
                 )
                 kept_count = len(filtered_entries)
@@ -7004,7 +7006,7 @@ def read_text_table(
                             entry.get("normalized_text") or entry.get("text")
                         )
                     ],
-                    "anchor_height": anchor_h,
+                    "anchor_h": anchor_h,
                     "layout_order": [
                         idx for idx in layout_order if _coerce_layout_index(idx) in anchor_layouts
                     ],
