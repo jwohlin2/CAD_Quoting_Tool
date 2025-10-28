@@ -695,45 +695,62 @@ def main(argv: Sequence[str] | None = None) -> int:
         )
     )
 
-    def _log_ops(label: str, counts: Mapping[str, Any] | None) -> None:
-        if not isinstance(counts, Mapping):
-            print(f"[OPS] {label}: <none>")
-            return
+    def _format_ops_counts(counts: Mapping[str, Any] | None) -> str:
         display_order = (
-            ("drill", "drill"),
-            ("tap", "tap"),
-            ("cbore", "cbore"),
-            ("cdrill", "cdrill"),
-            ("csink", "csink"),
-            ("jig_grind", "jig"),
-            ("spot", "spot"),
-            ("npt", "npt"),
-            ("unknown", "unknown"),
+            ("drill", "Drill"),
+            ("tap", "Tap"),
+            ("cbore", "C'bore"),
+            ("cdrill", "C'drill"),
+            ("jig_grind", "Jig"),
+            ("csink", "C'sink"),
+            ("spot", "Spot"),
+            ("npt", "NPT"),
         )
+        if not isinstance(counts, Mapping):
+            return "Drill 0"
         parts: list[str] = []
         for key, label_text in display_order:
-            value = counts.get(key, 0)
+            value = counts.get(key)
             try:
                 value_int = int(round(float(value)))
             except Exception:
-                continue
+                value_int = 0
             if value_int <= 0:
                 continue
-            parts.append(f"{label_text}={value_int}")
+            parts.append(f"{label_text} {value_int}")
         if not parts:
-            parts.append("none=0")
-        print(f"[OPS] {label}: " + " ".join(parts))
+            parts.append("Drill 0")
+        return " | ".join(parts)
 
     hole_sets_payload = _extract_hole_sets(geo)
-    manifest_payload = ops_manifest(rows, hole_sets=hole_sets_payload)
+    geom_holes_payload: Mapping[str, Any] | None = None
+    geom_candidate = payload.get("geom_holes") if isinstance(payload, Mapping) else None
+    if isinstance(geom_candidate, Mapping):
+        geom_holes_payload = geom_candidate
+    elif isinstance(geo, Mapping):
+        geom_candidate = geo.get("geom_holes")
+        if isinstance(geom_candidate, Mapping):
+            geom_holes_payload = geom_candidate
+
+    manifest_payload = ops_manifest(
+        rows,
+        geom_holes=geom_holes_payload,
+        hole_sets=hole_sets_payload,
+    )
+
+    if isinstance(manifest_payload, Mapping):
+        payload["ops_manifest"] = dict(manifest_payload)
+
     table_counts = manifest_payload.get("table") if isinstance(manifest_payload, Mapping) else {}
     geom_counts = manifest_payload.get("geom") if isinstance(manifest_payload, Mapping) else {}
     total_counts = manifest_payload.get("total") if isinstance(manifest_payload, Mapping) else {}
+    geom_display = {}
+    if isinstance(geom_counts, Mapping):
+        geom_display = {"drill": geom_counts.get("drill", 0)}
 
-    _log_ops("table", table_counts)
-    if isinstance(geom_counts, Mapping) and geom_counts:
-        _log_ops("geom", geom_counts)
-    _log_ops("total", total_counts)
+    print(f"[OPS] table: {_format_ops_counts(table_counts)}")
+    print(f"[OPS] geom : {_format_ops_counts(geom_display)}")
+    print(f"[OPS] total: {_format_ops_counts(total_counts)}")
 
     default_sample = "301_redacted.dwg"
     try:
