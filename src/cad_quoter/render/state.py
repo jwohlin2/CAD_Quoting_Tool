@@ -141,6 +141,9 @@ class RenderState:
     recorder: QuoteDocRecorder | None = None
     deferred_replacements: list[tuple[int, str]] = field(default_factory=list)
     summary_lines: list[str] = field(default_factory=list)
+    programming_rate: float = 0.0
+    programming_per_part: float = 0.0
+    fixture_per_part: float = 0.0
 
     def __post_init__(self) -> None:
         result_map = _as_mapping(self.payload)
@@ -207,6 +210,16 @@ class RenderState:
         self.nre_cost_details: dict[str, Any] = _as_mapping(
             breakdown_map.get("nre_cost_details")
         )
+
+        self.programming_rate = _coerce_rate_value(self.nre.get("programming_rate"))
+        if self.programming_rate <= 0:
+            self.programming_rate = _coerce_rate_value(self.rates.get("ProgrammerRate"))
+        if self.programming_rate <= 0:
+            self.programming_rate = _coerce_rate_value(self.rates.get("ProgrammingRate"))
+        self.programming_per_part = _coerce_rate_value(
+            self.nre.get("programming_per_part")
+        )
+        self.fixture_per_part = _coerce_rate_value(self.nre.get("fixture_per_part"))
 
         labor_costs_raw = _as_mapping(breakdown_map.get("labor_costs"))
         self.labor_cost_totals: dict[str, float] = {}
