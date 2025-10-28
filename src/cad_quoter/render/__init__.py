@@ -17,6 +17,7 @@ except ImportError:  # pragma: no cover - fallback for older versions
 
 import textwrap
 
+from .buckets import detect_planner_drilling, has_planner_drilling
 from .material import render_material
 from .nre import render_nre
 from .pass_through import render_pass_through
@@ -178,6 +179,8 @@ def render_quote_sections(state: RenderState) -> list[list[str]]:
 
 __all__ = [
     "RenderState",
+    "detect_planner_drilling",
+    "has_planner_drilling",
     "render_material",
     "render_nre",
     "render_pass_through",

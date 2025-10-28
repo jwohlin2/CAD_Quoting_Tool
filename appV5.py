@@ -148,6 +148,10 @@ from cad_quoter.render import (
     RenderState as QuoteRenderState,
     render_quote_sections as render_quote_sections_helper,
 )
+from cad_quoter.render.buckets import (
+    detect_planner_drilling,
+    has_planner_drilling as render_state_has_planner_drilling,
+)
 
 try:
     from cad_quoter.geometry.dxf_text import (
@@ -10997,22 +11001,6 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
     removal = (result or {}).get("removal_summary") or {}
     mins = float(removal.get("total_minutes") or 0.0)
 
-    def _has_planner_drilling_bucket(candidate: Any) -> bool:
-        if isinstance(candidate, _MappingABC):
-            items_iter = candidate.items()
-        elif isinstance(candidate, dict):
-            items_iter = candidate.items()
-        else:
-            return False
-        for raw_key, raw_value in items_iter:
-            key_text = str(raw_key or "").strip().lower()
-            if key_text == "drilling":
-                return True
-            if key_text == "buckets" and raw_value is not candidate:
-                if _has_planner_drilling_bucket(raw_value):
-                    return True
-        return False
-
     buckets = (breakdown or {}).get("planner_buckets") or {}
     bucket_view_candidate: Any = None
     if isinstance(breakdown, _MappingABC):
@@ -11022,9 +11010,9 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
 
     planner_has_drilling_bucket = False
     if not planner_has_drilling_bucket:
-        planner_has_drilling_bucket = _has_planner_drilling_bucket(bucket_view_candidate)
+        planner_has_drilling_bucket = detect_planner_drilling(bucket_view_candidate)
     if not planner_has_drilling_bucket:
-        planner_has_drilling_bucket = _has_planner_drilling_bucket(buckets)
+        planner_has_drilling_bucket = detect_planner_drilling(buckets)
 
     state_payload: MutableMapping[str, Any]
     if isinstance(result, _MappingABC):
@@ -11053,6 +11041,9 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
         lines=lines,
         recorder=doc_builder,
     )
+
+    if not planner_has_drilling_bucket:
+        planner_has_drilling_bucket = render_state_has_planner_drilling(quote_render_state)
     for segment in render_quote_sections_helper(quote_render_state):
         for segment_line in segment:
             append_line(segment_line)
