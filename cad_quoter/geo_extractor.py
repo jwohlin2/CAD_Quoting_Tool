@@ -9559,6 +9559,132 @@ def _read_geo_payload_from_path(
     return payload
 
 
+def extract_for_app(doc: Any, *, opts: Mapping[str, Any] | None = None, **read_kwargs: Any) -> dict[str, Any]:
+    """Return a normalized payload suitable for application diagnostics."""
+
+    payload_raw = read_geo(doc, **read_kwargs)
+    payload: dict[str, Any]
+    if isinstance(payload_raw, Mapping):
+        payload = dict(payload_raw)
+    else:
+        payload = {}
+
+    geo_obj = payload.get("geo") if isinstance(payload, Mapping) else None
+    if isinstance(geo_obj, Mapping):
+        geo_map = geo_obj if isinstance(geo_obj, dict) else dict(geo_obj)
+    else:
+        geo_map = {}
+    payload["geo"] = geo_map
+
+    ops_summary_candidate = payload.get("ops_summary")
+    ops_summary_map = _ensure_ops_summary_map(ops_summary_candidate)
+    if not ops_summary_map and isinstance(geo_map, Mapping):
+        ops_summary_map = _ensure_ops_summary_map(geo_map.get("ops_summary"))
+    payload["ops_summary"] = ops_summary_map
+
+    def _rows_list(value: Any) -> list[Mapping[str, Any]]:
+        if isinstance(value, list):
+            return [entry for entry in value if isinstance(entry, Mapping)]
+        if isinstance(value, Iterable) and not isinstance(value, (str, bytes, bytearray)):
+            return [entry for entry in value if isinstance(entry, Mapping)]
+        return []
+
+    rows_list = _rows_list(payload.get("rows"))
+    if not rows_list and isinstance(ops_summary_map, Mapping):
+        rows_list = _rows_list(ops_summary_map.get("rows"))
+    if rows_list:
+        payload["rows"] = list(rows_list)
+
+    qty_sum: int
+    qty_value = payload.get("qty_sum")
+    if isinstance(qty_value, (int, float)):
+        qty_sum = int(float(qty_value))
+    else:
+        qty_sum = _sum_qty(rows_list)
+    payload["qty_sum"] = qty_sum
+
+    holes_source = payload.get("provenance_holes")
+    if holes_source is None and isinstance(geo_map, Mapping):
+        provenance = geo_map.get("provenance")
+        if isinstance(provenance, Mapping):
+            holes_source = provenance.get("holes")
+    if holes_source is not None:
+        payload["provenance_holes"] = holes_source
+
+    hole_count = payload.get("hole_count")
+    if hole_count in (None, "") and isinstance(geo_map, Mapping):
+        hole_count = geo_map.get("hole_count")
+    try:
+        if hole_count not in (None, ""):
+            hole_count = int(float(hole_count))
+    except Exception:
+        pass
+    if hole_count in (None, ""):
+        hole_count = qty_sum
+    payload["hole_count"] = hole_count
+
+    source = payload.get("source")
+    if source in (None, "") and isinstance(ops_summary_map, Mapping):
+        source = ops_summary_map.get("source")
+    if source not in (None, ""):
+        payload["source"] = source
+
+    def _extract_hole_sets_from_geo(candidate: Mapping[str, Any] | None) -> Any:
+        if not isinstance(candidate, Mapping):
+            return None
+        direct = candidate.get("hole_sets")
+        if direct is not None:
+            return direct
+        nested = candidate.get("geo")
+        if isinstance(nested, Mapping):
+            return _extract_hole_sets_from_geo(nested)
+        return None
+
+    hole_sets_payload = _extract_hole_sets_from_geo(geo_map)
+    geom_holes_payload = payload.get("geom_holes")
+    if not isinstance(geom_holes_payload, Mapping) and isinstance(geo_map, Mapping):
+        geom_candidate = geo_map.get("geom_holes")
+        if isinstance(geom_candidate, Mapping):
+            geom_holes_payload = geom_candidate
+
+    manifest_payload = ops_manifest(
+        rows_list,
+        geom_holes=geom_holes_payload if isinstance(geom_holes_payload, Mapping) else None,
+        hole_sets=hole_sets_payload,
+    )
+    payload["ops_manifest"] = dict(manifest_payload)
+
+    opts_map = dict(opts or {})
+    errors: dict[str, str] = {}
+    try:
+        hole_table = extract_hole_table(doc, opts=opts_map) or {}
+    except Exception as exc:
+        errors["extract_hole_table"] = str(exc)
+        hole_table = {}
+    if isinstance(hole_table, Mapping):
+        payload["extract_hole_table"] = dict(hole_table)
+    else:
+        payload["extract_hole_table"] = {}
+
+    result: dict[str, Any] = {
+        "payload": payload,
+        "rows": rows_list,
+        "qty_sum": qty_sum,
+        "hole_count": hole_count,
+        "source": source,
+        "provenance_holes": holes_source,
+        "ops_summary": ops_summary_map,
+        "geom_holes": geom_holes_payload if isinstance(geom_holes_payload, Mapping) else None,
+        "hole_sets": hole_sets_payload,
+        "manifest": manifest_payload,
+        "ops_manifest": manifest_payload,
+        "published": bool(rows_list),
+        "extract_hole_table": payload.get("extract_hole_table", {}),
+        "errors": errors,
+    }
+    return result
+
+
 def extract_geo_from_path(
     path: str,
     *,
@@ -9663,6 +9789,7 @@ __all__ = [
     "NoTextRowsError",
     "NO_TEXT_ROWS_MESSAGE",
     "read_geo",
+    "extract_for_app",
     "extract_geo_from_path",
     "read_acad_table",
     "rows_from_acad_table",

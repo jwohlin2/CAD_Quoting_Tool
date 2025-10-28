@@ -20,8 +20,7 @@ from cad_quoter.geo_extractor import (
     DEFAULT_TEXT_LAYER_EXCLUDE_REGEX,
     NO_TEXT_ROWS_MESSAGE,
     NoTextRowsError,
-    ops_manifest,
-    read_geo,
+    extract_for_app,
 )
 
 DEFAULT_SAMPLE_PATH = REPO_ROOT / "Cad Files" / "301_redacted.dwg"
@@ -51,44 +50,6 @@ def _sum_qty(rows: list[Mapping[str, object]] | None) -> int:
         except Exception:
             continue
     return total
-
-
-def _payload_has_rows(payload: Mapping[str, object] | None) -> bool:
-    """Return ``True`` when the GEO payload already published any rows."""
-
-    if not isinstance(payload, Mapping):
-        return False
-
-    def _extract_rows(container: Mapping[str, object], key: str) -> list[object]:
-        value = container.get(key) if isinstance(container, Mapping) else None
-        if isinstance(value, list):
-            return value
-        if isinstance(value, Iterable) and not isinstance(value, (str, bytes, bytearray)):
-            rows_list = list(value)
-            if isinstance(container, dict):
-                container[key] = rows_list
-            return rows_list
-        return []
-
-    direct_rows = _extract_rows(payload, "rows")
-    if direct_rows:
-        return True
-
-    ops_summary = payload.get("ops_summary")
-    if not isinstance(ops_summary, Mapping):
-        geo = payload.get("geo")
-        if isinstance(geo, Mapping):
-            ops_summary = geo.get("ops_summary")
-    if isinstance(ops_summary, Mapping):
-        if not isinstance(ops_summary, dict):
-            ops_summary = dict(ops_summary)
-            if isinstance(payload, dict):
-                payload["ops_summary"] = ops_summary
-        if _extract_rows(ops_summary, "rows"):
-            return True
-
-    return False
-
 
 def _int_from_value(value: Any) -> int:
     try:
@@ -552,15 +513,21 @@ def main(argv: Sequence[str] | None = None) -> int:
         if key in read_kwargs
     }
     try:
-        payload = read_geo(doc, **read_kwargs)
+        extract_result = extract_for_app(doc, opts=extract_opts, **read_kwargs)
     except NoTextRowsError:
         print(NO_TEXT_ROWS_MESSAGE)
         return 2
+    if not isinstance(extract_result, Mapping):
+        extract_result = {}
+    payload = extract_result.get("payload") if isinstance(extract_result, Mapping) else {}
     if isinstance(payload, Mapping):
         payload = dict(payload)
     else:
         payload = {}
-    published = _payload_has_rows(payload)
+    rows = extract_result.get("rows") if isinstance(extract_result, Mapping) else None
+    if not isinstance(rows, list):
+        rows = list(rows or [])  # type: ignore[arg-type]
+    published = bool(rows)
     scan_info = geo_extractor.get_last_acad_table_scan() or {}
     tables_found = 0
     try:
@@ -591,15 +558,23 @@ def main(argv: Sequence[str] | None = None) -> int:
                 print(f"[ACAD-TABLE] DXF fallback {normalized_version} failed: {exc}")
                 continue
             try:
-                payload = read_geo(fallback_doc, **read_kwargs)
+                extract_result = extract_for_app(
+                    fallback_doc, opts=extract_opts, **read_kwargs
+                )
             except NoTextRowsError:
                 print(NO_TEXT_ROWS_MESSAGE)
                 return 2
+            if not isinstance(extract_result, Mapping):
+                extract_result = {}
+            payload = extract_result.get("payload") if isinstance(extract_result, Mapping) else {}
             if isinstance(payload, Mapping):
                 payload = dict(payload)
             else:
                 payload = {}
-            published = _payload_has_rows(payload)
+            rows = extract_result.get("rows") if isinstance(extract_result, Mapping) else None
+            if not isinstance(rows, list):
+                rows = list(rows or [])  # type: ignore[arg-type]
+            published = bool(rows)
             scan_info = geo_extractor.get_last_acad_table_scan() or {}
             try:
                 tables_found = int(scan_info.get("tables_found", 0))  # type: ignore[arg-type]
@@ -608,18 +583,21 @@ def main(argv: Sequence[str] | None = None) -> int:
             geo_extractor.log_last_dxf_fallback(tables_found)
             if tables_found or published:
                 break
-    if not isinstance(payload, Mapping):
-        payload = {}
-    else:
-        payload = dict(payload)
+    if not isinstance(rows, list):
+        rows = list(rows or [])  # type: ignore[arg-type]
 
-    try:
-        extractor_table = geo_extractor.extract_hole_table(doc, opts=extract_opts) or {}
-    except Exception as exc:
-        print(f"[geo_dump] extract_hole_table failed: {exc}")
+    errors = extract_result.get("errors") if isinstance(extract_result, Mapping) else None
+    if isinstance(errors, Mapping):
+        err_text = errors.get("extract_hole_table")
+        if err_text:
+            print(f"[geo_dump] extract_hole_table failed: {err_text}")
+
+    extractor_table = extract_result.get("extract_hole_table") if isinstance(
+        extract_result, Mapping
+    ) else None
+    if not isinstance(extractor_table, Mapping):
         extractor_table = {}
-    if isinstance(payload, dict):
-        payload["extract_hole_table"] = extractor_table
+    payload["extract_hole_table"] = extractor_table
 
     final_scan = geo_extractor.get_last_acad_table_scan() or scan_info
     if args.scan_acad_tables:
@@ -664,37 +642,45 @@ def main(argv: Sequence[str] | None = None) -> int:
     geo = payload.get("geo")
     if not isinstance(geo, Mapping):
         geo = {}
-    ops_summary = payload.get("ops_summary")
+    ops_summary = extract_result.get("ops_summary") if isinstance(
+        extract_result, Mapping
+    ) else None
+    if not isinstance(ops_summary, Mapping):
+        ops_summary = payload.get("ops_summary") if isinstance(payload, Mapping) else None
     if not isinstance(ops_summary, Mapping):
         ops_summary = geo.get("ops_summary") if isinstance(geo, Mapping) else {}
     if not isinstance(ops_summary, Mapping):
         ops_summary = {}
 
-    rows = payload.get("rows")
+    rows = extract_result.get("rows") if isinstance(extract_result, Mapping) else rows
     if not isinstance(rows, list):
         rows = list(rows or [])  # type: ignore[arg-type]
-    if not rows:
-        ops_rows = ops_summary.get("rows") if isinstance(ops_summary, Mapping) else None
-        if isinstance(ops_rows, list):
-            rows = ops_rows
-        else:
-            rows = list(ops_rows or [])  # type: ignore[arg-type]
 
-    qty_sum = payload.get("qty_sum")
+    qty_sum = extract_result.get("qty_sum") if isinstance(extract_result, Mapping) else None
+    if not isinstance(qty_sum, (int, float)):
+        qty_sum = payload.get("qty_sum")
     if isinstance(qty_sum, (int, float)):
         qty_sum = int(float(qty_sum))
     else:
         qty_sum = _sum_qty(rows)
 
-    holes_source = payload.get("provenance_holes")
+    holes_source = (
+        extract_result.get("provenance_holes")
+        if isinstance(extract_result, Mapping)
+        else None
+    )
+    if holes_source is None:
+        holes_source = payload.get("provenance_holes") if isinstance(payload, Mapping) else None
     if holes_source is None:
         provenance = geo.get("provenance") if isinstance(geo, Mapping) else {}
         if isinstance(provenance, Mapping):
             holes_source = provenance.get("holes")
 
-    hole_count = payload.get("hole_count")
+    hole_count = extract_result.get("hole_count") if isinstance(extract_result, Mapping) else None
     if hole_count in (None, ""):
-        hole_count = geo.get("hole_count") if isinstance(geo, Mapping) else None
+        hole_count = payload.get("hole_count") if isinstance(payload, Mapping) else None
+    if hole_count in (None, "") and isinstance(geo, Mapping):
+        hole_count = geo.get("hole_count")
     try:
         if hole_count not in (None, ""):
             hole_count = int(float(hole_count))
@@ -703,27 +689,36 @@ def main(argv: Sequence[str] | None = None) -> int:
     if hole_count in (None, ""):
         hole_count = qty_sum
 
-    source = payload.get("source")
-    if source is None and isinstance(ops_summary, Mapping):
+    source = extract_result.get("source") if isinstance(extract_result, Mapping) else None
+    if source in (None, "") and isinstance(payload, Mapping):
+        source = payload.get("source")
+    if source in (None, "") and isinstance(ops_summary, Mapping):
         source = ops_summary.get("source")
+
+    source_display = source if source not in (None, "") else "-"
+    if source_display != "-":
+        source_display = str(source_display)
+    provenance_display = holes_source if holes_source not in (None, "") else "-"
+    if provenance_display != "-":
+        provenance_display = str(provenance_display)
     print(
-        "rows={rows} qty_sum={qty} source={src} hole_count={hole_count} provenance={prov}".format(
+        "[EXTRACT] published rows={rows} qty_sum={qty} source={src} provenance={prov}".format(
             rows=len(rows),
             qty=qty_sum,
-            src=source,
-            hole_count=hole_count,
-            prov=holes_source,
+            src=source_display,
+            prov=provenance_display,
         )
     )
 
     def _format_ops_counts(counts: Mapping[str, Any] | None) -> str:
+        apost = "\u2019"
         display_order = (
             ("drill", "Drill"),
             ("tap", "Tap"),
-            ("cbore", "C'bore"),
-            ("cdrill", "C'drill"),
+            ("cbore", f"C{apost}bore"),
+            ("cdrill", f"C{apost}drill"),
             ("jig_grind", "Jig"),
-            ("csink", "C'sink"),
+            ("csink", f"C{apost}sink"),
             ("spot", "Spot"),
             ("npt", "NPT"),
         )
@@ -743,15 +738,111 @@ def main(argv: Sequence[str] | None = None) -> int:
             parts.append("Drill 0")
         return " | ".join(parts)
 
-    hole_sets_payload = _extract_hole_sets(geo)
+    hole_sets_payload = None
+    if isinstance(extract_result, Mapping):
+        hole_sets_payload = extract_result.get("hole_sets")
+    if hole_sets_payload is None:
+        hole_sets_payload = _extract_hole_sets(geo)
     geom_holes_payload: Mapping[str, Any] | None = None
-    geom_candidate = payload.get("geom_holes") if isinstance(payload, Mapping) else None
-    if isinstance(geom_candidate, Mapping):
-        geom_holes_payload = geom_candidate
-    elif isinstance(geo, Mapping):
+    if isinstance(extract_result, Mapping):
+        geom_candidate = extract_result.get("geom_holes")
+        if isinstance(geom_candidate, Mapping):
+            geom_holes_payload = geom_candidate
+    if geom_holes_payload is None and isinstance(payload, Mapping):
+        geom_candidate = payload.get("geom_holes")
+        if isinstance(geom_candidate, Mapping):
+            geom_holes_payload = geom_candidate
+    if geom_holes_payload is None and isinstance(geo, Mapping):
         geom_candidate = geo.get("geom_holes")
         if isinstance(geom_candidate, Mapping):
             geom_holes_payload = geom_candidate
+
+    def _geom_summary_sources() -> list[Mapping[str, Any]]:
+        sources: list[Mapping[str, Any]] = []
+        if isinstance(geom_holes_payload, Mapping):
+            sources.append(geom_holes_payload)
+        if isinstance(hole_sets_payload, Mapping):
+            sources.append(hole_sets_payload)
+        elif isinstance(hole_sets_payload, Iterable) and not isinstance(
+            hole_sets_payload, (str, bytes, bytearray)
+        ):
+            for item in hole_sets_payload:
+                if isinstance(item, Mapping):
+                    sources.append(item)
+        return sources
+
+    def _geom_circle_summary() -> tuple[int, int]:
+        total = 0
+        unique: set[float] = set()
+        total_candidates: list[int] = []
+
+        def _register_total(value: Any) -> None:
+            try:
+                number = int(float(value))
+            except Exception:
+                return
+            if number > 0:
+                total_candidates.append(number)
+
+        def _ingest_group(entry: Mapping[str, Any]) -> None:
+            nonlocal total
+            qty_value = None
+            for key in ("count", "qty", "quantity", "total"):
+                candidate = entry.get(key)
+                if candidate not in (None, ""):
+                    qty_value = candidate
+                    break
+            try:
+                qty = int(float(qty_value)) if qty_value not in (None, "") else 0
+            except Exception:
+                qty = 0
+            if qty <= 0:
+                return
+            total += qty
+            dia_candidate = None
+            for key in ("dia_in", "diam_in", "diameter_in", "diam", "dia"):
+                if entry.get(key) not in (None, ""):
+                    dia_candidate = entry.get(key)
+                    break
+            try:
+                if dia_candidate not in (None, ""):
+                    unique.add(round(float(dia_candidate), 4))
+            except Exception:
+                pass
+
+        for source_map in _geom_summary_sources():
+            for key in ("total", "hole_count", "hole_count_geom", "hole_count_geom_dedup"):
+                value = source_map.get(key)
+                if value not in (None, ""):
+                    _register_total(value)
+            groups_val = source_map.get("groups") or source_map.get("hole_groups")
+            if isinstance(groups_val, Iterable) and not isinstance(
+                groups_val, (str, bytes, bytearray)
+            ):
+                for entry in groups_val:
+                    if isinstance(entry, Mapping):
+                        _ingest_group(entry)
+            families = source_map.get("hole_diam_families_in")
+            if isinstance(families, Mapping):
+                for key, qty in families.items():
+                    try:
+                        qty_int = int(float(qty))
+                    except Exception:
+                        continue
+                    if qty_int <= 0:
+                        continue
+                    total += qty_int
+                    try:
+                        unique.add(round(float(key), 4))
+                    except Exception:
+                        continue
+
+        if total <= 0 and total_candidates:
+            total = max(total_candidates)
+        return (total, len(unique))
+
+    geom_total, geom_groups = _geom_circle_summary()
+    print(f"[GEOM] circles total={geom_total} unique groups={geom_groups}")
 
     def _normalize_count(value: Any) -> int | None:
         try:
@@ -844,12 +935,19 @@ def main(argv: Sequence[str] | None = None) -> int:
             summary_display = "; ".join(top_lines) + ";"
             print(f"[GEOM] top contributors: {summary_display}")
 
-    manifest_payload = ops_manifest(
-        rows,
-        geom_holes=geom_holes_payload,
-        hole_sets=hole_sets_payload,
-    )
-
+    manifest_payload: Mapping[str, Any] | None = None
+    if isinstance(extract_result, Mapping):
+        manifest_candidate = extract_result.get("manifest") or extract_result.get(
+            "ops_manifest"
+        )
+        if isinstance(manifest_candidate, Mapping):
+            manifest_payload = dict(manifest_candidate)
+    if manifest_payload is None:
+        manifest_payload = geo_extractor.ops_manifest(
+            rows,
+            geom_holes=geom_holes_payload,
+            hole_sets=hole_sets_payload,
+        )
     if isinstance(manifest_payload, Mapping):
         payload["ops_manifest"] = dict(manifest_payload)
 
