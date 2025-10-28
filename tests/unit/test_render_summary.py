@@ -37,17 +37,10 @@ def test_render_summary_matches_header_for_sample_payload() -> None:
     breakdown = payload["breakdown"]
 
     state = RenderState(
-        qty=payload.get("qty", 1),
-        result=payload,
-        breakdown=breakdown,
+        payload,
         page_width=74,
-        divider=_divider(74),
-        process_meta=breakdown.get("process_meta"),
-        process_meta_raw=breakdown.get("process_meta_raw"),
-        hour_summary_entries={},
-        cfg=None,
-        llm_debug_enabled=False,
         drill_debug_entries=payload.get("drill_debug"),
+        hour_summary_entries={},
         material_warning_summary=False,
         material_warning_label="⚠ MATERIALS MISSING",
     )
@@ -74,23 +67,19 @@ def test_render_summary_matches_header_for_sample_payload() -> None:
 
 
 def test_render_summary_includes_drill_debug_section() -> None:
-    entries = [
+    entries: list[str] = [
         "Material Removal Debug – milling",
         "OK drill group",
     ]
 
+    payload = {"qty": 1, "breakdown": {}, "drill_debug": entries}
+
     state = RenderState(
-        qty=1,
-        result={},
-        breakdown={},
+        payload,
         page_width=40,
-        divider=_divider(40),
-        process_meta=None,
-        process_meta_raw=None,
-        hour_summary_entries={},
-        cfg=None,
         llm_debug_enabled=True,
         drill_debug_entries=entries,
+        hour_summary_entries={},
         material_warning_summary=False,
         material_warning_label="⚠ MATERIALS MISSING",
     )
@@ -105,17 +94,12 @@ def test_render_summary_includes_drill_debug_section() -> None:
 
 
 def test_render_summary_adds_material_warning_label() -> None:
+    payload = {"qty": 1, "breakdown": {}}
+
     state = RenderState(
-        qty=1,
-        result={},
-        breakdown={},
+        payload,
         page_width=60,
-        divider=_divider(60),
-        process_meta=None,
-        process_meta_raw=None,
         hour_summary_entries={},
-        cfg=None,
-        llm_debug_enabled=False,
         drill_debug_entries=[],
         material_warning_summary=True,
         material_warning_label="⚠ MATERIALS MISSING",
