@@ -5776,40 +5776,6 @@ def read_text_table(
         am_bor_pre_count, am_bor_post_count, am_bor_drop_count = _perform_text_scan(
             resolved_allowlist
         )
-        if (
-            anchor_authoritative_result is None
-            and am_bor_pre_count >= 20
-            and am_bor_post_count == 0
-            and rows_txt_initial < 8
-        ):
-            tokens: list[str] = []
-            if resolved_allowlist is not None:
-                tokens = list(resolved_allowlist)
-            token_set = {str(token).upper() for token in tokens}
-            if "AM_BOR" not in token_set or resolved_allowlist is None:
-                print(
-                    "[TEXT-SCAN] auto-retry including AM_BOR (first pass dropped chart layer)"
-                )
-                if isinstance(_LAST_TEXT_TABLE_DEBUG, dict):
-                    _LAST_TEXT_TABLE_DEBUG.setdefault("auto_retry", {})["include_am_bor"] = {
-                        "dropped": int(am_bor_drop_count),
-                        "pre": int(am_bor_pre_count),
-                    }
-                if "AM_BOR" not in token_set:
-                    tokens.append("AM_BOR")
-                elif not tokens:
-                    tokens = ["AM_BOR"]
-                resolved_allowlist = _normalize_layer_allowlist(tokens)
-                allowlist_display = (
-                    "None"
-                    if resolved_allowlist is None
-                    else "{" + ",".join(sorted(resolved_allowlist) or []) + "}"
-                )
-                am_bor_pre_count, am_bor_post_count, am_bor_drop_count = _perform_text_scan(
-                    resolved_allowlist,
-                    ignore_regex_excludes=True,
-                )
-        
         def _parse_rows(row_texts: list[str]) -> tuple[list[dict[str, Any]], dict[str, int], int]:
             families: dict[str, int] = {}
             parsed: list[dict[str, Any]] = []
@@ -5878,8 +5844,7 @@ def read_text_table(
             text_rows_info = dict(anchor_authoritative_result)
             if isinstance(_LAST_TEXT_TABLE_DEBUG, dict):
                 _LAST_TEXT_TABLE_DEBUG["anchor_authoritative"] = True
-            if _GEO_STRICT_ANCHOR:
-                return (am_bor_pre_count, am_bor_post_count, am_bor_drop_count)
+            return (am_bor_pre_count, am_bor_post_count, am_bor_drop_count)
 
         if follow_sheet_target_layouts:
             follow_debug_entries: list[dict[str, Any]] = []
@@ -7752,6 +7717,7 @@ def read_geo(
                 text_layer_allowlist = None
         except TypeError:
             pass
+    anchor_auto_publish = False
     if run_text:
         try:
             text_info = read_text_table(
@@ -7789,6 +7755,8 @@ def read_geo(
 
     if isinstance(text_info, Mapping) and text_info.get("anchor_authoritative"):
         state.anchor_authoritative = True
+        state.published = True
+        anchor_auto_publish = True
 
     acad_rows_list: list[dict[str, Any]] = []
     if isinstance(acad_info, Mapping):
@@ -8103,7 +8071,7 @@ def read_geo(
         publish_path = source_lower
     else:
         publish_path = "geom"
-    if not state.published:
+    if not state.published or anchor_auto_publish:
         print(
             f"[PATH] publish={publish_path} rows={len(rows_for_log)} qty_sum={qty_sum}"
         )
