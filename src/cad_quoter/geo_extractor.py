@@ -7565,6 +7565,7 @@ def promote_table_to_geo(
     *,
     log_publish: bool = True,
     geom_holes: Mapping[str, Any] | None = None,
+    state: ExtractionState | None = None,
 ) -> None:
     helper = _resolve_app_callable("_persist_rows_and_totals")
     if callable(helper):
@@ -7596,10 +7597,13 @@ def promote_table_to_geo(
             geo["provenance"] = provenance
         if isinstance(provenance, dict):
             provenance["holes"] = "HOLE TABLE"
-        if log_publish:
+        should_log_publish = bool(log_publish and (state is None or not state.published))
+        if should_log_publish:
             print(
                 f"[PATH] publish=text_table rows={len(rows)} qty_sum={qty_sum}"
             )
+            if state is not None:
+                state.published = True
     hole_count = table_info.get("hole_count")
     if qty_sum > 0:
         hole_count = qty_sum
@@ -7838,6 +7842,7 @@ def read_geo(
     layout_filters: Mapping[str, Any] | Iterable[str] | str | None = None,
     debug_layouts: bool = False,
     debug_scan: bool = False,
+    state: ExtractionState | None = None,
 ) -> dict[str, Any]:
     """Process a loaded DXF/DWG document into GEO payload details.
 
@@ -7848,6 +7853,9 @@ def read_geo(
         allow_geom: When ``True``, geometry rows may be emitted even when the
             pipeline is set to ``"auto"``.
     """
+
+    if state is None:
+        state = ExtractionState()
 
     del feature_flags  # placeholder for future feature toggles
     pipeline_normalized = str(pipeline or "auto").strip().lower()
@@ -7861,7 +7869,6 @@ def read_geo(
     geom_census = geom_hole_census(doc)
     if isinstance(geo, dict):
         geo["geom_holes"] = geom_census
-    state = ExtractionState()
 
     use_tables = bool(
         prefer_table and pipeline_normalized in {"auto", "acad", "text"}
@@ -8127,6 +8134,7 @@ def read_geo(
                 publish_source_tag or "text_table",
                 log_publish=False,
                 geom_holes=geom_census,
+                state=state,
             )
             table_used = True
             if publish_source_tag and publish_source_tag == "text_table":
@@ -8360,6 +8368,7 @@ def read_geo(
         "debug_payload": debug_payload,
         "chart_lines": chart_lines,
         "skip_acad": skip_acad,
+        "state_published": state.published,
     }
 
     if geom_census:
@@ -8393,6 +8402,8 @@ def _read_geo_payload_from_path(
         print(f"[EXTRACT] failed to load document: {exc}")
         return {"error": str(exc)}
 
+    state = ExtractionState()
+
     payload = read_geo(
         doc,
         prefer_table=prefer_table,
@@ -8406,6 +8417,7 @@ def _read_geo_payload_from_path(
         layer_include_regex=layer_include_regex,
         layer_exclude_regex=layer_exclude_regex,
         debug_layouts=debug_layouts,
+        state=state,
     )
 
     if isinstance(payload, Mapping) and payload.get("skip_acad"):
@@ -8459,6 +8471,7 @@ def _read_geo_payload_from_path(
                 layer_allowlist=layer_allowlist,
                 block_name_allowlist=block_name_allowlist,
                 block_name_regex=block_name_regex,
+                state=state,
             )
             if isinstance(mechanical_table, Mapping) and mechanical_table.get("rows"):
                 existing_rows_obj = payload.get("rows")
@@ -8476,7 +8489,10 @@ def _read_geo_payload_from_path(
                             mechanical_table,
                             "text",
                             geom_holes=fallback_geom_census,
+                            log_publish=not state.published,
+                            state=state,
                         )
+                        payload["state_published"] = state.published
                         ops_summary_obj = geo_obj.get("ops_summary")
                         ops_summary = dict(ops_summary_obj) if isinstance(ops_summary_obj, Mapping) else {}
                         payload["ops_summary"] = ops_summary
