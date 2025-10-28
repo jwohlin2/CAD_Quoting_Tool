@@ -3297,6 +3297,8 @@ _COLUMN_TOKEN_RE = re.compile(
     r"(TAP|DRILL|THRU|C['’]?BORE|COUNTER\s*BORE|N\.?P\.?T|NPT|Ø|JIG)",
     re.IGNORECASE,
 )
+_PLAIN_O_DIAM_RE = re.compile(r"\bO\s*\.\s*(\d+)", re.IGNORECASE)
+_LEADING_DIAM_DECIMAL_RE = re.compile(r"Ø\s*\.\s*(\d+)")
 _QSTRIPE_CANDIDATE_RE = re.compile(
     r"(^\(?\d{1,3}\)?$|^\d{1,3}[x×]$|^QTY[:.]?$)",
     re.IGNORECASE,
@@ -3305,6 +3307,7 @@ _QSTRIPE_CANDIDATE_RE = re.compile(
 _DEBUG_DIR = Path("debug")
 _DEBUG_ROWS_PATH = _DEBUG_DIR / "hole_table_rows.csv"
 _DEBUG_TOTALS_PATH = _DEBUG_DIR / "ops_table_totals.json"
+_DEBUG_STRUCTURED_COLUMNS = tuple(chr(code) for code in range(ord("A"), ord("N") + 1))
 _DEBUG_FIELDNAMES = (
     "qty",
     "kind",
@@ -3313,6 +3316,7 @@ _DEBUG_FIELDNAMES = (
     "diam_token",
     "depth_token",
     "raw_text",
+    *_DEBUG_STRUCTURED_COLUMNS,
 )
 _DEBUG_DEPTH_RE = re.compile(
     r"([x×]\s*)?(\d+(?:\.\d+)?)\s*(?:DEEP|DEPTH|THK|THICK)\b",
@@ -5927,6 +5931,24 @@ def _normalize_entry_text(entry: Mapping[str, Any]) -> str:
     return _normalize_candidate_text(entry.get("text"))
 
 
+def _normalize_ref_token_text(text: Any) -> str:
+    candidate = "" if text is None else str(text)
+    candidate = candidate.replace("⌀", "Ø").replace("ø", "Ø")
+
+    def _sub_plain(match: re.Match[str]) -> str:
+        digits = match.group(1)
+        return f"Ø0.{digits}" if digits else "Ø0."
+
+    candidate = _PLAIN_O_DIAM_RE.sub(_sub_plain, candidate)
+
+    def _sub_decimal(match: re.Match[str]) -> str:
+        digits = match.group(1)
+        return f"Ø0.{digits}" if digits else "Ø0."
+
+    candidate = _LEADING_DIAM_DECIMAL_RE.sub(_sub_decimal, candidate)
+    return candidate
+
+
 def _entry_band_sort_key(entry: Mapping[str, Any]) -> tuple[float, float, int]:
     x_val = entry.get("x")
     y_val = entry.get("y")
@@ -6475,6 +6497,12 @@ def _fallback_debug_records(rows: Sequence[Mapping[str, Any]]) -> tuple[list[dic
             record["tool"] = record["diam_token"] or _detect_thread_token(desc_text)
         else:
             record["tool"] = record["diam_token"] or _detect_thread_token(desc_text) or record["kind"]
+        structured_columns = row.get("structured_columns")
+        if isinstance(structured_columns, Mapping):
+            for column_label in _DEBUG_STRUCTURED_COLUMNS:
+                value = structured_columns.get(column_label)
+                if value not in (None, ""):
+                    record[column_label] = str(value)
         records.append(record)
         qty_sum += qty
     return records, qty_sum
@@ -8601,7 +8629,7 @@ def read_text_table(
                 else:
                     _LAST_TEXT_TABLE_DEBUG["follow_sheet_debug"] = follow_debug_entries
 
-        def _cluster_entries_by_y(
+        def _legacy_cluster_entries_by_y(
             entries: list[dict[str, Any]]
         ) -> list[list[dict[str, Any]]]:
             valid = [entry for entry in entries if entry.get("normalized_text")]
@@ -8650,7 +8678,7 @@ def read_text_table(
                 eps *= 1.5
             return clusters
 
-        def _clusters_to_rows(clusters: list[list[dict[str, Any]]]) -> list[str]:
+        def _legacy_clusters_to_rows(clusters: list[list[dict[str, Any]]]) -> list[str]:
             rows: list[str] = []
             for cluster in clusters:
                 def _x_key(value: Any) -> float:
@@ -8676,30 +8704,306 @@ def read_text_table(
                 rows.append(row_text)
             return rows
 
+        def _extract_roi_bounds(
+            mapping: Mapping[str, Any] | None,
+        ) -> tuple[float, float, float, float] | None:
+            if not isinstance(mapping, Mapping):
+                return None
+
+            def _coerce(value: Any) -> float | None:
+                try:
+                    result = float(value)
+                except Exception:
+                    return None
+                return result if math.isfinite(result) else None
+
+            for key in ("expanded", "bbox"):
+                bbox = mapping.get(key)
+                if isinstance(bbox, (list, tuple)) and len(bbox) == 4:
+                    values = [_coerce(part) for part in bbox]
+                    if all(value is not None for value in values):
+                        xmin, xmax, ymin, ymax = values  # type: ignore[misc]
+                        if xmin is not None and xmax is not None and xmin > xmax:
+                            xmin, xmax = xmax, xmin
+                        if ymin is not None and ymax is not None and ymin > ymax:
+                            ymin, ymax = ymax, ymin
+                        return (float(xmin), float(xmax), float(ymin), float(ymax))
+
+            xmin = _coerce(mapping.get("xmin"))
+            xmax = _coerce(mapping.get("xmax"))
+            ymin = _coerce(mapping.get("ymin"))
+            ymax = _coerce(mapping.get("ymax"))
+            if None not in (xmin, xmax, ymin, ymax):
+                xmin_f = float(xmin)
+                xmax_f = float(xmax)
+                ymin_f = float(ymin)
+                ymax_f = float(ymax)
+                if xmin_f > xmax_f:
+                    xmin_f, xmax_f = xmax_f, xmin_f
+                if ymin_f > ymax_f:
+                    ymin_f, ymax_f = ymax_f, ymin_f
+                return (xmin_f, xmax_f, ymin_f, ymax_f)
+            return None
+
+        def _resolve_chart_roi_bounds() -> tuple[float, float, float, float] | None:
+            candidates: list[Mapping[str, Any]] = []
+            if isinstance(columnar_debug_info, Mapping):
+                roi_candidate = columnar_debug_info.get("roi")
+                if isinstance(roi_candidate, Mapping):
+                    candidates.append(roi_candidate)
+                roi_info = columnar_debug_info.get("roi_info")
+                if isinstance(roi_info, Mapping):
+                    candidates.append(roi_info)
+            if isinstance(roi_hint_effective, Mapping):
+                candidates.append(roi_hint_effective)
+            for mapping in candidates:
+                bounds = _extract_roi_bounds(mapping)
+                if bounds is not None:
+                    return bounds
+            return None
+
+        def _build_structured_band_rows(
+            entries: list[dict[str, Any]]
+        ) -> tuple[list[str], list[dict[str, Any]], dict[str, Any]]:
+            roi_bounds = _resolve_chart_roi_bounds()
+            filtered: list[dict[str, Any]] = []
+            heights: list[float] = []
+            for entry in entries:
+                text_value = str(entry.get("normalized_text") or "").strip()
+                if not text_value:
+                    continue
+                x_val = entry.get("x")
+                y_val = entry.get("y")
+                if not isinstance(x_val, (int, float)) or not isinstance(y_val, (int, float)):
+                    continue
+                x_float = float(x_val)
+                y_float = float(y_val)
+                if roi_bounds is not None:
+                    xmin, xmax, ymin, ymax = roi_bounds
+                    if x_float < xmin or x_float > xmax or y_float < ymin or y_float > ymax:
+                        continue
+                entry_copy = dict(entry)
+                entry_copy["x"] = x_float
+                entry_copy["y"] = y_float
+                entry_copy["_x_in"] = x_float * to_in
+                filtered.append(entry_copy)
+                height_val = entry.get("height")
+                if isinstance(height_val, (int, float)):
+                    height_float = float(height_val)
+                    if math.isfinite(height_float) and height_float > 0:
+                        heights.append(height_float)
+
+            debug_payload: dict[str, Any] = {
+                "roi": list(roi_bounds) if roi_bounds is not None else None,
+                "rows": [],
+                "column_centers_in": [],
+                "y_tolerance": None,
+            }
+
+            if not filtered:
+                return [], [], debug_payload
+
+            x_positions_in = [float(item.get("_x_in") or 0.0) for item in filtered]
+            column_centers_in = _kmeans_1d(x_positions_in, 4)
+            if not column_centers_in:
+                return [], [], debug_payload
+            while len(column_centers_in) < 4:
+                last = column_centers_in[-1] if column_centers_in else 0.0
+                column_centers_in.append(last)
+            column_centers_in = sorted(column_centers_in)[:4]
+            debug_payload["column_centers_in"] = list(column_centers_in)
+
+            median_height = statistics.median(heights) if heights else 0.0
+            if not math.isfinite(median_height) or median_height <= 0:
+                median_height = 0.0
+            y_tolerance = max(median_height, 0.1)
+            debug_payload["y_tolerance"] = y_tolerance
+
+            sorted_entries = sorted(
+                filtered,
+                key=lambda item: (-float(item.get("y") or 0.0), float(item.get("_x_in") or 0.0)),
+            )
+            row_clusters: list[dict[str, Any]] = []
+            for entry in sorted_entries:
+                if not row_clusters:
+                    row_clusters.append({"entries": [entry], "y_values": [float(entry.get("y") or 0.0)]})
+                    continue
+                current = row_clusters[-1]
+                center_y = sum(current["y_values"]) / len(current["y_values"])
+                entry_y = float(entry.get("y") or 0.0)
+                if abs(entry_y - center_y) <= y_tolerance:
+                    current["entries"].append(entry)
+                    current["y_values"].append(entry_y)
+                else:
+                    row_clusters.append({"entries": [entry], "y_values": [entry_y]})
+
+            column_labels = ["hole", "ref", "qty", "desc"]
+            structured_rows: list[dict[str, Any]] = []
+            structured_debug_rows: list[dict[str, Any]] = []
+
+            header_hole = {"HOLE", "HOLES"}
+            header_ref = {"REF", "REFERENCE", "Ø", "DIA", "DIAMETER"}
+            header_qty_prefixes = ("QTY", "QUANTITY")
+
+            for cluster_index, cluster in enumerate(row_clusters):
+                cluster_entries = sorted(
+                    cluster["entries"], key=lambda item: float(item.get("_x_in") or 0.0)
+                )
+                column_tokens: dict[str, list[str]] = {label: [] for label in column_labels}
+                for entry in cluster_entries:
+                    text = str(entry.get("normalized_text") or entry.get("text") or "").strip()
+                    if not text:
+                        continue
+                    normalized_text = text.replace("⌀", "Ø").replace("ø", "Ø")
+                    idx = min(
+                        range(len(column_centers_in)),
+                        key=lambda index: (
+                            abs(float(entry.get("_x_in") or 0.0) - column_centers_in[index]),
+                            index,
+                        ),
+                    )
+                    label = column_labels[idx]
+                    if label == "ref":
+                        normalized_text = _normalize_ref_token_text(normalized_text)
+                    column_tokens[label].append(normalized_text)
+
+                if all(not tokens for tokens in column_tokens.values()):
+                    continue
+
+                header_like = (
+                    column_tokens["hole"]
+                    and all(token.upper() in header_hole for token in column_tokens["hole"])
+                    and column_tokens["ref"]
+                    and all(token.upper() in header_ref for token in column_tokens["ref"])
+                    and column_tokens["qty"]
+                    and all(token.upper().startswith(header_qty_prefixes) for token in column_tokens["qty"])
+                )
+                if header_like:
+                    continue
+
+                qty_text_combined = " ".join(column_tokens["qty"]).strip()
+                qty_match = re.search(r"(\d+)", qty_text_combined)
+                if not qty_match:
+                    continue
+                qty_value = qty_match.group(1)
+
+                hole_text = " ".join(column_tokens["hole"]).strip()
+                ref_text = " ".join(column_tokens["ref"]).strip()
+                desc_text = " ".join(column_tokens["desc"]).strip()
+                remainder_parts = [part for part in (hole_text, ref_text, desc_text) if part]
+                if not remainder_parts:
+                    continue
+                row_text = f"({qty_value}) {' | '.join(remainder_parts)}"
+
+                structured_map = {label: "" for label in _DEBUG_STRUCTURED_COLUMNS}
+                structured_map["A"] = hole_text
+                structured_map["B"] = ref_text
+                structured_map["C"] = qty_value
+                structured_map["D"] = desc_text
+
+                row_center = sum(cluster["y_values"]) / len(cluster["y_values"])
+                assignments = {key: list(values) for key, values in column_tokens.items()}
+                structured_rows.append(
+                    {
+                        "row_text": row_text,
+                        "structured": structured_map,
+                        "assignments": assignments,
+                        "y_center": row_center,
+                    }
+                )
+                structured_debug_rows.append(
+                    {
+                        "index": cluster_index,
+                        "text": row_text,
+                        "A": hole_text,
+                        "B": ref_text,
+                        "C": qty_value,
+                        "D": desc_text,
+                        "y": row_center,
+                    }
+                )
+
+            if not structured_rows:
+                return [], [], debug_payload
+
+            deduped_texts = _filter_and_dedupe_row_texts([row["row_text"] for row in structured_rows])
+            structured_lookup = {row["row_text"]: row for row in structured_rows}
+            ordered_structured: list[dict[str, Any]] = []
+            fallback_rows: list[str] = []
+            for text in deduped_texts:
+                row_info = structured_lookup.get(text)
+                if row_info is None:
+                    continue
+                fallback_rows.append(text)
+                ordered_structured.append(row_info)
+
+            debug_payload["rows"] = structured_debug_rows
+            return fallback_rows, ordered_structured, debug_payload
+
         if "parsed_rows" not in locals():
             parsed_rows = []
         if "total_qty" not in locals():
             total_qty = 0
 
         if len(parsed_rows) < 8:
-            clusters = _cluster_entries_by_y(candidate_entries)
-            fallback_rows = _clusters_to_rows(clusters)
-            fallback_rows = [row for row in fallback_rows if row]
-            fallback_rows = _filter_and_dedupe_row_texts(fallback_rows)
-            fallback_parsed, fallback_families, fallback_qty = _parse_rows(fallback_rows)
-            print(
-                f"[TEXT-SCAN] fallback clusters={len(clusters)} "
-                f"chosen_rows={len(fallback_parsed)} qty_sum={fallback_qty}"
+            fallback_rows, structured_rows_info, structured_debug = _build_structured_band_rows(
+                candidate_entries
             )
-            current_total_qty = locals().get("total_qty", 0)
-            if fallback_parsed and (
-                (fallback_qty, len(fallback_parsed))
-                > (scan_totals.get("qty", 0), len(parsed_rows))
-            ):
-                merged_rows = fallback_rows
-                parsed_rows = fallback_parsed
-                scan_totals["families"] = fallback_families
-                scan_totals["qty"] = fallback_qty
+            if fallback_rows:
+                fallback_parsed, fallback_families, fallback_qty = _parse_rows(fallback_rows)
+                print(
+                    f"[TEXT-SCAN] fallback clusters={len(structured_rows_info)} "
+                    f"chosen_rows={len(fallback_parsed)} qty_sum={fallback_qty}"
+                )
+                for idx, row_entry in enumerate(fallback_parsed):
+                    if idx >= len(structured_rows_info):
+                        break
+                    structured_map = structured_rows_info[idx].get("structured")
+                    if isinstance(structured_map, Mapping):
+                        row_entry["structured_columns"] = dict(structured_map)
+                    assignments = structured_rows_info[idx].get("assignments")
+                    if isinstance(assignments, Mapping):
+                        row_entry["structured_assignments"] = {
+                            key: list(value) for key, value in assignments.items()
+                        }
+                    row_entry["structured_row_text"] = structured_rows_info[idx].get("row_text")
+                if isinstance(_LAST_TEXT_TABLE_DEBUG, dict):
+                    if structured_debug.get("rows"):
+                        _LAST_TEXT_TABLE_DEBUG["band_structured_rows"] = structured_debug["rows"]
+                    if structured_debug.get("roi") is not None:
+                        _LAST_TEXT_TABLE_DEBUG["band_roi_bounds"] = structured_debug["roi"]
+                    if structured_debug.get("column_centers_in"):
+                        _LAST_TEXT_TABLE_DEBUG["band_column_centers_in"] = structured_debug[
+                            "column_centers_in"
+                        ]
+                    if structured_debug.get("y_tolerance") is not None:
+                        _LAST_TEXT_TABLE_DEBUG["band_row_tolerance"] = structured_debug["y_tolerance"]
+                if fallback_parsed and (
+                    (fallback_qty, len(fallback_parsed))
+                    > (scan_totals.get("qty", 0), len(parsed_rows))
+                ):
+                    merged_rows = fallback_rows
+                    parsed_rows = fallback_parsed
+                    scan_totals["families"] = fallback_families
+                    scan_totals["qty"] = fallback_qty
+            else:
+                clusters = _legacy_cluster_entries_by_y(candidate_entries)
+                fallback_rows = _legacy_clusters_to_rows(clusters)
+                fallback_rows = [row for row in fallback_rows if row]
+                fallback_rows = _filter_and_dedupe_row_texts(fallback_rows)
+                fallback_parsed, fallback_families, fallback_qty = _parse_rows(fallback_rows)
+                print(
+                    f"[TEXT-SCAN] fallback clusters={len(clusters)} "
+                    f"chosen_rows={len(fallback_parsed)} qty_sum={fallback_qty}"
+                )
+                if fallback_parsed and (
+                    (fallback_qty, len(fallback_parsed))
+                    > (scan_totals.get("qty", 0), len(parsed_rows))
+                ):
+                    merged_rows = fallback_rows
+                    parsed_rows = fallback_parsed
+                    scan_totals["families"] = fallback_families
+                    scan_totals["qty"] = fallback_qty
 
         if merged_rows and len(parsed_rows) == len(merged_rows):
             for idx, fallback_text in enumerate(merged_rows):
