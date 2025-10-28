@@ -4,7 +4,7 @@
 from __future__ import annotations
 
 from collections import Counter, defaultdict, deque
-from collections.abc import Iterable, Mapping, Sequence
+from collections.abc import Iterable, Mapping, MutableMapping, Sequence
 from dataclasses import dataclass
 from fractions import Fraction
 import inspect
@@ -8425,6 +8425,84 @@ def ops_manifest(
     details: dict[str, Any] = {"npt": 0, "drill_sized": 0, "drill_sizes": {}}
 
     rows_iter = chart_rows or []
+    drill_groups: Counter[tuple[str, str]] = Counter()
+    tap_implied_candidates: list[tuple[int, tuple[str, str] | None, Any]] = []
+
+    def _row_value(row_obj: Any, key: str) -> Any:
+        if isinstance(row_obj, Mapping):
+            return row_obj.get(key)
+        return getattr(row_obj, key, None)
+
+    def _normalize_key_token(value: Any) -> str:
+        if value is None:
+            return ""
+        text = str(value).strip()
+        return text.upper()
+
+    def _row_group_key(row_obj: Any, desc: str) -> tuple[str, str] | None:
+        hole_token = _normalize_key_token(
+            _row_value(row_obj, "hole") or _row_value(row_obj, "hole_id")
+        )
+        ref_token = _normalize_key_token(
+            _row_value(row_obj, "ref")
+            or _row_value(row_obj, "drill_ref")
+            or _row_value(row_obj, "pilot")
+        )
+        if not ref_token:
+            extracted_ref, _ = _extract_row_reference(desc)
+            ref_token = _normalize_key_token(extracted_ref)
+        if hole_token or ref_token:
+            return (hole_token, ref_token)
+        return None
+
+    def _set_row_drill_implied(row_obj: Any, value: bool) -> None:
+        if isinstance(row_obj, MutableMapping):
+            tags_value = row_obj.get("tags")
+            if not isinstance(tags_value, MutableMapping):
+                if value:
+                    row_obj["tags"] = {"drill_implied": True}
+                else:
+                    if "tags" in row_obj:
+                        try:
+                            row_obj.pop("tags")
+                        except Exception:
+                            pass
+                return
+            if value:
+                tags_value["drill_implied"] = True
+            else:
+                tags_value.pop("drill_implied", None)
+                if not tags_value:
+                    try:
+                        row_obj.pop("tags")
+                    except Exception:
+                        pass
+            return
+
+        tags_value = getattr(row_obj, "tags", None)
+        if not isinstance(tags_value, MutableMapping):
+            if value:
+                try:
+                    setattr(row_obj, "tags", {"drill_implied": True})
+                except Exception:
+                    pass
+            else:
+                if hasattr(row_obj, "tags"):
+                    try:
+                        delattr(row_obj, "tags")
+                    except Exception:
+                        pass
+            return
+        if value:
+            tags_value["drill_implied"] = True
+        else:
+            tags_value.pop("drill_implied", None)
+            if not tags_value:
+                try:
+                    delattr(row_obj, "tags")
+                except Exception:
+                    pass
+
     for row in rows_iter:
         if not isinstance(row, Mapping):
             continue
@@ -8441,6 +8519,9 @@ def ops_manifest(
                 desc_source = row[key]
                 break
         desc_text = str(desc_source or "")
+        group_key = _row_group_key(row, desc_text)
+        row_has_drill = False
+        row_has_tap = False
         fragments = split_actions(desc_text) or [desc_text]
         for fragment in fragments:
             action = classify_action(fragment)
@@ -8450,12 +8531,23 @@ def ops_manifest(
             table_counts[kind] += qty
             if kind == "tap" and action.get("npt"):
                 details["npt"] += qty
+                row_has_tap = True
+            elif kind == "tap":
+                row_has_tap = True
             if kind == "drill":
+                row_has_drill = True
                 size_token = action.get("size")
                 if size_token:
                     details["drill_sized"] += qty
                     size_map = details.setdefault("drill_sizes", {})
                     size_map[size_token] = size_map.get(size_token, 0) + qty
+
+        if row_has_drill and not row_has_tap and group_key:
+            drill_groups[group_key] += qty
+        if row_has_tap and not row_has_drill:
+            tap_implied_candidates.append((qty, group_key, row))
+        elif row_has_tap:
+            _set_row_drill_implied(row, False)
 
     def _apply_aliases(counts: dict[str, int]) -> dict[str, int]:
         if "counterbore" in counts and "cbore" not in counts:
@@ -8465,6 +8557,22 @@ def ops_manifest(
         return counts
 
     table_counts = _apply_aliases(table_counts)
+
+    implied_drill_total = 0
+    leftover_drill = Counter(drill_groups)
+    for qty, key, row in tap_implied_candidates:
+        matched = 0
+        if key is not None and leftover_drill.get(key, 0) > 0:
+            available = leftover_drill[key]
+            matched = min(available, qty)
+            leftover_drill[key] -= matched
+        implied_qty = qty - matched
+        if implied_qty > 0:
+            implied_drill_total += implied_qty
+            _set_row_drill_implied(row, True)
+        else:
+            _set_row_drill_implied(row, False)
+    details["drill_implied_from_taps"] = implied_drill_total
 
     geom_info = _normalize_geom_holes_payload(geom_holes, hole_sets)
 
@@ -8551,7 +8659,7 @@ def ops_manifest(
         "unknown": int(table_counts.get("unknown", 0)),
     }
 
-    total_drill = table_drill_only + geom_residual + table_tap
+    total_drill = table_drill_only + geom_residual + implied_drill_total
     total_counts: dict[str, int] = {
         "drill": total_drill,
         "tap": table_tap,
