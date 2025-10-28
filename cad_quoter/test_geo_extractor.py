@@ -481,7 +481,7 @@ def test_fallback_semicolon_row_splits_actions() -> None:
 
     assert cbore_row.get("side") == "front"
     assert drill_row.get("side") == "front"
-    assert tap_row.get("tap_type") == "npt"
+    assert tap_row.get("tap_type") == "pipe"
 
     buckets, row_count, qty_sum = classify_chart_rows(rows)
     assert row_count == 3

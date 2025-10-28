@@ -56,6 +56,7 @@ _IDENTITY_TRANSFORM: TransformMatrix = (1.0, 0.0, 0.0, 0.0, 1.0, 0.0)
 
 
 _OPS_SEGMENT_SPLIT_RE = re.compile(r"[;•]+")
+_FALLBACK_ROW_START_RE = re.compile(r"^\s*\(?(\d+)\)?\s+")
 _TAP_WORD_TOKEN_RE = re.compile(r"\bTAP\b", re.IGNORECASE)
 _TAP_THREAD_TOKEN_RE = re.compile(
     r"(?:#\s*\d+\s*-\s*\d+|\b\d+\s*/\s*\d+\s*-\s*\d+\b)",
@@ -3068,7 +3069,7 @@ def classify_op_row(desc: str | None) -> list[dict[str, Any]]:
             seen_local.add(key)
             entry = {"kind": kind, "qty": 0, "size": size_text}
             if kind == "tap" and is_npt:
-                entry["tap_type"] = "npt"
+                entry["tap_type"] = "pipe"
             results.append(entry)
 
     return results
@@ -4578,10 +4579,36 @@ _ANCHOR_TERMINATOR_RE = re.compile(
 
 def _prepare_fallback_lines(lines: Iterable[str]) -> list[str]:
     try:
-        candidate = list(lines)
+        raw_lines = list(lines)
     except Exception:
-        candidate = []
-    return _merge_table_lines(candidate)
+        raw_lines = []
+
+    cleaned: list[str] = []
+    for raw_line in raw_lines:
+        candidate = " ".join(str(raw_line or "").split()).strip()
+        if not candidate:
+            continue
+        if _roi_is_admin_noise(candidate) or _roi_is_numeric_ladder(candidate):
+            continue
+        cleaned.append(candidate)
+
+    stitched: list[str] = []
+    current: list[str] = []
+    for line in cleaned:
+        if _FALLBACK_ROW_START_RE.match(line):
+            if current:
+                stitched.append(" ".join(current).strip())
+            current = [line]
+            continue
+        if current:
+            current.append(line)
+    if current:
+        stitched.append(" ".join(current).strip())
+
+    if not stitched and cleaned:
+        stitched = _merge_table_lines(cleaned)
+
+    return stitched
 
 
 def _coerce_float_optional(value: Any) -> float | None:
@@ -4992,6 +5019,33 @@ def _build_fallback_rows_from_lines(lines: Iterable[str]) -> tuple[list[dict[str
     return rows, families, total_qty
 
 
+def _fallback_rows_sample(rows: Sequence[Mapping[str, Any]] | None, limit: int = 3) -> str:
+    if not rows:
+        return "[]"
+    preview: list[str] = []
+    for row in rows:
+        if not isinstance(row, Mapping):
+            continue
+        qty_value = row.get("qty")
+        qty_text = ""
+        if isinstance(qty_value, (int, float)):
+            qty_int = int(round(float(qty_value)))
+            if qty_int > 0:
+                qty_text = f"{qty_int}× "
+        elif qty_value is not None:
+            qty_text = f"{qty_value}× "
+        desc_value = row.get("desc") or row.get("description") or row.get("text") or ""
+        desc_preview = _truncate_cell_preview(str(desc_value), 48)
+        combined = f"{qty_text}{desc_preview}".strip()
+        if combined:
+            preview.append(combined)
+        if len(preview) >= limit:
+            break
+    if not preview:
+        return "[]"
+    return f"[{', '.join(preview)}]"
+
+
 def _fallback_text_table(lines: Iterable[str]) -> dict[str, Any]:
     merged = _prepare_fallback_lines(lines)
     rows, families, total_qty = _build_fallback_rows_from_lines(merged)
@@ -4999,7 +5053,10 @@ def _fallback_text_table(lines: Iterable[str]) -> dict[str, Any]:
     if not rows:
         return {}
 
-    print(f"[TEXT-FALLBACK] rebuilt rows={len(rows)} qty_sum={total_qty}")
+    sample = _fallback_rows_sample(rows)
+    print(
+        f"[TEXT-FALLBACK] rebuilt rows={len(rows)} qty_sum={total_qty} sample={sample}"
+    )
 
     result: dict[str, Any] = {"rows": rows, "hole_count": total_qty}
     if families:
@@ -5016,7 +5073,10 @@ def _publish_fallback_from_rows_txt(rows_txt: Iterable[Any]) -> dict[str, Any]:
     if not rows:
         return {}
 
-    print(f"[TEXT-FALLBACK] rebuilt rows={len(rows)} qty_sum={total_qty}")
+    sample = _fallback_rows_sample(rows)
+    print(
+        f"[TEXT-FALLBACK] rebuilt rows={len(rows)} qty_sum={total_qty} sample={sample}"
+    )
 
     result: dict[str, Any] = {
         "rows": rows,
@@ -8215,7 +8275,7 @@ def classify_action(fragment: str) -> dict[str, Any]:
         result["kind"] = "tap"
         if is_npt:
             result["npt"] = True
-            result["tap_type"] = "npt"
+            result["tap_type"] = "pipe"
         return result
 
     if _COUNTERBORE_TOKEN_RE.search(upper):
