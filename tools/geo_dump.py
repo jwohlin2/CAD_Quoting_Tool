@@ -752,7 +752,67 @@ def main(argv: Sequence[str] | None = None) -> int:
         if isinstance(geom_candidate, Mapping):
             geom_holes_payload = geom_candidate
 
+    def _normalize_count(value: Any) -> int | None:
+        try:
+            number = int(round(float(value)))
+        except Exception:
+            return None
+        return number if number >= 0 else None
+
     if isinstance(geom_holes_payload, Mapping):
+        raw_layer_counts = geom_holes_payload.get("layer_counts")
+        layers_iter: Iterable[Any]
+        if isinstance(raw_layer_counts, Mapping):
+            layers_iter = [
+                {"layer": key, "count": value}
+                for key, value in raw_layer_counts.items()
+            ]
+        elif isinstance(raw_layer_counts, Iterable) and not isinstance(
+            raw_layer_counts, (str, bytes, bytearray)
+        ):
+            layers_iter = list(raw_layer_counts)
+        else:
+            alt_layers = geom_holes_payload.get("layers") or geom_holes_payload.get(
+                "layer_histogram"
+            )
+            if isinstance(alt_layers, Mapping):
+                layers_iter = [
+                    {"layer": key, "count": value}
+                    for key, value in alt_layers.items()
+                ]
+            elif isinstance(alt_layers, Iterable) and not isinstance(
+                alt_layers, (str, bytes, bytearray)
+            ):
+                layers_iter = list(alt_layers)
+            else:
+                layers_iter = []
+        counts_by_layer: dict[str, int] = {}
+        for entry in layers_iter:
+            if not isinstance(entry, Mapping):
+                continue
+            layer_name_raw = str(entry.get("layer") or entry.get("name") or "").strip()
+            layer_name = layer_name_raw.upper()
+            count_val = _normalize_count(entry.get("count"))
+            if not layer_name or count_val in (None, 0):
+                continue
+            counts_by_layer[layer_name] = counts_by_layer.get(layer_name, 0) + count_val
+        if not counts_by_layer and isinstance(raw_layer_counts, Mapping):
+            for key, value in raw_layer_counts.items():
+                count_val = _normalize_count(value)
+                if count_val in (None, 0):
+                    continue
+                name_key = str(key).strip().upper()
+                if not name_key:
+                    continue
+                counts_by_layer[name_key] = counts_by_layer.get(name_key, 0) + count_val
+        if counts_by_layer:
+            layer_totals = sorted(counts_by_layer.items(), key=lambda item: (-item[1], item[0]))
+            top_layers = [f"{name or '-'}:{count}" for name, count in layer_totals[:5]]
+            display = ", ".join(top_layers)
+            if len(layer_totals) > 5:
+                display += ", …"
+            print(f"[GEOM] top layers: {display}")
+
         raw_contributors = geom_holes_payload.get("contributors")
         contributor_records: list[Mapping[str, Any]] = []
         if isinstance(raw_contributors, Mapping):
@@ -765,10 +825,8 @@ def main(argv: Sequence[str] | None = None) -> int:
             ]
         top_lines: list[str] = []
         for entry in contributor_records[:5]:
-            count_val = entry.get("count")
-            try:
-                count_int = int(round(float(count_val)))
-            except Exception:
+            count_val = _normalize_count(entry.get("count"))
+            if count_val in (None, 0):
                 continue
             layer_text = str(entry.get("layer") or "").strip().upper()
             block_text = str(entry.get("block") or "").strip().upper()
@@ -780,7 +838,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 label = block_text
             else:
                 label = "-"
-            top_lines.append(f"{label} : {count_int}")
+            top_lines.append(f"{label} : {count_val}")
         if top_lines:
             summary_display = "; ".join(top_lines) + ";"
             print(f"[GEOM] top contributors: {summary_display}")
