@@ -1,8 +1,7 @@
 from __future__ import annotations
 
 from types import MappingProxyType
-
-import appV5
+from types import ModuleType
 from cad_quoter.render.config import apply_render_overrides, ensure_mutable_breakdown
 from cad_quoter.ui.services import QuoteConfiguration
 
@@ -55,7 +54,9 @@ def test_ensure_mutable_breakdown_clones_when_immutable() -> None:
     assert "b" not in proxy
 
 
-def test_render_quote_applies_overrides_and_mutable_breakdown() -> None:
+def test_render_quote_applies_overrides_and_mutable_breakdown(
+    appv5_module: ModuleType,
+) -> None:
     breakdown_proxy = MappingProxyType({"totals": {"labor_cost": 0.0}})
     payload = {
         "summary": {
@@ -74,7 +75,7 @@ def test_render_quote_applies_overrides_and_mutable_breakdown() -> None:
     cfg.machine_rate_per_hr = 100.0
     cfg.separate_machine_labor = False
 
-    text = appV5.render_quote(payload, currency="$", cfg=cfg)
+    text = appv5_module.render_quote(payload, currency="$", cfg=cfg)
 
     assert "$" in text
     assert cfg.machine_rate_per_hr == 45.0
