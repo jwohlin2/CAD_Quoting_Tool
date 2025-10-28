@@ -55,7 +55,7 @@ integration.【F:requirements.txt†L1-L11】
 ## 4. Configure runtime variables
 
 The configuration helper exposes the following environment variables. Set them
-per your deployment needs before launching the application.【F:cad_quoter_pkg/src/cad_quoter/config.py†L15-L52】【F:cad_quoter_pkg/src/cad_quoter/pricing/metals_api.py†L16-L32】
+per your deployment needs before launching the application.【F:cad_quoter/config.py†L15-L62】【F:cad_quoter/pricing/metals_api.py†L16-L32】
 
 | Variable | Purpose | Typical value |
 | --- | --- | --- |
@@ -100,13 +100,13 @@ environment.【F:appV5.py†L62-L79】
 
 * **Metals API** – Provide the `METALS_API_KEY` environment variable to enable
   HTTPS price fetching. Without it, the registry falls back to offline CSV
-  pricing.【F:cad_quoter_pkg/src/cad_quoter/pricing/__init__.py†L62-L130】
+  pricing.【F:cad_quoter/pricing/__init__.py†L62-L130】
 * **DXF/DWG enrichment** – Install `ezdxf` and the ODA File Converter binaries if
   you need automated DWG to DXF conversion. The geometry module exposes helper
-  diagnostics via `geometry.get_import_diagnostics_text()` to confirm availability.【F:cad_quoter_pkg/src/cad_quoter/geometry/__init__.py†L19-L38】【F:cad_quoter_pkg/src/cad_quoter/geometry/__init__.py†L462-L476】
+  diagnostics via `geometry.get_import_diagnostics_text()` to confirm availability.【F:cad_quoter/geometry/__init__.py†L19-L38】【F:cad_quoter/geometry/__init__.py†L462-L476】
 * **LLM suggestions** – Place the Qwen GGUF model alongside the application or
   configure `QWEN_GGUF_PATH`. The llama-cpp wrapper validates the presence of the
-  model file at startup.【F:cad_quoter_pkg/src/cad_quoter/llm/__init__.py†L86-L129】
+  model file at startup.【F:cad_quoter/llm/__init__.py†L86-L129】
 
 ## 8. Packaging tips
 
