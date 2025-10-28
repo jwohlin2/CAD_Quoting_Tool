@@ -10009,12 +10009,46 @@ def compute_quote_from_df(  # type: ignore[reportGeneralTypeIssues]
     if isinstance(groups_existing, Sequence) and not isinstance(groups_existing, (str, bytes)):
         has_groups = bool(groups_existing)
 
-    fallback_groups: list[dict[str, Any]] = []
-    if not has_groups and hole_diams:
-        fallback_groups = build_drill_groups_from_geometry(
+    table_signals_present = False
+    if isinstance(geo_payload, _MappingABC):
+        provenance_obj = geo_payload.get("provenance")
+        if isinstance(provenance_obj, _MappingABC):
+            holes_src = provenance_obj.get("holes")
+            if isinstance(holes_src, str) and "table" in holes_src.lower():
+                table_signals_present = True
+        if not table_signals_present:
+            chart_summary_obj = geo_payload.get("chart_summary")
+            if isinstance(chart_summary_obj, _MappingABC):
+                chart_count = _coerce_float_or_none(chart_summary_obj.get("hole_count"))
+                if chart_count is not None and chart_count > 0:
+                    table_signals_present = True
+        if not table_signals_present:
+            families_obj = geo_payload.get("hole_table_families_in")
+            if isinstance(families_obj, _MappingABC):
+                for family_qty in families_obj.values():
+                    qty_val = _coerce_float_or_none(family_qty)
+                    if qty_val is not None and qty_val > 0:
+                        table_signals_present = True
+                        break
+
+    geometry_groups_hint: list[dict[str, Any]] = []
+    if hole_diams:
+        geometry_groups_hint = build_drill_groups_from_geometry(
             hole_diams,
             thickness_in,
         )
+
+    fallback_groups: list[dict[str, Any]] = []
+    if not has_groups and geometry_groups_hint and not table_signals_present:
+        fallback_groups = geometry_groups_hint
+    elif geometry_groups_hint and table_signals_present:
+        try:
+            if isinstance(drilling_meta_container, _MutableMappingABC):
+                drilling_meta_container.setdefault("geometry_groups_hint", geometry_groups_hint)
+            elif isinstance(drilling_meta_container, dict):
+                drilling_meta_container.setdefault("geometry_groups_hint", geometry_groups_hint)
+        except Exception:
+            pass
 
     if fallback_groups:
         drilling_summary["groups"] = fallback_groups
