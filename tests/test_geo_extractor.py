@@ -1,27 +1,59 @@
 from __future__ import annotations
 
 from collections import Counter
+import importlib
 import sys
 import types
 
-_geometry_stub = types.ModuleType("cad_quoter.geometry")
-_geometry_stub.convert_dwg_to_dxf = lambda *_args, **_kwargs: None
-_geometry_stub.detect_units_scale = lambda *_args, **_kwargs: (1.0, "inch")
-
-sys.modules.setdefault("cad_quoter.geometry", _geometry_stub)
-sys.modules.setdefault("cad_quoter.geometry.dxf_enrich", _geometry_stub)
-
-from cad_quoter import geo_extractor
+import pytest
 
 
-def _collect_rows(lines: list[str]):
-    fallback = geo_extractor._fallback_text_table(lines)
+@pytest.fixture()
+def geo_extractor() -> types.ModuleType:
+    """Load ``cad_quoter.geo_extractor`` with a geometry stub and restore afterwards."""
+
+    geometry_stub = types.ModuleType("cad_quoter.geometry")
+    geometry_stub.convert_dwg_to_dxf = lambda *_args, **_kwargs: None
+    geometry_stub.detect_units_scale = lambda *_args, **_kwargs: (1.0, "inch")
+
+    original_geometry = sys.modules.get("cad_quoter.geometry")
+    original_geometry_enrich = sys.modules.get("cad_quoter.geometry.dxf_enrich")
+    original_geo_extractor = sys.modules.get("cad_quoter.geo_extractor")
+
+    sys.modules.pop("cad_quoter.geo_extractor", None)
+
+    sys.modules["cad_quoter.geometry"] = geometry_stub
+    sys.modules["cad_quoter.geometry.dxf_enrich"] = geometry_stub
+
+    module = importlib.import_module("cad_quoter.geo_extractor")
+
+    try:
+        yield module
+    finally:
+        if original_geometry is not None:
+            sys.modules["cad_quoter.geometry"] = original_geometry
+        else:
+            sys.modules.pop("cad_quoter.geometry", None)
+
+        if original_geometry_enrich is not None:
+            sys.modules["cad_quoter.geometry.dxf_enrich"] = original_geometry_enrich
+        else:
+            sys.modules.pop("cad_quoter.geometry.dxf_enrich", None)
+
+        if original_geo_extractor is not None:
+            sys.modules["cad_quoter.geo_extractor"] = original_geo_extractor
+        else:
+            sys.modules.pop("cad_quoter.geo_extractor", None)
+
+
+def _collect_rows(geo_extractor_module: types.ModuleType, lines: list[str]):
+    fallback = geo_extractor_module._fallback_text_table(lines)
     rows = fallback.get("rows") or []
     total = int(fallback.get("hole_count") or 0)
     return rows, total
 
 
-def test_text_fallback_rows_stitched_and_split() -> None:
+def test_text_fallback_rows_stitched_and_split(geo_extractor: types.ModuleType) -> None:
     lines = [
         "(12) 1/4-20 TAP FROM BACK",
         "; .201 DRILL FROM BACK",
@@ -35,7 +67,7 @@ def test_text_fallback_rows_stitched_and_split() -> None:
         "; .312 DRILL FROM FRONT",
     ]
 
-    rows, total = _collect_rows(lines)
+    rows, total = _collect_rows(geo_extractor, lines)
 
     assert len(rows) >= 10
     assert total == geo_extractor._sum_qty(rows) == 70
@@ -58,7 +90,7 @@ def test_text_fallback_rows_stitched_and_split() -> None:
 
 
 
-def test_geom_residual_and_pilot_logic() -> None:
+def test_geom_residual_and_pilot_logic(geo_extractor: types.ModuleType) -> None:
     rows = [
         {"qty": 5, "desc": "1/4-20 TAP FROM FRONT"},
         {"qty": 2, "desc": "3/8-16 TAP FROM BACK"},
