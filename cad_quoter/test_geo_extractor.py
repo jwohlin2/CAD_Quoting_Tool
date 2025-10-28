@@ -182,7 +182,7 @@ def test_read_text_table_raises_when_layout_filter_has_no_match(
         )
 
 
-def test_read_text_table_auto_retries_excluded_am_bor(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_read_text_table_includes_am_bor_by_default(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(geo_extractor, "_resolve_app_callable", lambda name: None)
 
     class _LayeredMText(_DummyMText):
@@ -203,9 +203,10 @@ def test_read_text_table_auto_retries_excluded_am_bor(monkeypatch: pytest.Monkey
     assert len(rows) == 2
     assert sorted(row.get("qty") for row in rows) == [2, 3]
     assert any("Ø0.250" in str(row.get("desc")) for row in rows)
+    assert result.get("am_bor_included") is True
 
 
-def test_layer_filter_excludes_am_bor_from_post_counts(
+def test_layer_filter_includes_am_bor_in_post_counts_by_default(
     monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
     monkeypatch.setattr(geo_extractor, "_resolve_app_callable", lambda name: None)
@@ -223,6 +224,33 @@ def test_layer_filter_excludes_am_bor_from_post_counts(
     )
 
     geo_extractor.read_text_table(doc)
+    out = capsys.readouterr().out
+
+    post_lines = [
+        line for line in out.splitlines() if "[TEXT-SCAN] kept_by_layer(post)=" in line
+    ]
+    assert post_lines, "expected kept_by_layer(post) line"
+    assert any("AM_BOR" in line for line in post_lines)
+
+
+def test_layer_filter_excludes_am_bor_when_requested(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    monkeypatch.setattr(geo_extractor, "_resolve_app_callable", lambda name: None)
+
+    class _LayeredMText(_DummyMText):
+        def __init__(self, text: str, layer: str) -> None:
+            super().__init__(text)
+            self.dxf = types.SimpleNamespace(layer=layer)
+
+    doc = _DummyDoc(
+        [
+            _LayeredMText("(2) Ø0.250 DRILL THRU", "AM_BOR"),
+            _LayeredMText("(3) Ø0.312 TAP FROM FRONT", "AM_BOR"),
+        ]
+    )
+
+    geo_extractor.read_text_table(doc, layer_exclude_regex=[r"^AM_BOR$"])
     out = capsys.readouterr().out
 
     post_lines = [
@@ -522,7 +550,7 @@ def test_fallback_semicolon_row_splits_actions() -> None:
     assert buckets.get("drill") == 4
 
 
-def test_anchor_h_filter_drops_small_text() -> None:
+def test_anchor_height_filter_drops_small_text() -> None:
     entries = [
         {"normalized_text": "(2) Ø0.250 DRILL", "height": 0.20},
         {"normalized_text": "FROM FRONT", "height": 0.21},
@@ -530,13 +558,13 @@ def test_anchor_h_filter_drops_small_text() -> None:
         {"normalized_text": "1 1 2 2 3 3 4 4", "height": 0.06},
     ]
 
-    anchor_h, anchor_count = geo_extractor._compute_anchor_h(entries)
+    anchor_height, anchor_count = geo_extractor._compute_anchor_height(entries)
 
     assert anchor_count == 2
-    assert anchor_h == pytest.approx(0.195, rel=1e-3)
+    assert anchor_height == pytest.approx(0.195, rel=1e-3)
 
-    filtered = geo_extractor._filter_entries_by_anchor_h(
-        entries, anchor_h=anchor_h
+    filtered = geo_extractor._filter_entries_by_anchor_height(
+        entries, anchor_height=anchor_height
     )
     filtered_texts = {entry.get("normalized_text") for entry in filtered}
 
@@ -788,7 +816,7 @@ def test_anchor_band_lines_use_expanded_window() -> None:
     context = {
         "entries": [header, *rows, tall_row, terminator, far_entry],
         "anchor_entries": rows[:3],
-        "anchor_h": 5.0,
+        "anchor_height": 5.0,
         "layout_order": [1],
     }
 
