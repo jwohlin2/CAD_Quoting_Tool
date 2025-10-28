@@ -55,22 +55,16 @@ _IDENTITY_TRANSFORM: TransformMatrix = (1.0, 0.0, 0.0, 0.0, 1.0, 0.0)
 
 
 _OPS_SEGMENT_SPLIT_RE = re.compile(r"[;•]+")
-_TAP_TOKEN_RE = re.compile(r"\bTAP\b", re.IGNORECASE)
+_TAP_WORD_TOKEN_RE = re.compile(r"\bTAP\b", re.IGNORECASE)
+_TAP_THREAD_TOKEN_RE = re.compile(
+    r"(?:#\s*\d+\s*-\s*\d+|\b\d+\s*/\s*\d+\s*-\s*\d+\b)",
+    re.IGNORECASE,
+)
 _NPT_TOKEN_RE = re.compile(r"\bN\.?P\.?T\.?\b", re.IGNORECASE)
-_THREAD_TOKEN_RE = re.compile(
-    r"(?:#\s*\d+\s*-\s*\d+|\b\d+\s*/\s*\d+\s*-\s*\d+\b|\b\d+\s*-\s*\d+\b)",
-    re.IGNORECASE,
-)
-_COUNTERBORE_TOKEN_RE = re.compile(
-    r"\b(?:C['’]?\s*BORE|CBORE|COUNTER\s*BORE)\b",
-    re.IGNORECASE,
-)
-_COUNTERSINK_TOKEN_RE = re.compile(
-    r"\b(?:C['’]?\s*SINK|CSK|COUNTERSINK|COUNTER\s*SINK)\b",
-    re.IGNORECASE,
-)
+_COUNTERBORE_TOKEN_RE = re.compile(r"\b(?:C['’]?\s*BORE|CBORE)\b", re.IGNORECASE)
+_COUNTERSINK_TOKEN_RE = re.compile(r"\b(?:C['’]?\s*SINK|CSK|COUNTERSINK)\b", re.IGNORECASE)
 _COUNTERDRILL_TOKEN_RE = re.compile(
-    r"\b(?:C['’]?\s*DRILL|COUNTER\s*DRILL|CTR\s*DRILL)\b",
+    r"\b(?:C['’]?\s*DRILL|COUNTER\s*DRILL|CTR\s*DRILL|C['’]DRILL)\b",
     re.IGNORECASE,
 )
 _JIG_GRIND_TOKEN_RE = re.compile(
@@ -84,6 +78,7 @@ _DRILL_SIZE_PATTERNS: tuple[re.Pattern[str], ...] = (
     re.compile(r"NO\.?\s*(\d+)", re.IGNORECASE),
     re.compile(r"LETTER\s+([A-Z])", re.IGNORECASE),
     re.compile(r'"([A-Z])"'),
+    re.compile(r"\bR\s*[.#]?\s*([0-9]+(?:\.[0-9]+)?)\b", re.IGNORECASE),
     re.compile(r"R\s*\(([^)]+)\)", re.IGNORECASE),
     re.compile(r"[\u00D8\u2300\u2A00⌀]\s*([0-9]+(?:\.[0-9]+)?)", re.IGNORECASE),
     re.compile(r"([0-9]+(?:\.[0-9]+)?)\s*(?:IN\.?|MM|\"|DIA|DIAM)\b", re.IGNORECASE),
@@ -2954,8 +2949,8 @@ def classify_op_row(desc: str | None) -> list[dict[str, Any]]:
         kinds: list[tuple[str, str | None]] = []
         is_npt = bool(_NPT_TOKEN_RE.search(segment))
         is_cdrill = bool(_COUNTERDRILL_TOKEN_RE.search(segment))
-        has_thread_tap = bool(_THREAD_TOKEN_RE.search(segment))
-        has_tap_word = bool(_TAP_TOKEN_RE.search(segment))
+        has_thread_tap = bool(_TAP_THREAD_TOKEN_RE.search(segment))
+        has_tap_word = bool(_TAP_WORD_TOKEN_RE.search(segment))
         if is_npt:
             kinds.append(("npt", None))
         if is_npt or has_tap_word or has_thread_tap:
@@ -6204,14 +6199,15 @@ def read_text_table(
                     families[key] = families.get(key, 0) + qty_val
             return (parsed, families, total)
 
-            parsed_rows, families, total_qty = _parse_rows(merged_rows)
-            anchor_rows_primary = list(parsed_rows)
-            anchor_qty_total = _sum_qty(anchor_rows_primary)
-            anchor_is_authoritative = len(anchor_rows_primary) >= 2
-            anchor_mode = "authoritative" if anchor_is_authoritative else "fallback"
-            print(
-                f"[TEXT-SCAN] pass=anchor rows={len(anchor_rows_primary)} ({anchor_mode})"
-            )
+        total_qty = 0
+        parsed_rows, families, total_qty = _parse_rows(merged_rows)
+        anchor_rows_primary = list(parsed_rows)
+        anchor_qty_total = _sum_qty(anchor_rows_primary)
+        anchor_is_authoritative = len(anchor_rows_primary) >= 2
+        anchor_mode = "authoritative" if anchor_is_authoritative else "fallback"
+        print(
+            f"[TEXT-SCAN] pass=anchor rows={len(anchor_rows_primary)} ({anchor_mode})"
+        )
 
         if anchor_is_authoritative:
             anchor_payload_rows = [dict(row) for row in anchor_rows_primary]
@@ -7493,9 +7489,9 @@ def classify_action(fragment: str) -> dict[str, Any]:
     if not text:
         return result
 
-    if _TAP_TOKEN_RE.search(upper) or _THREAD_TOKEN_RE.search(upper) or _NPT_TOKEN_RE.search(upper):
+    if _TAP_WORD_TOKEN_RE.search(text) or _TAP_THREAD_TOKEN_RE.search(text) or _NPT_TOKEN_RE.search(text):
         result["kind"] = "tap"
-        if _NPT_TOKEN_RE.search(upper):
+        if _NPT_TOKEN_RE.search(text):
             result["npt"] = True
         return result
 
@@ -7515,7 +7511,7 @@ def classify_action(fragment: str) -> dict[str, Any]:
         result["kind"] = "jig_grind"
         return result
 
-    if _SPOT_TOKEN_RE.search(upper) and not _TAP_TOKEN_RE.search(upper):
+    if _SPOT_TOKEN_RE.search(upper) and not _TAP_WORD_TOKEN_RE.search(text):
         result["kind"] = "spot"
         return result
 
