@@ -3,6 +3,7 @@ from __future__ import annotations
 import pytest
 
 from cad_quoter.render import RenderState, render_quote_sections
+from cad_quoter.render.writer import QuoteWriter
 from cad_quoter.utils.render_utils import QuoteDocRecorder
 
 
@@ -28,3 +29,5 @@ def test_render_quote_sections_emits_summary(minimal_state: RenderState) -> None
     assert minimal_state.summary_lines[: len(header)] == header
     assert list(minimal_state.lines) == header + sections[1]
     assert minimal_state.deferred_replacements == []
+    assert isinstance(minimal_state.writer, QuoteWriter)
+    assert minimal_state.summary_lines == list(minimal_state.lines)

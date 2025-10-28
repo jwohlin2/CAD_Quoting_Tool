@@ -8,6 +8,8 @@ from typing import Any, Callable, Iterable, Mapping, Sequence, TYPE_CHECKING
 
 from cad_quoter.utils.render_utils import (
     QuoteDocRecorder,
+    QuoteRow,
+    QuoteSection,
     format_currency,
     format_hours,
     format_hours_with_rate,
@@ -114,6 +116,49 @@ class SectionWriter:
 
 
 @dataclass
+class RenderSection:
+    """Structured representation of a rendered section and its metadata."""
+
+    index: int
+    title: str
+    lines: list[str]
+    start_index: int
+    doc_section: QuoteSection | None = None
+
+
+@dataclass
+class PlaceholderRecord:
+    """Internal book-keeping for line placeholders."""
+
+    name: str
+    section_index: int
+    line_index: int
+    formatter: Callable[[Any], str] | None = None
+
+
+class SectionBuilder:
+    """Convenience builder for accumulating section output."""
+
+    def __init__(self, state: "RenderState", title: str) -> None:
+        self._state = state
+        self.title = title
+        self.lines: list[str] = []
+
+    def add_line(self, text: Any) -> int:
+        value = "" if text is None else str(text)
+        self.lines.append(value)
+        return len(self.lines) - 1
+
+    def add_row(self, label: str, value: Any, *, indent: str = "", kind: str | None = None) -> int:
+        text = self._state.format_row(label, value, indent=indent, kind=kind)
+        self.lines.append(text)
+        return len(self.lines) - 1
+
+    def finalize(self) -> RenderSection:
+        return self._state.add_section(self.title, self.lines)
+
+
+@dataclass
 class RenderState:
     """Mutable context shared across section renderers."""
 
@@ -141,15 +186,19 @@ class RenderState:
     recorder: QuoteDocRecorder | None = None
     deferred_replacements: list[tuple[int, str]] = field(default_factory=list)
     summary_lines: list[str] = field(default_factory=list)
-    programming_rate: float = 0.0
-    programming_per_part: float = 0.0
-    fixture_per_part: float = 0.0
+    sections: list[RenderSection] = field(default_factory=list)
+    _placeholders: dict[str, PlaceholderRecord] = field(default_factory=dict)
+    warning_flags: dict[str, bool] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         result_map = _as_mapping(self.payload)
         self.result: dict[str, Any] = result_map
         breakdown_map = _as_mapping(result_map.get("breakdown"))
         self.breakdown: dict[str, Any] = breakdown_map
+
+        pricing_map = _as_mapping(result_map.get("pricing"))
+        self.pricing: dict[str, Any] = pricing_map
+        result_map["pricing"] = pricing_map
 
         if not self.divider:
             self.divider = "-" * max(self.page_width, 1)
@@ -172,6 +221,10 @@ class RenderState:
                 self.hour_summary_entries = hour_entries
             else:
                 self.hour_summary_entries = {}
+
+        totals_map = _as_mapping(breakdown_map.get("totals"))
+        self.totals: dict[str, Any] = totals_map
+        breakdown_map["totals"] = totals_map
 
         if self.process_meta is None:
             meta = breakdown_map.get("process_meta")
@@ -264,8 +317,48 @@ class RenderState:
         if self.qty <= 0:
             self.qty = 1
 
+        if self.material_warning_summary:
+            self.warning_flags["material_warning"] = True
+
     def section(self) -> SectionWriter:
         return SectionWriter(self)
+
+    def new_section(self, title: str) -> SectionBuilder:
+        """Return a builder for a section titled ``title``."""
+
+        return SectionBuilder(self, title)
+
+    def add_section(self, title: str, lines: Sequence[Any]) -> RenderSection:
+        """Register ``lines`` under ``title`` and return the section record."""
+
+        normalized: list[str] = []
+        for value in lines:
+            if isinstance(value, DisplayRow):
+                normalized.append(self.format_row(value))
+            elif value in (None,):
+                normalized.append("")
+            else:
+                normalized.append(str(value))
+
+        start_index = len(self.lines or [])
+        if self.lines is not None:
+            self.lines.extend(normalized)
+
+        doc_rows = [
+            QuoteRow(index=start_index + offset, text=text)
+            for offset, text in enumerate(normalized)
+        ]
+        doc_section = QuoteSection(title=title, rows=doc_rows)
+
+        record = RenderSection(
+            index=len(self.sections),
+            title=title,
+            lines=list(normalized),
+            start_index=start_index,
+            doc_section=doc_section,
+        )
+        self.sections.append(record)
+        return record
 
     def defer_replacement(self, index: int, text: str) -> None:
         """Queue a line replacement to be applied after section rendering."""
@@ -279,7 +372,7 @@ class RenderState:
             index, text = self.deferred_replacements.pop(0)
             replace(index, text)
 
-    def format_row(self, row: DisplayRow) -> str:
+    def _format_display_row(self, row: DisplayRow) -> str:
         label = f"{row.indent}{row.label}"
         if row.kind == "hours":
             right = format_hours(row.value)
@@ -307,8 +400,77 @@ class RenderState:
                 return f"{left_segment}{right_segment}"
         return f"{label}{' ' * pad}{right}"
 
+    def format_row(
+        self,
+        label_or_row: DisplayRow | str,
+        value: Any | None = None,
+        *,
+        indent: str = "",
+        kind: str | None = None,
+    ) -> str:
+        if isinstance(label_or_row, DisplayRow):
+            row = label_or_row
+        else:
+            try:
+                numeric = float(value) if value is not None else 0.0
+            except Exception:
+                numeric = 0.0
+            row_kind = "hours" if (kind or "").lower() == "hours" else "money"
+            row = DisplayRow(label=str(label_or_row), value=numeric, indent=indent, kind=row_kind)
+        return self._format_display_row(row)
+
     def format_rows(self, rows: Sequence[DisplayRow]) -> list[str]:
-        return [self.format_row(row) for row in rows]
+        return [self._format_display_row(row) for row in rows]
+
+    def register_placeholder(
+        self,
+        name: str,
+        section_index: int,
+        line_index: int,
+        *,
+        formatter: Callable[[Any], str] | None = None,
+    ) -> None:
+        """Register a placeholder for later update."""
+
+        self._placeholders[name] = PlaceholderRecord(
+            name=name,
+            section_index=section_index,
+            line_index=line_index,
+            formatter=formatter,
+        )
+
+    def update_placeholder(self, name: str, value: Any) -> None:
+        """Update the placeholder ``name`` with ``value`` if registered."""
+
+        record = self._placeholders.get(name)
+        if record is None:
+            return
+
+        if record.formatter is not None:
+            try:
+                text = record.formatter(value)
+            except Exception:
+                text = str(value)
+        else:
+            text = str(value)
+
+        if not text and text != "":
+            text = ""
+
+        try:
+            section = self.sections[record.section_index]
+        except IndexError:
+            return
+
+        if 0 <= record.line_index < len(section.lines):
+            section.lines[record.line_index] = text
+
+        global_index = section.start_index + record.line_index
+        if 0 <= global_index < len(self.lines or []):
+            self.lines[global_index] = text
+
+        if section.doc_section is not None and 0 <= record.line_index < len(section.doc_section.rows):
+            section.doc_section.rows[record.line_index].text = text
 
     def hours_with_rate(self, hours: Any, rate: Any) -> str:
         return format_hours_with_rate(hours, rate, self.currency)
