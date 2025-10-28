@@ -26,4 +26,5 @@ def test_render_quote_sections_emits_summary(minimal_state: RenderState) -> None
     assert header[2] == "Quote Summary (structured data attached below)"
     assert header[3] == "Speeds/Feeds CSV: (not set)"
     assert minimal_state.summary_lines[: len(header)] == header
+    assert list(minimal_state.lines) == header + sections[1]
     assert minimal_state.deferred_replacements == []

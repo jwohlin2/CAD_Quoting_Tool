@@ -64,6 +64,7 @@ def test_render_summary_matches_header_for_sample_payload() -> None:
     assert state.pricing_source_value == expected_source
     assert breakdown.get("pricing_source") == expected_source
     assert state.summary_lines == header_lines + suffix_lines
+    assert list(state.lines) == header_lines + suffix_lines
 
 
 def test_render_summary_includes_drill_debug_section() -> None:
@@ -91,6 +92,7 @@ def test_render_summary_includes_drill_debug_section() -> None:
     assert suffix_lines[1] == "Drill Debug"
     assert suffix_lines[2] == _divider(40)
     assert suffix_lines[-1] == ""
+    assert list(state.lines) == header_lines + suffix_lines
 
 
 def test_render_summary_adds_material_warning_label() -> None:
@@ -110,3 +112,4 @@ def test_render_summary_adds_material_warning_label() -> None:
     assert header_lines[0].startswith("QUOTE SUMMARY")
     assert suffix_lines[0] == "⚠ MATERIALS MISSING"
     assert suffix_lines[1] == ""
+    assert list(state.lines) == header_lines + suffix_lines
