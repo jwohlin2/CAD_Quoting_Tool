@@ -6349,7 +6349,12 @@ def read_text_table(
             table_lines = normalized_lines
 
             h_anchor, anchor_count = _compute_anchor_height(candidate_entries)
-            h_anchor = float(h_anchor or 0.20)
+            try:
+                h_anchor = float(h_anchor or 0.0)
+            except Exception:
+                h_anchor = 0.0
+            if anchor_count > 0 and h_anchor <= 0:
+                h_anchor = 0.20
             print(f"[TEXT-SCAN] anchors={anchor_count} h_anchor={h_anchor:.2f}")
             total_by_height = len(candidate_entries)
             if anchor_count > 0 and h_anchor > 0 and candidate_entries:
