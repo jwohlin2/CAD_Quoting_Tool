@@ -4655,9 +4655,11 @@ def read_text_table(
     text_rows_info: dict[str, Any] | None = None
     merged_rows: list[str] = []
     parsed_rows: list[dict[str, Any]] = []
+    total_qty = 0
     columnar_table_info: dict[str, Any] | None = None
     columnar_debug_info: dict[str, Any] | None = None
     anchor_rows_primary: list[dict[str, Any]] = []
+    anchor_qty_total = 0
     anchor_is_authoritative = False
     roi_rows_primary: list[dict[str, Any]] = []
     rows_txt_initial = 0
@@ -4751,7 +4753,7 @@ def read_text_table(
         def _perform_text_scan(
             current_allowlist: _LayerAllowlist | None,
         ) -> tuple[int, int, int]:
-            nonlocal table_lines, text_rows_info, merged_rows, parsed_rows
+            nonlocal table_lines, text_rows_info, merged_rows, parsed_rows, total_qty
             nonlocal columnar_table_info, columnar_debug_info, roi_hint_effective, rows_txt_initial
             nonlocal anchor_rows_primary, roi_rows_primary, anchor_authoritative_result
             nonlocal anchor_is_authoritative, secondary_anchor_candidate
@@ -4766,6 +4768,7 @@ def read_text_table(
             layout_order = []
             merged_rows = []
             parsed_rows = []
+            total_qty = 0
             text_rows_info = None
             rows_txt_initial = 0
             anchor_rows_primary = []
@@ -6204,14 +6207,27 @@ def read_text_table(
                     families[key] = families.get(key, 0) + qty_val
             return (parsed, families, total)
 
-            parsed_rows, families, total_qty = _parse_rows(merged_rows)
-            anchor_rows_primary = list(parsed_rows)
-            anchor_qty_total = _sum_qty(anchor_rows_primary)
-            anchor_is_authoritative = len(anchor_rows_primary) >= 2
-            anchor_mode = "authoritative" if anchor_is_authoritative else "fallback"
-            print(
-                f"[TEXT-SCAN] pass=anchor rows={len(anchor_rows_primary)} ({anchor_mode})"
-            )
+        parsed_rows, families, total_qty = _parse_rows(merged_rows)
+        anchor_rows_primary = list(parsed_rows)
+        anchor_qty_total = _sum_qty(anchor_rows_primary)
+        anchor_is_authoritative = len(anchor_rows_primary) >= 2
+        anchor_mode = "authoritative" if anchor_is_authoritative else "fallback"
+        print(f"[TEXT-SCAN] pass=anchor rows={len(anchor_rows_primary)} ({anchor_mode})")
+
+        if not anchor_is_authoritative and not anchor_rows_primary:
+            debug_rows_candidate = None
+            if isinstance(_LAST_TEXT_TABLE_DEBUG, Mapping):
+                debug_rows_candidate = _LAST_TEXT_TABLE_DEBUG.get("rows")
+            if isinstance(debug_rows_candidate, list):
+                fallback_rows = [
+                    dict(row)
+                    for row in debug_rows_candidate
+                    if isinstance(row, Mapping)
+                ]
+                if len(fallback_rows) >= 2:
+                    anchor_rows_primary = fallback_rows
+                    anchor_qty_total = _sum_qty(anchor_rows_primary)
+                    anchor_is_authoritative = True
 
         if anchor_is_authoritative:
             anchor_payload_rows = [dict(row) for row in anchor_rows_primary]
@@ -6636,7 +6652,7 @@ def read_text_table(
     columnar_result: dict[str, Any] | None = None
     column_selected = False
     roi_rows_primary: list[dict[str, Any]] = []
-    if not anchor_is_authoritative:
+    if not anchor_is_authoritative and not anchor_rows_primary:
         if isinstance(columnar_table_info, Mapping):
             columnar_result = dict(columnar_table_info)
             promoted_rows, promoted_qty_sum = _prepare_columnar_promoted_rows(
@@ -7674,13 +7690,18 @@ def ops_manifest(
     geom_info = _normalize_geom_holes_payload(geom_holes, hole_sets)
     geom_total = int(geom_info.get("total") or 0)
     sized_drill_qty = int(details.get("drill_sized") or 0)
-    geom_residual = max(geom_total - sized_drill_qty, 0) if geom_total and sized_drill_qty else geom_total
+    text_drill_qty = _coerce_positive_int(table_counts.get("drill")) or 0
+    geom_residual = (
+        max(geom_total - text_drill_qty, 0)
+        if geom_total and text_drill_qty
+        else geom_total
+    )
 
     total_counts = dict(table_counts)
     if geom_total > 0:
-        total_counts["drill"] = geom_residual if sized_drill_qty else geom_total
+        total_counts["drill"] = geom_residual
     else:
-        total_counts["drill"] = table_counts.get("drill", 0)
+        total_counts["drill"] = text_drill_qty
 
     text_info = {"estimated_total_drills": int(table_counts.get("drill", 0))}
 
@@ -7695,7 +7716,7 @@ def ops_manifest(
         "details": details,
         "text": text_info,
     }
-    if sized_drill_qty and geom_total:
+    if geom_total:
         manifest["geom"]["residual_drill"] = geom_residual
     return manifest
 
@@ -8870,6 +8891,17 @@ def read_geo(
         print(f"[OPS] table: {_format_ops_counts(table_counts)}")
         print(f"[OPS] geom : {_format_ops_counts(geom_display)}")
         print(f"[OPS] total: {_format_ops_counts(total_counts)}")
+        
+        def _int_from(value: Any) -> int:
+            try:
+                return int(round(float(value or 0)))
+            except Exception:
+                return 0
+
+        text_drill_total = _int_from(table_counts.get("drill")) if isinstance(table_counts, Mapping) else 0
+        text_cbore_total = _int_from(table_counts.get("cbore")) if isinstance(table_counts, Mapping) else 0
+        text_cdrill_total = _int_from(table_counts.get("cdrill")) if isinstance(table_counts, Mapping) else 0
+        text_ops_total = text_drill_total + text_cbore_total + text_cdrill_total
         text_manifest = manifest_payload.get("text") if isinstance(manifest_payload, Mapping) else {}
         text_estimated_total_drills = 0
         if isinstance(text_manifest, Mapping):
@@ -8898,6 +8930,14 @@ def read_geo(
             best_table,
             current_table_info,
         )
+        suspect_overcount = False
+        if geom_total > 0:
+            if text_ops_total > 0 and float(geom_total) > 1.6 * float(text_ops_total):
+                suspect_overcount = True
+            elif am_bor_in_text_flow and geom_total > 150:
+                suspect_overcount = True
+        if suspect_overcount:
+            print("[GEOM] suspect overcount – check layer blacklist or bbox guard")
         if (
             am_bor_in_text_flow
             and geom_total > 0
