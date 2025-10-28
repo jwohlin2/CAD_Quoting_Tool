@@ -240,8 +240,19 @@ def _iter_insert_attributes(entity: Any) -> Iterable[Any]:
             yield attr_entity
 
 
-def flatten_entities(layout: Any, depth: int = 5) -> Iterable[FlattenedEntity]:
-    """Yield entities from ``layout`` with accumulated block transforms."""
+def flatten_entities(
+    layout: Any,
+    depth: int = 5,
+    *,
+    include_block: Callable[[str | None], bool] | None = None,
+) -> Iterable[FlattenedEntity]:
+    """Yield entities from ``layout`` with accumulated block transforms.
+
+    Args:
+        include_block: Optional predicate invoked for each ``INSERT`` block
+            reference. When provided, recursion into the block's entities is
+            skipped unless the predicate returns ``True`` for the block name.
+    """
 
     if layout is None:
         return
@@ -429,6 +440,17 @@ def flatten_entities(layout: Any, depth: int = 5) -> Iterable[FlattenedEntity]:
         if block_name and block_name in block_stack:
             return
 
+        if include_block is not None:
+            try:
+                allow_block = bool(include_block(block_name))
+            except Exception:
+                allow_block = True
+        else:
+            allow_block = True
+
+        if not allow_block:
+            return
+
         block_layout = _resolve_block_layout(entity)
         local_transform = _insert_local_transform(entity, block_layout)
         child_transform = _matrix_multiply(transform, local_transform)
@@ -494,6 +516,8 @@ if _TEXT_LAYER_EXCLUDE_ENV is not None:
             DEFAULT_TEXT_LAYER_EXCLUDE_REGEX = (f"^({env_pattern})$",)
     else:
         DEFAULT_TEXT_LAYER_EXCLUDE_REGEX = tuple()
+
+_GEOM_BLOCK_EXCLUDE_RE = re.compile(r"^(TITLE|BORDER|CHART|FRAME|AM_.*)$", re.IGNORECASE)
 
 _GEO_STRICT_ANCHOR = _env_flag("GEO_STRICT_ANCHOR")
 try:
@@ -7339,19 +7363,48 @@ def ops_manifest(
 
 
 def geom_hole_census(doc: Any) -> dict[str, Any]:
+    blocks_included = 0
+    blocks_skipped = 0
+    groups_counter: defaultdict[float, int] = defaultdict(int)
+
     try:
         msp = doc.modelspace()
     except Exception:
-        return {"groups": [], "total": 0}
+        layouts = getattr(doc, "layouts", None)
+        layout_get = getattr(layouts, "get", None) if layouts is not None else None
+        if callable(layout_get):
+            try:
+                msp = layout_get("Model")
+            except Exception:
+                msp = None
+        else:
+            msp = None
+        if msp is None:
+            print(
+                "[GEOM] counted circles: total=0 from model=0 paperspace=0 "
+                "blocks_included=0 blocks_skipped=0"
+            )
+            return {"groups": [], "total": 0}
 
     units = detect_units_scale(doc)
     to_in = float(units.get("to_in") or 1.0)
     exclude_patterns = [
         re.compile(pattern, re.IGNORECASE) for pattern in DEFAULT_TEXT_LAYER_EXCLUDE_REGEX
     ]
-    groups_counter: defaultdict[float, int] = defaultdict(int)
 
-    for flattened in flatten_entities(msp, depth=_MAX_INSERT_DEPTH):
+    def _allow_block(name: str | None) -> bool:
+        nonlocal blocks_included, blocks_skipped
+        if not name:
+            return True
+        if _GEOM_BLOCK_EXCLUDE_RE.match(name):
+            blocks_skipped += 1
+            return False
+        blocks_included += 1
+        return True
+
+    for flattened in flatten_entities(
+        msp, depth=_MAX_INSERT_DEPTH, include_block=_allow_block
+    ):
         entity = flattened.entity
         try:
             dxftype = entity.dxftype()
@@ -7384,6 +7437,14 @@ def geom_hole_census(doc: Any) -> dict[str, Any]:
         if count > 0
     ]
     total = sum(entry["count"] for entry in groups)
+    circle_total = sum(groups_counter.values())
+    model_circles = circle_total
+    print(
+        "[GEOM] counted circles: total={} from model={} paperspace=0 "
+        "blocks_included={} blocks_skipped={}".format(
+            circle_total, model_circles, blocks_included, blocks_skipped
+        )
+    )
     return {"groups": groups, "total": total}
 
 
