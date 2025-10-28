@@ -8,7 +8,6 @@ import json
 import math
 import os
 import re
-import statistics
 import sys
 from collections import Counter
 from collections.abc import Iterable, Mapping
@@ -30,6 +29,49 @@ from cad_quoter.geo_extractor import (
 DEFAULT_SAMPLE_PATH = REPO_ROOT / "Cad Files" / "301_redacted.dwg"
 ARTIFACT_DIR = REPO_ROOT / "out"
 DEFAULT_EXCLUDE_PATTERN_TEXT = ", ".join(DEFAULT_TEXT_LAYER_EXCLUDE_REGEX) or "<none>"
+
+_FULL_TEXT_FIELDS = [
+    "layout",
+    "entity_type",
+    "layer",
+    "height",
+    "width",
+    "rotation",
+    "x",
+    "y",
+    "raw_text",
+    "plain_text",
+    "style",
+    "handle",
+    "block_name",
+    "from_block",
+]
+
+_HEIGHT_ATTRS = tuple(
+    getattr(
+        geo_extractor,
+        "_DEFAULT_HEIGHT_ATTRS",
+        ("char_height", "text_height", "height", "size"),
+    )
+)
+_ROTATION_ATTRS = tuple(
+    getattr(geo_extractor, "_DEFAULT_ROTATION_ATTRS", ("rotation", "rot"))
+)
+_INSERT_ATTRS = tuple(
+    getattr(
+        geo_extractor,
+        "_DEFAULT_INSERT_ATTRS",
+        (
+            "insert",
+            "alignment_point",
+            "location",
+            "base_point",
+            "defpoint",
+            "start",
+            "point",
+        ),
+    )
+)
 
 TABLE_EXTRACT_ALLOWED_KEYS = {
     "layer_allowlist",
@@ -243,6 +285,381 @@ def write_text_dump_jsonl(rows: Sequence[Mapping[str, Any]], out_dir: str | os.P
             f.write("\n")
     print(f"[TEXT-DUMP] jsonl -> {path}")
     return path
+
+
+def _safe_float(value: Any) -> float | None:
+    try:
+        number = float(value)
+    except Exception:
+        return None
+    if not math.isfinite(number):
+        return None
+    return number
+
+
+def _resolve_first_attr(dxf: Any, attrs: Sequence[str]) -> Any:
+    if dxf is None:
+        return None
+    for name in attrs:
+        if not hasattr(dxf, name):
+            continue
+        try:
+            value = getattr(dxf, name)
+        except Exception:
+            continue
+        if value is None:
+            continue
+        if isinstance(value, str) and not value:
+            continue
+        return value
+    return None
+
+
+def _vector_xy(value: Any) -> tuple[float | None, float | None]:
+    if value is None:
+        return (None, None)
+    if hasattr(value, "x") and hasattr(value, "y"):
+        return (_safe_float(value.x), _safe_float(value.y))
+    if isinstance(value, Iterable) and not isinstance(value, (str, bytes, bytearray)):
+        try:
+            data = list(value)
+        except Exception:
+            data = []
+        if len(data) >= 2:
+            return (_safe_float(data[0]), _safe_float(data[1]))
+    return (None, None)
+
+
+def _resolve_xy_from_dxf(dxf: Any) -> tuple[float | None, float | None]:
+    for attr in _INSERT_ATTRS:
+        if not hasattr(dxf, attr):
+            continue
+        try:
+            point = getattr(dxf, attr)
+        except Exception:
+            continue
+        x_val, y_val = _vector_xy(point)
+        if x_val is not None or y_val is not None:
+            return (x_val, y_val)
+    return (None, None)
+
+
+def _resolve_style_name(dxf: Any) -> str | None:
+    if dxf is None:
+        return None
+    for attr in ("style", "text_style", "dimstyle"):
+        if not hasattr(dxf, attr):
+            continue
+        try:
+            value = getattr(dxf, attr)
+        except Exception:
+            continue
+        if value is None:
+            continue
+        text = str(value)
+        if text:
+            return text
+    return None
+
+
+def _resolve_handle(entity: Any) -> str | None:
+    handle = None
+    dxf = getattr(entity, "dxf", None)
+    if dxf is not None and hasattr(dxf, "handle"):
+        try:
+            handle = dxf.handle
+        except Exception:
+            handle = None
+    if handle in (None, "") and hasattr(entity, "handle"):
+        try:
+            handle = entity.handle
+        except Exception:
+            handle = None
+    if handle in (None, ""):
+        return None
+    return str(handle)
+
+
+def _extract_text_strings(entity: Any, etype: str) -> tuple[str | None, str | None]:
+    raw_text: str | None = None
+    plain_text: str | None = None
+    dxf = getattr(entity, "dxf", None)
+
+    if etype == "MTEXT":
+        try:
+            raw_text = str(getattr(entity, "text", ""))
+        except Exception:
+            raw_text = None
+        if hasattr(entity, "plain_text"):
+            try:
+                plain_text = str(entity.plain_text())
+            except Exception:
+                plain_text = None
+    elif etype in {"TEXT", "ATTRIB", "ATTDEF"}:
+        if dxf is not None and hasattr(dxf, "text"):
+            try:
+                raw_text = str(dxf.text)
+            except Exception:
+                raw_text = None
+        if raw_text is not None:
+            plain_text = raw_text
+    elif etype == "MLEADER":
+        mtext_obj = None
+        get_mtext = getattr(entity, "get_mtext", None)
+        if callable(get_mtext):
+            try:
+                mtext_obj = get_mtext()
+            except Exception:
+                mtext_obj = None
+        if mtext_obj is not None:
+            try:
+                raw_text = str(getattr(mtext_obj, "text", ""))
+            except Exception:
+                raw_text = None
+            if hasattr(mtext_obj, "plain_text"):
+                try:
+                    plain_text = str(mtext_obj.plain_text())
+                except Exception:
+                    plain_text = None
+            if hasattr(mtext_obj, "destroy"):
+                try:
+                    mtext_obj.destroy()
+                except Exception:
+                    pass
+        if raw_text is None and dxf is not None and hasattr(dxf, "text"):
+            try:
+                raw_text = str(dxf.text)
+            except Exception:
+                raw_text = None
+        if raw_text is not None and plain_text is None:
+            plain_text = raw_text
+
+    if plain_text is None and raw_text is not None:
+        plain_text = raw_text
+
+    return (raw_text, plain_text)
+
+
+def _compile_regex_list(patterns: Sequence[str] | None, *, default: Sequence[str] | None = None) -> list[re.Pattern[str]]:
+    raw_patterns: list[str] = []
+    if patterns:
+        for value in patterns:
+            if value is None:
+                continue
+            text = str(value).strip()
+            if text:
+                raw_patterns.append(text)
+    elif default:
+        raw_patterns.extend(str(value).strip() for value in default if str(value).strip())
+    compiled: list[re.Pattern[str]] = []
+    for text in raw_patterns:
+        try:
+            compiled.append(re.compile(text, re.IGNORECASE))
+        except re.error as exc:
+            print(f"[TEXT-DUMP] layer regex error pattern={text!r} err={exc}")
+    return compiled
+
+
+def _iter_insert_attribs(insert: Any) -> list[Any]:
+    attribs: list[Any] = []
+    if insert is None:
+        return attribs
+    candidate = getattr(insert, "attribs", None)
+    if callable(candidate):
+        try:
+            attribs = list(candidate())
+        except Exception:
+            attribs = []
+    elif isinstance(candidate, Iterable) and not isinstance(candidate, (str, bytes, bytearray)):
+        try:
+            attribs = list(candidate)
+        except Exception:
+            attribs = []
+    return attribs
+
+
+def dump_all_text(doc: Any, out_dir: Path | str, opts: Mapping[str, Any] | None) -> tuple[list[dict[str, Any]], Path, Path]:
+    options = dict(opts or {})
+    min_height_raw = options.get("text_min_height", 0.0)
+    min_height_value: float | None = None
+    if min_height_raw is not None:
+        try:
+            candidate = float(min_height_raw)
+        except Exception:
+            candidate = None
+        if candidate is not None and math.isfinite(candidate) and candidate > 0:
+            min_height_value = candidate
+
+    include_patterns = _compile_regex_list(
+        options.get("text_include_layers"), default=[".*"]
+    )
+    exclude_patterns = _compile_regex_list(options.get("text_exclude_layers"))
+
+    layout_filters = [
+        str(value).strip()
+        for value in options.get("text_layouts") or []
+        if isinstance(value, str) and value.strip()
+    ]
+    if layout_filters:
+        layout_arg: Mapping[str, Any] | Iterable[str] | None = {
+            "all_layouts": False,
+            "patterns": layout_filters,
+        }
+    else:
+        layout_arg = {"all_layouts": True, "patterns": []}
+
+    try:
+        layout_spaces = geo_extractor.iter_layouts(doc, layout_arg, log=False)
+    except Exception:
+        layout_spaces = []
+
+    records: list[dict[str, Any]] = []
+    max_depth = 8
+    mleader_total = 0
+    mleader_captured = 0
+
+    def record_matches_filters(entry: Mapping[str, Any]) -> bool:
+        layer_name = str(entry.get("layer") or "")
+        if include_patterns and not any(pattern.search(layer_name) for pattern in include_patterns):
+            return False
+        if exclude_patterns and any(pattern.search(layer_name) for pattern in exclude_patterns):
+            return False
+        if min_height_value is not None:
+            height_value = entry.get("height")
+            if isinstance(height_value, (int, float)) and height_value < min_height_value:
+                return False
+        return True
+
+    def build_record(entity: Any, layout_name: str, *, from_block: bool, block_name: str | None) -> dict[str, Any] | None:
+        dxf = getattr(entity, "dxf", None)
+        try:
+            etype = str(entity.dxftype()).upper()
+        except Exception:
+            etype = ""
+        raw_text, plain_text = _extract_text_strings(entity, etype)
+        if raw_text is None and plain_text is None:
+            return None
+        layer_value = ""
+        if dxf is not None and hasattr(dxf, "layer"):
+            try:
+                layer_value = str(dxf.layer or "")
+            except Exception:
+                layer_value = ""
+        height_candidate = _resolve_first_attr(dxf, _HEIGHT_ATTRS)
+        width_candidate = _resolve_first_attr(dxf, ("width", "text_width", "char_width"))
+        rotation_candidate = _resolve_first_attr(dxf, _ROTATION_ATTRS)
+        x_val, y_val = _resolve_xy_from_dxf(dxf)
+        style_value = _resolve_style_name(dxf)
+        handle_value = _resolve_handle(entity)
+        block_value = None if not block_name else str(block_name)
+        entry = {
+            "layout": str(layout_name or "").strip() or "-",
+            "entity_type": etype or "-",
+            "layer": layer_value,
+            "height": _safe_float(height_candidate),
+            "width": _safe_float(width_candidate),
+            "rotation": _safe_float(rotation_candidate),
+            "x": x_val,
+            "y": y_val,
+            "raw_text": raw_text or "",
+            "plain_text": plain_text or "",
+            "style": style_value,
+            "handle": handle_value,
+            "block_name": block_value,
+            "from_block": 1 if from_block else 0,
+        }
+        return entry
+
+    def walk_entity(entity: Any, layout_name: str, *, from_block: bool = False, block_name: str | None = None, depth_left: int = max_depth) -> None:
+        nonlocal mleader_total, mleader_captured
+        if entity is None:
+            return
+        try:
+            etype = str(entity.dxftype()).upper()
+        except Exception:
+            etype = ""
+        if etype in {"TEXT", "MTEXT", "ATTRIB", "ATTDEF"}:
+            record = build_record(entity, layout_name, from_block=from_block, block_name=block_name)
+            if record and record_matches_filters(record):
+                records.append(record)
+            return
+        if etype == "MLEADER":
+            mleader_total += 1
+            record = build_record(entity, layout_name, from_block=from_block, block_name=block_name)
+            if record and record.get("raw_text") and record_matches_filters(record):
+                records.append(record)
+                mleader_captured += 1
+            return
+        if etype != "INSERT" or depth_left <= 0:
+            return
+
+        insert_name = None
+        dxf = getattr(entity, "dxf", None)
+        if dxf is not None:
+            for attr in ("name", "block_name"):
+                if hasattr(dxf, attr):
+                    try:
+                        value = getattr(dxf, attr)
+                    except Exception:
+                        value = None
+                    if value not in (None, ""):
+                        insert_name = str(value)
+                        break
+
+        for attrib in _iter_insert_attribs(entity):
+            walk_entity(
+                attrib,
+                layout_name,
+                from_block=True,
+                block_name=insert_name,
+                depth_left=depth_left - 1,
+            )
+
+        virtual_entities: list[Any] = []
+        try:
+            virtual_entities = list(entity.virtual_entities())
+        except Exception:
+            virtual_entities = []
+        for child in virtual_entities:
+            walk_entity(
+                child,
+                layout_name,
+                from_block=True,
+                block_name=insert_name,
+                depth_left=depth_left - 1,
+            )
+            if hasattr(child, "destroy"):
+                try:
+                    child.destroy()
+                except Exception:
+                    pass
+
+    for layout_name, layout in layout_spaces:
+        if layout is None:
+            continue
+        for entity in layout:
+            walk_entity(entity, str(layout_name or ""))
+
+    out_dir_path = Path(out_dir).expanduser()
+    out_dir_path.mkdir(parents=True, exist_ok=True)
+    csv_path = out_dir_path / "dxf_text_dump_full.csv"
+    jsonl_path = out_dir_path / "dxf_text_dump_full.jsonl"
+
+    with csv_path.open("w", newline="", encoding="utf-8") as handle:
+        writer = csv.writer(handle)
+        writer.writerow(_FULL_TEXT_FIELDS)
+        for entry in records:
+            writer.writerow([entry.get(field) for field in _FULL_TEXT_FIELDS])
+
+    with jsonl_path.open("w", encoding="utf-8") as handle:
+        for entry in records:
+            json.dump(entry, handle, ensure_ascii=False)
+            handle.write("\n")
+
+    print(f"[TEXT-DUMP] full csv -> {csv_path}")
+    print(f"[TEXT-DUMP] full jsonl -> {jsonl_path}")
+
+    return (records, csv_path, jsonl_path)
 
 
 def _write_rows_csv(
@@ -1125,11 +1542,35 @@ def main(argv: Sequence[str] | None = None) -> int:
         help="Dump all text entities with layout metadata",
     )
     parser.add_argument(
+        "--dump-text-all",
+        action="store_true",
+        help="Write an unfiltered text dump (CSV and JSONL)",
+    )
+    parser.add_argument(
         "--text-min-height",
         type=float,
-        metavar="VALUE",
-        default=None,
-        help="Minimum text height (drawing units) for CHART audit comparisons",
+        metavar="IN",
+        default=0.0,
+        help="Minimum text height in inches for --dump-text-all (default: %(default).2f)",
+    )
+    parser.add_argument(
+        "--text-include-layers",
+        action="append",
+        metavar="REGEX",
+        help="Regex pattern to include layers for --dump-text-all (repeatable; default: .*)",
+    )
+    parser.add_argument(
+        "--text-exclude-layers",
+        action="append",
+        metavar="REGEX",
+        help="Regex pattern to exclude layers for --dump-text-all (repeatable)",
+    )
+    parser.add_argument(
+        "--text-layout",
+        dest="text_layouts",
+        action="append",
+        metavar="NAME",
+        help="Restrict --dump-text-all to specific layouts (repeatable)",
     )
     parser.add_argument(
         "--layouts",
@@ -1233,6 +1674,26 @@ def main(argv: Sequence[str] | None = None) -> int:
 
     text_csv_path: str = "-"
     text_jsonl_path: str = "-"
+
+    if args.dump_text_all:
+        text_dump_opts = {
+            "text_min_height": args.text_min_height,
+            "text_include_layers": args.text_include_layers,
+            "text_exclude_layers": args.text_exclude_layers,
+            "text_layouts": args.text_layouts,
+        }
+        try:
+            _full_entries, full_csv_path, full_jsonl_path = dump_all_text(
+                doc,
+                dump_dir_path,
+                text_dump_opts,
+            )
+        except Exception as exc:
+            print(f"[TEXT-DUMP] full dump failed: {exc}")
+        else:
+            # Update summary paths even if --dump-all-text also runs later.
+            text_csv_path = str(full_csv_path)
+            text_jsonl_path = str(full_jsonl_path)
 
     if args.dump_all_text:
         include_layers: list[str] | None = None
