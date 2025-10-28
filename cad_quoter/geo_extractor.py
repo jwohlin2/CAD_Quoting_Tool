@@ -606,7 +606,7 @@ def _env_float(*names: str, default: float) -> float:
 
 
 _DEFAULT_LAYER_ALLOWLIST = frozenset({"BALLOON"})
-_GEO_EXCLUDE_LAYERS_DEFAULT = r"^(AM_BOR|DEFPOINTS|PAPER)$"
+_GEO_EXCLUDE_LAYERS_DEFAULT = r"^(DEFPOINTS|PAPER)$"
 DEFAULT_TEXT_LAYER_EXCLUDE_REGEX: tuple[str, ...] = (
     _GEO_EXCLUDE_LAYERS_DEFAULT,
 )
@@ -4071,7 +4071,7 @@ def _combine_text_rows(
     return merged, dedup_dropped, False
 
 
-def _compute_anchor_h(entries: Iterable[Mapping[str, Any]]) -> tuple[float, int]:
+def _compute_anchor_height(entries: Iterable[Mapping[str, Any]]) -> tuple[float, int]:
     heights: list[float] = []
     count = 0
     for entry in entries:
@@ -4090,19 +4090,19 @@ def _compute_anchor_h(entries: Iterable[Mapping[str, Any]]) -> tuple[float, int]
     if not heights:
         return (0.0, 0)
     try:
-        anchor_h = float(statistics.median(heights))
+        anchor_height = float(statistics.median(heights))
     except Exception:
-        anchor_h = float(heights[0])
-    return (anchor_h, count)
+        anchor_height = float(heights[0])
+    return (anchor_height, count)
 
 
-def _filter_entries_by_anchor_h(
+def _filter_entries_by_anchor_height(
     entries: Iterable[Mapping[str, Any]],
     *,
-    anchor_h: float,
+    anchor_height: float,
     tolerance: float = 0.4,
 ) -> list[Mapping[str, Any]]:
-    effective_anchor = float(anchor_h or 0.0)
+    effective_anchor = float(anchor_height or 0.0)
     if effective_anchor > 0:
         effective_anchor = max(effective_anchor, _GEO_H_ANCHOR_MIN)
     lower = max(effective_anchor * (1.0 - tolerance), _GEO_H_ANCHOR_HARD_MIN)
@@ -5508,7 +5508,7 @@ def _entry_band_sort_key(entry: Mapping[str, Any]) -> tuple[float, float, int]:
 def _extract_anchor_band_lines(
     context: Mapping[str, Any] | None,
     *,
-    anchor_h: float | None = None,
+    anchor_height: float | None = None,
 ) -> list[str]:
     if not isinstance(context, Mapping):
         return []
@@ -5572,21 +5572,25 @@ def _extract_anchor_band_lines(
         )
     ]
 
-    if anchor_h is None and isinstance(context, Mapping):
-        anchor_candidate = context.get("anchor_h") or context.get("anchor_height")
+    if anchor_height is None and isinstance(context, Mapping):
+        anchor_candidate = (
+            context.get("anchor_height")
+            or context.get("anchor_h")
+            or context.get("h_anchor")
+        )
         if isinstance(anchor_candidate, (int, float)):
-            anchor_h = float(anchor_candidate)
+            anchor_height = float(anchor_candidate)
     try:
-        anchor_h = float(anchor_h) if anchor_h is not None else 0.0
+        anchor_height = float(anchor_height) if anchor_height is not None else 0.0
     except Exception:
-        anchor_h = 0.0
-    if anchor_h < 0:
-        anchor_h = 0.0
+        anchor_height = 0.0
+    if anchor_height < 0:
+        anchor_height = 0.0
 
-    height_lower = anchor_h * 0.6 if anchor_h > 0 else None
-    height_upper = anchor_h * 1.4 if anchor_h > 0 else None
-    height_stop_lower = anchor_h * 0.3 if anchor_h > 0 else None
-    height_stop_upper = anchor_h * 1.7 if anchor_h > 0 else None
+    height_lower = anchor_height * 0.6 if anchor_height > 0 else None
+    height_upper = anchor_height * 1.4 if anchor_height > 0 else None
+    height_stop_lower = anchor_height * 0.3 if anchor_height > 0 else None
+    height_stop_upper = anchor_height * 1.7 if anchor_height > 0 else None
 
     anchor_y_values: list[float] = []
     anchor_x_bounds: dict[int, list[float | None]] = {}
@@ -5650,20 +5654,20 @@ def _extract_anchor_band_lines(
             span = abs(sorted_anchor_y[-1] - sorted_anchor_y[0])
             divider = max(len(sorted_anchor_y) - 1, 1)
             row_spacing_est = span / divider if divider else span
-        if (not row_spacing_est or row_spacing_est <= 0) and anchor_h > 0:
-            row_spacing_est = anchor_h * 2.5
+        if (not row_spacing_est or row_spacing_est <= 0) and anchor_height > 0:
+            row_spacing_est = anchor_height * 2.5
         if not row_spacing_est or row_spacing_est <= 0:
-            row_spacing_est = anchor_h if anchor_h > 0 else 1.0
+            row_spacing_est = anchor_height if anchor_height > 0 else 1.0
         band_half_height = row_spacing_est * 8.0
-        if anchor_h > 0:
-            band_half_height = max(band_half_height, anchor_h * 12.0)
+        if anchor_height > 0:
+            band_half_height = max(band_half_height, anchor_height * 12.0)
         band_y_low = anchor_center_y - band_half_height
         band_y_high = anchor_center_y + band_half_height
-    elif anchor_h > 0:
-        row_spacing_est = anchor_h * 2.5
+    elif anchor_height > 0:
+        row_spacing_est = anchor_height * 2.5
 
-    if row_spacing_est <= 0 and anchor_h > 0:
-        row_spacing_est = anchor_h
+    if row_spacing_est <= 0 and anchor_height > 0:
+        row_spacing_est = anchor_height
     if row_spacing_est <= 0:
         row_spacing_est = 1.0
 
@@ -5686,8 +5690,8 @@ def _extract_anchor_band_lines(
         layout_x_extents[layout_idx] = (min_x, max_x)
 
     x_margin = 0.0
-    if anchor_h > 0:
-        x_margin = max(x_margin, anchor_h * 4.0)
+    if anchor_height > 0:
+        x_margin = max(x_margin, anchor_height * 4.0)
     if row_spacing_est > 0:
         x_margin = max(x_margin, row_spacing_est * 0.5)
 
@@ -5793,7 +5797,7 @@ def _extract_anchor_band_lines(
                 if isinstance(height_val, (int, float)) and math.isfinite(height_val)
                 else None
             )
-            if anchor_h > 0 and height_float is not None and height_float > 0:
+            if anchor_height > 0 and height_float is not None and height_float > 0:
                 if (
                     height_stop_lower is not None
                     and height_stop_upper is not None
@@ -6130,7 +6134,7 @@ def extract_hole_table_from_text(
     rows_txt: Iterable[Any] | None = None,
     *,
     min_rows: int = 2,
-    anchor_h: float | None = None,
+    anchor_height: float | None = None,
 ) -> dict[str, Any]:
     """Fallback text helper for hole table extraction.
 
@@ -6188,9 +6192,9 @@ def extract_hole_table_from_text(
         "provenance_holes": fallback.get("provenance_holes", "HOLE TABLE"),
         "source": fallback.get("source", "text_table"),
     }
-    if anchor_h is not None:
+    if anchor_height is not None:
         try:
-            result["anchor_h"] = float(anchor_h)
+            result["anchor_height"] = float(anchor_height)
         except Exception:
             pass
     families = fallback.get("hole_diam_families_in")
@@ -6267,6 +6271,9 @@ def read_text_table(
     base_exclude = re.compile(_GEO_EXCLUDE_LAYERS_DEFAULT, re.IGNORECASE)
     if not any(pattern.pattern == base_exclude.pattern for pattern in exclude_patterns):
         exclude_patterns.insert(0, base_exclude)
+    am_bor_exclusion_requested = any(
+        pattern.search("AM_BOR") for pattern in exclude_patterns
+    )
     am_bor_band_layouts = {"CHART", "SHEET (B)"}
     include_display = [pattern.pattern for pattern in include_patterns]
     exclude_display = [pattern.pattern for pattern in exclude_patterns]
@@ -6279,8 +6286,11 @@ def read_text_table(
         _LAST_TEXT_TABLE_DEBUG["layer_regex_include"] = list(include_display)
         _LAST_TEXT_TABLE_DEBUG["layer_regex_exclude"] = list(exclude_display)
         _LAST_TEXT_TABLE_DEBUG["debug_layouts_requested"] = bool(debug_layouts)
+        _LAST_TEXT_TABLE_DEBUG["am_bor_exclusion_requested"] = bool(
+            am_bor_exclusion_requested
+        )
     table_lines: list[str] | None = None
-    anchor_h: float = 0.0
+    anchor_height: float = 0.0
     fallback_candidate: Mapping[str, Any] | None = None
     best_candidate: Mapping[str, Any] | None = None
     best_score: tuple[int, int] = (0, 0)
@@ -7141,9 +7151,11 @@ def read_text_table(
             am_bor_drop_count = max(am_bor_pre_count - am_bor_post_count, 0)
 
             if am_bor_post_count > 0:
-                raise AssertionError(
-                    "AM_BOR layer must be excluded from text scan results",
-                )
+                am_bor_included = True
+                if am_bor_exclusion_requested:
+                    raise AssertionError(
+                        "AM_BOR layer must be excluded from text scan results",
+                    )
     
             collected_entries = filtered_entries
             if isinstance(_LAST_TEXT_TABLE_DEBUG, dict):
@@ -7482,13 +7494,17 @@ def read_text_table(
                     candidate_entries_local.append(entry_copy)
                 if not candidate_entries_local:
                     return None
-                anchor_h_local, _anchor_count = _compute_anchor_h(
+                anchor_height_local, _anchor_count = _compute_anchor_height(
                     candidate_entries_local
                 )
-                anchor_h_local = float(anchor_h_local or 0.20)
-                if _anchor_count > 0 and anchor_h_local > 0 and candidate_entries_local:
-                    filtered_by_height = _filter_entries_by_anchor_h(
-                        candidate_entries_local, anchor_h=anchor_h_local
+                anchor_height_local = float(anchor_height_local or 0.20)
+                if (
+                    _anchor_count > 0
+                    and anchor_height_local > 0
+                    and candidate_entries_local
+                ):
+                    filtered_by_height = _filter_entries_by_anchor_height(
+                        candidate_entries_local, anchor_height=anchor_height_local
                     )
                     if filtered_by_height:
                         candidate_entries_local = [dict(entry) for entry in filtered_by_height]
@@ -7696,21 +7712,21 @@ def read_text_table(
                 )
             ]
             anchor_count = len(anchors)
-            anchor_h = 0.0
+            anchor_height = 0.0
             if anchor_count:
-                anchor_h, counted = _compute_anchor_h(anchors)
+                anchor_height, counted = _compute_anchor_height(anchors)
                 if counted <= 0:
-                    anchor_h = 0.0
-                anchor_h = float(anchor_h or 0.20)
+                    anchor_height = 0.0
+                anchor_height = float(anchor_height or 0.20)
             print(
-                f"[TEXT-SCAN] anchors={len(anchors)} h_anchor={anchor_h:.2f}"
+                f"[TEXT-SCAN] anchors={len(anchors)} anchor_height={anchor_height:.2f}"
                 if anchors
                 else "[TEXT-SCAN] anchors=0"
             )
             total_by_height = len(candidate_entries)
-            if anchor_count > 0 and anchor_h > 0 and candidate_entries:
-                filtered_entries = _filter_entries_by_anchor_h(
-                    candidate_entries, anchor_h=anchor_h
+            if anchor_count > 0 and anchor_height > 0 and candidate_entries:
+                filtered_entries = _filter_entries_by_anchor_height(
+                    candidate_entries, anchor_height=anchor_height
                 )
                 kept_count = len(filtered_entries)
                 if kept_count != total_by_height:
@@ -7962,8 +7978,8 @@ def read_text_table(
                                 lower, upper = band_limits
                                 band_min = min(lower, upper)
                                 band_max = max(lower, upper)
-                                if anchor_h > 0:
-                                    band_margin = max(anchor_h * 1.5, 6.0)
+                                if anchor_height > 0:
+                                    band_margin = max(anchor_height * 1.5, 6.0)
                                 else:
                                     band_margin = max((band_max - band_min) * 0.5, 6.0)
                                 lower_bound = band_min - band_margin
@@ -7990,7 +8006,7 @@ def read_text_table(
                             entry.get("normalized_text") or entry.get("text")
                         )
                     ],
-                    "anchor_h": anchor_h,
+                    "anchor_height": anchor_height,
                     "layout_order": [
                         idx for idx in layout_order if _coerce_layout_index(idx) in anchor_layouts
                     ],
@@ -8342,8 +8358,8 @@ def read_text_table(
         helper_kwargs: dict[str, Any] = {}
         if use_lines:
             args.append(lines)
-        if anchor_h > 0:
-            helper_kwargs["anchor_h"] = anchor_h
+        if anchor_height > 0:
+            helper_kwargs["anchor_height"] = anchor_height
         try:
             helper_result = helper(*args, **helper_kwargs)
         except TypeError as exc:
@@ -8431,7 +8447,7 @@ def read_text_table(
         and legacy_score[1] == 0
         and isinstance(anchor_band_context, Mapping)
     ):
-        band_lines = _extract_anchor_band_lines(anchor_band_context, anchor_h=anchor_h)
+        band_lines = _extract_anchor_band_lines(anchor_band_context, anchor_height=anchor_height)
         if band_lines:
             if isinstance(_LAST_TEXT_TABLE_DEBUG, dict):
                 _LAST_TEXT_TABLE_DEBUG["anchor_band_lines"] = list(band_lines)
