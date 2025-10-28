@@ -361,6 +361,33 @@ def test_ops_manifest_combines_table_and_geom() -> None:
     assert geom_counts.get("total") == 10
     assert total_counts.get("drill") == 12
     assert text_info.get("estimated_total_drills") == 4
+    assert manifest.get("details", {}).get("drill_implied_from_taps") == 2
+
+
+def test_ops_manifest_marks_implied_tap_drill() -> None:
+    tap_row = {"qty": 3, "desc": "10-32 TAP THRU"}
+
+    manifest = geo_extractor.ops_manifest([tap_row], geom_holes={"groups": [], "total": 0})
+
+    total_counts = manifest.get("total", {})
+    details = manifest.get("details", {})
+
+    assert total_counts.get("drill") == 3
+    assert details.get("drill_implied_from_taps") == 3
+    assert tap_row.get("tags", {}).get("drill_implied") is True
+
+
+def test_ops_manifest_skips_implied_when_explicit_drill_present() -> None:
+    row = {"qty": 4, "desc": "Ø0.201 DRILL THRU; 1/4-20 TAP"}
+
+    manifest = geo_extractor.ops_manifest([row], geom_holes={"groups": [], "total": 0})
+
+    total_counts = manifest.get("total", {})
+    details = manifest.get("details", {})
+
+    assert total_counts.get("drill") == 4
+    assert details.get("drill_implied_from_taps") == 0
+    assert not row.get("tags")
 
 
 def test_npt_counts_as_tap() -> None:
