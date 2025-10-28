@@ -7322,10 +7322,14 @@ def ops_manifest(
     geom_residual = max(geom_total - sized_drill_qty, 0) if geom_total and sized_drill_qty else geom_total
 
     total_counts = dict(table_counts)
+    table_drill_total = table_counts.get("drill", 0)
     if geom_total > 0:
-        total_counts["drill"] = geom_residual if sized_drill_qty else geom_total
+        if sized_drill_qty:
+            total_counts["drill"] = max(table_drill_total, geom_residual)
+        else:
+            total_counts["drill"] = max(table_drill_total, geom_total)
     else:
-        total_counts["drill"] = table_counts.get("drill", 0)
+        total_counts["drill"] = table_drill_total
 
     manifest = {
         "table": table_counts,
