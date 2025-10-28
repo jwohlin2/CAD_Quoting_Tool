@@ -4,9 +4,11 @@ from __future__ import annotations
 
 from .buckets import detect_planner_drilling, has_planner_drilling
 from .header import render_header
+from .appendix import render_appendix
 from .material import render_material
 from .nre import render_nre
 from .pass_through import render_pass_through
+from .process import render_process
 from .state import RenderState
 from .summary import render_summary
 from .writer import QuoteWriter
@@ -15,10 +17,10 @@ from .writer import QuoteWriter
 def render_quote_sections(state: RenderState) -> list[list[str]]:
     """Return the quote sections emitted for ``state``."""
 
-    summary_sections = render_summary(state)
+    summary_header, summary_suffix = render_summary(state)
 
     sections: list[list[str]] = []
-    for block in summary_sections:
+    for block in (summary_header, summary_suffix):
         if block:
             sections.append(block)
 
@@ -33,7 +35,8 @@ def render_quote_sections(state: RenderState) -> list[list[str]]:
             lines=state.lines,
         )
         setattr(state, "writer", writer)
-        state.lines = writer.lines
+    state.lines = writer.lines
+    state.recorder = writer.recorder
 
     material_section = render_material(state)
     if material_section:
@@ -42,6 +45,23 @@ def render_quote_sections(state: RenderState) -> list[list[str]]:
     nre_section = render_nre(state)
     if nre_section:
         sections.append(nre_section)
+
+    process_section = render_process(state)
+    if process_section.lines:
+        sections.append(process_section.lines)
+
+    sections_before = len(state.sections)
+    pass_through_section, pass_total, pass_labor_total = render_pass_through(state)
+    setattr(state, "pass_through_total", pass_total)
+    setattr(state, "pass_through_labor_total", pass_labor_total)
+    if len(state.sections) > sections_before:
+        del state.sections[sections_before:]
+    if pass_through_section:
+        sections.append(pass_through_section)
+
+    appendix_section = render_appendix(state)
+    if appendix_section:
+        sections.append(appendix_section)
 
     final_writer = getattr(state, "writer", None)
     if isinstance(final_writer, QuoteWriter):
@@ -65,6 +85,8 @@ __all__ = [
     "render_material",
     "render_nre",
     "render_pass_through",
+    "render_process",
+    "render_appendix",
     "render_summary",
     "render_quote_sections",
 ]

@@ -61,10 +61,11 @@ def _ensure_mapping(candidate: Any) -> dict[str, Any]:
         return {}
 
 
-def render_material(state: "RenderState") -> list[str]:
+def render_material(state: "RenderState", **legacy_kwargs: Any) -> list[str]:
     """Return the legacy material section lines while updating ``state``."""
 
     divider = state.divider or "-" * max(10, state.page_width)
+
 
     writer_candidate = getattr(state, "writer", None)
     if isinstance(writer_candidate, QuoteWriter):
