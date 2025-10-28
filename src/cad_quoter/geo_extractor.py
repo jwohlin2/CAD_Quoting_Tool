@@ -585,6 +585,16 @@ _GEO_CIRCLE_DEDUP_DIGITS = 3
 class ExtractionState:
     published: bool = False
     anchor_authoritative: bool = False
+    publish_logged: bool = False
+
+    def mark_published(self) -> bool:
+        """Mark the state as published, returning ``True`` if this is the first publish."""
+
+        if self.publish_logged:
+            return False
+        self.publish_logged = True
+        self.published = True
+        return True
 
 _PREFERRED_BLOCK_NAME_RE = re.compile(r"HOLE.*(?:CHART|TABLE)", re.IGNORECASE)
 _FOLLOW_SHEET_DIRECTIVE_RE = re.compile(
@@ -4706,6 +4716,8 @@ def read_text_table(
         combined_fallback_lines: list[str] = []
         fallback_layout_names: list[str] = []
         fallback_follow_entries: list[dict[str, Any]] = []
+        families: dict[str, int] = {}
+        total_qty = 0
         layout_line_map: dict[str, list[str]] = {}
 
         def _filter_and_dedupe_row_texts(row_texts: Iterable[str]) -> list[str]:
@@ -8281,13 +8293,15 @@ def promote_table_to_geo(
             geo["provenance"] = provenance
         if isinstance(provenance, dict):
             provenance["holes"] = "HOLE TABLE"
-        should_log_publish = bool(log_publish and (state is None or not state.published))
-        if should_log_publish:
-            print(
-                f"[PATH] publish=text_table rows={len(rows)} qty_sum={qty_sum}"
-            )
-            if state is not None:
-                state.published = True
+        if log_publish:
+            if state is None:
+                print(
+                    f"[PATH] publish=text_table rows={len(rows)} qty_sum={qty_sum}"
+                )
+            elif state.mark_published():
+                print(
+                    f"[PATH] publish=text_table rows={len(rows)} qty_sum={qty_sum}"
+                )
     hole_count = table_info.get("hole_count")
     if qty_sum > 0:
         hole_count = qty_sum
@@ -8629,7 +8643,6 @@ def read_geo(
                 text_layer_allowlist = None
         except TypeError:
             pass
-    anchor_auto_publish = False
     if run_text:
         try:
             text_info = read_text_table(
@@ -8668,7 +8681,6 @@ def read_geo(
     if isinstance(text_info, Mapping) and text_info.get("anchor_authoritative"):
         state.anchor_authoritative = True
         state.published = True
-        anchor_auto_publish = True
 
     acad_rows_list: list[dict[str, Any]] = []
     if isinstance(acad_info, Mapping):
@@ -9036,11 +9048,11 @@ def read_geo(
         publish_path = source_lower
     else:
         publish_path = "geom"
-    if not state.published or anchor_auto_publish:
+    should_log_publish = True if state is None else state.mark_published()
+    if should_log_publish:
         print(
             f"[PATH] publish={publish_path} rows={len(rows_for_log)} qty_sum={qty_sum}"
         )
-        state.published = True
     print(
         f"[EXTRACT] published rows={len(rows_for_log)} qty_sum={qty_sum} "
         f"source={ops_summary.get('source')}"
