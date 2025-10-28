@@ -2967,7 +2967,7 @@ def classify_op_row(desc: str | None) -> list[dict[str, Any]]:
         has_tap_word = bool(_TAP_WORD_TOKEN_RE.search(segment))
         if is_npt:
             kinds.append(("npt", None))
-        if has_thread_tap or has_tap_word:
+        if is_npt or has_thread_tap or has_tap_word:
             kinds.append(("tap", None))
         if _COUNTERBORE_TOKEN_RE.search(segment):
             kinds.append(("cbore", None))
