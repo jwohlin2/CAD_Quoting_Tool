@@ -4540,8 +4540,27 @@ def _extract_mechanical_table_from_blocks(doc: Any) -> Mapping[str, Any] | None:
 _FALLBACK_ACTION_KINDS = {"tap", "counterbore", "drill", "counterdrill"}
 _FALLBACK_TRAILING_LADDER_RE = re.compile(r"(?:\s*\d+){3,}$")
 _ANCHOR_TERMINATOR_RE = re.compile(
-    r"^(?:NOTES?|TOLERANCES?|REVISION|TITLE|DRAWN\s+BY)\b",
-    re.IGNORECASE,
+    r"""(?ix)
+    ^\s*
+    (?:
+        (?:
+            (?:\(?\d+[\)\.]*) |
+            (?:[A-Z][\)\.]*) |
+            [-*•]
+        )\s+
+    )?
+    (?:
+        NOTES?|
+        TOLERANCES?|
+        REVISION|
+        TITLE|
+        DRAWN\s+BY|
+        FINISH|
+        MATERIALS?|
+        SCALE|
+        SHT
+    )\b
+    """,
 )
 
 
