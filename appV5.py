@@ -16204,6 +16204,13 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
         currency=currency,
     )
 
+    summary_margin_pct = summary_payload.get("margin_pct")
+    if summary_margin_pct is not None:
+        try:
+            margin_pct_value = float(summary_margin_pct)
+        except (TypeError, ValueError):
+            pass
+
     subtotal_before_margin_val = summary_metrics["subtotal_before_margin"]
     final_price_val = summary_metrics["final_price"]
     margin_amount = summary_metrics["margin_amount"]
