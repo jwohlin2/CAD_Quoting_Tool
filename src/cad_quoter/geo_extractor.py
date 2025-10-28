@@ -8265,6 +8265,14 @@ def _read_geo_payload_from_path(
         published_rows_list = published_rows_obj
     else:
         published_rows_list = []
+    if not published_rows_list and state.published:
+        # Allow fallback publish logging to reflect any rows discovered later.
+        state.published = False
+        if isinstance(payload, Mapping):
+            try:
+                payload["state_published"] = state.published
+            except Exception:
+                pass
     if published_rows_list:
         return payload
     if tables_found == 0 and path_obj.suffix.lower() == ".dwg":
@@ -8308,6 +8316,15 @@ def _read_geo_payload_from_path(
                 else:
                     existing_rows = []
                 if not existing_rows:
+                    if state is not None and state.published:
+                        state.published = False
+                    if isinstance(payload, Mapping):
+                        try:
+                            payload["state_published"] = (
+                                state.published if state is not None else False
+                            )
+                        except Exception:
+                            pass
                     geo_obj = payload.get("geo")
                     if isinstance(geo_obj, dict):
                         promote_table_to_geo(
