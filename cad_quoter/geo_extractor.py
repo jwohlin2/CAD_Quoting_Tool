@@ -4473,7 +4473,7 @@ def _extract_mechanical_table_from_blocks(doc: Any) -> Mapping[str, Any] | None:
     return best_result
 
 
-_FALLBACK_ACTION_KINDS = {"tap", "cbore", "drill", "cdrill"}
+_FALLBACK_ACTION_KINDS = {"tap", "cbore", "drill", "cdrill", "csink", "spot", "jig_grind"}
 _FALLBACK_TRAILING_LADDER_RE = re.compile(r"(?:\s*\d+){3,}$")
 
 
