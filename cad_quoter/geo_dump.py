@@ -583,7 +583,7 @@ def dump_all_text(doc: Any, out_dir: Path | str, opts: Mapping[str, Any] | None)
     except Exception:
         layout_spaces = []
 
-    records: list[dict[str, Any]] = []
+    raw_lines_all: list[dict[str, Any]] = []
     mleader_total = 0
     mleader_captured = 0
     from_blocks_depth_max = 0
@@ -726,15 +726,14 @@ def dump_all_text(doc: Any, out_dir: Path | str, opts: Mapping[str, Any] | None)
                 block_path=block_path,
                 matrix=transform,
             )
-            if record and record_matches_filters(record):
-                records.append(record)
+            if record:
+                raw_lines_all.append(record)
             return
         if etype == "MLEADER":
             mleader_total += 1
             record = build_record(entity, layout_name, from_block=from_block, block_name=block_name)
-            if record and record.get("plain_text") and record_matches_filters(record):
-                records.append(record)
-                mleader_captured += 1
+            if record and record.get("plain_text"):
+                raw_lines_all.append(record)
             return
         if etype != "INSERT":
             return
@@ -805,8 +804,8 @@ def dump_all_text(doc: Any, out_dir: Path | str, opts: Mapping[str, Any] | None)
             continue
         for table_entry in iter_table_cells((layout_name, layout)):
             table_record = build_tablecell_record(table_entry)
-            if table_record and record_matches_filters(table_record):
-                records.append(table_record)
+            if table_record:
+                raw_lines_all.append(table_record)
         for entity in layout:
             walk_entity(
                 entity,
@@ -823,17 +822,27 @@ def dump_all_text(doc: Any, out_dir: Path | str, opts: Mapping[str, Any] | None)
     with csv_path.open("w", newline="", encoding="utf-8") as handle:
         writer = csv.writer(handle)
         writer.writerow(_FULL_TEXT_FIELDS)
-        for entry in records:
+        for entry in raw_lines_all:
             writer.writerow([entry.get(field) for field in _FULL_TEXT_FIELDS])
 
     with jsonl_path.open("w", encoding="utf-8") as handle:
-        for entry in records:
+        for entry in raw_lines_all:
             json.dump(entry, handle, ensure_ascii=False)
             handle.write("\n")
 
     print(f"[TEXT-DUMP] full csv -> {csv_path}")
     print(f"[TEXT-DUMP] full jsonl -> {jsonl_path}")
+    print(f"[TEXT-DUMP] full count={len(raw_lines_all)}")
     print(f"[TEXT-DUMP] from_blocks_depth_max={from_blocks_depth_max}")
+
+    records: list[dict[str, Any]] = []
+    for entry in raw_lines_all:
+        if entry.get("entity_type") == "MLEADER" and not entry.get("plain_text"):
+            continue
+        if record_matches_filters(entry):
+            records.append(entry)
+
+    mleader_captured = sum(1 for entry in records if entry.get("entity_type") == "MLEADER")
 
     return (records, csv_path, jsonl_path)
 
