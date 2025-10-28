@@ -65,7 +65,8 @@ _TAP_THREAD_TOKEN_RE = re.compile(
 _NPT_TOKEN_RE = re.compile(r"\bN\.?P\.?T\.?\b", re.IGNORECASE)
 _PIPE_TAP_TOKEN_RE = re.compile(r"\bPIPE\s+TAP\b", re.IGNORECASE)
 _COUNTERBORE_TOKEN_RE = re.compile(
-    r"\b(?:C['’]?\s*BORE|CBORE|COUNTERBORE)\b", re.IGNORECASE
+    r"\b(?:C['’]?\s*BORE|CBORE|COUNTER\s*BORE)\b",
+    re.IGNORECASE,
 )
 _COUNTERSINK_TOKEN_RE = re.compile(r"\b(?:C['’]?\s*SINK|CSK|COUNTERSINK)\b", re.IGNORECASE)
 _COUNTERDRILL_TOKEN_RE = re.compile(
@@ -77,7 +78,7 @@ _JIG_GRIND_TOKEN_RE = re.compile(
     re.IGNORECASE,
 )
 _SPOT_TOKEN_RE = re.compile(r"\bSPOT\b", re.IGNORECASE)
-_DRILL_TOKEN_RE = re.compile(r"\bDRILL\b", re.IGNORECASE)
+_DRILL_TOKEN_RE = re.compile(r"\bDRILL(?:\s+THRU)?\b", re.IGNORECASE)
 _DRILL_SIZE_PATTERNS: tuple[re.Pattern[str], ...] = (
     re.compile(r"#\s*(\d+)", re.IGNORECASE),
     re.compile(r"NO\.?\s*(\d+)", re.IGNORECASE),
@@ -87,6 +88,7 @@ _DRILL_SIZE_PATTERNS: tuple[re.Pattern[str], ...] = (
     re.compile(r"R\s*\(([^)]+)\)", re.IGNORECASE),
     re.compile(r"[\u00D8\u2300\u2A00⌀]\s*([0-9]+(?:\.[0-9]+)?)", re.IGNORECASE),
     re.compile(r"([0-9]+(?:\.[0-9]+)?)\s*(?:IN\.?|MM|\"|DIA|DIAM)\b", re.IGNORECASE),
+    re.compile(r"\b(\.[0-9]+)\b"),
     re.compile(r"\b([0-9]+\s*/\s*[0-9]+)\b"),
     re.compile(r"\b([A-Z])\b(?=[^A-Z0-9]*(?:DRILL|HOLE))", re.IGNORECASE),
     re.compile(r"\(([^(]*?([0-9]+(?:\.[0-9]+)?)[^)]*)\)", re.IGNORECASE),
@@ -4569,7 +4571,15 @@ def _extract_mechanical_table_from_blocks(doc: Any) -> Mapping[str, Any] | None:
     return best_result
 
 
-_FALLBACK_ACTION_KINDS = {"tap", "counterbore", "drill", "counterdrill"}
+_FALLBACK_ACTION_KINDS = {
+    "tap",
+    "counterbore",
+    "drill",
+    "counterdrill",
+    "jig_grind",
+    "csink",
+    "spot",
+}
 _FALLBACK_TRAILING_LADDER_RE = re.compile(r"(?:\s*\d+){3,}$")
 _ANCHOR_TERMINATOR_RE = re.compile(
     r"^(?:NOTES?|TOLERANCES?|REVISION|TITLE|DRAWN\s+BY)\b",
@@ -4747,6 +4757,21 @@ def _extract_anchor_band_lines(context: Mapping[str, Any] | None) -> list[str]:
 
     anchor_y_values: list[float] = []
     anchor_x_bounds: dict[int, list[float | None]] = {}
+    anchor_keys_by_layout: defaultdict[
+        int, Counter[tuple[str, float | None, float | None]]
+    ] = defaultdict(Counter)
+
+    def _anchor_key(entry: Mapping[str, Any]) -> tuple[str, float | None, float | None] | None:
+        normalized = _normalize_candidate_text(
+            entry.get("normalized_text") or entry.get("text")
+        )
+        if not normalized:
+            return None
+        x_val = _coerce_float_optional(entry.get("x"))
+        y_val = _coerce_float_optional(entry.get("y"))
+        rounded_x = None if x_val is None else round(float(x_val), 3)
+        rounded_y = None if y_val is None else round(float(y_val), 3)
+        return (normalized.upper(), rounded_x, rounded_y)
     for entry in anchor_entries:
         y_val = _coerce_float_optional(entry.get("y"))
         if y_val is not None:
@@ -4764,6 +4789,9 @@ def _extract_anchor_band_lines(context: Mapping[str, Any] | None) -> list[str]:
             bounds[0] = x_val
         if bounds[1] is None or (right_val is not None and right_val > bounds[1]):
             bounds[1] = right_val
+        key = _anchor_key(entry)
+        if key is not None:
+            anchor_keys_by_layout[layout_idx][key] += 1
 
     anchor_center_y: float | None = None
     band_y_low: float | None = None
@@ -4855,6 +4883,10 @@ def _extract_anchor_band_lines(context: Mapping[str, Any] | None) -> list[str]:
             continue
         sorted_records = sorted(records, key=_entry_band_sort_key)
         layout_lines: list[str] = []
+        layout_anchor_counts = Counter(anchor_keys_by_layout.get(layout_idx, {}))
+        anchors_needed = min(sum(layout_anchor_counts.values()), 3)
+        anchors_seen = 0
+        band_started = anchors_needed == 0
         started = False
         x_bounds = band_x_bounds.get(layout_idx)
         x_left_bound = x_bounds[0] if x_bounds else None
@@ -4895,6 +4927,26 @@ def _extract_anchor_band_lines(context: Mapping[str, Any] | None) -> list[str]:
                 continue
             if _roi_is_admin_noise(text):
                 continue
+            anchor_key = _anchor_key(record)
+            if not band_started and anchors_needed:
+                if (
+                    anchor_key is not None
+                    and layout_anchor_counts.get(anchor_key, 0) > 0
+                ):
+                    layout_anchor_counts[anchor_key] -= 1
+                    anchors_seen += 1
+                    if anchors_seen >= anchors_needed:
+                        band_started = True
+                    continue
+                if anchors_seen < anchors_needed:
+                    continue
+                band_started = True
+            if band_started and anchor_key is not None:
+                original_count = anchor_keys_by_layout.get(layout_idx, Counter()).get(
+                    anchor_key, 0
+                )
+                if original_count:
+                    continue
             if not started:
                 if _line_is_table_row_start(text) or re.search(r"\bQTY\b", text, re.IGNORECASE):
                     started = True
