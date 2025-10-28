@@ -173,7 +173,7 @@ def _log_text_stats(entries: Sequence[Mapping[str, Any]]) -> Counter[str]:
             layout = str(entry.get("layout") or "-")
             etype = str(entry.get("etype") or "-")
             layout_type_counts.setdefault(layout, Counter())[etype] += 1
-        priority_types = ("TEXT", "MTEXT", "ATTRIB", "MLEADER", "TABLE")
+        priority_types = ("TEXT", "MTEXT", "ATTRIB", "MLEADER", "TABLE", "TABLECELL")
         for layout in sorted(layout_type_counts):
             counter = layout_type_counts[layout]
             parts: list[str] = []
@@ -546,6 +546,61 @@ def dump_all_text(doc: Any, out_dir: Path | str, opts: Mapping[str, Any] | None)
                 return False
         return True
 
+    def build_tablecell_record(entry: Mapping[str, Any]) -> dict[str, Any] | None:
+        if not isinstance(entry, Mapping):
+            return None
+        layout_value = str(entry.get("layout") or "").strip() or "-"
+        raw_value = entry.get("raw")
+        text_value = entry.get("text")
+        try:
+            raw_text = str(raw_value) if raw_value not in (None, "") else ""
+        except Exception:
+            raw_text = ""
+        try:
+            plain_text = str(text_value) if text_value not in (None, "") else ""
+        except Exception:
+            plain_text = raw_text
+        if not plain_text:
+            plain_text = raw_text
+        if not (plain_text or raw_text):
+            return None
+
+        block_path = entry.get("block_path")
+        if isinstance(block_path, (list, tuple)) and block_path:
+            block_name = " > ".join(str(part) for part in block_path if part)
+            from_block = 1
+        else:
+            block_name = None
+            from_block = 0
+
+        handle_value = entry.get("handle")
+        if isinstance(handle_value, str):
+            handle_text = handle_value
+        elif handle_value in (None, ""):
+            handle_text = ""
+        else:
+            try:
+                handle_text = str(handle_value)
+            except Exception:
+                handle_text = ""
+
+        return {
+            "layout": layout_value,
+            "entity_type": "TABLECELL",
+            "layer": str(entry.get("layer") or ""),
+            "height": _safe_float(entry.get("height")),
+            "width": _safe_float(entry.get("width")),
+            "rotation": _safe_float(entry.get("rotation")),
+            "x": _safe_float(entry.get("insert_x")),
+            "y": _safe_float(entry.get("insert_y")),
+            "raw_text": raw_text or plain_text,
+            "plain_text": plain_text or raw_text,
+            "style": str(entry.get("style") or ""),
+            "handle": handle_text,
+            "block_name": block_name,
+            "from_block": from_block,
+        }
+
     def build_record(entity: Any, layout_name: str, *, from_block: bool, block_name: str | None) -> dict[str, Any] | None:
         dxf = getattr(entity, "dxf", None)
         try:
@@ -653,6 +708,10 @@ def dump_all_text(doc: Any, out_dir: Path | str, opts: Mapping[str, Any] | None)
     for layout_name, layout in layout_spaces:
         if layout is None:
             continue
+        for table_entry in iter_table_cells((layout_name, layout)):
+            table_record = build_tablecell_record(table_entry)
+            if table_record and record_matches_filters(table_record):
+                records.append(table_record)
         for entity in layout:
             walk_entity(entity, str(layout_name or ""))
 
