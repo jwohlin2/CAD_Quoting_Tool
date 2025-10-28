@@ -2,7 +2,6 @@
 from __future__ import annotations
 
 import argparse
-import csv
 import importlib
 import json
 import math
@@ -93,11 +92,16 @@ def _format_text_preview(text: Any, limit: int = 120) -> str:
     return preview
 
 
-def _print_text_dump(entries: Sequence[Mapping[str, Any]]) -> None:
+def _print_text_dump(
+    entries: Sequence[Mapping[str, Any]], csv_path: Path | None = None
+) -> None:
     total = len(entries)
     type_counts = Counter(str(entry.get("etype") or "-") for entry in entries)
     type_summary = ", ".join(f"{key}:{type_counts[key]}" for key in sorted(type_counts))
-    print(f"[TEXT-DUMP] total={total} by etype={{{type_summary}}}")
+    if csv_path:
+        print(f"[TEXT-DUMP] total={total} by etype={{{type_summary}}} -> {csv_path}")
+    else:
+        print(f"[TEXT-DUMP] total={total} by etype={{{type_summary}}}")
     if not entries:
         return
 

@@ -7,6 +7,7 @@ from collections import Counter, defaultdict, deque
 from collections.abc import Iterable, Mapping, MutableMapping, Sequence
 from dataclasses import dataclass
 from fractions import Fraction
+import csv
 import inspect
 import math
 from functools import lru_cache
@@ -1415,6 +1416,68 @@ def _compile_layer_patterns(patterns: Any) -> list[re.Pattern[str]]:
     return compiled
 
 
+def _format_csv_value(value: Any) -> Any:
+    if value in (None, ""):
+        return ""
+    if isinstance(value, (int, float)):
+        return value
+    return str(value)
+
+
+def _write_text_dump_csv(entries: Sequence[Mapping[str, Any]]) -> Path | None:
+    csv_path = Path("debug/dxf_text_dump.csv")
+    try:
+        csv_path.parent.mkdir(parents=True, exist_ok=True)
+        with csv_path.open("w", newline="", encoding="utf-8") as handle:
+            writer = csv.writer(handle)
+            writer.writerow(
+                [
+                    "layout",
+                    "layer",
+                    "etype",
+                    "height",
+                    "rotation",
+                    "insert_x",
+                    "insert_y",
+                    "block_path",
+                    "text",
+                    "raw",
+                ]
+            )
+            for entry in entries:
+                insert_point = _point2d(entry.get("insert"))
+                if insert_point is None:
+                    insert_x: Any = ""
+                    insert_y: Any = ""
+                else:
+                    insert_x, insert_y = insert_point
+                block_path = entry.get("block_path") or ()
+                if not isinstance(block_path, (list, tuple)):
+                    block_items = [block_path]
+                else:
+                    block_items = list(block_path)
+                writer.writerow(
+                    [
+                        _format_csv_value(entry.get("layout")),
+                        _format_csv_value(entry.get("layer")),
+                        _format_csv_value(entry.get("etype")),
+                        _format_csv_value(entry.get("height")),
+                        _format_csv_value(entry.get("rotation")),
+                        _format_csv_value(insert_x),
+                        _format_csv_value(insert_y),
+                        " > ".join(
+                            str(name) for name in block_items if name not in (None, "")
+                        ),
+                        _format_csv_value(entry.get("text")),
+                        _format_csv_value(entry.get("raw")),
+                    ]
+                )
+    except OSError as exc:
+        print(f"[TEXT-DUMP] failed to write CSV: {exc}")
+        return None
+    return csv_path
+
+
 def collect_all_text(
     doc: Any,
     *,
@@ -1423,7 +1486,7 @@ def collect_all_text(
     min_height: float | None = None,
     layers_include: Any = None,
     layers_exclude: Any = None,
-) -> list[dict[str, Any]]:
+) -> tuple[list[dict[str, Any]], Path | None]:
     layouts = _iter_text_layout_spaces(doc, include_paperspace)
     depth = _MAX_INSERT_DEPTH if include_blocks else 0
     records: list[dict[str, Any]] = []
@@ -1451,7 +1514,8 @@ def collect_all_text(
                 min_height_value = None
 
     if not records:
-        return []
+        csv_path = _write_text_dump_csv([])
+        return [], csv_path
 
     filtered: list[dict[str, Any]] = []
     for entry in records:
@@ -1466,7 +1530,9 @@ def collect_all_text(
                 continue
         filtered.append(entry)
 
-    return filtered
+    csv_path = _write_text_dump_csv(filtered)
+
+    return filtered, csv_path
 
 
 def set_trace_acad(enabled: bool) -> None:
