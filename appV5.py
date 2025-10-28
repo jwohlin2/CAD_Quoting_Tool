@@ -11745,12 +11745,428 @@ def _looks_like_hole_header(s: str) -> bool:
     )
 
 
-def extract_hole_table_from_text(doc, y_tol: float = 0.04, min_rows: int = 5):
-    """
-    Returns dict like:
-      {"hole_count": int, "hole_diam_families_in": {...}, "rows":[{"ref":".7500","qty":4,"desc":"..."}, ...]}
-    or {} if not found.
-    """
+_CHART_ANCHOR_RE = re.compile(r"\bHOLE\s+TABLE\b", re.IGNORECASE)
+_CHART_TOTAL_RE = re.compile(r"\bTOTAL\b", re.IGNORECASE)
+
+
+def _as_float_or_none(value: Any) -> float | None:
+    try:
+        number = float(value)
+    except Exception:
+        return None
+    try:
+        if not math.isfinite(number):
+            return None
+    except Exception:
+        return None
+    return number
+
+
+def _collect_chart_text_records(doc: Any) -> list[dict[str, Any]]:
+    try:
+        from cad_quoter import geo_extractor as _geo_extractor
+    except Exception:
+        return []
+
+    try:
+        raw_records = _geo_extractor.collect_all_text(
+            doc, include_blocks=True, include_paperspace=True
+        )
+    except Exception:
+        raw_records = []
+
+    records: list[dict[str, Any]] = []
+    for entry in raw_records or []:
+        if not isinstance(entry, Mapping):
+            continue
+        text = str(entry.get("text") or entry.get("raw") or "").strip()
+        if not text:
+            continue
+        record = {
+            "text": text,
+            "layout": str(entry.get("layout") or ""),
+            "etype": str(entry.get("etype") or ""),
+            "x": _as_float_or_none(entry.get("insert_x")),
+            "y": _as_float_or_none(entry.get("insert_y")),
+            "height": _as_float_or_none(entry.get("height")),
+        }
+        records.append(record)
+    return records
+
+
+def _group_chart_records_by_layout(
+    records: Iterable[Mapping[str, Any]] | None,
+) -> dict[str, list[dict[str, Any]]]:
+    layout_map: dict[str, list[dict[str, Any]]] = {}
+    if not records:
+        return layout_map
+    for entry in records:
+        layout_name = str(entry.get("layout") or "")
+        layout_map.setdefault(layout_name, []).append(dict(entry))
+    return layout_map
+
+
+def _ordered_layout_names(layout_map: Mapping[str, list[dict[str, Any]]]) -> list[str]:
+    layout_names = list(layout_map.keys())
+    if not layout_names:
+        return []
+    chart_layouts = [
+        name for name in layout_names if "CHART" in name.upper()
+    ]
+    sheet_b_layouts = [
+        name for name in layout_names if re.search(r"SHEET\s*\(B\)", name, re.IGNORECASE)
+    ]
+    ordered: list[str] = []
+    seen: set[str] = set()
+    for group in (chart_layouts, sheet_b_layouts, layout_names):
+        for name in group:
+            if name not in seen:
+                ordered.append(name)
+                seen.add(name)
+    return ordered
+
+
+def _anchor_candidates(records: Iterable[Mapping[str, Any]]) -> list[dict[str, Any]]:
+    anchors: list[dict[str, Any]] = []
+    for entry in records:
+        text = str(entry.get("text") or "")
+        if not text or not _CHART_ANCHOR_RE.search(text):
+            continue
+        x_val = _as_float_or_none(entry.get("x"))
+        y_val = _as_float_or_none(entry.get("y"))
+        if x_val is None or y_val is None:
+            continue
+        candidate = dict(entry)
+        candidate["x"] = x_val
+        candidate["y"] = y_val
+        anchors.append(candidate)
+    anchors.sort(
+        key=lambda item: (
+            -float(item.get("y") or 0.0),
+            float(item.get("x") or 0.0),
+        )
+    )
+    return anchors
+
+
+def _records_within_band(
+    records: Iterable[Mapping[str, Any]] | None,
+    anchor: Mapping[str, Any],
+    *,
+    left: float,
+    right: float,
+    above: float,
+    below: float,
+) -> list[dict[str, Any]]:
+    if not records:
+        return []
+    anchor_x = _as_float_or_none(anchor.get("x"))
+    anchor_y = _as_float_or_none(anchor.get("y"))
+    if anchor_x is None or anchor_y is None:
+        return []
+    x_min = anchor_x - abs(left)
+    x_max = anchor_x + abs(right)
+    y_min = anchor_y - abs(below)
+    y_max = anchor_y + abs(above)
+    band: list[dict[str, Any]] = []
+    for entry in records:
+        x_val = _as_float_or_none(entry.get("x"))
+        y_val = _as_float_or_none(entry.get("y"))
+        if x_val is None or y_val is None:
+            continue
+        if x_val < x_min or x_val > x_max:
+            continue
+        if y_val < y_min or y_val > y_max:
+            continue
+        text = str(entry.get("text") or "").strip()
+        if not text:
+            continue
+        record = dict(entry)
+        record["x"] = x_val
+        record["y"] = y_val
+        band.append(record)
+    return band
+
+
+def _segment_records_into_rows(
+    records: Iterable[Mapping[str, Any]] | None,
+    row_gap: float,
+) -> list[list[dict[str, Any]]]:
+    if not records:
+        return []
+    sorted_records = sorted(
+        (dict(entry) for entry in records if _as_float_or_none(entry.get("y")) is not None),
+        key=lambda item: (
+            -float(_as_float_or_none(item.get("y")) or 0.0),
+            float(_as_float_or_none(item.get("x")) or 0.0),
+        ),
+    )
+    rows: list[list[dict[str, Any]]] = []
+    current: list[dict[str, Any]] = []
+    current_y: float | None = None
+    gap = abs(row_gap) if row_gap else 0.12
+    for record in sorted_records:
+        y_val = _as_float_or_none(record.get("y"))
+        if y_val is None:
+            continue
+        if current_y is None:
+            current = [record]
+            current_y = y_val
+            continue
+        if abs(current_y - y_val) > gap:
+            if current:
+                rows.append(current)
+            current = [record]
+            current_y = y_val
+        else:
+            current.append(record)
+    if current:
+        rows.append(current)
+    return rows
+
+
+def _combine_chart_row_text(row: Iterable[Mapping[str, Any]]) -> str:
+    fragments: list[str] = []
+    for entry in sorted(
+        (dict(item) for item in row),
+        key=lambda item: float(_as_float_or_none(item.get("x")) or 0.0),
+    ):
+        text = str(entry.get("text") or "").strip()
+        if text:
+            fragments.append(text)
+    return " ".join(fragments).strip()
+
+
+def _clean_chart_cell_text(text: str, column: str) -> str:
+    cleaned = " ".join(str(text or "").split())
+    if not cleaned:
+        return ""
+    if column == "HOLE":
+        cleaned = re.sub(r"\bHOLE\b", "", cleaned, flags=re.IGNORECASE)
+    elif column == "REF":
+        cleaned = re.sub(r"\bREF(?:ERENCE)?\b", "", cleaned, flags=re.IGNORECASE)
+    elif column == "QTY":
+        cleaned = re.sub(r"\bQTY\b|\bQUANTITY\b", "", cleaned, flags=re.IGNORECASE)
+    elif column == "DESC":
+        cleaned = re.sub(r"\bDESC(?:RIPTION)?\b", "", cleaned, flags=re.IGNORECASE)
+    return " ".join(cleaned.split()).strip(" -:;|")
+
+
+def _build_chart_rows_from_band(
+    band_records: Iterable[Mapping[str, Any]] | None,
+    row_gap: float,
+) -> list[dict[str, Any]]:
+    grouped_rows = _segment_records_into_rows(band_records, row_gap=row_gap)
+    if not grouped_rows:
+        return []
+    lines = [_combine_chart_row_text(row) for row in grouped_rows]
+    header_idx: int | None = None
+    for idx, line in enumerate(lines):
+        if not line:
+            continue
+        if _looks_like_hole_header(line):
+            header_idx = idx
+            break
+    if header_idx is None:
+        return []
+    header_row = grouped_rows[header_idx]
+    header_map: dict[str, float] = {}
+    for entry in header_row:
+        text_upper = str(entry.get("text") or "").upper()
+        x_val = _as_float_or_none(entry.get("x"))
+        if x_val is None:
+            continue
+        if "REF" in text_upper or "Ø" in text_upper or "DIA" in text_upper:
+            header_map["REF"] = x_val
+        elif "QTY" in text_upper or "QUANTITY" in text_upper:
+            header_map["QTY"] = x_val
+        elif "HOLE" in text_upper:
+            header_map["HOLE"] = x_val
+        elif "DESC" in text_upper or "DESCRIPTION" in text_upper:
+            header_map["DESC"] = x_val
+    if not {"REF", "QTY", "DESC"} <= set(header_map):
+        return []
+    hole_x = header_map.get("HOLE", min(header_map.values()) - 1.0)
+    columns = [
+        ("HOLE", hole_x),
+        ("REF", header_map["REF"]),
+        ("QTY", header_map["QTY"]),
+        ("DESC", header_map["DESC"]),
+    ]
+    columns_sorted = sorted(columns, key=lambda item: item[1])
+    bounds = [value for _, value in columns_sorted]
+    splits = [(bounds[i] + bounds[i + 1]) * 0.5 for i in range(len(bounds) - 1)]
+
+    def _column_of(x_val: float) -> str:
+        if x_val < splits[0]:
+            return columns_sorted[0][0]
+        if x_val < splits[1]:
+            return columns_sorted[1][0]
+        if x_val < splits[2]:
+            return columns_sorted[2][0]
+        return columns_sorted[3][0]
+
+    parsed_rows: list[dict[str, Any]] = []
+    for idx in range(header_idx + 1, len(grouped_rows)):
+        line_text = lines[idx]
+        if not line_text:
+            continue
+        if _looks_like_hole_header(line_text):
+            break
+        if _CHART_TOTAL_RE.search(line_text):
+            break
+        row_entries = grouped_rows[idx]
+        cells: dict[str, list[str]] = {key: [] for key in ("HOLE", "REF", "QTY", "DESC")}
+        for entry in sorted(
+            row_entries,
+            key=lambda item: float(_as_float_or_none(item.get("x")) or 0.0),
+        ):
+            text = str(entry.get("text") or "").strip()
+            if not text:
+                continue
+            x_val = _as_float_or_none(entry.get("x"))
+            if x_val is None:
+                continue
+            column = _column_of(x_val)
+            cells[column].append(text)
+        hole = _clean_chart_cell_text(" ".join(cells["HOLE"]), "HOLE")
+        ref = _clean_chart_cell_text(" ".join(cells["REF"]), "REF")
+        qty = _clean_chart_cell_text(" ".join(cells["QTY"]), "QTY")
+        desc = _clean_chart_cell_text(" ".join(cells["DESC"]), "DESC")
+        if not any([ref, qty, desc]):
+            continue
+        parsed_rows.append({"hole": hole, "ref": ref, "qty": qty, "desc": desc})
+    return parsed_rows
+
+
+def _build_hole_table_result(
+    rows: Iterable[Mapping[str, Any]] | None,
+    provenance: str,
+) -> dict[str, Any]:
+    if not rows:
+        return {}
+
+    def parse_qty(value: Any) -> int:
+        try:
+            return int(round(float(str(value).strip())))
+        except Exception:
+            match = re.search(r"\d+", str(value) or "")
+            return int(match.group()) if match else 0
+
+    def parse_dia(value: Any) -> float | None:
+        text = str(value or "").strip()
+        if not text:
+            return None
+        text = text.lstrip("Ø⌀\u00D8 ").strip()
+        if re.fullmatch(r"\d+/\d+", text):
+            try:
+                return float(Fraction(text))
+            except Exception:
+                return None
+        if re.fullmatch(r"(?:\d+)?\.\d+|\d+(?:\.\d+)?", text):
+            try:
+                return float(text)
+            except Exception:
+                return None
+        return None
+
+    families: dict[str, int] = {}
+    clean_rows: list[dict[str, Any]] = []
+    total_qty = 0
+    for entry in rows:
+        if not isinstance(entry, Mapping):
+            continue
+        qty_val = parse_qty(entry.get("qty"))
+        if qty_val <= 0:
+            continue
+        hole = str(entry.get("hole") or "").strip()
+        ref_text = " ".join(str(entry.get("ref") or "").split())
+        desc_text = " ".join(str(entry.get("desc") or "").split())
+        diameter = parse_dia(ref_text)
+        if diameter is None and desc_text:
+            match = re.search(
+                r"[Ø⌀\u00D8]?\s*((?:\d+)?\.\d+|\d+/\d+|\d+(?:\.\d+)?)",
+                desc_text,
+            )
+            if match:
+                diameter = parse_dia(match.group(1))
+        row_payload: dict[str, Any] = {
+            "hole": hole,
+            "ref": ref_text,
+            "qty": qty_val,
+            "desc": desc_text,
+        }
+        if diameter is not None:
+            ref_key = f"{diameter:.4f}\""
+            row_payload["ref"] = ref_key
+            row_payload["diameter_in"] = diameter
+            families[ref_key] = families.get(ref_key, 0) + qty_val
+        clean_rows.append(row_payload)
+        total_qty += qty_val
+
+    if total_qty <= 0 or not clean_rows:
+        return {}
+
+    result = {
+        "rows": clean_rows,
+        "hole_count": total_qty,
+        "hole_diam_families_in": families,
+        "provenance_holes": provenance,
+        "qty_sum": total_qty,
+    }
+    ops_summary = aggregate_ops(clean_rows) if clean_rows else {}
+    if ops_summary:
+        result["ops_summary"] = ops_summary
+    return result
+
+
+def _extract_chart_hole_table(
+    doc: Any,
+    *,
+    min_rows: int,
+    band_left: float,
+    band_right: float,
+    band_above: float,
+    band_below: float,
+    row_gap: float,
+) -> dict[str, Any]:
+    records = _collect_chart_text_records(doc)
+    layout_map = _group_chart_records_by_layout(records)
+    if not layout_map:
+        return {}
+    for layout_name in _ordered_layout_names(layout_map):
+        layout_records = layout_map.get(layout_name) or []
+        anchors = _anchor_candidates(layout_records)
+        if not anchors:
+            continue
+        for anchor in anchors:
+            band = _records_within_band(
+                layout_records,
+                anchor,
+                left=band_left,
+                right=band_right,
+                above=band_above,
+                below=band_below,
+            )
+            parsed_rows = _build_chart_rows_from_band(band, row_gap=row_gap)
+            if len(parsed_rows) < max(1, min_rows):
+                continue
+            result = _build_hole_table_result(parsed_rows, "HOLE TABLE (chart)")
+            rows_payload = result.get("rows") if isinstance(result, Mapping) else []
+            if not result or len(rows_payload or []) < max(1, min_rows):
+                continue
+            anchor_height = _as_float_or_none(anchor.get("height"))
+            if anchor_height is not None:
+                result["anchor_height"] = anchor_height
+            result["chart_layout"] = layout_name or None
+            return result
+    return {}
+
+
+def _extract_hole_table_from_text_legacy(
+    doc, y_tol: float = 0.04, min_rows: int = 5
+):
+    """Legacy text-scanning fallback for HOLE TABLE rows."""
 
     try:
         texts = [(_normalize(t), x, y) for (t, x, y) in _iter_text_with_xy(doc) if _normalize(t)]
@@ -11833,60 +12249,64 @@ def extract_hole_table_from_text(doc, y_tol: float = 0.04, min_rows: int = 5):
     if len(rows) < min_rows:
         return {}
 
-    total = 0
-    families: dict[str, int] = {}
-
-    def parse_qty(s: str) -> int:
-        try:
-            return int(float((s or "").strip()))
-        except Exception:
-            m = re.search(r"\d+", s or "")
-            return int(m.group()) if m else 0
-
-    def parse_dia_inch(s: str) -> float | None:
-        s = (s or "").strip().lstrip("Ø⌀\u00D8 ").strip()
-        if re.fullmatch(r"\d+/\d+", s):
-            try:
-                return float(Fraction(s))
-            except Exception:
-                return None
-        if re.fullmatch(r"(?:\d+)?\.\d+|\d+(?:\.\d+)?", s):
-            try:
-                return float(s)
-            except Exception:
-                return None
-        return None
-
-    clean_rows: list[dict[str, Any]] = []
-    for r in rows:
-        q = parse_qty(r["qty"])
-        if q <= 0:
-            continue
-        d = parse_dia_inch(r["ref"])
-        if d is None:
-            mm = re.search(r"[Ø⌀\u00D8]?\s*((?:\d+)?\.\d+|\d+/\d+|\d+(?:\.\d+)?)", r["desc"])
-            d = parse_dia_inch(mm.group(1)) if mm else None
-        if d is None:
-            continue
-        key = f'{d:.4f}"'
-        families[key] = families.get(key, 0) + q
-        total += q
-        clean_rows.append({**r, "qty": q, "ref": key, "diameter_in": d})
-
-    if total <= 0:
+    result = _build_hole_table_result(rows, "HOLE TABLE (text)")
+    rows_payload = result.get("rows") if isinstance(result, Mapping) else []
+    if not result or len(rows_payload or []) < min_rows:
         return {}
-
-    ops_summary = aggregate_ops(clean_rows) if clean_rows else {}
-
-    result = {
-        "hole_count": total,
-        "hole_diam_families_in": families,
-        "rows": clean_rows,
-        "provenance_holes": "HOLE TABLE (text)",
-    }
-    if ops_summary:
-        result["ops_summary"] = ops_summary
     return result
+
+
+def extract_hole_table_from_text(
+    doc,
+    y_tol: float = 0.04,
+    min_rows: int = 5,
+    **kwargs: Any,
+):
+    """Extract HOLE TABLE rows from text geometry with CHART-focused heuristics."""
+
+    anchor_height_raw = None
+    for key in ("anchor_height", "anchor_h", "h_anchor"):
+        if key in kwargs:
+            anchor_height_raw = kwargs.pop(key)
+            break
+    anchor_height = _as_float_or_none(anchor_height_raw)
+
+    # Optional helper invocations may provide unused arguments such as ``lines``.
+    kwargs.pop("lines", None)
+
+    def _pop_band(name: str, fallback: float) -> float:
+        value = kwargs.pop(name, None)
+        if value is None:
+            return fallback
+        coerced = _as_float_or_none(value)
+        return coerced if coerced is not None else fallback
+
+    band_left = _pop_band("band_left", _pop_band("band_x_pad_left", 0.5))
+    band_right = _pop_band("band_right", _pop_band("band_x_pad_right", 10.0))
+    band_above = _pop_band("band_above", _pop_band("band_y_above", 0.5))
+    band_below = _pop_band("band_below", _pop_band("band_y_below", 6.0))
+    row_gap = _pop_band("row_gap", _pop_band("band_row_gap", 0.12))
+
+    chart_result = _extract_chart_hole_table(
+        doc,
+        min_rows=max(1, int(min_rows or 0)),
+        band_left=band_left,
+        band_right=band_right,
+        band_above=band_above,
+        band_below=band_below,
+        row_gap=row_gap,
+    )
+    if chart_result:
+        if anchor_height is not None and "anchor_height" not in chart_result:
+            chart_result["anchor_height"] = anchor_height
+        return chart_result
+
+    legacy_result = _extract_hole_table_from_text_legacy(
+        doc, y_tol=y_tol, min_rows=min_rows
+    )
+    if legacy_result and anchor_height is not None and "anchor_height" not in legacy_result:
+        legacy_result["anchor_height"] = anchor_height
+    return legacy_result
 
 
 def hole_count_from_acad_table(doc) -> dict[str, Any]:
