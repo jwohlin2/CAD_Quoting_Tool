@@ -8,6 +8,7 @@ import json
 import math
 import os
 import re
+import statistics
 import sys
 from collections import Counter
 from collections.abc import Iterable, Mapping
@@ -1502,7 +1503,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         "--text-anchor-ratio",
         dest="text_anchor_ratio",
         type=float,
-        help="Anchor height tolerance ratio for filtered text scan (e.g. 0.4 for ±40%)",
+        help="Anchor height tolerance ratio for filtered text scan (e.g. 0.4 for ±40%%)",
     )
     parser.add_argument(
         "--text-layout",
@@ -1595,27 +1596,32 @@ def main(argv: Sequence[str] | None = None) -> int:
         help="Write an unfiltered text dump (CSV and JSONL)",
     )
     parser.add_argument(
-        "--text-min-height",
+        "--dump-text-min-height",
+        dest="dump_text_min_height",
         type=float,
         metavar="IN",
         default=0.0,
-        help="Minimum text height in inches for --dump-text-all (default: %(default).2f)",
+        help="Minimum text height in drawing units for --dump-text-all (default: %(default)s)",
     )
     parser.add_argument(
-        "--text-include-layers",
+        "--dump-text-include-layer",
+        "--dump-text-include-layers",
+        dest="dump_text_include_layers",
         action="append",
         metavar="REGEX",
         help="Regex pattern to include layers for --dump-text-all (repeatable; default: .*)",
     )
     parser.add_argument(
-        "--text-exclude-layers",
+        "--dump-text-exclude-layer",
+        "--dump-text-exclude-layers",
+        dest="dump_text_exclude_layers",
         action="append",
         metavar="REGEX",
         help="Regex pattern to exclude layers for --dump-text-all (repeatable)",
     )
     parser.add_argument(
-        "--text-layout",
-        dest="text_layouts",
+        "--dump-text-layout",
+        dest="dump_text_layouts",
         action="append",
         metavar="NAME",
         help="Restrict --dump-text-all to specific layouts (repeatable)",
@@ -1725,10 +1731,10 @@ def main(argv: Sequence[str] | None = None) -> int:
 
     if args.dump_text_all:
         text_dump_opts = {
-            "text_min_height": args.text_min_height,
-            "text_include_layers": args.text_include_layers,
-            "text_exclude_layers": args.text_exclude_layers,
-            "text_layouts": args.text_layouts,
+            "text_min_height": args.dump_text_min_height,
+            "text_include_layers": args.dump_text_include_layers,
+            "text_exclude_layers": args.dump_text_exclude_layers,
+            "text_layouts": args.dump_text_layouts,
         }
         try:
             _full_entries, full_csv_path, full_jsonl_path = dump_all_text(
