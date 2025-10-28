@@ -2,7 +2,15 @@
 name = "cad-quoting-tool"
 version = "0.0.0"
 description = "Desktop workflow for quoting CAD-driven jobs."
+readme = "README.md"
 requires-python = ">=3.11"
+license = { text = "Proprietary" }
+authors = [{ name = "CAD Quoter Team" }]
+classifiers = [
+    "Private :: Do Not Upload",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.11",
+]
 dependencies = [
     "beautifulsoup4>=4.12",
     "lxml>=4.9",
@@ -20,6 +28,26 @@ dependencies = [
     "types-ezdxf==1.0.0",
     "types-pythonocc-core==7.7.0.1",
     "types-PyMuPDF==1.24.3.20240525",
+]
+
+[tool.setuptools]
+include-package-data = true
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["cad_quoter*"]
+exclude = ["tests", "tests.*"]
+namespaces = false
+
+[tool.setuptools.package-data]
+cad_quoter = [
+    "resources/*.csv",
+    "resources/*.json",
+    "resources/*.txt",
+]
+"cad_quoter.pricing" = [
+    "resources/*.csv",
+    "resources/*.json",
 ]
 
 [tool.ruff]
