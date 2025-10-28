@@ -1,0 +1,305 @@
+{
+  "breakdown": {
+    "app_meta": {
+      "used_planner": true
+    },
+    "applied_pcts": {
+      "MarginPct": 0.2
+    },
+    "bucket_view": {
+      "buckets": {
+        "drilling": {
+          "labor$": 90.0,
+          "machine$": 120.0,
+          "minutes": 90.0,
+          "total$": 210.0
+        },
+        "finishing_deburr": {
+          "labor$": 80.0,
+          "machine$": 0.0,
+          "minutes": 60.0,
+          "total$": 80.0
+        },
+        "grinding": {
+          "labor$": 150.0,
+          "machine$": 180.0,
+          "minutes": 120.0,
+          "total$": 330.0
+        },
+        "inspection": {
+          "labor$": 40.0,
+          "machine$": 0.0,
+          "minutes": 45.0,
+          "total$": 40.0
+        },
+        "milling": {
+          "labor$": 240.0,
+          "machine$": 360.0,
+          "minutes": 360.0,
+          "total$": 600.0
+        }
+      }
+    },
+    "direct_cost_details": {},
+    "drill_debug": [
+      "Planner drill analysis: material Aluminum MIC6 with matched feeds"
+    ],
+    "drilling_meta": {
+      "material": "aluminum mic6",
+      "material_display": "Aluminum MIC6",
+      "speeds_feeds_loaded": true,
+      "speeds_feeds_path": "planner://feeds.csv"
+    },
+    "hour_summary": {
+      "buckets": {
+        "drilling": {
+          "$": 210.0,
+          "hr": 1.5,
+          "label": "Drilling",
+          "labor$": 90.0,
+          "machine$": 120.0,
+          "rate": 140.0
+        },
+        "finishing_deburr": {
+          "$": 80.0,
+          "hr": 1.0,
+          "label": "Finishing/Deburr",
+          "labor$": 80.0,
+          "machine$": 0.0,
+          "rate": 80.0
+        },
+        "grinding": {
+          "$": 330.0,
+          "hr": 2.0,
+          "label": "Grinding",
+          "labor$": 150.0,
+          "machine$": 180.0,
+          "rate": 165.0
+        },
+        "inspection": {
+          "$": 40.0,
+          "hr": 0.75,
+          "label": "Inspection",
+          "labor$": 40.0,
+          "machine$": 0.0,
+          "rate": 53.333333333333336
+        },
+        "milling": {
+          "$": 600.0,
+          "hr": 6.0,
+          "label": "Milling",
+          "labor$": 240.0,
+          "machine$": 360.0,
+          "rate": 100.0
+        }
+      },
+      "order": [
+        "milling",
+        "drilling",
+        "grinding",
+        "finishing_deburr",
+        "inspection"
+      ],
+      "total_hours": 11.25
+    },
+    "labor_cost_details": {
+      "Drilling": "mach $45.00/hr / labor $45.00/hr",
+      "Finishing/Deburr": "labor $45.00/hr",
+      "Grinding": "mach $45.00/hr",
+      "Inspection": "labor $45.00/hr",
+      "Milling": "mach $45.00/hr"
+    },
+    "labor_cost_details_input": {},
+    "labor_costs": {
+      "Drilling": 210.0,
+      "Finishing/Deburr": 80.0,
+      "Grinding": 330.0,
+      "Inspection": 40.0,
+      "Milling": 600.0
+    },
+    "material": {
+      "mass_g": 98500.0,
+      "material": "Aluminum MIC6",
+      "material_cost": 420.0,
+      "material_name": "Aluminum MIC6",
+      "net_mass_g": 91500.0,
+      "scrap_pct": 0.07
+    },
+    "material_selected": {
+      "canonical": "Aluminum MIC6"
+    },
+    "nre": {
+      "extra_nre_cost": 0.0,
+      "fixture_per_part": 0.0,
+      "programming_per_lot": 0.0
+    },
+    "nre_cost_details": {},
+    "nre_detail": {
+      "fixture": {
+        "build_hr": 3.0,
+        "build_rate": 85.0
+      },
+      "programming": {
+        "amortized": false,
+        "prog_hr": 4.0,
+        "prog_rate": 95.0
+      }
+    },
+    "params": {},
+    "pass_meta": {},
+    "pass_through": {
+      "Expedite Shipping": 20.0,
+      "Finishing": 25.0,
+      "Heat Treat": 55.0,
+      "Material & Stock": 420.0
+    },
+    "pricing_source": "planner",
+    "pricing_source_text": "planner://feeds.csv",
+    "process_costs": {
+      "Labor": 600.0,
+      "Machine": 660.0
+    },
+    "process_meta": {
+      "drilling": {
+        "$": 210.0,
+        "hr": 1.5,
+        "labor$": 90.0,
+        "machine$": 120.0,
+        "minutes": 90.0,
+        "rate": 140.0,
+        "total$": 210.0
+      },
+      "finishing_deburr": {
+        "$": 80.0,
+        "hr": 1.0,
+        "labor$": 80.0,
+        "machine$": 0.0,
+        "minutes": 60.0,
+        "rate": 80.0,
+        "total$": 80.0
+      },
+      "grinding": {
+        "$": 330.0,
+        "hr": 2.0,
+        "labor$": 150.0,
+        "machine$": 180.0,
+        "minutes": 120.0,
+        "rate": 165.0,
+        "total$": 330.0
+      },
+      "inspection": {
+        "$": 40.0,
+        "hr": 0.75,
+        "labor$": 40.0,
+        "machine$": 0.0,
+        "minutes": 45.0,
+        "rate": 53.333333333333336,
+        "total$": 40.0
+      },
+      "milling": {
+        "$": 600.0,
+        "hr": 6.0,
+        "labor$": 240.0,
+        "machine$": 360.0,
+        "minutes": 360.0,
+        "rate": 100.0,
+        "total$": 600.0
+      },
+      "planner_labor": {
+        "cost": 600.0,
+        "hr": 11.25,
+        "minutes": 675.0
+      },
+      "planner_machine": {
+        "cost": 660.0,
+        "hr": 7.0,
+        "minutes": 420.0
+      },
+      "planner_total": {
+        "cost": 1260.0,
+        "hr": 11.25,
+        "labor_cost": 600.0,
+        "line_items": [
+          {
+            "labor_cost": 240.0,
+            "machine_cost": 360.0,
+            "minutes": 240.0,
+            "op": "Milling Rough"
+          },
+          {
+            "labor_cost": 90.0,
+            "machine_cost": 120.0,
+            "minutes": 90.0,
+            "op": "Drilling Ops"
+          },
+          {
+            "labor_cost": 150.0,
+            "machine_cost": 180.0,
+            "minutes": 120.0,
+            "op": "Surface Grind"
+          },
+          {
+            "labor_cost": 80.0,
+            "machine_cost": 0.0,
+            "minutes": 60.0,
+            "op": "Deburr & Finish"
+          },
+          {
+            "labor_cost": 40.0,
+            "machine_cost": 0.0,
+            "minutes": 45.0,
+            "op": "Inspection"
+          }
+        ],
+        "machine_cost": 660.0,
+        "minutes": 675.0
+      }
+    },
+    "qty": 12,
+    "rates": {
+      "DeburrRate": 80.0,
+      "DrillingRate": 80.0,
+      "InspectionRate": 95.0,
+      "MillingRate": 100.0,
+      "SurfaceGrindRate": 90.0
+    },
+    "totals": {
+      "direct_costs": 520.0,
+      "labor_cost": 1260.0,
+      "price": 2136.0,
+      "subtotal": 1780.0,
+      "with_expedite": 2093.28
+    }
+  },
+  "decision_state": {
+    "baseline": {
+      "drill_params": {
+        "group": "N1",
+        "material": "aluminum mic6"
+      },
+      "normalized_quote_material": "aluminum mic6",
+      "pricing_source": "planner",
+      "process_hours": {
+        "drilling": 1.5,
+        "finishing_deburr": 1.0,
+        "grinding": 2.0,
+        "inspection": 0.75,
+        "milling": 6.0
+      },
+      "used_planner": true
+    },
+    "effective": {},
+    "effective_sources": {},
+    "suggestions": {},
+    "user_overrides": {}
+  },
+  "drill_debug": [
+    "Drill calc \u2192 op=Planner Drill, mat=Aluminum MIC6, SFM=280\u2013320, IPR=0.0030\u20130.0040; RPM 3400\u20133900 IPM 10.2\u201313.3; \u00d8 0.500\"; depth/hole 1.50 in; holes 48; index 8.0 s/hole; peck 0.08 min/hole; toolchange 0.50 min; total hr 1.50."
+  ],
+  "price": 2136.0,
+  "qty": 12,
+  "speeds_feeds_path": "planner://feeds.csv",
+  "ui_vars": {
+    "Material": "Aluminum MIC6"
+  }
+}

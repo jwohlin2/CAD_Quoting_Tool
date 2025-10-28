@@ -1,0 +1,206 @@
+QUOTE SUMMARY - Qty 12
+--------------------------------------------------------------------------
+Quote Summary (structured data attached below)
+Speeds/Feeds CSV: planner://feeds.csv
+Pricing Source: Estimator
+
+Material & Stock
+--------------------------------------------------------------------------
+  Material used:  Aluminum MIC6
+  Starting Weight: 217 lb 2.5 oz
+  Net Weight: 201 lb 11.6 oz
+  Scrap Weight: 15 lb 3.2 oz
+  Scrap Percentage: 7.0% (computed)
+  Scrap % (geometry hint): 7.0%
+  Base Material @ per-lb @ $0.00/lb                                $420.00
+                                                                   -------
+  Total Material Cost :                                            $420.00
+
+QUOTE SUMMARY - Qty 12
+--------------------------------------------------------------------------
+Quote Summary (structured data attached below)
+Speeds/Feeds CSV: planner://feeds.csv
+Pricing Source: Estimator
+
+Material & Stock
+--------------------------------------------------------------------------
+  Material used:  Aluminum MIC6
+  Starting Weight: 217 lb 2.5 oz
+  Net Weight: 201 lb 11.6 oz
+  Scrap Weight: 15 lb 3.2 oz
+  Scrap Percentage: 7.0% (computed)
+  Scrap % (geometry hint): 7.0%
+  Base Material @ per-lb @ $0.00/lb                                $420.00
+                                                                   -------
+  Total Material Cost :                                            $420.00
+
+NRE / Setup Costs (per lot)
+--------------------------------------------------------------------------
+Programming & Eng:                                                 $180.00
+  Programming Cost:                                                $180.00
+  Programming Hrs: 4.00 hr
+    - Programmer (lot): 4.00 hr @ $45.00/hr
+Fixturing:                                                           $0.00
+    - Build labor (lot): 3.00 hr @ $85.00/hr
+Programming Hrs:                                                   4.00 hr
+Programming Cost:                                                  $180.00
+
+QUOTE SUMMARY - Qty 12
+--------------------------------------------------------------------------
+Quote Summary (structured data attached below)
+Speeds/Feeds CSV: planner://feeds.csv
+Pricing Source: Estimator
+
+Material & Stock
+--------------------------------------------------------------------------
+  Material used:  Aluminum MIC6
+  Starting Weight: 217 lb 2.5 oz
+  Net Weight: 201 lb 11.6 oz
+  Scrap Weight: 15 lb 3.2 oz
+  Scrap Percentage: 7.0% (computed)
+  Scrap % (geometry hint): 7.0%
+  Base Material @ per-lb @ $0.00/lb                                $420.00
+                                                                   -------
+  Total Material Cost :                                            $420.00
+
+NRE / Setup Costs (per lot)
+--------------------------------------------------------------------------
+Programming & Eng:                                                 $180.00
+  Programming Cost:                                                $180.00
+  Programming Hrs: 4.00 hr
+    - Programmer (lot): 4.00 hr @ $45.00/hr
+Fixturing:                                                           $0.00
+    - Build labor (lot): 3.00 hr @ $85.00/hr
+Programming Hrs:                                                   4.00 hr
+Programming Cost:                                                  $180.00
+
+Final Price per Part:                                            $1,722.00
+                                                                 ---------
+Total Process Cost:                                                $915.00
+                                                                     -----
+Total Direct Costs:                                                $520.00
+
+Material & Stock
+--------------------------------------------------------------------------
+  Material used:  Aluminum MIC6
+  Starting Weight: 217 lb 2.5 oz
+  Net Weight: 201 lb 11.6 oz
+  Scrap Weight: 15 lb 3.2 oz
+  Scrap Percentage: 7.0% (computed)
+  Scrap % (geometry hint): 7.0%
+  Base Material @ per-lb @ $0.00/lb                                $420.00
+                                                                   -------
+  Total Material Cost :                                            $420.00
+
+NRE / Setup Costs (per lot)
+--------------------------------------------------------------------------
+Programming & Eng:                                                 $180.00
+  Programming Cost:                                                $180.00
+  Programming Hrs: 4.00 hr
+    - Programmer (lot): 4.00 hr @ $45.00/hr
+Fixturing:                                                           $0.00
+    - Build labor (lot): 3.00 hr @ $85.00/hr
+Programming Hrs:                                                   4.00 hr
+Programming Cost:                                                  $180.00
+
+[DEBUG] ops_rows_pre=0  source=?
+[DEBUG] chart_lines_found=0 built_rows=0
+[DEBUG] ops_cards_inputs: chart_lines=0 rows=0
+    0.33 hr @ $45.00/hr
+    mach $45.00/hr
+    mach $45.00/hr
+    labor $45.00/hr
+    labor $45.00/hr
+Process & Labor Costs
+--------------------------------------------------------------------------
+  Process                 Minutes  Machine $  Labor $  Total $
+  ----------------------  -------  ---------  -------  -------
+  Programming (per part)    20.00      $0.00   $15.00   $15.00
+  Milling                  300.00    $225.00  $225.00  $450.00
+  Grinding                 120.00    $180.00  $150.00  $330.00
+  Finishing/Deburr          60.00      $0.00   $80.00   $80.00
+  Inspection                45.00      $0.00   $40.00   $40.00
+  ----------------------  -------  ---------  -------  -------
+  Total                                                $915.00
+
+Pass-Through & Direct Costs (Total: $520.00)
+--------------------------------------------------------------------------
+  Material & Stock                                                 $420.00
+    Material & Stock (printed above) contributes $420.00 to Direct Costs
+  Shipping                                                          $65.00
+  Consumables                                                       $35.00
+                                                                   -------
+  Total                                                            $520.00
+[DEBUG] at_print_ops cb=0 tap=0 npt=0 spot=0 counterdrill=0 jig=0
+[DEBUG] extra_ops_appended_at_print=0
+[DEBUG] ops_rows_pre=0
+[DEBUG] counterdrill=0 jig=0
+[DEBUG] chart_lines_found=0 built_rows=0
+[DEBUG] material_removal_emit_skipped=UnboundLocalError: cannot access local variable 'counts_by_diam_obj' where it is not associated with a value
+[DEBUG] drill_families_from_geo=0
+[DEBUG] ops_rows_pre=0  source=?
+[DEBUG] chart_lines_found=0 built_rows=0
+[DEBUG] ops_cards_inputs: chart_lines=0 rows=0
+[DEBUG] OPS TALLY drill=0 tap=0 cbore=0 spot=0 counterdrill=0 jig=0
+[DEBUG] OPS TALLY  drill=0 tap=0 npt=0 cbore=0 spot=0 counterdrill=0 jig=0
+[DEBUG] OPS TALLY (final) drill=0, tap=0, counterbore=0, counterdrill=0, jig-grind=0
+OPERATION AUDIT – Action counts
+------------------------------------------------------------------
+ Drills:        0
+ Taps:          0  (Front 0 / Back 0)
+ Counterbores:  0  (Front 0 / Back 0)
+ Spot:          0
+ Counterdrill:  0
+ Jig-grind:     0
+ Actions total: 0
+
+Pricing Ladder
+--------------------------------------------------------------------------
+Subtotal (Labor + Directs):                                      $1,435.00
+= Subtotal before Margin:                                        $1,435.00
+Final Price with Margin (20.0%):                                 $1,722.00
+
+QUICK WHAT-IFS (INTERNAL KNOBS)
+--------------------------------------------------------------------------
+Quick What-Ifs
+A) Margin Slider (Qty = 1)
+  0% margin..................................................... $1,435.00
+  15% margin.................................................... $1,650.25
+  20% margin (current).......................................... $1,722.00
+  30% margin.................................................... $1,865.50
+
+B) Qty break (assumes same ops; programming amortized; 20% margin)
+  +-----+----------------+----------------+---------------+---------------+
+  | Qty |  Labor $/part  | Directs $/part |   Subtotal    |     Final     |
+  +-----+----------------+----------------+---------------+---------------+
+  |    1|         $915.00|         $520.00|      $1,435.00|      $1,722.00|
+  |    2|         $907.50|         $470.00|      $1,377.50|      $1,653.00|
+  |    5|         $903.00|         $440.00|      $1,343.00|      $1,611.60|
+  |   10|         $901.50|         $430.00|      $1,331.50|      $1,597.80|
+  +-----+----------------+----------------+---------------+---------------+
+
+Why this price
+--------------------------------------------------------------------------
+  Milling $450.00
+  Grinding $330.00
+  Finishing/Deburr $80.00
+  Quote total $1,722.00 for 12 pieces.
+  Material: Aluminum MIC6.
+  Cost makeup: material $420.00; labor & machine $915.00.
+  Why this price
+  ------------------------------------------------------------------------
+  --
+  Main cost drivers: Milling $450.00, Grinding $330.00, Finishing/Deburr
+  $80.00.
+  Buckets allocate $915.00 across machine $405.00; manual labor $510.00.
+  Largest process costs  milling: $520.00; grinding: $330.00;
+  finishing_deburr: $80.00.
+  Drilling is included because planner buckets allocate 1.50 hr to
+  drilling and planner buckets include drilling.
+  Pass-through items  Shipping: $65.00; Consumables: $35.00.
+  Process buckets - Machine $405.00; Labor $510.00; largest bucket(s):
+  Milling $450.00, Grinding $330.00, Finishing/Deburr $80.00
+
+DEBUG - Drilling sanity
+--------------------------------------------------------------------------
+  bucket(planner): -   canonical: -   hour_summary: 1.50 hr   meta: 1.50 hr
