@@ -294,7 +294,7 @@ def test_anchor_rows_are_authoritative_over_roi() -> None:
     buckets, row_count, qty_sum = classify_chart_rows(merged)
     assert row_count == 3
     assert qty_sum == 8
-    assert buckets.get("tap") == 8
+    assert buckets.get("tap") == 4
     assert buckets.get("cbore") == 4
     assert buckets.get("npt") == 4
     assert buckets.get("drill") == 4
@@ -402,7 +402,7 @@ def test_merge_table_lines_ignores_numeric_ladder_noise() -> None:
     assert merged == ["(2) Ø0.250 DRILL THRU"]
 
 
-def test_fallback_semicolon_row_remains_single_entry() -> None:
+def test_fallback_semicolon_row_splits_actions() -> None:
     result = geo_extractor._fallback_text_table(
         [
             "(4) .75Ø C'BORE AS SHOWN; \"R\" (.339Ø) DRILL THRU AS SHOWN; 1/8- N.P.T.",
@@ -410,16 +410,24 @@ def test_fallback_semicolon_row_remains_single_entry() -> None:
     )
 
     rows = result.get("rows") or []
-    assert len(rows) == 1
-    assert rows[0].get("qty") == 4
-    assert "1/8- N.P.T." in rows[0].get("desc", "")
+    assert len(rows) == 3
+    assert all(row.get("qty") == 4 for row in rows)
+
+    cbore_row = next(row for row in rows if "C'BORE" in row.get("desc", ""))
+    drill_row = next(row for row in rows if "DRILL" in row.get("desc", ""))
+    tap_row = next(row for row in rows if "N.P.T" in row.get("desc", ""))
+
+    assert cbore_row.get("side") == "front"
+    assert drill_row.get("side") == "front"
+    assert tap_row.get("tap_type") == "npt"
 
     buckets, row_count, qty_sum = classify_chart_rows(rows)
-    assert row_count == 1
-    assert qty_sum == 4
+    assert row_count == 3
+    assert qty_sum == 12
     assert buckets.get("cbore") == 4
     assert buckets.get("npt") == 4
     assert buckets.get("tap") == 4
+    assert buckets.get("drill") == 4
 
 
 def test_anchor_height_filter_drops_small_text() -> None:
@@ -757,30 +765,25 @@ def test_build_column_table_splits_semicolons_and_detects_operations() -> None:
 
     assert table_info is not None
     rows = table_info["rows"]
-    assert len(rows) == 2
+    assert len(rows) == 4
     qty_sum = table_info.get("sum_qty")
     if qty_sum is None:
         qty_sum = geo_extractor._sum_qty(rows)
-    assert qty_sum == sum(row["qty"] for row in rows) == 5
+    assert qty_sum == sum(row["qty"] for row in rows) == 9
 
-    combined_row = next(row for row in rows if "5/8-11 TAP" in row["desc"])
-    assert ";" in combined_row["desc"]
-    assert "Ø0.812 C'BORE" in combined_row["desc"]
-    assert "17/32 DRILL THRU" in combined_row["desc"]
+    tap_row = next(row for row in rows if row.get("desc", "").startswith("5/8-11 TAP"))
+    cbore_row = next(row for row in rows if "C'BORE" in row.get("desc", ""))
+    drill_row = next(row for row in rows if "DRILL THRU" in row.get("desc", ""))
+    npt_row = next(row for row in rows if "NPT TAP" in row.get("desc", ""))
 
-    npt_row = next(row for row in rows if "NPT TAP" in row["desc"])
-    tap_tokens = {
-        token.upper()
-        for token in geo_extractor._CANDIDATE_TOKEN_RE.findall(combined_row["desc"])
-    }
-    npt_tokens = {
-        token.upper() for token in geo_extractor._CANDIDATE_TOKEN_RE.findall(npt_row["desc"])
-    }
+    assert tap_row.get("qty") == 2
+    assert cbore_row.get("qty") == 2
+    assert drill_row.get("qty") == 2
+    assert npt_row.get("qty") == 3
 
-    assert tap_tokens >= {"TAP", "FROM BACK", "C'BORE", "DRILL"}
-    assert "TAP" in npt_tokens
-
-    assert combined_row.get("side") == "back"
+    assert tap_row.get("side") == "back"
+    assert cbore_row.get("side") == "back"
+    assert drill_row.get("side") == "back"
 
 
 def test_follow_sheet_layout_processed_even_when_filtered(
@@ -861,7 +864,7 @@ def test_extract_row_quantity_requires_anchor_pattern() -> None:
     assert "BREAK ALL" in remainder
 
 
-def test_semicolon_row_remains_single_entry(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_semicolon_row_splits_into_multiple_entries(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(geo_extractor, "_resolve_app_callable", lambda name: None)
 
     doc = _DummyDoc([_DummyMText("(4) COUNTERBORE; DRILL; NPT")])
@@ -869,9 +872,7 @@ def test_semicolon_row_remains_single_entry(monkeypatch: pytest.MonkeyPatch) -> 
     result = geo_extractor.read_text_table(doc)
 
     rows = result.get("rows") or []
-    assert len(rows) == 1
-    row = rows[0]
-    assert row.get("qty") == 4
-    desc_text = row.get("desc")
-    assert isinstance(desc_text, str)
-    assert desc_text.count(";") == 2
+    assert len(rows) == 3
+    assert all(row.get("qty") == 4 for row in rows)
+    kinds = {geo_extractor.classify_action(row.get("desc", "")).get("kind") for row in rows}
+    assert kinds >= {"counterbore", "drill", "tap"}

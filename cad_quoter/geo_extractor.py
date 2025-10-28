@@ -62,12 +62,13 @@ _TAP_THREAD_TOKEN_RE = re.compile(
     re.IGNORECASE,
 )
 _NPT_TOKEN_RE = re.compile(r"\bN\.?P\.?T\.?\b", re.IGNORECASE)
+_PIPE_TAP_TOKEN_RE = re.compile(r"\bPIPE\s+TAP\b", re.IGNORECASE)
 _COUNTERBORE_TOKEN_RE = re.compile(
     r"\b(?:C['’]?\s*BORE|CBORE|COUNTERBORE)\b", re.IGNORECASE
 )
 _COUNTERSINK_TOKEN_RE = re.compile(r"\b(?:C['’]?\s*SINK|CSK|COUNTERSINK)\b", re.IGNORECASE)
 _COUNTERDRILL_TOKEN_RE = re.compile(
-    r"\b(?:C['’]?\s*DRILL|COUNTER\s*DRILL|CTR\s*DRILL|C['’]DRILL)\b",
+    r"\b(?:C['’]?\s*DRILL|COUNTER\s*DRILL|CTR\s*DRILL|C['’]DRILL|CENTER\s*DRILL)\b",
     re.IGNORECASE,
 )
 _JIG_GRIND_TOKEN_RE = re.compile(
@@ -3010,7 +3011,8 @@ def classify_op_row(desc: str | None) -> list[dict[str, Any]]:
         if not segment:
             continue
         kinds: list[tuple[str, str | None]] = []
-        is_npt = bool(_NPT_TOKEN_RE.search(segment))
+        is_pipe_tap = bool(_PIPE_TAP_TOKEN_RE.search(segment))
+        is_npt = bool(_NPT_TOKEN_RE.search(segment) or is_pipe_tap)
         is_cdrill = bool(_COUNTERDRILL_TOKEN_RE.search(segment))
         has_thread_tap = bool(_TAP_THREAD_TOKEN_RE.search(segment))
         has_tap_word = bool(_TAP_WORD_TOKEN_RE.search(segment))
@@ -3044,7 +3046,7 @@ def classify_op_row(desc: str | None) -> list[dict[str, Any]]:
             seen_local.add(key)
             entry = {"kind": kind, "qty": 0, "size": size_text}
             if kind == "tap" and is_npt:
-                entry["tap_type"] = "pipe"
+                entry["tap_type"] = "npt"
             results.append(entry)
 
     return results
@@ -3457,13 +3459,20 @@ def _merge_table_lines(lines: Iterable[str]) -> list[str]:
             continue
         if _roi_is_admin_noise(candidate) or _roi_is_numeric_ladder(candidate):
             continue
-        if _line_is_table_row_start(candidate):
+        starts_new_row = False
+        if _ROW_QUANTITY_PATTERNS[0].match(candidate) or _ROW_QUANTITY_PATTERNS[1].match(candidate):
+            starts_new_row = True
+        elif not current and _line_is_table_row_start(candidate):
+            starts_new_row = True
+        if starts_new_row:
             if current:
                 merged.append(" ".join(current))
             current = [candidate]
             continue
         if current:
             current.append(candidate)
+        else:
+            current = [candidate]
     if current:
         merged.append(" ".join(current))
     return merged
@@ -4745,35 +4754,43 @@ def _build_fallback_rows_from_lines(lines: Iterable[str]) -> tuple[list[dict[str
         for fragment_text, action in candidate_fragments:
             ref_text, ref_value = _extract_row_reference(fragment_text)
             side_value = action.get("side") or _detect_row_side(fragment_text) or side_hint
-            if not side_value:
-                side_value = "front"
-            normalized_key = (
-                qty_int,
-                fragment_text.upper(),
-                (side_value or "").upper(),
-                (ref_text or base_ref_text or "").upper(),
-            )
-            if normalized_key in seen_keys:
-                continue
-            seen_keys.add(normalized_key)
+            if side_value == "both":
+                sides_to_emit = ["front", "back"]
+            else:
+                fallback_side = side_value or "front"
+                sides_to_emit = [fallback_side]
 
-            row: dict[str, Any] = {
-                "hole": "",
-                "ref": ref_text or base_ref_text or "",
-                "qty": qty_int,
-                "desc": fragment_text,
-            }
-            if side_value:
-                row["side"] = side_value
-            if action.get("npt"):
-                row["npt"] = True
-            rows.append(row)
-            total_qty += qty_int
+            for side_option in sides_to_emit:
+                normalized_key = (
+                    qty_int,
+                    fragment_text.upper(),
+                    (side_option or "").upper(),
+                    (ref_text or base_ref_text or "").upper(),
+                )
+                if normalized_key in seen_keys:
+                    continue
+                seen_keys.add(normalized_key)
 
-            value_for_family = ref_value if ref_value is not None else base_ref_value
-            if value_for_family is not None:
-                key = f"{float(value_for_family):.4f}".rstrip("0").rstrip(".")
-                families[key] = families.get(key, 0) + qty_int
+                row: dict[str, Any] = {
+                    "hole": "",
+                    "ref": ref_text or base_ref_text or "",
+                    "qty": qty_int,
+                    "desc": fragment_text,
+                }
+                if side_option:
+                    row["side"] = side_option
+                if action.get("npt"):
+                    row["npt"] = True
+                tap_type = action.get("tap_type")
+                if tap_type:
+                    row["tap_type"] = tap_type
+                rows.append(row)
+                total_qty += qty_int
+
+                value_for_family = ref_value if ref_value is not None else base_ref_value
+                if value_for_family is not None:
+                    key = f"{float(value_for_family):.4f}".rstrip("0").rstrip(".")
+                    families[key] = families.get(key, 0) + qty_int
 
     return rows, families, total_qty
 
@@ -7901,11 +7918,13 @@ def classify_action(fragment: str) -> dict[str, Any]:
     if not text:
         return result
 
-    if _TAP_WORD_TOKEN_RE.search(text) or _TAP_THREAD_TOKEN_RE.search(text) or _NPT_TOKEN_RE.search(text):
+    is_pipe_tap = bool(_PIPE_TAP_TOKEN_RE.search(text))
+    is_npt = bool(_NPT_TOKEN_RE.search(text) or is_pipe_tap)
+    if _TAP_WORD_TOKEN_RE.search(text) or _TAP_THREAD_TOKEN_RE.search(text) or is_npt:
         result["kind"] = "tap"
-        if _NPT_TOKEN_RE.search(text):
+        if is_npt:
             result["npt"] = True
-            result["tap_type"] = "pipe"
+            result["tap_type"] = "npt"
         return result
 
     if _COUNTERBORE_TOKEN_RE.search(upper):
