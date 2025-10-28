@@ -7671,6 +7671,307 @@ def ops_manifest(
     return manifest
 
 
+_LAST_GEO_OUTLINE_HINT: Mapping[str, Any] | None = None
+
+
+def _polygon_area(points: Sequence[tuple[float, float]]) -> float:
+    area = 0.0
+    if len(points) < 3:
+        return area
+    for idx, (x1, y1) in enumerate(points):
+        x2, y2 = points[(idx + 1) % len(points)]
+        area += x1 * y2 - x2 * y1
+    return 0.5 * area
+
+
+def _polyline_vertices_in(
+    entity: Any,
+    transform: TransformMatrix,
+    to_in: float,
+) -> list[tuple[float, float]]:
+    pts: list[tuple[float, float]] = []
+    get_points = getattr(entity, "get_points", None)
+    if callable(get_points):
+        try:
+            raw_pts = list(get_points("xy"))
+        except TypeError:
+            raw_pts = list(get_points())  # type: ignore[call-arg]
+        except Exception:
+            raw_pts = []
+        for raw in raw_pts:
+            if not isinstance(raw, Sequence) or len(raw) < 2:
+                continue
+            try:
+                local = (float(raw[0]), float(raw[1]))
+            except Exception:
+                continue
+            world = _apply_transform_point(transform, local)
+            if world[0] is None or world[1] is None:
+                continue
+            pts.append((float(world[0]) * to_in, float(world[1]) * to_in))
+    else:
+        vertices = getattr(entity, "vertices", None)
+        if vertices is not None:
+            try:
+                iterator = list(vertices)
+            except Exception:
+                iterator = []
+            for vertex in iterator:
+                location = getattr(getattr(vertex, "dxf", vertex), "location", None)
+                point = _point2d(location)
+                if point is None:
+                    continue
+                world = _apply_transform_point(transform, point)
+                if world[0] is None or world[1] is None:
+                    continue
+                pts.append((float(world[0]) * to_in, float(world[1]) * to_in))
+    return pts
+
+
+def _find_polyline_bbox_in(
+    layout: Any,
+    to_in: float,
+    exclude_patterns: Sequence[re.Pattern[str]],
+) -> tuple[float, float, float, float] | None:
+    best: tuple[float, tuple[float, float, float, float]] | None = None
+
+    def _is_closed(candidate: Any) -> bool:
+        if getattr(candidate, "closed", False):
+            return True
+        dxf_obj = getattr(candidate, "dxf", None)
+        flags = getattr(dxf_obj, "flags", 0) if dxf_obj is not None else 0
+        if isinstance(flags, int) and flags & 1:
+            return True
+        try:
+            vertices = list(getattr(candidate, "vertices", []))
+        except Exception:
+            vertices = []
+        if len(vertices) >= 2:
+            first = _point2d(getattr(vertices[0], "dxf", vertices[0]).location)
+            last = _point2d(getattr(vertices[-1], "dxf", vertices[-1]).location)
+            if first and last and abs(first[0] - last[0]) < 1e-6 and abs(first[1] - last[1]) < 1e-6:
+                return True
+        return False
+
+    def _maybe_update(candidate: Any) -> None:
+        nonlocal best
+        layer_name = (
+            str(getattr(getattr(candidate, "dxf", object()), "layer", "") or "")
+        ).upper()
+        if layer_name and any(pattern.search(layer_name) for pattern in exclude_patterns):
+            return
+        if not _is_closed(candidate):
+            return
+        pts = _polyline_vertices_in(candidate, _IDENTITY_TRANSFORM, to_in)
+        if len(pts) < 3:
+            return
+        xs = [pt[0] for pt in pts]
+        ys = [pt[1] for pt in pts]
+        if not xs or not ys:
+            return
+        area = abs(_polygon_area(pts))
+        if area <= 0.0:
+            return
+        bbox = (min(xs), max(xs), min(ys), max(ys))
+        if best is None or area > best[0]:
+            best = (area, bbox)
+
+    if layout is None:
+        return None
+
+    for spec in ("LWPOLYLINE", "POLYLINE"):
+        try:
+            entities = list(layout.query(spec))
+        except Exception:
+            entities = []
+        for entity in entities:
+            _maybe_update(entity)
+
+    return best[1] if best else None
+
+
+def _collect_entity_points_in(
+    flattened: FlattenedEntity,
+    to_in: float,
+) -> list[tuple[float, float]]:
+    entity = flattened.entity
+    try:
+        dxftype = entity.dxftype()
+    except Exception:
+        return []
+    dxftype_upper = str(dxftype or "").upper()
+    points: list[tuple[float, float]] = []
+    transform = flattened.transform
+
+    if dxftype_upper == "LINE":
+        for attr in ("start", "end"):
+            point = _point2d(getattr(getattr(entity, "dxf", entity), attr, None))
+            if point is None:
+                continue
+            world = _apply_transform_point(transform, point)
+            if world[0] is None or world[1] is None:
+                continue
+            points.append((float(world[0]) * to_in, float(world[1]) * to_in))
+    elif dxftype_upper in {"LWPOLYLINE", "POLYLINE"}:
+        points.extend(_polyline_vertices_in(entity, transform, to_in))
+    elif dxftype_upper == "ARC":
+        center = _point2d(getattr(getattr(entity, "dxf", entity), "center", None))
+        radius = getattr(getattr(entity, "dxf", entity), "radius", None)
+        start_angle = getattr(getattr(entity, "dxf", entity), "start_angle", None)
+        end_angle = getattr(getattr(entity, "dxf", entity), "end_angle", None)
+        if (
+            center is not None
+            and isinstance(radius, (int, float))
+            and isinstance(start_angle, (int, float))
+            and isinstance(end_angle, (int, float))
+        ):
+            try:
+                center_world = _apply_transform_point(transform, center)
+            except Exception:
+                center_world = (None, None)
+            else:
+                if center_world[0] is not None and center_world[1] is not None:
+                    points.append(
+                        (float(center_world[0]) * to_in, float(center_world[1]) * to_in)
+                    )
+            for angle_deg in (float(start_angle), float(end_angle)):
+                angle_rad = math.radians(angle_deg)
+                x = center[0] + float(radius) * math.cos(angle_rad)
+                y = center[1] + float(radius) * math.sin(angle_rad)
+                world = _apply_transform_point(transform, (x, y))
+                if world[0] is None or world[1] is None:
+                    continue
+                points.append((float(world[0]) * to_in, float(world[1]) * to_in))
+    return points
+
+
+def _filter_dense_points(points: Sequence[tuple[float, float]]) -> list[tuple[float, float]]:
+    if len(points) < 6:
+        return list(points)
+    xs = [pt[0] for pt in points]
+    ys = [pt[1] for pt in points]
+    median_x = statistics.median(xs)
+    median_y = statistics.median(ys)
+    mad_x = statistics.median([abs(x - median_x) for x in xs]) or 0.0
+    mad_y = statistics.median([abs(y - median_y) for y in ys]) or 0.0
+    scale = 6.0
+    filtered = [
+        pt
+        for pt in points
+        if (mad_x == 0.0 or abs(pt[0] - median_x) <= scale * mad_x)
+        and (mad_y == 0.0 or abs(pt[1] - median_y) <= scale * mad_y)
+    ]
+    if len(filtered) >= max(6, len(points) // 3):
+        return filtered
+    return list(points)
+
+
+def _convex_hull(points: Sequence[tuple[float, float]]) -> list[tuple[float, float]]:
+    unique = sorted(set(points))
+    if len(unique) <= 1:
+        return unique
+
+    def _cross(o: tuple[float, float], a: tuple[float, float], b: tuple[float, float]) -> float:
+        return (a[0] - o[0]) * (b[1] - o[1]) - (a[1] - o[1]) * (b[0] - o[0])
+
+    lower: list[tuple[float, float]] = []
+    for p in unique:
+        while len(lower) >= 2 and _cross(lower[-2], lower[-1], p) <= 0:
+            lower.pop()
+        lower.append(p)
+    upper: list[tuple[float, float]] = []
+    for p in reversed(unique):
+        while len(upper) >= 2 and _cross(upper[-2], upper[-1], p) <= 0:
+            upper.pop()
+        upper.append(p)
+    return lower[:-1] + upper[:-1]
+
+
+def _bbox_from_points(points: Sequence[tuple[float, float]]) -> tuple[float, float, float, float] | None:
+    if not points:
+        return None
+    filtered = _filter_dense_points(points)
+    hull = _convex_hull(filtered)
+    if not hull:
+        hull = filtered
+    if not hull:
+        return None
+    xs = [pt[0] for pt in hull]
+    ys = [pt[1] for pt in hull]
+    if not xs or not ys:
+        return None
+    return (min(xs), max(xs), min(ys), max(ys))
+
+
+def _coerce_positive(value: Any) -> float | None:
+    try:
+        val = float(value)
+    except Exception:
+        return None
+    if not math.isfinite(val) or val <= 0.0:
+        return None
+    return val
+
+
+def _extract_dims_hint(geo_hint: Mapping[str, Any] | None) -> tuple[float, float] | None:
+    if not isinstance(geo_hint, Mapping):
+        return None
+
+    def _from_mapping(candidate: Mapping[str, Any], keys: tuple[str, str]) -> tuple[float, float] | None:
+        width = _coerce_positive(candidate.get(keys[0]))
+        height = _coerce_positive(candidate.get(keys[1]))
+        if width and height:
+            return (float(width), float(height))
+        return None
+
+    outline = geo_hint.get("outline_bbox")
+    if isinstance(outline, Mapping):
+        dims = _from_mapping(outline, ("plate_wid_in", "plate_len_in"))
+        if dims:
+            return dims
+
+    for key in ("bbox_in", "required_blank_in"):
+        payload = geo_hint.get(key)
+        if isinstance(payload, Mapping):
+            dims = _from_mapping(payload, ("w", "h"))
+            if dims:
+                return dims
+
+    plate_dims = (
+        _coerce_positive(geo_hint.get("plate_wid_in")),
+        _coerce_positive(geo_hint.get("plate_len_in")),
+    )
+    if plate_dims[0] and plate_dims[1]:
+        return (float(plate_dims[0]), float(plate_dims[1]))
+
+    return None
+
+
+def _bbox_from_dims(
+    dims: tuple[float, float] | None,
+    points: Sequence[tuple[float, float]],
+) -> tuple[float, float, float, float] | None:
+    if not dims or not points:
+        return None
+    width, height = dims
+    if width <= 0.0 or height <= 0.0:
+        return None
+    xs = [pt[0] for pt in points]
+    ys = [pt[1] for pt in points]
+    if not xs or not ys:
+        return None
+    center_x = statistics.median(xs)
+    center_y = statistics.median(ys)
+    half_w = width / 2.0
+    half_h = height / 2.0
+    return (
+        center_x - half_w,
+        center_x + half_w,
+        center_y - half_h,
+        center_y + half_h,
+    )
+
+
 def geom_hole_census(doc: Any) -> dict[str, Any]:
     blocks_included = 0
     blocks_skipped = 0
@@ -7695,11 +7996,19 @@ def geom_hole_census(doc: Any) -> dict[str, Any]:
             )
             return {"groups": [], "total": 0}
 
+    global _LAST_GEO_OUTLINE_HINT
+    geo_hint = _LAST_GEO_OUTLINE_HINT if isinstance(_LAST_GEO_OUTLINE_HINT, Mapping) else None
+    _LAST_GEO_OUTLINE_HINT = None
+
     units = detect_units_scale(doc)
     to_in = float(units.get("to_in") or 1.0)
     exclude_patterns = [
         re.compile(pattern, re.IGNORECASE) for pattern in DEFAULT_TEXT_LAYER_EXCLUDE_REGEX
     ]
+
+    poly_bbox_in = _find_polyline_bbox_in(msp, to_in, exclude_patterns)
+    dims_hint = _extract_dims_hint(geo_hint)
+
     groups_counter: defaultdict[float, int] = defaultdict(int)
     seen_circle_keys: set[tuple[float, float, float]] = set()
     total_candidates = 0
@@ -8109,6 +8418,8 @@ def read_geo(
     if not isinstance(geo, dict):
         geo = {}
 
+    global _LAST_GEO_OUTLINE_HINT
+    _LAST_GEO_OUTLINE_HINT = geo if isinstance(geo, Mapping) else None
     geom_census = geom_hole_census(doc)
     if isinstance(geo, dict):
         geo["geom_holes"] = geom_census
@@ -8703,6 +9014,8 @@ def _read_geo_payload_from_path(
                 print(f"[ACAD-TABLE] DXF fallback {oda_version} failed: {exc}")
                 continue
             mechanical_table = _extract_mechanical_table_from_blocks(fallback_doc)
+            global _LAST_GEO_OUTLINE_HINT
+            _LAST_GEO_OUTLINE_HINT = None
             fallback_geom_census = geom_hole_census(fallback_doc)
             payload = read_geo(
                 fallback_doc,
