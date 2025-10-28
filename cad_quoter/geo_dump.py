@@ -958,6 +958,15 @@ def main(argv: Sequence[str] | None = None) -> int:
             parts.append("Drill 0")
         return " | ".join(parts)
 
+    def _counts_value(counts: Mapping[str, Any] | None, *keys: str) -> int:
+        if not isinstance(counts, Mapping):
+            return 0
+        for key in keys:
+            if key not in counts:
+                continue
+            return _int_from_value(counts.get(key))
+        return 0
+
     hole_sets_payload = None
     if isinstance(extract_result, Mapping):
         hole_sets_payload = extract_result.get("hole_sets")
@@ -1297,11 +1306,11 @@ def main(argv: Sequence[str] | None = None) -> int:
         except Exception:
             tap_total = 0
         try:
-            cbore_total = int(total_counts.get("cbore", 0))
+            cbore_total = _counts_value(total_counts, "counterbore", "cbore")
         except Exception:
             cbore_total = 0
         try:
-            cdrill_total = int(total_counts.get("cdrill", 0))
+            cdrill_total = _counts_value(total_counts, "counterdrill", "cdrill")
         except Exception:
             cdrill_total = 0
         print(

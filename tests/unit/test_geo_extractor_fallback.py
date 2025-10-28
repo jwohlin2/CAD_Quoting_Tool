@@ -45,8 +45,12 @@ def test_publish_fallback_from_rows_txt_multiaction() -> None:
 
         tap_row = next(row for row in rows if classified[row["desc"]]["kind"] == "tap" and not classified[row["desc"]]["npt"])
         drill_row = next(row for row in rows if classified[row["desc"]]["kind"] == "drill")
-        cbore_row = next(row for row in rows if classified[row["desc"]]["kind"] == "cbore")
-        cdrill_row = next(row for row in rows if classified[row["desc"]]["kind"] == "cdrill")
+        cbore_row = next(
+            row for row in rows if classified[row["desc"]]["kind"] == "counterbore"
+        )
+        cdrill_row = next(
+            row for row in rows if classified[row["desc"]]["kind"] == "counterdrill"
+        )
         npt_row = next(row for row in rows if classified[row["desc"]]["kind"] == "tap" and classified[row["desc"]]["npt"])
 
         assert tap_row["qty"] == 4
@@ -64,6 +68,7 @@ def test_publish_fallback_from_rows_txt_multiaction() -> None:
         assert npt_row["qty"] == 2
         assert npt_row.get("side") == "front"
         assert npt_row.get("npt") is True
+        assert classified[npt_row["desc"]].get("tap_type") == "pipe"
 
         notes = [row for row in rows if "BREAK" in row["desc"].upper()]
         assert not notes, "notes should be ignored"

@@ -91,8 +91,8 @@ _DRILL_SIZE_PATTERNS: tuple[re.Pattern[str], ...] = (
 )
 _OPS_MANIFEST_KEYS = (
     "tap",
-    "cbore",
-    "cdrill",
+    "counterbore",
+    "counterdrill",
     "csink",
     "drill",
     "jig_grind",
@@ -2872,7 +2872,11 @@ def _parse_number_token(token: str) -> float | None:
 
 
 def _format_ref_value(value: float) -> str:
-    return f"{value:.4f}\""
+    text = f"{value:.4f}"
+    text = text.rstrip("0").rstrip(".")
+    if not text:
+        text = "0"
+    return f"{text}\""
 
 
 def _has_candidate_token(text: str) -> bool:
@@ -3016,11 +3020,11 @@ def classify_op_row(desc: str | None) -> list[dict[str, Any]]:
         if is_npt or has_tap:
             kinds.append(("tap", None))
         if _COUNTERBORE_TOKEN_RE.search(segment):
-            kinds.append(("cbore", None))
+            kinds.append(("counterbore", None))
         if _COUNTERSINK_TOKEN_RE.search(segment):
             kinds.append(("csink", None))
         if is_cdrill:
-            kinds.append(("cdrill", None))
+            kinds.append(("counterdrill", None))
         if _JIG_GRIND_TOKEN_RE.search(segment):
             kinds.append(("jig_grind", None))
         if _SPOT_TOKEN_RE.search(segment):
@@ -3038,7 +3042,10 @@ def classify_op_row(desc: str | None) -> list[dict[str, Any]]:
             if key in seen_local:
                 continue
             seen_local.add(key)
-            results.append({"kind": kind, "qty": 0, "size": size_text})
+            entry = {"kind": kind, "qty": 0, "size": size_text}
+            if kind == "tap" and is_npt:
+                entry["tap_type"] = "pipe"
+            results.append(entry)
 
     return results
 
@@ -3427,6 +3434,20 @@ def _detect_row_side(desc: str) -> str:
     return ""
 
 
+def _line_is_table_row_start(text: str) -> bool:
+    if not text:
+        return False
+    candidate = str(text).strip()
+    if not candidate:
+        return False
+    for pattern in _ROW_QUANTITY_PATTERNS:
+        if pattern.match(candidate):
+            return True
+    if re.match(r"^\s*QTY\b", candidate, re.IGNORECASE):
+        return True
+    return False
+
+
 def _merge_table_lines(lines: Iterable[str]) -> list[str]:
     merged: list[str] = []
     current: list[str] = []
@@ -3436,7 +3457,7 @@ def _merge_table_lines(lines: Iterable[str]) -> list[str]:
             continue
         if _roi_is_admin_noise(candidate) or _roi_is_numeric_ladder(candidate):
             continue
-        if _roi_is_row_starter(candidate):
+        if _line_is_table_row_start(candidate):
             if current:
                 merged.append(" ".join(current))
             current = [candidate]
@@ -4516,8 +4537,12 @@ def _extract_mechanical_table_from_blocks(doc: Any) -> Mapping[str, Any] | None:
     return best_result
 
 
-_FALLBACK_ACTION_KINDS = {"tap", "cbore", "drill", "cdrill"}
+_FALLBACK_ACTION_KINDS = {"tap", "counterbore", "drill", "counterdrill"}
 _FALLBACK_TRAILING_LADDER_RE = re.compile(r"(?:\s*\d+){3,}$")
+_ANCHOR_TERMINATOR_RE = re.compile(
+    r"\b(NOTES?|TOLERANCES?|TOLERANCE|FINISH|MATERIALS?|REVISION|SCALE|SHT)\b",
+    re.IGNORECASE,
+)
 
 
 def _prepare_fallback_lines(lines: Iterable[str]) -> list[str]:
@@ -4526,6 +4551,141 @@ def _prepare_fallback_lines(lines: Iterable[str]) -> list[str]:
     except Exception:
         candidate = []
     return _merge_table_lines(candidate)
+
+
+def _coerce_layout_index(value: Any) -> int:
+    try:
+        return int(value)
+    except Exception:
+        try:
+            return int(float(value))
+        except Exception:
+            return 0
+
+
+def _normalize_entry_text(entry: Mapping[str, Any]) -> str:
+    text = entry.get("normalized_text")
+    if text:
+        return _normalize_candidate_text(text)
+    return _normalize_candidate_text(entry.get("text"))
+
+
+def _entry_band_sort_key(entry: Mapping[str, Any]) -> tuple[float, float, int]:
+    x_val = entry.get("x")
+    y_val = entry.get("y")
+    order_val = entry.get("order", 0)
+    try:
+        y_key = -float(y_val) if y_val is not None else float("inf")
+    except Exception:
+        y_key = float("inf")
+    try:
+        x_key = float(x_val) if x_val is not None else float("inf")
+    except Exception:
+        x_key = float("inf")
+    try:
+        order_key = int(order_val)
+    except Exception:
+        order_key = 0
+    return (y_key, x_key, order_key)
+
+
+def _extract_anchor_band_lines(context: Mapping[str, Any] | None) -> list[str]:
+    if not isinstance(context, Mapping):
+        return []
+
+    raw_entries = context.get("entries")
+    raw_anchor_entries = context.get("anchor_entries")
+    if not isinstance(raw_entries, Iterable) or not isinstance(raw_anchor_entries, Iterable):
+        return []
+
+    entries: list[dict[str, Any]] = []
+    for entry in raw_entries:
+        if not isinstance(entry, Mapping):
+            continue
+        entry_copy = dict(entry)
+        entry_copy["normalized_text"] = _normalize_entry_text(entry_copy)
+        entries.append(entry_copy)
+
+    anchor_entries: list[dict[str, Any]] = []
+    for entry in raw_anchor_entries:
+        if not isinstance(entry, Mapping):
+            continue
+        entry_copy = dict(entry)
+        entry_copy["normalized_text"] = _normalize_entry_text(entry_copy)
+        anchor_entries.append(entry_copy)
+
+    if not entries or not anchor_entries:
+        return []
+
+    anchor_layouts = {
+        _coerce_layout_index(item.get("layout_index")) for item in anchor_entries
+    }
+    if not anchor_layouts:
+        return []
+
+    layout_order_raw = context.get("layout_order")
+    layout_sequence: list[int]
+    if isinstance(layout_order_raw, Iterable):
+        layout_sequence = []
+        for idx in layout_order_raw:
+            layout_idx = _coerce_layout_index(idx)
+            if layout_idx in anchor_layouts and layout_idx not in layout_sequence:
+                layout_sequence.append(layout_idx)
+    else:
+        layout_sequence = []
+    if not layout_sequence:
+        layout_sequence = sorted(anchor_layouts)
+
+    entries_by_layout: defaultdict[int, list[dict[str, Any]]] = defaultdict(list)
+    for entry in entries:
+        layout_idx = _coerce_layout_index(entry.get("layout_index"))
+        if layout_idx in anchor_layouts:
+            entries_by_layout[layout_idx].append(entry)
+
+    anchor_height = 0.0
+    try:
+        anchor_height = float(context.get("anchor_height") or 0.0)
+    except Exception:
+        anchor_height = 0.0
+    if anchor_height < 0:
+        anchor_height = 0.0
+    lower_bound = anchor_height * 0.75 if anchor_height > 0 else None
+    upper_bound = anchor_height * 1.25 if anchor_height > 0 else None
+
+    band_lines: list[str] = []
+    for layout_idx in layout_sequence:
+        records = entries_by_layout.get(layout_idx, [])
+        if not records:
+            continue
+        sorted_records = sorted(records, key=_entry_band_sort_key)
+        layout_lines: list[str] = []
+        started = False
+        for record in sorted_records:
+            text = _normalize_entry_text(record)
+            if not text:
+                continue
+            if _roi_is_admin_noise(text):
+                continue
+            if not started:
+                if _line_is_table_row_start(text) or re.search(r"\bQTY\b", text, re.IGNORECASE):
+                    started = True
+                else:
+                    continue
+            if _ANCHOR_TERMINATOR_RE.search(text):
+                break
+            height_val = record.get("height")
+            if (
+                lower_bound is not None
+                and upper_bound is not None
+                and isinstance(height_val, (int, float))
+            ):
+                height_float = float(height_val)
+                if height_float > 0 and not (lower_bound <= height_float <= upper_bound):
+                    break
+            layout_lines.append(text)
+        band_lines.extend(layout_lines)
+
+    return band_lines
 
 
 def _build_fallback_rows_from_lines(lines: Iterable[str]) -> tuple[list[dict[str, Any]], dict[str, int], int]:
@@ -4585,6 +4745,8 @@ def _build_fallback_rows_from_lines(lines: Iterable[str]) -> tuple[list[dict[str
         for fragment_text, action in candidate_fragments:
             ref_text, ref_value = _extract_row_reference(fragment_text)
             side_value = action.get("side") or _detect_row_side(fragment_text) or side_hint
+            if not side_value:
+                side_value = "front"
             normalized_key = (
                 qty_int,
                 fragment_text.upper(),
@@ -4629,7 +4791,7 @@ def _fallback_text_table(lines: Iterable[str]) -> dict[str, Any]:
     if families:
         result["hole_diam_families_in"] = families
     result["provenance_holes"] = "HOLE TABLE"
-    result["source"] = "text_table"
+    result["source"] = "text_fallback"
     return result
 
 
@@ -4646,7 +4808,7 @@ def _publish_fallback_from_rows_txt(rows_txt: Iterable[Any]) -> dict[str, Any]:
         "rows": rows,
         "hole_count": total_qty,
         "provenance_holes": "HOLE TABLE (fallback)",
-        "source": "text_table",
+        "source": "text_fallback",
     }
     if families:
         result["hole_diam_families_in"] = families
@@ -4804,6 +4966,8 @@ def read_text_table(
     fallback_candidate: Mapping[str, Any] | None = None
     best_candidate: Mapping[str, Any] | None = None
     best_score: tuple[int, int] = (0, 0)
+    helper_score: tuple[int, int] = (0, 0)
+    legacy_score: tuple[int, int] = (0, 0)
     text_rows_info: dict[str, Any] | None = None
     merged_rows: list[str] = []
     parsed_rows: list[dict[str, Any]] = []
@@ -4819,6 +4983,7 @@ def read_text_table(
     confidence_high = False
     anchor_authoritative_result: dict[str, Any] | None = None
     secondary_anchor_candidate: dict[str, Any] | None = None
+    anchor_band_context: dict[str, Any] | None = None
 
     helper_missing = helper is None
     if helper_missing and isinstance(_LAST_TEXT_TABLE_DEBUG, dict):
@@ -4860,6 +5025,7 @@ def read_text_table(
         nonlocal rows_txt_initial, doc, resolved_allowlist
         nonlocal anchor_rows_primary, roi_rows_primary, anchor_authoritative_result
         nonlocal anchor_is_authoritative
+        nonlocal anchor_band_context
         if table_lines is not None:
             return table_lines
 
@@ -4913,6 +5079,7 @@ def read_text_table(
             nonlocal columnar_table_info, columnar_debug_info, roi_hint_effective, rows_txt_initial
             nonlocal anchor_rows_primary, roi_rows_primary, anchor_authoritative_result
             nonlocal anchor_is_authoritative, secondary_anchor_candidate
+            nonlocal anchor_band_context
             nonlocal allowlist_display, follow_sheet_target_layouts
             nonlocal collected_entries, candidate_entries, entries_by_layout, layout_names
             nonlocal layout_order, see_sheet_hint_text, see_sheet_hint_logged
@@ -4932,6 +5099,7 @@ def read_text_table(
             anchor_rows_primary = []
             roi_rows_primary = []
             secondary_anchor_candidate = None
+            anchor_band_context = None
             hint_logged = False
             attrib_count = 0
             mleader_count = 0
@@ -6389,6 +6557,38 @@ def read_text_table(
         )
 
         if anchor_is_authoritative:
+            anchor_layouts = {
+                _coerce_layout_index(entry.get("layout_index"))
+                for entry in candidate_entries
+                if _line_is_table_row_start(entry.get("normalized_text") or entry.get("text"))
+            }
+            if anchor_layouts:
+                anchor_band_entries: list[dict[str, Any]] = []
+                for entry in collected_entries:
+                    if not isinstance(entry, Mapping):
+                        continue
+                    layout_idx = _coerce_layout_index(entry.get("layout_index"))
+                    if layout_idx not in anchor_layouts:
+                        continue
+                    entry_copy = dict(entry)
+                    entry_copy["normalized_text"] = _normalize_candidate_text(
+                        entry_copy.get("normalized_text") or entry_copy.get("text")
+                    )
+                    anchor_band_entries.append(entry_copy)
+                anchor_band_context = {
+                    "entries": anchor_band_entries,
+                    "anchor_entries": [
+                        dict(entry)
+                        for entry in candidate_entries
+                        if _line_is_table_row_start(
+                            entry.get("normalized_text") or entry.get("text")
+                        )
+                    ],
+                    "anchor_height": anchor_height,
+                    "layout_order": [
+                        idx for idx in layout_order if _coerce_layout_index(idx) in anchor_layouts
+                    ],
+                }
             anchor_payload_rows = [dict(row) for row in anchor_rows_primary]
             anchor_authoritative_result = {
                 "rows": anchor_payload_rows,
@@ -6803,6 +7003,31 @@ def read_text_table(
             if legacy_score[1] > 0 and legacy_score > best_score:
                 best_candidate = legacy_map
                 best_score = legacy_score
+
+    if (
+        anchor_is_authoritative
+        and len(anchor_rows_primary) <= 3
+        and helper_score[1] == 0
+        and legacy_score[1] == 0
+        and isinstance(anchor_band_context, Mapping)
+    ):
+        band_lines = _extract_anchor_band_lines(anchor_band_context)
+        if band_lines:
+            if isinstance(_LAST_TEXT_TABLE_DEBUG, dict):
+                _LAST_TEXT_TABLE_DEBUG["anchor_band_lines"] = list(band_lines)
+            anchor_band_result = _fallback_text_table(band_lines)
+            if anchor_band_result:
+                fallback_candidate = anchor_band_result
+                band_score = _score_table(anchor_band_result)
+                if band_score[1] > 0 and band_score > best_score:
+                    best_candidate = anchor_band_result
+                    best_score = band_score
+                anchor_authoritative_result = dict(anchor_band_result)
+                anchor_rows_primary = _normalize_table_rows(
+                    anchor_band_result.get("rows")
+                )
+                anchor_qty_total = _sum_qty(anchor_rows_primary)
+                text_rows_info = dict(anchor_band_result)
 
     primary_result: dict[str, Any] | None = None
     if isinstance(anchor_authoritative_result, Mapping):
@@ -7680,14 +7905,15 @@ def classify_action(fragment: str) -> dict[str, Any]:
         result["kind"] = "tap"
         if _NPT_TOKEN_RE.search(text):
             result["npt"] = True
+            result["tap_type"] = "pipe"
         return result
 
     if _COUNTERBORE_TOKEN_RE.search(upper):
-        result["kind"] = "cbore"
+        result["kind"] = "counterbore"
         return result
 
     if _COUNTERDRILL_TOKEN_RE.search(upper):
-        result["kind"] = "cdrill"
+        result["kind"] = "counterdrill"
         return result
 
     if _COUNTERSINK_TOKEN_RE.search(upper):
@@ -7915,8 +8141,8 @@ def ops_manifest(
     table_keys = (
         "drill",
         "tap",
-        "cbore",
-        "cdrill",
+        "counterbore",
+        "counterdrill",
         "csink",
         "jig_grind",
         "spot",
@@ -7957,6 +8183,15 @@ def ops_manifest(
                     details["drill_sized"] += qty
                     size_map = details.setdefault("drill_sizes", {})
                     size_map[size_token] = size_map.get(size_token, 0) + qty
+
+    def _apply_aliases(counts: dict[str, int]) -> dict[str, int]:
+        if "counterbore" in counts and "cbore" not in counts:
+            counts["cbore"] = counts["counterbore"]
+        if "counterdrill" in counts and "cdrill" not in counts:
+            counts["cdrill"] = counts["counterdrill"]
+        return counts
+
+    table_counts = _apply_aliases(table_counts)
 
     geom_info = _normalize_geom_holes_payload(geom_holes, hole_sets)
 
@@ -8053,6 +8288,8 @@ def ops_manifest(
         "cbore": table_counterbore,
         "cdrill": table_counterdrill,
     }
+
+    total_counts = _apply_aliases(total_counts)
 
     text_info = {"estimated_total_drills": int(table_counts.get("drill", 0))}
 
