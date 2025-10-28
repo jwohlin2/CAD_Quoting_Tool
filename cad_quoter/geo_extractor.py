@@ -11,6 +11,7 @@ import json
 from fractions import Fraction
 import csv
 import inspect
+import json
 import math
 from functools import lru_cache
 import os
@@ -10179,19 +10180,37 @@ def geom_hole_census(doc: Any) -> dict[str, Any]:
 
     groups_counter = defaultdict(int)
     residual_holes: list[dict[str, float]] = []
-    for rec in kept_records:
+    sample_lookup: dict[str, dict[str, float]] = {}
+    group_samples: defaultdict[float, list[str]] = defaultdict(list)
+    SAMPLE_LIMIT_PER_GROUP = 12
+    for idx, rec in enumerate(kept_records):
         hole_record = {
             "x": float(rec.get("x", 0.0)),
             "y": float(rec.get("y", 0.0)),
             "dia_in": float(rec.get("dia_in", 0.0)),
         }
+        sample_id = f"circle-{idx:05d}"
+        hole_record["sample_id"] = sample_id
         residual_holes.append(hole_record)
+        sample_lookup[sample_id] = hole_record
         dia_key = round(float(hole_record.get("dia_in", 0.0)), 4)
         if dia_key > 0:
             groups_counter[dia_key] += 1
+            sample_ids = group_samples[dia_key]
+            if len(sample_ids) < SAMPLE_LIMIT_PER_GROUP:
+                sample_ids.append(sample_id)
 
     groups = [
         {"dia_in": float(diameter), "count": count}
+        for diameter, count in sorted(groups_counter.items())
+        if count > 0
+    ]
+    debug_groups = [
+        {
+            "dia_in": float(diameter),
+            "count": count,
+            "sample_ids": list(group_samples.get(diameter, [])),
+        }
         for diameter, count in sorted(groups_counter.items())
         if count > 0
     ]
@@ -10222,6 +10241,35 @@ def geom_hole_census(doc: Any) -> dict[str, Any]:
         "raw_unique_count": int(raw_unique_count),
         "total_candidates": int(total_candidates),
     }
+    circles_debug_payload = {
+        "groups": debug_groups,
+        "samples": [
+            {
+                "id": sample_id,
+                "x": record.get("x", 0.0),
+                "y": record.get("y", 0.0),
+                "dia_in": record.get("dia_in", 0.0),
+            }
+            for sample_id, record in sorted(sample_lookup.items())
+        ],
+        "total": int(total),
+    }
+    debug_dir = Path("debug")
+    debug_path = debug_dir / "geom_circles.json"
+    try:
+        debug_dir.mkdir(parents=True, exist_ok=True)
+        with debug_path.open("w", encoding="utf-8") as handle:
+            json.dump(circles_debug_payload, handle, indent=2, sort_keys=True)
+    except OSError as exc:
+        print(f"[GEOM-DUMP] failed to write {debug_path}: {exc}")
+    else:
+        print(
+            "[GEOM-DUMP] groups={groups_written} circles={circle_total} -> {path}".format(
+                groups_written=len(debug_groups),
+                circle_total=circle_total,
+                path=debug_path,
+            )
+        )
     if applied_bbox is not None:
         payload["bbox_in"] = applied_bbox
         payload["bbox_margin_in"] = float(_GEO_BBOX_MARGIN_IN)
