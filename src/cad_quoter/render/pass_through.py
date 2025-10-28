@@ -77,7 +77,7 @@ def render_pass_through(state: RenderState) -> tuple[list[str], float, float]:
         if canonical.lower() == "material":
             continue
         amount = _coerce_float(raw_value)
-        if amount <= 0.0 and not state.show_zeros:
+        if amount == 0.0 and not state.show_zeros:
             continue
         displayed_pass[key] = round(amount, 2)
         pass_through_total += amount
