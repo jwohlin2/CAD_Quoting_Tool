@@ -53,6 +53,53 @@ class FlattenedEntity:
 _IDENTITY_TRANSFORM: TransformMatrix = (1.0, 0.0, 0.0, 0.0, 1.0, 0.0)
 
 
+_OPS_SEGMENT_SPLIT_RE = re.compile(r"[;•]+")
+_TAP_TOKEN_RE = re.compile(r"\bTAP\b", re.IGNORECASE)
+_NPT_TOKEN_RE = re.compile(r"\bN\.?P\.?T\.?\b", re.IGNORECASE)
+_THREAD_TOKEN_RE = re.compile(
+    r"\b(?:#\s*\d+\s*-\s*\d+|#\d+-\d+|\d+\s*/\s*\d+\s*-\s*\d+|\d+-\d+)\b",
+    re.IGNORECASE,
+)
+_COUNTERBORE_TOKEN_RE = re.compile(
+    r"\b(?:C['’]?\s*BORE|C\s*BORE|COUNTER\s*BORE)\b",
+    re.IGNORECASE,
+)
+_COUNTERSINK_TOKEN_RE = re.compile(
+    r"\b(?:C['’]?\s*SINK|CSK|COUNTER\s*SINK)\b",
+    re.IGNORECASE,
+)
+_COUNTERDRILL_TOKEN_RE = re.compile(
+    r"\b(?:C['’]?\s*DRILL|COUNTER\s*DRILL|CTR\s*DRILL)\b",
+    re.IGNORECASE,
+)
+_JIG_GRIND_TOKEN_RE = re.compile(r"\b(?:JIG\s*GRIND|JG)\b", re.IGNORECASE)
+_SPOT_TOKEN_RE = re.compile(r"\bSPOT\b", re.IGNORECASE)
+_DRILL_TOKEN_RE = re.compile(r"\bDRILL\b", re.IGNORECASE)
+_DRILL_SIZE_PATTERNS: tuple[re.Pattern[str], ...] = (
+    re.compile(r"#\s*(\d+)", re.IGNORECASE),
+    re.compile(r"NO\.?\s*(\d+)", re.IGNORECASE),
+    re.compile(r"LETTER\s+([A-Z])", re.IGNORECASE),
+    re.compile(r'"([A-Z])"'),
+    re.compile(r"R\s*\(([^)]+)\)", re.IGNORECASE),
+    re.compile(r"[\u00D8\u2300\u2A00⌀]\s*([0-9]+(?:\.[0-9]+)?)", re.IGNORECASE),
+    re.compile(r"([0-9]+(?:\.[0-9]+)?)\s*(?:IN\.?|MM|\"|DIA|DIAM)\b", re.IGNORECASE),
+    re.compile(r"\b([0-9]+\s*/\s*[0-9]+)\b"),
+    re.compile(r"\b([A-Z])\b(?=[^A-Z0-9]*(?:DRILL|HOLE))", re.IGNORECASE),
+    re.compile(r"\(([^(]*?([0-9]+(?:\.[0-9]+)?)[^)]*)\)", re.IGNORECASE),
+)
+_OPS_MANIFEST_KEYS = (
+    "tap",
+    "cbore",
+    "cdrill",
+    "csink",
+    "drill",
+    "jig_grind",
+    "spot",
+    "npt",
+    "unknown",
+)
+
+
 def _matrix_multiply(a: TransformMatrix, b: TransformMatrix) -> TransformMatrix:
     """Return the matrix product ``a @ b`` for affine 2D transforms."""
 
@@ -2700,6 +2747,166 @@ def _should_drop_candidate_line(text: Any) -> bool:
     if _is_numeric_ladder_line(normalized):
         return True
     return bool(_ADMIN_ROW_DROP_RE.search(normalized))
+
+
+def _extract_drill_size(segment: str) -> str | None:
+    if not segment or not _DRILL_TOKEN_RE.search(segment):
+        return None
+    for pattern in _DRILL_SIZE_PATTERNS:
+        match = pattern.search(segment)
+        if not match:
+            continue
+        size_text = match.group(match.lastindex or 1)
+        if not size_text:
+            continue
+        cleaned = re.sub(r"\s+", " ", str(size_text)).strip()
+        cleaned = cleaned.strip("'\"")
+        cleaned = cleaned.replace("Ø", "Ø").replace("⌀", "Ø")
+        cleaned = cleaned.strip()
+        if cleaned:
+            return cleaned
+    return None
+
+
+def classify_op_row(desc: str | None) -> list[dict[str, Any]]:
+    """Return operation descriptors parsed from ``desc``.
+
+    Each descriptor contains ``kind`` (one of the manifest buckets), ``qty``
+    (initialized to ``0`` and expected to be overridden by callers), and an
+    optional ``size`` token for sized drill operations.
+    """
+
+    if not desc:
+        return []
+    try:
+        text = str(desc)
+    except Exception:
+        return []
+    segments = [part.strip() for part in _OPS_SEGMENT_SPLIT_RE.split(text) if part.strip()]
+    if not segments:
+        segments = [text.strip()]
+
+    results: list[dict[str, Any]] = []
+    for segment in segments:
+        if not segment:
+            continue
+        kinds: list[tuple[str, str | None]] = []
+        is_npt = bool(_NPT_TOKEN_RE.search(segment))
+        is_cdrill = bool(_COUNTERDRILL_TOKEN_RE.search(segment))
+        if is_npt:
+            kinds.append(("npt", None))
+        elif _TAP_TOKEN_RE.search(segment) or _THREAD_TOKEN_RE.search(segment):
+            kinds.append(("tap", None))
+        if _COUNTERBORE_TOKEN_RE.search(segment):
+            kinds.append(("cbore", None))
+        if _COUNTERSINK_TOKEN_RE.search(segment):
+            kinds.append(("csink", None))
+        if is_cdrill:
+            kinds.append(("cdrill", None))
+        if _JIG_GRIND_TOKEN_RE.search(segment):
+            kinds.append(("jig_grind", None))
+        if _SPOT_TOKEN_RE.search(segment):
+            kinds.append(("spot", None))
+        drill_size = None if is_cdrill else _extract_drill_size(segment)
+        if drill_size:
+            kinds.append(("drill", drill_size))
+
+        if not kinds:
+            kinds.append(("unknown", None))
+
+        seen_local: set[str] = set()
+        for kind, size_text in kinds:
+            if kind in seen_local and not size_text:
+                continue
+            seen_local.add(kind)
+            results.append({"kind": kind, "qty": 0, "size": size_text})
+
+    return results
+
+
+def _coerce_positive_int(value: Any) -> int | None:
+    try:
+        candidate = int(round(float(value)))
+    except Exception:
+        return None
+    return candidate if candidate > 0 else None
+
+
+def _hole_sets_total(candidate: Any) -> tuple[int, bool]:
+    total = 0
+    found = False
+    if isinstance(candidate, Mapping):
+        if "hole_sets" in candidate:
+            return _hole_sets_total(candidate.get("hole_sets"))
+        qty_val = _coerce_positive_int(candidate.get("qty"))
+        if qty_val is not None:
+            total += qty_val
+            found = True
+        return (total, found)
+    if isinstance(candidate, Iterable) and not isinstance(candidate, (str, bytes, bytearray)):
+        for item in candidate:
+            subtotal, subfound = _hole_sets_total(item)
+            total += subtotal
+            found = found or subfound
+        return (total, found)
+    qty_val = _coerce_positive_int(candidate)
+    if qty_val is not None:
+        return (qty_val, True)
+    return (0, False)
+
+
+def ops_manifest(
+    chart_rows: Iterable[Mapping[str, Any]] | None,
+    hole_sets: Any = None,
+) -> dict[str, Any]:
+    """Return a normalized operation manifest from chart rows and geometry."""
+
+    table_totals: dict[str, int] = {key: 0 for key in _OPS_MANIFEST_KEYS}
+    row_count = 0
+    sized_drill_qty = 0
+
+    if chart_rows is not None:
+        for row in chart_rows:
+            if not isinstance(row, Mapping):
+                continue
+            qty = _coerce_positive_int(row.get("qty")) or 0
+            if qty <= 0:
+                continue
+            row_count += 1
+            desc_value = row.get("desc") or row.get("description") or row.get("text")
+            operations = classify_op_row(desc_value)
+            if not operations:
+                table_totals["unknown"] += qty
+                continue
+            seen = set()
+            for op in operations:
+                kind = str(op.get("kind") or "unknown").strip().lower()
+                if kind not in _OPS_MANIFEST_KEYS:
+                    kind = "unknown"
+                if kind == "unknown" and kind in seen:
+                    continue
+                table_totals[kind] += qty
+                seen.add(kind)
+                if kind == "drill":
+                    sized_drill_qty += qty
+
+    geom_total, geom_found = _hole_sets_total(hole_sets)
+    geom_drill_total = geom_total if geom_found else 0
+    geom_unsized = max(geom_drill_total - sized_drill_qty, 0)
+
+    total_totals = dict(table_totals)
+    if geom_found:
+        total_totals["drill"] = sized_drill_qty + geom_unsized
+    manifest: dict[str, Any] = {
+        "table": table_totals,
+        "total": total_totals,
+        "chart_row_count": row_count,
+    }
+    if geom_found:
+        manifest["geom"] = {"drill": geom_drill_total, "residual_drill": geom_unsized}
+        manifest["geom_drill_count"] = geom_drill_total
+    manifest["chart_drill_sized"] = sized_drill_qty
+    return manifest
 
 
 def _norm_row_key(row: Mapping[str, Any] | Any) -> tuple[int, str]:

@@ -69,12 +69,29 @@ def classify_chart_rows(
     total quantities.
     """
 
-    buckets: Dict[str, int] = {"tap": 0, "cbore": 0, "npt": 0, "drill_spec": 0, "unknown": 0}
+    totals: Dict[str, int] = {
+        "tap": 0,
+        "cbore": 0,
+        "cdrill": 0,
+        "csink": 0,
+        "drill": 0,
+        "jig_grind": 0,
+        "spot": 0,
+        "npt": 0,
+        "unknown": 0,
+    }
     row_count = 0
     qty_sum = 0
 
     if not rows:
         return {}, row_count, qty_sum
+
+    try:
+        from cad_quoter import geo_extractor as _geo_extractor  # type: ignore
+
+        classify_op_row = getattr(_geo_extractor, "classify_op_row", None)
+    except Exception:  # pragma: no cover - defensive import
+        classify_op_row = None
 
     for raw_row in rows:
         if not isinstance(raw_row, Mapping):
@@ -91,31 +108,46 @@ def classify_chart_rows(
             or raw_row.get("text")
             or raw_row.get("name")
         )
-        segments = _split_segments(desc)
-        categories: set[str] = set()
 
-        for segment in segments:
-            segment_upper = re.sub(r"\s+", "", segment.upper())
-            segment_plain_upper = segment.upper()
-            if not segment_upper:
-                continue
-            if "NPT" in segment_upper.replace(".", ""):
-                categories.add("npt")
-            if "TAP" in segment_plain_upper:
-                categories.add("tap")
-            if any(token in segment_plain_upper for token in ("C'BORE", "CBORE", "COUNTERBORE", "COUNTER BORE")):
-                categories.add("cbore")
-            if _segment_has_drill_spec(segment):
-                categories.add("drill_spec")
+        categories: set[str] = set()
+        if callable(classify_op_row):
+            operations = classify_op_row(desc)
+            for op in operations:
+                kind = str(op.get("kind") or "unknown").strip().lower()
+                if kind not in totals:
+                    kind = "unknown"
+                if kind == "unknown" and kind in categories:
+                    continue
+                categories.add(kind)
+        else:
+            segments = _split_segments(desc)
+            for segment in segments:
+                segment_upper = re.sub(r"\s+", "", segment.upper())
+                segment_plain_upper = segment.upper()
+                if not segment_upper:
+                    continue
+                if "NPT" in segment_upper.replace(".", ""):
+                    categories.add("npt")
+                if "TAP" in segment_plain_upper:
+                    categories.add("tap")
+                if any(
+                    token in segment_plain_upper
+                    for token in ("C'BORE", "CBORE", "COUNTERBORE", "COUNTER BORE")
+                ):
+                    categories.add("cbore")
+                if _segment_has_drill_spec(segment):
+                    categories.add("drill")
 
         if not categories:
             categories.add("unknown")
 
         for category in categories:
-            buckets[category] = buckets.get(category, 0) + qty
+            totals[category] = totals.get(category, 0) + qty
 
     if row_count == 0:
         return {}, row_count, qty_sum
 
-    filtered = {key: value for key, value in buckets.items() if value > 0}
+    filtered = {key: value for key, value in totals.items() if value > 0}
+    if totals.get("drill"):
+        filtered["drill_spec"] = totals["drill"]
     return filtered, row_count, qty_sum

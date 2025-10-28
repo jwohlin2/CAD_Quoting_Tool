@@ -2,6 +2,7 @@ from __future__ import annotations
 from math import sqrt, log1p
 from typing import Any, Dict, Tuple, List, Iterable, Mapping
 
+from cad_quoter.geo_extractor import ops_manifest
 from cad_quoter.planning.process_planner import plan_job
 from cad_quoter.rates import ensure_two_bucket_defaults
 from cad_quoter.utils import _dict
@@ -168,9 +169,31 @@ def _geom(geom: dict) -> dict:
 
     chart_buckets, chart_row_count, chart_qty_sum = classify_chart_rows(chart_rows_iter)
 
+    def _hole_sets_from_geo(source: Mapping[str, Any] | None) -> Any:
+        if not isinstance(source, Mapping):
+            return None
+        hole_sets_val = source.get("hole_sets")
+        if hole_sets_val:
+            return hole_sets_val
+        nested_geo = source.get("geo")
+        if isinstance(nested_geo, Mapping):
+            return _hole_sets_from_geo(nested_geo)
+        return None
+
+    hole_sets_payload = _hole_sets_from_geo(d)
+    ops_manifest_payload = ops_manifest(chart_rows_iter, hole_sets=hole_sets_payload)
+    manifest_totals = (
+        ops_manifest_payload.get("total", {})
+        if isinstance(ops_manifest_payload, Mapping)
+        else {}
+    )
+
     ops_totals = _dict(ops_summary.get("totals"))
     out["ops"] = {
-        "drill": int(_as_float(ops_totals.get("drill"), 0) or 0),
+        "drill": int(
+            _as_float(manifest_totals.get("drill"), _as_float(ops_totals.get("drill"), 0))
+            or 0
+        ),
         "tap_front": int(_as_float(ops_totals.get("tap_front"), 0) or 0),
         "tap_back": int(_as_float(ops_totals.get("tap_back"), 0) or 0),
         "cbore_front": int(_as_float(ops_totals.get("cbore_front"), 0) or 0),
@@ -181,6 +204,7 @@ def _geom(geom: dict) -> dict:
         "spot_back": int(_as_float(ops_totals.get("spot_back"), 0) or 0),
         "jig_grind": int(_as_float(ops_totals.get("jig_grind"), 0) or 0),
     }
+    out["ops"]["manifest"] = ops_manifest_payload
     out["flip_required"] = bool(ops_summary.get("flip_required"))
 
     if chart_buckets:
