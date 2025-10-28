@@ -644,6 +644,13 @@ except Exception:
 _GEO_H_ANCHOR_MIN = max(_GEO_H_ANCHOR_MIN, 0.0)
 _GEO_H_ANCHOR_HARD_MIN = 0.04
 
+_HOLE_TABLE_BAND_MARGIN_IN = _env_float(
+    "HOLE_TABLE_BAND_MARGIN_IN", default=1.25
+)
+_HOLE_TABLE_BAND_MIN_HEIGHT_IN = _env_float(
+    "HOLE_TABLE_BAND_MIN_HEIGHT_IN", default=0.06
+)
+
 _GEO_DIA_MIN_IN = max(
     _env_float("GEO_DIA_MIN_IN", "GEO_CIRCLE_DIAM_MIN_IN", default=0.04),
     0.0,
@@ -4377,6 +4384,7 @@ def _build_columnar_table_from_panel_entries(
     entries: list[dict[str, Any]],
     *,
     roi_hint: Mapping[str, Any] | None = None,
+    column_centers_hint: Sequence[float] | None = None,
 ) -> tuple[dict[str, Any] | None, dict[str, Any]]:
     def _percentile(values: list[float], fraction: float) -> float:
         if not values:
@@ -4742,6 +4750,8 @@ def _build_columnar_table_from_panel_entries(
             "row_gap": y_gap,
             "columns": [],
         }
+        if column_centers_hint:
+            debug_info["column_centers_hint"] = list(column_centers_hint)
         return (None, debug_info)
 
     class _RowBuffer:
@@ -4797,6 +4807,17 @@ def _build_columnar_table_from_panel_entries(
         return centers
 
     column_centers = _column_centers_from_rows(row_buffers)
+    if column_centers_hint:
+        hint_centers: list[float] = []
+        for center in column_centers_hint:
+            try:
+                value = float(center)
+            except Exception:
+                continue
+            if math.isfinite(value):
+                hint_centers.append(value)
+        if hint_centers:
+            column_centers = sorted(hint_centers)
     if not column_centers:
         column_centers = sorted({cell[0] for cell in sorted_cells})
 
@@ -4841,6 +4862,8 @@ def _build_columnar_table_from_panel_entries(
             "row_gap": y_gap,
             "columns": column_centers,
         }
+        if column_centers_hint:
+            debug_info["column_centers_hint"] = list(column_centers_hint)
         return (None, debug_info)
 
     def _header_hits(cells: list[str]) -> dict[str, int]:
@@ -5136,6 +5159,8 @@ def _build_columnar_table_from_panel_entries(
         "qty_sum": qty_sum,
         "row_debug": row_debug_entries,
     }
+    if column_centers_hint:
+        debug_info["column_centers_hint"] = list(column_centers_hint)
     if roi_info is not None:
         debug_info["roi"] = roi_info
     return (table_info, debug_info)
@@ -6140,6 +6165,14 @@ def extract_hole_table_from_text(
     attempt to scan the provided ``doc`` for text entities using
     :func:`_collect_table_text_lines`.
     """
+
+    units_scale = detect_units_scale(doc)
+    try:
+        to_in = float(units_scale.get("to_in") or 1.0)
+    except Exception:
+        to_in = 1.0
+    if not math.isfinite(to_in) or to_in <= 0:
+        to_in = 1.0
 
     rows: list[dict[str, Any]] = []
     total_qty = 0
@@ -8180,13 +8213,79 @@ def read_text_table(
         if rows_txt_initial > 0 and not parsed_rows:
             print("[PATH-GUARD] rows_txt>0 but text_rows==0; forcing band/column pass")
 
+        def _layer_allowed(entry: Mapping[str, Any]) -> bool:
+            if resolved_allowlist is None:
+                return True
+            for key in (
+                "effective_layer",
+                "effective_layer_upper",
+                "layer",
+                "layer_upper",
+            ):
+                value = entry.get(key)
+                if value and value in resolved_allowlist:
+                    return True
+            return False
+
+        def _kmeans_1d(
+            values: Sequence[float],
+            clusters: int,
+            *,
+            iterations: int = 12,
+        ) -> list[float]:
+            unique = sorted(set(values))
+            if not unique:
+                return []
+            clusters = max(1, min(clusters, len(unique)))
+            if clusters == 1:
+                return [unique[len(unique) // 2]]
+            centers = [
+                unique[
+                    min(
+                        int(round(i * (len(unique) - 1) / max(clusters - 1, 1))),
+                        len(unique) - 1,
+                    )
+                ]
+                for i in range(clusters)
+            ]
+            for _ in range(iterations):
+                buckets: list[list[float]] = [[] for _ in centers]
+                for value in values:
+                    idx = min(
+                        range(len(centers)),
+                        key=lambda index: (abs(value - centers[index]), index),
+                    )
+                    buckets[idx].append(value)
+                updated: list[float] = list(centers)
+                empty_indices: list[int] = []
+                for idx, bucket in enumerate(buckets):
+                    if bucket:
+                        updated[idx] = sum(bucket) / len(bucket)
+                    else:
+                        empty_indices.append(idx)
+                if empty_indices:
+                    for idx in empty_indices:
+                        position = min(
+                            int(round((idx + 0.5) * (len(unique) - 1) / clusters)),
+                            len(unique) - 1,
+                        )
+                        updated[idx] = unique[position]
+                delta = max(abs(updated[idx] - centers[idx]) for idx in range(len(centers)))
+                centers = updated
+                if delta < 1e-6:
+                    break
+            return sorted(centers)
+
         chart_lines: list[dict[str, Any]] = []
         sheet_lines: list[dict[str, Any]] = []
         model_lines: list[dict[str, Any]] = []
         other_lines: list[dict[str, Any]] = []
+        header_samples: defaultdict[str, list[float]] = defaultdict(list)
+        layout_counts: Counter[str] = Counter()
+        header_pattern = re.compile(r"HOLE\s+(TABLE|CHART)", re.IGNORECASE)
         for entry in collected_entries:
             text_value = str(entry.get("text") or "").strip()
-            if not text_value:
+            if not text_value or not _layer_allowed(entry):
                 continue
             record = {
                 "layout_name": entry.get("layout_name"),
@@ -8197,8 +8296,20 @@ def read_text_table(
                 "height": entry.get("height"),
                 "text": text_value,
                 "normalized_text": text_value,
+                "layer": entry.get("layer"),
+                "layer_upper": entry.get("layer_upper"),
+                "effective_layer": entry.get("effective_layer"),
+                "effective_layer_upper": entry.get("effective_layer_upper"),
             }
             layout_name = str(entry.get("layout_name") or "")
+            layout_counts[layout_name] += 1
+            upper_text = text_value.upper()
+            if header_pattern.search(text_value) or (
+                "HOLE" in upper_text and ("TABLE" in upper_text or "CHART" in upper_text)
+            ):
+                y_val = entry.get("y")
+                if isinstance(y_val, (int, float)):
+                    header_samples[layout_name].append(float(y_val))
             lower_name = layout_name.lower()
             if "chart" in lower_name:
                 chart_lines.append(record)
@@ -8208,9 +8319,78 @@ def read_text_table(
                 model_lines.append(record)
             else:
                 other_lines.append(record)
-        raw_lines = chart_lines + sheet_lines + model_lines
+        raw_lines = chart_lines + sheet_lines + model_lines + other_lines
         if not raw_lines:
             raw_lines = list(other_lines)
+
+        band_entries: list[dict[str, Any]] = list(raw_lines)
+        column_centers_hint_doc: list[float] | None = None
+        band_debug_info: dict[str, Any] | None = None
+        if header_samples:
+            def _layout_priority(name: str) -> tuple[int, int]:
+                return (len(header_samples[name]), layout_counts.get(name, 0))
+
+            best_layout = max(header_samples, key=_layout_priority)
+            header_values = header_samples[best_layout]
+            try:
+                header_center = statistics.mean(header_values)
+            except statistics.StatisticsError:
+                header_center = header_values[0]
+            margin_doc = _HOLE_TABLE_BAND_MARGIN_IN / to_in
+            band_low = header_center - margin_doc
+            band_high = header_center + margin_doc
+            filtered_entries: list[dict[str, Any]] = []
+            x_values_in: list[float] = []
+            for entry in raw_lines:
+                if str(entry.get("layout_name") or "") != best_layout:
+                    continue
+                y_val = entry.get("y")
+                if not isinstance(y_val, (int, float)):
+                    continue
+                y_float = float(y_val)
+                if y_float < band_low or y_float > band_high:
+                    continue
+                height_val = entry.get("height")
+                if isinstance(height_val, (int, float)) and float(height_val) > 0:
+                    height_in = float(height_val) * to_in
+                    if height_in < _HOLE_TABLE_BAND_MIN_HEIGHT_IN:
+                        continue
+                filtered_entries.append(entry)
+                x_val = entry.get("x")
+                if isinstance(x_val, (int, float)):
+                    x_values_in.append(float(x_val) * to_in)
+            if filtered_entries:
+                band_entries = filtered_entries
+                unique_x = {round(value, 6) for value in x_values_in}
+                centers_in: list[float] | None = None
+                if len(unique_x) >= 4:
+                    centers_in = _kmeans_1d(x_values_in, 4)
+                if centers_in:
+                    column_centers_hint_doc = [center / to_in for center in centers_in]
+                band_debug_info = {
+                    "layout": best_layout,
+                    "y_center": header_center,
+                    "y_center_in": header_center * to_in,
+                    "margin_in": _HOLE_TABLE_BAND_MARGIN_IN,
+                    "entries": len(filtered_entries),
+                    "y_bounds": [band_low, band_high],
+                }
+                if centers_in:
+                    band_debug_info["column_centers_in"] = centers_in
+            else:
+                band_debug_info = {
+                    "layout": best_layout,
+                    "y_center": header_center,
+                    "y_center_in": header_center * to_in,
+                    "margin_in": _HOLE_TABLE_BAND_MARGIN_IN,
+                    "entries": 0,
+                    "y_bounds": [band_low, band_high],
+                }
+        if isinstance(_LAST_TEXT_TABLE_DEBUG, dict):
+            if band_debug_info is not None:
+                _LAST_TEXT_TABLE_DEBUG["bands"] = [band_debug_info]
+            else:
+                _LAST_TEXT_TABLE_DEBUG["bands"] = []
         _LAST_TEXT_TABLE_DEBUG["raw_lines"] = [
             {
                 "layout": item.get("layout_name"),
@@ -8223,19 +8403,33 @@ def read_text_table(
             for item in raw_lines
         ]
         block_count = sum(1 for item in raw_lines if item.get("from_block"))
+        band_block_count = sum(1 for item in band_entries if item.get("from_block"))
         print(
             "[COLUMN] raw_lines total={total} (chart={chart} sheet={sheet} "
-            "model={model}) blocks={blocks}".format(
+            "model={model} other={other}) blocks={blocks}".format(
                 total=len(raw_lines),
                 chart=len(chart_lines),
                 sheet=len(sheet_lines),
                 model=len(model_lines),
+                other=len(other_lines),
                 blocks=block_count,
             )
         )
-        if raw_lines:
+        if band_debug_info is not None:
+            print(
+                "[COLUMN-BAND] layout={layout} entries={count} blocks={blocks} "
+                "margin=±{margin:.2f}in".format(
+                    layout=str(band_debug_info.get("layout") or "-"),
+                    count=len(band_entries),
+                    blocks=band_block_count,
+                    margin=_HOLE_TABLE_BAND_MARGIN_IN,
+                )
+            )
+        if band_entries:
             table_candidate, debug_payload = _build_columnar_table_from_entries(
-                raw_lines, roi_hint=roi_hint_effective
+                band_entries,
+                roi_hint=roi_hint_effective,
+                column_centers_hint=column_centers_hint_doc,
             )
             columnar_table_info = table_candidate
             columnar_debug_info = debug_payload
@@ -8249,7 +8443,6 @@ def read_text_table(
                 _LAST_TEXT_TABLE_DEBUG["rows"] = list(
                     debug_payload.get("rows_txt_fallback", [])
                 )
-                _LAST_TEXT_TABLE_DEBUG["bands"] = []
                 if "roi" in debug_payload:
                     _LAST_TEXT_TABLE_DEBUG["roi"] = debug_payload.get("roi")
 
@@ -8929,6 +9122,7 @@ def _build_columnar_table_from_entries(
     entries: list[dict[str, Any]],
     *,
     roi_hint: Mapping[str, Any] | None = None,
+    column_centers_hint: Sequence[float] | None = None,
 ) -> tuple[dict[str, Any] | None, dict[str, Any]]:
     panels = _cluster_panel_entries(entries, roi_hint=roi_hint)
     if len(panels) <= 1:
@@ -8938,6 +9132,7 @@ def _build_columnar_table_from_entries(
         return _build_columnar_table_from_panel_entries(
             list(panel_entries or []),
             roi_hint=panel_hint,
+            column_centers_hint=column_centers_hint,
         )
 
     panel_results: list[dict[str, Any]] = []
@@ -8947,6 +9142,7 @@ def _build_columnar_table_from_entries(
         candidate, debug_payload = _build_columnar_table_from_panel_entries(
             panel_entries,
             roi_hint=panel_hint,
+            column_centers_hint=column_centers_hint,
         )
         normalized_rows = _normalize_table_rows(candidate.get("rows")) if candidate else []
         panel_debug = {
@@ -9008,7 +9204,11 @@ def _build_columnar_table_from_entries(
                 break
 
     if best_candidate is None:
-        return _build_columnar_table_from_panel_entries(entries, roi_hint=roi_hint)
+        return _build_columnar_table_from_panel_entries(
+            entries,
+            roi_hint=roi_hint,
+            column_centers_hint=column_centers_hint,
+        )
 
     combined_candidate = dict(best_candidate)
     if merged_rows:
