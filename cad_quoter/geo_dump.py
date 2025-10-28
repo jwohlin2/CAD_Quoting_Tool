@@ -1207,6 +1207,10 @@ def main(argv: Sequence[str] | None = None) -> int:
             print(f"[GEOM] top contributors: {summary_display}")
 
     manifest_payload: Mapping[str, Any] | None = None
+    authoritative_table_from_source = geo_extractor._table_source_is_authoritative(
+        source,
+        len(rows),
+    )
     if isinstance(extract_result, Mapping):
         manifest_candidate = extract_result.get("manifest") or extract_result.get(
             "ops_manifest"
@@ -1214,15 +1218,11 @@ def main(argv: Sequence[str] | None = None) -> int:
         if isinstance(manifest_candidate, Mapping):
             manifest_payload = dict(manifest_candidate)
     if manifest_payload is None:
-        authoritative_table = geo_extractor._table_source_is_authoritative(
-            source,
-            len(rows),
-        )
         manifest_payload = geo_extractor.ops_manifest(
             rows,
             geom_holes=geom_holes_payload,
             hole_sets=hole_sets_payload,
-            authoritative_table=authoritative_table,
+            authoritative_table=authoritative_table_from_source,
         )
     if isinstance(manifest_payload, Mapping):
         payload["ops_manifest"] = dict(manifest_payload)
@@ -1252,6 +1252,8 @@ def main(argv: Sequence[str] | None = None) -> int:
     )
     if not table_authoritative:
         table_authoritative = _provenance_is_anchor(holes_source)
+    if not table_authoritative:
+        table_authoritative = authoritative_table_from_source
 
     effective_total_counts: Mapping[str, Any]
     if table_authoritative:

@@ -8818,8 +8818,10 @@ def ops_manifest(
     }
 
     table_drill_total = table_drill_only + implied_drill_total
-    if table_rows_present:
-        total_drill = table_drill_total
+    if authoritative_table:
+        total_drill = table_drill_only
+    elif table_rows_present:
+        total_drill = sized_drill_qty + geom_residual + implied_drill_total
     else:
         total_drill = max(geom_total, table_drill_total)
 
@@ -8852,6 +8854,9 @@ def ops_manifest(
         "details": details,
         "text": text_info,
     }
+    if authoritative_table:
+        manifest["authoritative_table"] = True
+        manifest["table_authoritative"] = True
     return manifest
 
 
