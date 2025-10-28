@@ -1069,37 +1069,46 @@ def main(argv: Sequence[str] | None = None) -> int:
     text_jsonl_path: str = "-"
 
     if args.dump_all_text:
-        include_layers: list[str] | None = None
-        exclude_layers: list[str] | None = None
-        if args.no_layer_filter:
-            print("[TEXT-DUMP] layer filtering disabled")
-        else:
-            include_layers = _normalize_pattern_args(args.layers_include)
-            exclude_layers = _normalize_pattern_args(args.layers_exclude)
-            if include_layers:
-                print(f"[TEXT-DUMP] layers_include={sorted(set(include_layers))}")
-            if exclude_layers:
-                print(f"[TEXT-DUMP] layers_exclude={sorted(set(exclude_layers))}")
-        if args.min_height:
-            print(f"[TEXT-DUMP] min_height={args.min_height}")
-        layout_filter = None
-        if isinstance(args.layouts, str) and args.layouts.strip():
-            layout_filter = [
-                value.strip()
-                for value in args.layouts.split(",")
-                if value and value.strip()
-            ]
-            if layout_filter:
-                print(f"[TEXT-DUMP] layouts={layout_filter}")
+        include_layers = _normalize_pattern_args(args.layers_include)
+        raw_exclude_layers = _normalize_pattern_args(args.layers_exclude)
+        exclude_layers = list(raw_exclude_layers)
+        dump_min_height = args.min_height
+        if dump_min_height is None:
+            dump_min_height = 0.0
+        if dump_min_height is not None:
+            if args.min_height is None:
+                print(f"[TEXT-DUMP] min_height={dump_min_height} (default for dump)")
+            else:
+                print(f"[TEXT-DUMP] min_height={dump_min_height}")
+
+        if not getattr(args, "no_exclude_layer", False):
+            default_exclude = {
+                pattern for pattern in DEFAULT_TEXT_LAYER_EXCLUDE_REGEX if pattern
+            }
+            if default_exclude:
+                explicit_defaults = {
+                    pattern for pattern in raw_exclude_layers if pattern in default_exclude
+                }
+                filtered_layers = [
+                    pattern
+                    for pattern in exclude_layers
+                    if pattern not in default_exclude or pattern in explicit_defaults
+                ]
+                if len(filtered_layers) != len(exclude_layers):
+                    print("[TEXT-DUMP] ignoring default layer exclusions for dump-all-text")
+                    exclude_layers = filtered_layers
+        if include_layers:
+            print(f"[TEXT-DUMP] layers_include={sorted(set(include_layers))}")
+        if exclude_layers:
+            print(f"[TEXT-DUMP] layers_exclude={sorted(set(exclude_layers))}")
         try:
             entries = geo_extractor.collect_all_text(
                 doc,
                 include_blocks=bool(args.include_blocks),
                 include_paperspace=bool(args.include_paperspace),
-                min_height=args.min_height,
-                layers_include=None if args.no_layer_filter else include_layers,
-                layers_exclude=None if args.no_layer_filter else exclude_layers,
-                layouts=layout_filter,
+                min_height=dump_min_height,
+                layers_include=include_layers,
+                layers_exclude=exclude_layers,
             )
         except Exception as exc:
             print(f"[TEXT-DUMP] failed to collect text entities: {exc}")
