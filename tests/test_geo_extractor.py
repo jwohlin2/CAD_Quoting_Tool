@@ -418,7 +418,7 @@ def test_fallback_semicolon_row_remains_single_entry() -> None:
     assert qty_sum == 4
     assert buckets.get("cbore") == 4
     assert buckets.get("npt") == 4
-    assert buckets.get("tap", 0) == 4
+    assert buckets.get("tap") == 4
 
 
 def test_anchor_height_filter_drops_small_text() -> None:
