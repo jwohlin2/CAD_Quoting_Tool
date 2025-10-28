@@ -11189,21 +11189,25 @@ def read_geo(
             and len(manifest_rows) >= 8
         )
 
-        def _counts_int(counts: Mapping[str, Any] | None, key: str) -> int:
+        def _counts_value(counts: Mapping[str, Any] | None, *keys: str) -> int:
             if not isinstance(counts, Mapping):
                 return 0
-            try:
-                return int(round(float(counts.get(key) or 0)))
-            except Exception:
-                return 0
+            for key in keys:
+                if key not in counts:
+                    continue
+                try:
+                    return int(round(float(counts.get(key) or 0)))
+                except Exception:
+                    return 0
+            return 0
 
         def _table_totals_map(counts: Mapping[str, Any] | None) -> dict[str, int]:
             return {
-                "drill": _counts_int(counts, "drill"),
-                "tap": _counts_int(counts, "tap"),
-                "counterbore": _counts_int(counts, "counterbore"),
-                "counterdrill": _counts_int(counts, "counterdrill"),
-                "jig_grind": _counts_int(counts, "jig_grind"),
+                "drill": _counts_value(counts, "drill", "drill_only"),
+                "tap": _counts_value(counts, "tap"),
+                "counterbore": _counts_value(counts, "counterbore", "cbore"),
+                "counterdrill": _counts_value(counts, "counterdrill", "cdrill"),
+                "jig_grind": _counts_value(counts, "jig_grind", "jig"),
             }
 
         if authoritative_counts:
