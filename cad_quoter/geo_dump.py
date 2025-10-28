@@ -8,6 +8,7 @@ import json
 import math
 import os
 import sys
+from collections import Counter
 from collections.abc import Iterable, Mapping
 from pathlib import Path
 from typing import Any, Sequence
@@ -57,6 +58,142 @@ def _int_from_value(value: Any) -> int:
         return int(round(float(value or 0)))
     except Exception:
         return 0
+
+
+def _format_height_display(value: Any) -> str:
+    if isinstance(value, (int, float)):
+        try:
+            number = float(value)
+        except Exception:
+            return "-"
+        if math.isfinite(number):
+            return f"{number:.3f}"
+    return "-"
+
+
+def _format_rotation_display(value: Any) -> str:
+    if isinstance(value, (int, float)):
+        try:
+            number = float(value)
+        except Exception:
+            return "-"
+        if math.isfinite(number):
+            return f"{number:.1f}"
+    return "-"
+
+
+def _format_text_preview(text: Any, limit: int = 120) -> str:
+    try:
+        value = str(text or "")
+    except Exception:
+        value = ""
+    preview = value.replace("\n", "\\n")
+    if len(preview) > limit:
+        preview = preview[: limit - 3] + "..."
+    return preview
+
+
+def _print_text_dump(entries: Sequence[Mapping[str, Any]]) -> None:
+    total = len(entries)
+    type_counts = Counter(str(entry.get("etype") or "-") for entry in entries)
+    type_summary = ", ".join(f"{key}:{type_counts[key]}" for key in sorted(type_counts))
+    print(f"[TEXT-DUMP] total={total} by etype={{{type_summary}}}")
+    if not entries:
+        return
+
+    sample = entries[0]
+    sample_height = _format_height_display(sample.get("height"))
+    sample_text = _format_text_preview(sample.get("text"), limit=100)
+    sample_layer = str(sample.get("layer") or "-")
+    sample_layout = str(sample.get("layout") or "-")
+    print(
+        "[TEXT-DUMP] sample: [{etype} layout={layout} layer={layer} h={height} \"{text}\"]".format(
+            etype=str(sample.get("etype") or "-"),
+            layout=sample_layout,
+            layer=sample_layer,
+            height=sample_height,
+            text=sample_text,
+        )
+    )
+
+    layout_counts = Counter(str(entry.get("layout") or "-") for entry in entries)
+    max_lines = 20
+    lines_shown = 0
+    seen_layouts: set[str] = set()
+    for entry in entries:
+        if lines_shown >= max_lines:
+            break
+        layout = str(entry.get("layout") or "-")
+        if layout not in seen_layouts:
+            print(f"[TEXT-DUMP] layout={layout} count={layout_counts[layout]}")
+            seen_layouts.add(layout)
+        height_display = _format_height_display(entry.get("height"))
+        rotation_display = _format_rotation_display(entry.get("rotation"))
+        layer_display = str(entry.get("layer") or "-")
+        preview = _format_text_preview(entry.get("text"))
+        block_path = entry.get("block_path") or ()
+        block_display = ""
+        if block_path:
+            block_display = " blocks=" + " > ".join(str(name) for name in block_path)
+        print(
+            "[TEXT-DUMP]   {etype:<9} layer={layer} h={height} rot={rot}{blocks} \"{text}\"".format(
+                etype=str(entry.get("etype") or "-"),
+                layer=layer_display,
+                height=height_display,
+                rot=rotation_display,
+                blocks=block_display,
+                text=preview,
+            )
+        )
+        lines_shown += 1
+
+
+def _write_text_dump_csv(entries: Sequence[Mapping[str, Any]]) -> None:
+    if not entries:
+        return
+    csv_path = Path("debug/dxf_text_dump.csv")
+    try:
+        csv_path.parent.mkdir(parents=True, exist_ok=True)
+        with csv_path.open("w", newline="", encoding="utf-8") as handle:
+            writer = csv.writer(handle)
+            writer.writerow(
+                [
+                    "text",
+                    "raw",
+                    "etype",
+                    "layout",
+                    "layer",
+                    "height",
+                    "rotation",
+                    "insert_x",
+                    "insert_y",
+                    "block_path",
+                ]
+            )
+            for entry in entries:
+                insert = entry.get("insert")
+                if isinstance(insert, (tuple, list)) and len(insert) >= 2:
+                    insert_x, insert_y = insert[0], insert[1]
+                else:
+                    insert_x, insert_y = "", ""
+                writer.writerow(
+                    [
+                        entry.get("text", ""),
+                        entry.get("raw", ""),
+                        entry.get("etype", ""),
+                        entry.get("layout", ""),
+                        entry.get("layer", ""),
+                        entry.get("height", ""),
+                        entry.get("rotation", ""),
+                        insert_x,
+                        insert_y,
+                        " > ".join(str(name) for name in entry.get("block_path") or ()),
+                    ]
+                )
+    except OSError as exc:
+        print(f"[TEXT-DUMP] failed to write CSV: {exc}")
+    else:
+        print(f"[TEXT-DUMP] wrote CSV to {csv_path}")
 
 
 def _truthy_flag(value: Any) -> bool:
@@ -601,6 +738,11 @@ def main(argv: Sequence[str] | None = None) -> int:
         dest="dump_ents",
         help="Write scanned text entities to CSV",
     )
+    parser.add_argument(
+        "--dump-all-text",
+        action="store_true",
+        help="Dump all text entities with layout metadata",
+    )
     args = parser.parse_args(argv)
 
     if args.show_rows is not None:
@@ -643,6 +785,12 @@ def main(argv: Sequence[str] | None = None) -> int:
     except Exception as exc:  # pragma: no cover - defensive logging
         print(f"[geo_dump] failed to load document: {exc}")
         return 1
+
+    if args.dump_all_text:
+        entries = geo_extractor.collect_all_text(doc)
+        _print_text_dump(entries)
+        _write_text_dump_csv(entries)
+        return 0
 
     read_kwargs: dict[str, object] = {}
 
