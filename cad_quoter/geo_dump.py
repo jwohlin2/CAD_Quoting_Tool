@@ -2,7 +2,6 @@
 from __future__ import annotations
 
 import argparse
-import csv
 import importlib
 import json
 import math
@@ -93,11 +92,16 @@ def _format_text_preview(text: Any, limit: int = 120) -> str:
     return preview
 
 
-def _print_text_dump(entries: Sequence[Mapping[str, Any]]) -> None:
+def _print_text_dump(
+    entries: Sequence[Mapping[str, Any]], csv_path: Path | None = None
+) -> None:
     total = len(entries)
     type_counts = Counter(str(entry.get("etype") or "-") for entry in entries)
     type_summary = ", ".join(f"{key}:{type_counts[key]}" for key in sorted(type_counts))
-    print(f"[TEXT-DUMP] total={total} by etype={{{type_summary}}}")
+    if csv_path:
+        print(f"[TEXT-DUMP] total={total} by etype={{{type_summary}}} -> {csv_path}")
+    else:
+        print(f"[TEXT-DUMP] total={total} by etype={{{type_summary}}}")
     if not entries:
         return
 
@@ -146,55 +150,6 @@ def _print_text_dump(entries: Sequence[Mapping[str, Any]]) -> None:
             )
         )
         lines_shown += 1
-
-
-def _write_text_dump_csv(entries: Sequence[Mapping[str, Any]]) -> None:
-    if not entries:
-        return
-    csv_path = Path("debug/dxf_text_dump.csv")
-    try:
-        csv_path.parent.mkdir(parents=True, exist_ok=True)
-        with csv_path.open("w", newline="", encoding="utf-8") as handle:
-            writer = csv.writer(handle)
-            writer.writerow(
-                [
-                    "text",
-                    "raw",
-                    "etype",
-                    "layout",
-                    "layer",
-                    "height",
-                    "rotation",
-                    "insert_x",
-                    "insert_y",
-                    "block_path",
-                ]
-            )
-            for entry in entries:
-                insert = entry.get("insert")
-                if isinstance(insert, (tuple, list)) and len(insert) >= 2:
-                    insert_x, insert_y = insert[0], insert[1]
-                else:
-                    insert_x, insert_y = "", ""
-                writer.writerow(
-                    [
-                        entry.get("text", ""),
-                        entry.get("raw", ""),
-                        entry.get("etype", ""),
-                        entry.get("layout", ""),
-                        entry.get("layer", ""),
-                        entry.get("height", ""),
-                        entry.get("rotation", ""),
-                        insert_x,
-                        insert_y,
-                        " > ".join(str(name) for name in entry.get("block_path") or ()),
-                    ]
-                )
-    except OSError as exc:
-        print(f"[TEXT-DUMP] failed to write CSV: {exc}")
-    else:
-        print(f"[TEXT-DUMP] wrote CSV to {csv_path}")
-
 
 def _truthy_flag(value: Any) -> bool:
     if isinstance(value, bool):
@@ -787,9 +742,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         return 1
 
     if args.dump_all_text:
-        entries = geo_extractor.collect_all_text(doc)
-        _print_text_dump(entries)
-        _write_text_dump_csv(entries)
+        entries, csv_path = geo_extractor.collect_all_text(doc)
+        _print_text_dump(entries, csv_path)
         return 0
 
     read_kwargs: dict[str, object] = {}
