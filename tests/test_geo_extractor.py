@@ -574,15 +574,25 @@ def test_read_geo_promotes_rows_txt_fallback(
 def test_anchor_wins_skips_roi_and_single_publish(
     monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    doc = _DummyDoc(
-        [
-            _DummyMText("(2) Ø0.250 DRILL THRU"),
-            _DummyMText("(3) Ø0.312 TAP FROM FRONT"),
-            _DummyMText("(4) Ø0.201 DRILL THRU"),
-        ]
-    )
+    anchor_rows = [
+        {"hole": "", "qty": 2, "ref": "A", "desc": "(2) DRILL"},
+        {"hole": "", "qty": 2, "ref": "B", "desc": "(2) TAP"},
+        {"hole": "", "qty": 3, "ref": "C", "desc": "(3) DRILL"},
+    ]
+
+    def fake_text(_doc: _DummyDoc, **_kwargs: object) -> dict[str, object]:
+        print("[TEXT-SCAN] pass=anchor rows=3 (authoritative)")
+        return {
+            "rows": list(anchor_rows),
+            "hole_count": 7,
+            "provenance_holes": "HOLE TABLE (anchor)",
+            "source": "text_table",
+            "anchor_authoritative": True,
+            "header_validated": True,
+        }
 
     monkeypatch.setattr(geo_extractor, "_resolve_app_callable", lambda name: None)
+    monkeypatch.setattr(geo_extractor, "read_text_table", fake_text)
     monkeypatch.setattr(geo_extractor, "read_acad_table", lambda *args, **kwargs: {})
     monkeypatch.setattr(geo_extractor, "extract_geometry", lambda _doc: {})
     monkeypatch.setattr(
@@ -591,7 +601,7 @@ def test_anchor_wins_skips_roi_and_single_publish(
         lambda _doc: {"groups": [], "total": 0},
     )
 
-    geo_extractor.read_geo(doc)
+    geo_extractor.read_geo(_DummyDoc([]))
     captured = capsys.readouterr().out
 
     assert captured.count("[TEXT-SCAN] pass=roi") == 1
@@ -603,6 +613,52 @@ def test_anchor_wins_skips_roi_and_single_publish(
     assert len(publish_lines) == 1
     assert publish_lines[0].startswith("[PATH] publish=text_table")
 
+
+def test_anchor_authoritative_short_circuits(monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> None:
+    anchor_rows = [
+        {"hole": "", "qty": 2, "ref": "A", "desc": "(2) DRILL"},
+        {"hole": "", "qty": 3, "ref": "B", "desc": "(3) TAP"},
+        {"hole": "", "qty": 4, "ref": "C", "desc": "(4) DRILL"},
+    ]
+
+    def fake_text(_doc: _DummyDoc, **_kwargs: object) -> dict[str, object]:
+        print("[TEXT-SCAN] pass=anchor rows=3 (authoritative)")
+        return {
+            "rows": list(anchor_rows),
+            "hole_count": 9,
+            "provenance_holes": "HOLE TABLE (anchor)",
+            "source": "text_table",
+            "anchor_authoritative": True,
+            "header_validated": True,
+        }
+
+    monkeypatch.setattr(geo_extractor, "_resolve_app_callable", lambda name: None)
+    monkeypatch.setattr(geo_extractor, "read_text_table", fake_text)
+    monkeypatch.setattr(geo_extractor, "read_acad_table", lambda *args, **kwargs: {})
+    monkeypatch.setattr(geo_extractor, "extract_geometry", lambda _doc: {})
+    monkeypatch.setattr(
+        geo_extractor,
+        "geom_hole_census",
+        lambda _doc: {"groups": [], "total": 0},
+    )
+
+    state = geo_extractor.ExtractionState()
+    result = geo_extractor.read_geo(_DummyDoc([]), state=state)
+    captured = capsys.readouterr().out
+
+    assert state.anchor_authoritative is True
+    assert state.published is True
+    assert result["provenance_holes"] == "HOLE TABLE (anchor)"
+
+    assert "[TEXT-SCAN] pass=roi" not in captured
+    assert "[TEXT-SCAN] fallback" not in captured
+    assert "[TABLE-R]" not in captured
+
+    publish_lines = [
+        line for line in captured.splitlines() if line.startswith("[PATH] publish=")
+    ]
+    assert len(publish_lines) == 1
+    assert publish_lines[0].startswith("[PATH] publish=text_table")
 
 def test_read_geo_raises_when_no_text_rows(
     monkeypatch: pytest.MonkeyPatch, fallback_doc: _DummyDoc
