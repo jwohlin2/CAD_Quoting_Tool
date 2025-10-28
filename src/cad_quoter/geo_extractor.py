@@ -1806,25 +1806,54 @@ class _LayerAllowlist(Iterable[str]):
 def _normalize_layer_allowlist(
     layer_allowlist: Iterable[str] | None,
 ) -> _LayerAllowlist | None:
-    if layer_allowlist is None:
+    if layer_allowlist is None or layer_allowlist is _DEFAULT_LAYER_ALLOWLIST:
         return None
+
     special_tokens = {"ALL", "*", "<ALL>"}
     normalized: list[str] = []
-    for value in layer_allowlist:
-        if value is None:
-            continue
+    seen: set[str] = set()
+    allow_all = False
+
+    def _consume(value: Any) -> None:
+        nonlocal allow_all
+        if allow_all or value is None:
+            return
         if isinstance(value, str):
             raw_values = value.split(",")
         else:
             raw_values = [value]
         for item in raw_values:
+            if allow_all:
+                break
             text = str(item).strip()
             if not text:
                 continue
             upper = text.upper()
             if upper in special_tokens:
-                return None
+                allow_all = True
+                break
+            if upper in seen:
+                continue
+            seen.add(upper)
             normalized.append(upper)
+
+    sources: tuple[Iterable[Any] | Any, ...] = (
+        _DEFAULT_LAYER_ALLOWLIST,
+        layer_allowlist,
+    )
+    for source in sources:
+        if allow_all:
+            break
+        if isinstance(source, Iterable) and not isinstance(source, (str, bytes, bytearray)):
+            for value in source:
+                _consume(value)
+                if allow_all:
+                    break
+        else:
+            _consume(source)
+
+    if allow_all or not normalized:
+        return None
     return _LayerAllowlist(normalized)
 
 
@@ -4713,8 +4742,6 @@ def read_text_table(
 
         def _perform_text_scan(
             current_allowlist: _LayerAllowlist | None,
-            *,
-            ignore_regex_excludes: bool = False,
         ) -> tuple[int, int, int]:
             nonlocal table_lines, text_rows_info, merged_rows, parsed_rows
             nonlocal columnar_table_info, columnar_debug_info, roi_hint_effective, rows_txt_initial
@@ -5348,7 +5375,6 @@ def read_text_table(
                     return False
 
                 regex_filtered: list[dict[str, Any]] = []
-                active_exclude_patterns = [] if ignore_regex_excludes else list(exclude_patterns)
                 for entry in collected_entries:
                     layer_text = str(
                         entry.get("effective_layer")
@@ -5365,8 +5391,8 @@ def read_text_table(
                     if include_patterns:
                         include_ok = _matches_any(include_patterns, values)
                     exclude_hit = False
-                    if include_ok and active_exclude_patterns:
-                        exclude_hit = _matches_any(active_exclude_patterns, values)
+                    if include_ok and exclude_patterns:
+                        exclude_hit = _matches_any(list(exclude_patterns), values)
                     if include_ok and not exclude_hit:
                         regex_filtered.append(entry)
                 kept = len(regex_filtered)
