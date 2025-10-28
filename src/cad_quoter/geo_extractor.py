@@ -211,6 +211,59 @@ def _point2d(value: Any) -> tuple[float, float] | None:
     return None
 
 
+def _point3d(value: Any) -> tuple[float, float, float] | None:
+    if value is None:
+        return None
+    if hasattr(value, "xyz"):
+        try:
+            x_val, y_val, z_val = value.xyz
+            return (float(x_val), float(y_val), float(z_val))
+        except Exception:
+            return None
+    for accessor in (("x", "y", "z"), (0, 1, 2)):
+        coords: list[float] = []
+        missing = True
+        for key in accessor:
+            try:
+                candidate = getattr(value, key) if isinstance(key, str) else value[key]
+            except Exception:
+                candidate = None
+            if candidate is None:
+                coords.append(0.0)
+            else:
+                missing = False
+                try:
+                    coords.append(float(candidate))
+                except Exception:
+                    coords = []
+                    break
+        if coords and not missing:
+            try:
+                x_val, y_val, z_val = coords
+                return (x_val, y_val, z_val)
+            except Exception:
+                continue
+    return None
+
+
+def _is_positive_z_normal(candidate: Any, tol: float = 1e-6) -> bool:
+    vector = _point3d(candidate)
+    if vector is None:
+        return True
+    nx, ny, nz = vector
+    magnitude = math.sqrt(nx * nx + ny * ny + nz * nz)
+    if not math.isfinite(magnitude) or magnitude <= 0.0:
+        return False
+    nx /= magnitude
+    ny /= magnitude
+    nz /= magnitude
+    if nz <= tol:
+        return False
+    if abs(nx) > tol or abs(ny) > tol:
+        return False
+    return True
+
+
 def _iter_insert_attributes(entity: Any) -> Iterable[Any]:
     attr_seen: set[int] = set()
     for attr_name in ("attribs", "attribs_raw"):
@@ -502,6 +555,23 @@ except Exception:
     _GEO_H_ANCHOR_MIN = 0.10
 _GEO_H_ANCHOR_MIN = max(_GEO_H_ANCHOR_MIN, 0.0)
 _GEO_H_ANCHOR_HARD_MIN = 0.04
+
+try:
+    _GEO_CIRCLE_DIAM_MIN_IN = float(os.environ.get("GEO_CIRCLE_DIAM_MIN_IN", "0.09") or 0.09)
+except Exception:
+    _GEO_CIRCLE_DIAM_MIN_IN = 0.09
+_GEO_CIRCLE_DIAM_MIN_IN = max(_GEO_CIRCLE_DIAM_MIN_IN, 0.0)
+
+try:
+    _GEO_CIRCLE_DIAM_MAX_IN = float(os.environ.get("GEO_CIRCLE_DIAM_MAX_IN", "3.0") or 3.0)
+except Exception:
+    _GEO_CIRCLE_DIAM_MAX_IN = 3.0
+if _GEO_CIRCLE_DIAM_MAX_IN <= 0.0:
+    _GEO_CIRCLE_DIAM_MAX_IN = 3.0
+if _GEO_CIRCLE_DIAM_MAX_IN < _GEO_CIRCLE_DIAM_MIN_IN:
+    _GEO_CIRCLE_DIAM_MAX_IN = _GEO_CIRCLE_DIAM_MIN_IN
+_GEO_CIRCLE_Z_ABS_MAX = 1e-6
+_GEO_CIRCLE_DEDUP_DIGITS = 3
 
 
 @dataclass(slots=True)
@@ -7350,6 +7420,8 @@ def geom_hole_census(doc: Any) -> dict[str, Any]:
         re.compile(pattern, re.IGNORECASE) for pattern in DEFAULT_TEXT_LAYER_EXCLUDE_REGEX
     ]
     groups_counter: defaultdict[float, int] = defaultdict(int)
+    seen_circle_keys: set[tuple[float, float, float]] = set()
+    total_candidates = 0
 
     for flattened in flatten_entities(msp, depth=_MAX_INSERT_DEPTH):
         entity = flattened.entity
@@ -7359,6 +7431,7 @@ def geom_hole_census(doc: Any) -> dict[str, Any]:
             continue
         if str(dxftype or "").upper() != "CIRCLE":
             continue
+        dxf_obj = getattr(entity, "dxf", None)
         layer_upper = (
             getattr(flattened, "effective_layer_upper", "")
             or getattr(flattened, "layer_upper", "")
@@ -7366,17 +7439,57 @@ def geom_hole_census(doc: Any) -> dict[str, Any]:
         if layer_upper:
             if any(pattern.search(layer_upper) for pattern in exclude_patterns):
                 continue
-        radius_val = getattr(getattr(entity, "dxf", None), "radius", None)
+        radius_val = getattr(dxf_obj, "radius", None)
+        if radius_val is None:
+            radius_val = getattr(entity, "radius", None)
         if not isinstance(radius_val, (int, float)):
+            continue
+        center_obj = getattr(dxf_obj, "center", None)
+        if center_obj is None:
+            center_obj = getattr(entity, "center", None)
+        center_coords = _point3d(center_obj)
+        if center_coords is None:
+            continue
+        cx_raw, cy_raw, cz_raw = center_coords
+        if not math.isfinite(cz_raw) or abs(cz_raw) > _GEO_CIRCLE_Z_ABS_MAX:
+            continue
+        tx, ty = _apply_transform_point(flattened.transform, (cx_raw, cy_raw))
+        if tx is None or ty is None:
+            continue
+        if not (math.isfinite(tx) and math.isfinite(ty)):
+            continue
+        normal_candidate = getattr(dxf_obj, "extrusion", None)
+        if normal_candidate is None:
+            normal_candidate = getattr(dxf_obj, "normal", None)
+        if normal_candidate is None:
+            normal_candidate = getattr(entity, "extrusion", None)
+        if normal_candidate is None:
+            normal_candidate = getattr(entity, "normal", None)
+        if not _is_positive_z_normal(normal_candidate):
             continue
         scaled_radius = float(radius_val) * _transform_scale_hint(flattened.transform)
         diameter_in = 2.0 * scaled_radius * to_in
         if not math.isfinite(diameter_in) or diameter_in <= 0:
             continue
-        if diameter_in < 0.04:
+        if diameter_in < _GEO_CIRCLE_DIAM_MIN_IN:
             continue
+        if _GEO_CIRCLE_DIAM_MAX_IN and diameter_in > _GEO_CIRCLE_DIAM_MAX_IN:
+            continue
+        total_candidates += 1
+        dedup_key = (
+            round(float(tx), _GEO_CIRCLE_DEDUP_DIGITS),
+            round(float(ty), _GEO_CIRCLE_DEDUP_DIGITS),
+            round(float(diameter_in), _GEO_CIRCLE_DEDUP_DIGITS),
+        )
+        if dedup_key in seen_circle_keys:
+            continue
+        seen_circle_keys.add(dedup_key)
         dia_key = round(diameter_in, 4)
         groups_counter[dia_key] += 1
+
+    unique_count = len(seen_circle_keys)
+    if total_candidates or unique_count:
+        print(f"[GEOM] unique circles after dedup: {unique_count} (was {total_candidates})")
 
     groups = [
         {"dia_in": float(diameter), "count": count}
