@@ -148,10 +148,12 @@ def _print_text_dump(entries: Sequence[Mapping[str, Any]]) -> None:
         lines_shown += 1
 
 
-def _write_text_dump_csv(entries: Sequence[Mapping[str, Any]]) -> None:
+def _write_text_dump_csv(
+    entries: Sequence[Mapping[str, Any]], dump_dir: Path
+) -> Path | None:
     if not entries:
-        return
-    csv_path = Path("debug/dxf_text_dump.csv")
+        return None
+    csv_path = dump_dir / "dxf_text_dump.csv"
     try:
         csv_path.parent.mkdir(parents=True, exist_ok=True)
         with csv_path.open("w", newline="", encoding="utf-8") as handle:
@@ -192,8 +194,25 @@ def _write_text_dump_csv(entries: Sequence[Mapping[str, Any]]) -> None:
                 )
     except OSError as exc:
         print(f"[TEXT-DUMP] failed to write CSV: {exc}")
+        return None
     else:
         print(f"[TEXT-DUMP] wrote CSV to {csv_path}")
+        return csv_path
+
+
+def _write_geom_dump_json(payload: Mapping[str, Any], dump_dir: Path) -> Path | None:
+    json_path = dump_dir / "geom_circles.json"
+    try:
+        json_path.parent.mkdir(parents=True, exist_ok=True)
+        with json_path.open("w", encoding="utf-8") as handle:
+            json.dump(payload, handle, indent=2)
+            handle.write("\n")
+    except (OSError, TypeError) as exc:
+        print(f"[geo_dump] failed to write geom dump: {exc}")
+        return None
+    else:
+        print(f"[geo_dump] wrote geom dump to {json_path}")
+        return json_path
 
 
 def _truthy_flag(value: Any) -> bool:
@@ -591,7 +610,12 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument(
         "--dump-table",
         action="store_true",
-        help="Print the first 8 stitched rows (qty/kind/side/text)",
+        help="Dump stitched rows to CSV and print the first 8 entries",
+    )
+    parser.add_argument(
+        "--dump-geom",
+        action="store_true",
+        help="Dump geometry circle groups and guard drops to JSON",
     )
     parser.add_argument(
         "--dump-circles",
@@ -729,9 +753,9 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument(
         "--dump-rows-csv",
         nargs="?",
-        const="debug/rows.csv",
+        const="__AUTO__",
         default=None,
-        help="Write extracted rows to CSV (optional custom path; default debug/rows.csv)",
+        help="Write extracted rows to CSV (optional custom path; default uses --dump-dir)",
     )
     parser.add_argument(
         "--dump-ents",
@@ -743,7 +767,18 @@ def main(argv: Sequence[str] | None = None) -> int:
         action="store_true",
         help="Dump all text entities with layout metadata",
     )
+    parser.add_argument(
+        "--dump-dir",
+        default="debug",
+        help="Directory for dump outputs (default: debug/)",
+    )
     args = parser.parse_args(argv)
+
+    dump_dir = Path(args.dump_dir or "debug").expanduser()
+    if args.dump_rows_csv == "__AUTO__":
+        args.dump_rows_csv = str(dump_dir / "hole_table_rows.csv")
+    if args.dump_table and not args.dump_rows_csv:
+        args.dump_rows_csv = str(dump_dir / "hole_table_rows.csv")
 
     if args.show_rows is not None:
         os.environ["CAD_QUOTER_SHOW_ROWS"] = str(args.show_rows)
@@ -786,11 +821,11 @@ def main(argv: Sequence[str] | None = None) -> int:
         print(f"[geo_dump] failed to load document: {exc}")
         return 1
 
+    text_csv_path: Path | None = None
     if args.dump_all_text:
         entries = geo_extractor.collect_all_text(doc)
         _print_text_dump(entries)
-        _write_text_dump_csv(entries)
-        return 0
+        text_csv_path = _write_text_dump_csv(entries, dump_dir)
 
     read_kwargs: dict[str, object] = {}
 
@@ -1573,6 +1608,8 @@ def main(argv: Sequence[str] | None = None) -> int:
     if not rebuilt_rows:
         rebuilt_rows = [row for row in rows if isinstance(row, Mapping)]
 
+    geom_json_path: Path | None = None
+
     if args.dump_table:
         if rebuilt_rows:
             limit = min(8, len(rebuilt_rows))
@@ -1606,7 +1643,9 @@ def main(argv: Sequence[str] | None = None) -> int:
         else:
             print("[TABLE] rebuilt rows unavailable")
 
-    if args.dump_circles:
+    circle_samples: list[dict[str, Any]] = []
+    guard_drop_samples: list[dict[str, Any]] = []
+    if args.dump_geom or args.dump_circles:
         geom_candidates: list[Mapping[str, Any]] = []
         if isinstance(geom_holes_payload, Mapping):
             geom_candidates.append(geom_holes_payload)
@@ -1622,6 +1661,19 @@ def main(argv: Sequence[str] | None = None) -> int:
         circle_samples = _gather_circle_samples(*geom_candidates)
         guard_drop_samples = _collect_guard_drops(*geom_candidates)
 
+    if args.dump_geom:
+        normalized_geom = geo_extractor._normalize_geom_holes_payload(
+            geom_holes_payload if isinstance(geom_holes_payload, Mapping) else None,
+            hole_sets_payload,
+        )
+        geom_dump_payload: dict[str, Any] = {
+            "normalized": normalized_geom,
+            "circle_samples": circle_samples,
+            "guard_drop_samples": guard_drop_samples,
+        }
+        geom_json_path = _write_geom_dump_json(geom_dump_payload, dump_dir)
+
+    if args.dump_circles:
         combined_samples: list[tuple[dict[str, Any], str]] = []
         combined_samples.extend((sample, "kept") for sample in circle_samples)
         combined_samples.extend((sample, "dropped") for sample in guard_drop_samples)
@@ -1832,7 +1884,7 @@ def main(argv: Sequence[str] | None = None) -> int:
 
     rows_csv_path: Path | None = None
     if args.dump_rows_csv:
-        csv_target = Path(args.dump_rows_csv)
+        csv_target = Path(args.dump_rows_csv).expanduser()
         try:
             csv_target.parent.mkdir(parents=True, exist_ok=True)
             with csv_target.open("w", newline="", encoding="utf-8") as handle:
@@ -1907,16 +1959,21 @@ def main(argv: Sequence[str] | None = None) -> int:
     layer_summary = ",".join(scanned_layers) if scanned_layers else "-"
     include_summary = ",".join(include_patterns_dbg) if include_patterns_dbg else "-"
     exclude_summary = ",".join(exclude_patterns_dbg) if exclude_patterns_dbg else "-"
-    csv_display = str(rows_csv_path) if rows_csv_path else "-"
+    text_csv_display = str(text_csv_path) if text_csv_path else "-"
+    table_csv_display = str(rows_csv_path) if rows_csv_path else "-"
+    geom_json_display = str(geom_json_path) if geom_json_path else "-"
     print(
         "[geo_dump] summary layouts={layouts} layers={layers} incl={incl} "
-        "excl={excl} rows={rows} csv={csv}".format(
+        "excl={excl} rows={rows} text_csv={text_csv} table_csv={table_csv} "
+        "geom_json={geom_json}".format(
             layouts=layout_summary,
             layers=layer_summary,
             incl=include_summary,
             excl=exclude_summary,
             rows=len(rows),
-            csv=csv_display,
+            text_csv=text_csv_display,
+            table_csv=table_csv_display,
+            geom_json=geom_json_display,
         )
     )
 
