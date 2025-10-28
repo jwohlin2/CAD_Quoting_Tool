@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import argparse
+import csv
 import importlib
 import json
 import math
@@ -1622,11 +1623,31 @@ def main(argv: Sequence[str] | None = None) -> int:
     if not table_authoritative:
         table_authoritative = authoritative_table_from_source
 
+    source_normalized = str(source or "").strip().lower()
+    authoritative_counts = (
+        source_normalized in {"acad_table", "text_table", "text_fallback"}
+        and len(rows) >= 8
+    )
+
+    def _table_totals_map(counts: Mapping[str, Any] | None) -> dict[str, int]:
+        totals_map = {
+            "drill": _counts_value(counts, "drill", "drill_only"),
+            "tap": _counts_value(counts, "tap"),
+            "counterbore": _counts_value(counts, "counterbore", "cbore"),
+            "counterdrill": _counts_value(counts, "counterdrill", "cdrill"),
+            "jig_grind": _counts_value(counts, "jig_grind", "jig"),
+        }
+        return totals_map
+
     effective_total_counts: Mapping[str, Any]
-    if table_authoritative:
-        effective_total_counts = table_counts
+    if authoritative_counts:
+        effective_total_counts = _table_totals_map(table_counts)
     else:
         effective_total_counts = total_counts
+
+    if authoritative_counts and isinstance(manifest_payload, dict):
+        manifest_payload["authoritative_counts"] = True
+
     apost = "\u2019"
     print(
         "[OPS] table: "
@@ -1661,6 +1682,25 @@ def main(argv: Sequence[str] | None = None) -> int:
             ),
         )
     )
+
+    if authoritative_counts:
+        assert _counts_value(effective_total_counts, "drill") == _counts_value(
+            table_counts, "drill", "drill_only"
+        ), "authoritative drill mismatch"
+        assert _counts_value(effective_total_counts, "tap") == _counts_value(
+            table_counts, "tap"
+        ), "authoritative tap mismatch"
+        assert _counts_value(effective_total_counts, "counterbore") == _counts_value(
+            table_counts, "counterbore", "cbore"
+        ), "authoritative counterbore mismatch"
+        assert _counts_value(
+            effective_total_counts, "counterdrill"
+        ) == _counts_value(table_counts, "counterdrill", "cdrill"), (
+            "authoritative counterdrill mismatch"
+        )
+        assert _counts_value(effective_total_counts, "jig_grind") == _counts_value(
+            table_counts, "jig_grind", "jig"
+        ), "authoritative jig mismatch"
 
     text_drill_total = (
         _int_from_value(table_counts.get("drill_only"))

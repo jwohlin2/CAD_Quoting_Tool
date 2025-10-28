@@ -9,9 +9,7 @@ from dataclasses import dataclass
 import csv
 import json
 from fractions import Fraction
-import csv
 import inspect
-import json
 import math
 from functools import lru_cache
 import os
@@ -5275,7 +5273,11 @@ def _entry_band_sort_key(entry: Mapping[str, Any]) -> tuple[float, float, int]:
     return (y_key, x_key, order_key)
 
 
-def _extract_anchor_band_lines(context: Mapping[str, Any] | None) -> list[str]:
+def _extract_anchor_band_lines(
+    context: Mapping[str, Any] | None,
+    *,
+    anchor_h: float | None = None,
+) -> list[str]:
     if not isinstance(context, Mapping):
         return []
 
@@ -5337,17 +5339,13 @@ def _extract_anchor_band_lines(context: Mapping[str, Any] | None) -> list[str]:
             )
         )
     ]
-    anchor_h = 0.0
+
+    if anchor_h is None and isinstance(context, Mapping):
+        anchor_candidate = context.get("anchor_h") or context.get("anchor_height")
+        if isinstance(anchor_candidate, (int, float)):
+            anchor_h = float(anchor_candidate)
     try:
-        anchor_h = float(
-            context.get("anchor_h")
-            if isinstance(context, Mapping)
-            else 0.0
-        )
-        if anchor_h == 0.0 and isinstance(context, Mapping):
-            legacy_anchor = context.get("anchor_height")
-            if isinstance(legacy_anchor, (int, float)):
-                anchor_h = float(legacy_anchor)
+        anchor_h = float(anchor_h) if anchor_h is not None else 0.0
     except Exception:
         anchor_h = 0.0
     if anchor_h < 0:
@@ -5357,11 +5355,6 @@ def _extract_anchor_band_lines(context: Mapping[str, Any] | None) -> list[str]:
     height_upper = anchor_h * 1.4 if anchor_h > 0 else None
     height_stop_lower = anchor_h * 0.3 if anchor_h > 0 else None
     height_stop_upper = anchor_h * 1.7 if anchor_h > 0 else None
-    print(
-        f"[TEXT-SCAN] anchors={len(anchors)} h_anchor={anchor_h:.2f}"
-        if anchors
-        else "[TEXT-SCAN] anchors=0"
-    )
 
     anchor_y_values: list[float] = []
     anchor_x_bounds: dict[int, list[float | None]] = {}
@@ -5629,7 +5622,23 @@ def _build_fallback_rows_from_lines(lines: Iterable[str]) -> tuple[list[dict[str
             if _roi_is_admin_noise(cleaned_fragment) or _roi_is_numeric_ladder(cleaned_fragment):
                 continue
             action = classify_action(cleaned_fragment)
+            fragment_ops = classify_op_row(cleaned_fragment)
             kind = str(action.get("kind") or "").strip().lower()
+            for op in fragment_ops:
+                op_kind = str(op.get("kind") or "").strip().lower()
+                if op_kind == "npt":
+                    action["npt"] = True
+                    action["kind"] = "tap"
+                    action["tap_type"] = "pipe"
+                    kind = "tap"
+                    break
+                if op_kind in _FALLBACK_ACTION_KINDS:
+                    action["kind"] = op_kind
+                    kind = op_kind
+                    size_token = op.get("size")
+                    if size_token and op_kind == "drill" and not action.get("size"):
+                        action["size"] = size_token
+                    break
             is_relevant = kind in _FALLBACK_ACTION_KINDS or action.get("npt")
             if not is_relevant and len(fragments) > 1 and (op_kinds & _FALLBACK_ACTION_KINDS):
                 # Skip unrelated fragments when we have explicit action rows.
@@ -5889,6 +5898,7 @@ def extract_hole_table_from_text(
     rows_txt: Iterable[Any] | None = None,
     *,
     min_rows: int = 2,
+    anchor_h: float | None = None,
 ) -> dict[str, Any]:
     """Fallback text helper for hole table extraction.
 
@@ -5946,6 +5956,11 @@ def extract_hole_table_from_text(
         "provenance_holes": fallback.get("provenance_holes", "HOLE TABLE"),
         "source": fallback.get("source", "text_table"),
     }
+    if anchor_h is not None:
+        try:
+            result["anchor_h"] = float(anchor_h)
+        except Exception:
+            pass
     families = fallback.get("hole_diam_families_in")
     if isinstance(families, Mapping):
         result["hole_diam_families_in"] = dict(families)
@@ -6033,6 +6048,7 @@ def read_text_table(
         _LAST_TEXT_TABLE_DEBUG["layer_regex_exclude"] = list(exclude_display)
         _LAST_TEXT_TABLE_DEBUG["debug_layouts_requested"] = bool(debug_layouts)
     table_lines: list[str] | None = None
+    anchor_h: float = 0.0
     fallback_candidate: Mapping[str, Any] | None = None
     best_candidate: Mapping[str, Any] | None = None
     best_score: tuple[int, int] = (0, 0)
@@ -8091,21 +8107,35 @@ def read_text_table(
         needs_lines, allows_lines = _analyze_helper_signature(helper)
         use_lines = needs_lines or allows_lines
         args: list[Any] = [doc]
+        helper_kwargs: dict[str, Any] = {}
         if use_lines:
             args.append(lines)
+        if anchor_h > 0:
+            helper_kwargs["anchor_h"] = anchor_h
         try:
-            helper_result = helper(*args)
+            helper_result = helper(*args, **helper_kwargs)
         except TypeError as exc:
-            if use_lines and allows_lines and not needs_lines:
+            retry_exc: TypeError | None = exc
+            if helper_kwargs:
+                helper_kwargs.clear()
                 try:
-                    helper_result = helper(doc)
-                    use_lines = False
-                except Exception as inner_exc:
-                    print(f"[EXTRACT] text helper error: {inner_exc}")
-                    raise
-            else:
-                print(f"[EXTRACT] text helper error: {exc}")
-                raise
+                    helper_result = helper(*args)
+                except TypeError as inner_exc:
+                    retry_exc = inner_exc
+                else:
+                    retry_exc = None
+            if retry_exc is not None:
+                if use_lines and allows_lines and not needs_lines:
+                    try:
+                        helper_result = helper(doc)
+                        use_lines = False
+                        retry_exc = None
+                    except Exception as inner_exc:
+                        print(f"[EXTRACT] text helper error: {inner_exc}")
+                        raise
+                if retry_exc is not None:
+                    print(f"[EXTRACT] text helper error: {retry_exc}")
+                    raise retry_exc
         except Exception as exc:
             print(f"[EXTRACT] text helper error: {exc}")
             raise
@@ -8169,7 +8199,7 @@ def read_text_table(
         and legacy_score[1] == 0
         and isinstance(anchor_band_context, Mapping)
     ):
-        band_lines = _extract_anchor_band_lines(anchor_band_context)
+        band_lines = _extract_anchor_band_lines(anchor_band_context, anchor_h=anchor_h)
         if band_lines:
             if isinstance(_LAST_TEXT_TABLE_DEBUG, dict):
                 _LAST_TEXT_TABLE_DEBUG["anchor_band_lines"] = list(band_lines)
@@ -11153,6 +11183,37 @@ def read_geo(
         table_counts = manifest_payload.get("table") if isinstance(manifest_payload, Mapping) else {}
         geom_counts = manifest_payload.get("geom") if isinstance(manifest_payload, Mapping) else {}
         total_counts = manifest_payload.get("total") if isinstance(manifest_payload, Mapping) else {}
+        source_text = str(ops_summary.get("source") or "").strip().lower()
+        authoritative_counts = (
+            source_text in {"acad_table", "text_table", "text_fallback"}
+            and len(manifest_rows) >= 8
+        )
+
+        def _counts_int(counts: Mapping[str, Any] | None, key: str) -> int:
+            if not isinstance(counts, Mapping):
+                return 0
+            try:
+                return int(round(float(counts.get(key) or 0)))
+            except Exception:
+                return 0
+
+        def _table_totals_map(counts: Mapping[str, Any] | None) -> dict[str, int]:
+            return {
+                "drill": _counts_int(counts, "drill"),
+                "tap": _counts_int(counts, "tap"),
+                "counterbore": _counts_int(counts, "counterbore"),
+                "counterdrill": _counts_int(counts, "counterdrill"),
+                "jig_grind": _counts_int(counts, "jig_grind"),
+            }
+
+        if authoritative_counts:
+            total_counts_for_log: Mapping[str, Any] = _table_totals_map(table_counts)
+            if isinstance(ops_summary, MutableMapping):
+                ops_summary["totals"] = dict(total_counts_for_log)
+        else:
+            total_counts_for_log = total_counts
+        effective_total_counts = total_counts_for_log
+
         print(
             "[OPS] table: "
             + _format_ops_counts(
@@ -11178,7 +11239,7 @@ def read_geo(
         print(
             "[OPS] total: "
             + _format_ops_counts(
-                total_counts,
+                total_counts_for_log,
                 (
                     ("drill", "Drill"),
                     ("tap", "Tap"),
@@ -11227,7 +11288,11 @@ def read_geo(
             best_table,
             current_table_info,
         )
-        total_drill_count = _int_from(total_counts.get("drill")) if isinstance(total_counts, Mapping) else 0
+        total_drill_count = (
+            _int_from(effective_total_counts.get("drill"))
+            if isinstance(effective_total_counts, Mapping)
+            else 0
+        )
         if total_drill_count > 100 or (total_drill_count != 0 and total_drill_count < 50):
             print("[GEOM] suspect overcount – check layer blacklist or bbox guard")
         if (
