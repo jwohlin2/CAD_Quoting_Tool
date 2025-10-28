@@ -93,16 +93,26 @@ def _format_text_preview(text: Any, limit: int = 120) -> str:
     return preview
 
 
+def _format_counter_summary(counter: Counter[str]) -> str:
+    if not counter:
+        return "{}"
+    ordered = sorted(counter.items(), key=lambda item: (-item[1], item[0] or ""))
+    summary = ", ".join(f"{name or '-'}:{count}" for name, count in ordered)
+    return "{" + summary + "}"
+
+
 def _print_text_dump(
-    entries: Sequence[Mapping[str, Any]], csv_path: Path | None = None
+    entries: Sequence[Mapping[str, Any]],
+    *,
+    sample_limit: int | None = None,
+    group_by_layout: bool = True,
 ) -> None:
     total = len(entries)
     type_counts = Counter(str(entry.get("etype") or "-") for entry in entries)
-    type_summary = ", ".join(f"{key}:{type_counts[key]}" for key in sorted(type_counts))
-    if csv_path:
-        print(f"[TEXT-DUMP] total={total} by etype={{{type_summary}}} -> {csv_path}")
-    else:
-        print(f"[TEXT-DUMP] total={total} by etype={{{type_summary}}}")
+    layout_counts = Counter(str(entry.get("layout") or "-") for entry in entries)
+    print(f"[TEXT-DUMP] total={total} by etype={_format_counter_summary(type_counts)}")
+    print(f"[TEXT-DUMP] by layout={_format_counter_summary(layout_counts)}")
+
     if not entries:
         return
 
@@ -121,16 +131,20 @@ def _print_text_dump(
         )
     )
 
-    layout_counts = Counter(str(entry.get("layout") or "-") for entry in entries)
-    max_lines = 20
+    if sample_limit is not None and sample_limit <= 0:
+        return
+
+    max_lines = sample_limit if sample_limit is not None else 20
     lines_shown = 0
     seen_layouts: set[str] = set()
     for entry in entries:
         if lines_shown >= max_lines:
             break
         layout = str(entry.get("layout") or "-")
-        if layout not in seen_layouts:
+        if group_by_layout and layout not in seen_layouts:
             print(f"[TEXT-DUMP] layout={layout} count={layout_counts[layout]}")
+            seen_layouts.add(layout)
+        elif not group_by_layout and layout not in seen_layouts:
             seen_layouts.add(layout)
         height_display = _format_height_display(entry.get("height"))
         rotation_display = _format_rotation_display(entry.get("rotation"))
@@ -153,55 +167,54 @@ def _print_text_dump(
         lines_shown += 1
 
 
-def _write_text_dump_csv(
-    entries: Sequence[Mapping[str, Any]],
-    path: Path | str = Path("debug/dxf_text_dump.csv"),
-) -> Path | None:
-    csv_path = Path(path)
-    try:
-        csv_path.parent.mkdir(parents=True, exist_ok=True)
-        with csv_path.open("w", newline="", encoding="utf-8") as handle:
-            writer = csv.writer(handle)
+def write_text_dump_csv(rows: Sequence[Mapping[str, Any]], out_dir: str | os.PathLike[str]) -> str:
+    os.makedirs(out_dir, exist_ok=True)
+    path = os.path.join(out_dir, "dxf_text_dump.csv")
+    cols = [
+        "handle",
+        "etype",
+        "layout",
+        "layer",
+        "height",
+        "rotation",
+        "insert_x",
+        "insert_y",
+        "block_path",
+        "text",
+        "raw",
+    ]
+    with open(path, "w", newline="", encoding="utf-8") as f:
+        writer = csv.writer(f)
+        writer.writerow(cols)
+        for row in rows:
             writer.writerow(
                 [
-                    "text",
-                    "raw",
-                    "etype",
-                    "layout",
-                    "layer",
-                    "height",
-                    "rotation",
-                    "insert_x",
-                    "insert_y",
-                    "block_path",
+                    row.get("handle"),
+                    row.get("etype"),
+                    row.get("layout"),
+                    row.get("layer"),
+                    row.get("height"),
+                    row.get("rotation"),
+                    row.get("insert_x"),
+                    row.get("insert_y"),
+                    " :: ".join(str(part) for part in (row.get("block_path") or [])),
+                    row.get("text"),
+                    row.get("raw"),
                 ]
             )
-            for entry in entries:
-                insert = entry.get("insert")
-                if isinstance(insert, (tuple, list)) and len(insert) >= 2:
-                    insert_x, insert_y = insert[0], insert[1]
-                else:
-                    insert_x, insert_y = "", ""
-                writer.writerow(
-                    [
-                        entry.get("text", ""),
-                        entry.get("raw", ""),
-                        entry.get("etype", ""),
-                        entry.get("layout", ""),
-                        entry.get("layer", ""),
-                        entry.get("height", ""),
-                        entry.get("rotation", ""),
-                        insert_x,
-                        insert_y,
-                        " > ".join(str(name) for name in entry.get("block_path") or ()),
-                    ]
-                )
-    except OSError as exc:
-        print(f"[TEXT-DUMP] failed to write CSV: {exc}")
-        return None
-    else:
-        print(f"[TEXT-DUMP] wrote CSV to {csv_path}")
-        return csv_path
+    print(f"[TEXT-DUMP] csv -> {path}")
+    return path
+
+
+def write_text_dump_jsonl(rows: Sequence[Mapping[str, Any]], out_dir: str | os.PathLike[str]) -> str:
+    os.makedirs(out_dir, exist_ok=True)
+    path = os.path.join(out_dir, "dxf_text_dump.jsonl")
+    with open(path, "w", encoding="utf-8") as f:
+        for row in rows:
+            json.dump(row, f, ensure_ascii=False)
+            f.write("\n")
+    print(f"[TEXT-DUMP] jsonl -> {path}")
+    return path
 
 
 def _write_rows_csv(
@@ -916,6 +929,11 @@ def main(argv: Sequence[str] | None = None) -> int:
         help="Write scanned text entities to CSV",
     )
     parser.add_argument(
+        "--dump-dir",
+        default="debug",
+        help="Directory for debug dump artifacts (default: %(default)s)",
+    )
+    parser.add_argument(
         "--dump-all-text",
         action="store_true",
         help="Dump all text entities with layout metadata",
@@ -928,11 +946,39 @@ def main(argv: Sequence[str] | None = None) -> int:
         help="Minimum text height (drawing units) when dumping text entities",
     )
     parser.add_argument(
+        "--layers-include",
+        dest="text_layers_include",
+        action="append",
+        metavar="REGEX",
+        help="Regex pattern to include layers when dumping text entities (repeatable)",
+    )
+    parser.add_argument(
         "--layers-exclude",
         dest="text_layers_exclude",
         action="append",
         metavar="REGEX",
         help="Regex pattern to exclude layers when dumping text entities (repeatable)",
+    )
+    parser.add_argument(
+        "--no-blocks",
+        dest="text_include_blocks",
+        action="store_false",
+        default=True,
+        help="Skip traversing INSERT blocks when dumping text",
+    )
+    parser.add_argument(
+        "--no-paperspace",
+        dest="text_include_paperspace",
+        action="store_false",
+        default=True,
+        help="Skip paperspace layouts when dumping text",
+    )
+    parser.add_argument(
+        "--sample",
+        dest="text_sample",
+        type=int,
+        metavar="N",
+        help="Print the first N dumped text rows grouped by layout",
     )
     parser.add_argument(
         "--save",
@@ -941,13 +987,6 @@ def main(argv: Sequence[str] | None = None) -> int:
         help="Write consolidated GEO-style output to the provided path",
     )
     args = parser.parse_args(argv)
-
-    text_layers_exclude_patterns: list[str] = []
-    if not args.no_exclude_layer:
-        text_layers_exclude_patterns.extend(DEFAULT_TEXT_LAYER_EXCLUDE_REGEX)
-    text_layers_exclude_patterns.extend(_normalize_pattern_args(args.exclude_layer))
-    text_layers_exclude_patterns.extend(_normalize_pattern_args(args.text_layers_exclude))
-    text_layers_exclude = list(dict.fromkeys(text_layers_exclude_patterns))
 
     if args.show_rows is not None:
         os.environ["CAD_QUOTER_SHOW_ROWS"] = str(args.show_rows)
@@ -990,24 +1029,36 @@ def main(argv: Sequence[str] | None = None) -> int:
         print(f"[geo_dump] failed to load document: {exc}")
         return 1
 
-    text_layers_exclude_arg: Sequence[str] | None = text_layers_exclude or None
-
     if args.dump_all_text:
+        dump_dir_path = Path(args.dump_dir).expanduser()
+        include_layers = _normalize_pattern_args(args.text_layers_include)
+        exclude_layers = _normalize_pattern_args(args.text_layers_exclude)
         if args.text_min_height is not None:
             print(f"[TEXT-DUMP] min_height={args.text_min_height}")
-        if text_layers_exclude_arg:
-            print(
-                "[TEXT-DUMP] layers_exclude={patterns}".format(
-                    patterns=sorted(set(text_layers_exclude_arg))
-                )
+        if include_layers:
+            print(f"[TEXT-DUMP] layers_include={sorted(set(include_layers))}")
+        if exclude_layers:
+            print(f"[TEXT-DUMP] layers_exclude={sorted(set(exclude_layers))}")
+        try:
+            entries = geo_extractor.collect_all_text(
+                doc,
+                include_blocks=bool(args.text_include_blocks),
+                include_paperspace=bool(args.text_include_paperspace),
+                min_height=args.text_min_height,
+                layers_include=include_layers,
+                layers_exclude=exclude_layers,
             )
-        entries = geo_extractor.collect_all_text(
-            doc,
-            min_height=args.text_min_height,
-            layers_exclude=text_layers_exclude_arg,
-        )
-        _print_text_dump(entries)
-        text_csv_path = _write_text_dump_csv(entries, dump_dir)
+        except Exception as exc:
+            print(f"[TEXT-DUMP] failed to collect text entities: {exc}")
+            entries = []
+        sample_limit = args.text_sample
+        _print_text_dump(entries, sample_limit=sample_limit)
+        text_csv_path = write_text_dump_csv(entries, dump_dir_path)
+        text_jsonl_path = write_text_dump_jsonl(entries, dump_dir_path)
+    else:
+        dump_dir_path = Path(args.dump_dir).expanduser()
+        text_csv_path = None
+        text_jsonl_path = None
 
     read_kwargs: dict[str, object] = {}
 
@@ -2082,7 +2133,10 @@ def main(argv: Sequence[str] | None = None) -> int:
 
     rows_csv_path: Path | None = None
     if args.dump_rows_csv:
-        csv_target = Path(args.dump_rows_csv).expanduser()
+        if args.dump_rows_csv == "__AUTO__":
+            csv_target = dump_dir_path / "hole_table_rows.csv"
+        else:
+            csv_target = Path(args.dump_rows_csv).expanduser()
         try:
             csv_target.parent.mkdir(parents=True, exist_ok=True)
             with csv_target.open("w", newline="", encoding="utf-8") as handle:
@@ -2107,17 +2161,6 @@ def main(argv: Sequence[str] | None = None) -> int:
             rows_csv_path = csv_target
             print(f"[geo_dump] wrote rows CSV to {csv_target}")
 
-    try:
-        text_dump_entries = geo_extractor.collect_all_text(
-            doc,
-            min_height=args.text_min_height,
-            layers_exclude=text_layers_exclude_arg,
-        )
-    except Exception as exc:
-        print(f"[TEXT-DUMP] failed to collect text entities: {exc}")
-        text_dump_entries = []
-    text_csv_path = _write_text_dump_csv(text_dump_entries)
-
     if args.save_geo_path:
         geom_summary_payload: dict[str, Any] = {
             "circle_total": geom_total,
@@ -2129,6 +2172,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             geom_summary_payload["guard_drop_counts"] = guard_drop_summary
         artifact_map = {
             "text_csv": text_csv_path,
+            "text_jsonl": text_jsonl_path,
             "table_csv": table_csv_path,
             "geom_json": geom_json_path,
             "ops_json": ops_totals_debug_path,
@@ -2194,6 +2238,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     exclude_summary = ",".join(exclude_patterns_dbg) if exclude_patterns_dbg else "-"
     rows_csv_display = str(rows_csv_path) if rows_csv_path else "-"
     text_csv_display = str(text_csv_path) if text_csv_path else "-"
+    text_jsonl_display = str(text_jsonl_path) if text_jsonl_path else "-"
     table_csv_display = str(table_csv_path) if table_csv_path else rows_csv_display
     geom_json_display = str(geom_json_path) if geom_json_path else "-"
     ops_json_display = (
@@ -2201,14 +2246,16 @@ def main(argv: Sequence[str] | None = None) -> int:
     )
     print(
         "[geo_dump] summary layouts={layouts} layers={layers} incl={incl} "
-        "excl={excl} rows={rows} text_csv={text_csv} table_csv={table_csv} "
-        "geom_json={geom_json} ops_json={ops_json} rows_csv={rows_csv}".format(
+        "excl={excl} rows={rows} text_csv={text_csv} text_jsonl={text_jsonl} "
+        "table_csv={table_csv} geom_json={geom_json} ops_json={ops_json} "
+        "rows_csv={rows_csv}".format(
             layouts=layout_summary,
             layers=layer_summary,
             incl=include_summary,
             excl=exclude_summary,
             rows=len(rows),
             text_csv=text_csv_display,
+            text_jsonl=text_jsonl_display,
             table_csv=table_csv_display,
             geom_json=geom_json_display,
             ops_json=ops_json_display,

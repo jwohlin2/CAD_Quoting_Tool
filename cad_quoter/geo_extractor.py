@@ -1342,19 +1342,35 @@ def _build_text_record(
         if insert_value is None and insert_entity is not flattened.entity:
             insert_value = _extract_insert_point(flattened.entity, flattened.transform)
 
+    insert_x: float | None = None
+    insert_y: float | None = None
+    if insert_value is not None:
+        try:
+            insert_x = float(insert_value[0])
+        except Exception:
+            insert_x = None
+        try:
+            insert_y = float(insert_value[1])
+        except Exception:
+            insert_y = None
+
     layer_name = layer if layer is not None else flattened.effective_layer or flattened.layer or ""
     layout_label = str(layout_name or "").strip() or "-"
+    handle_value = _entity_handle(flattened.entity)
+    block_path = [str(name) for name in flattened.block_stack if name]
 
     return {
-        "text": text_value,
-        "raw": raw_value,
+        "handle": handle_value or None,
         "etype": etype,
         "layout": layout_label,
         "layer": layer_name,
         "height": height_value,
         "rotation": rotation_value,
-        "insert": insert_value,
-        "block_path": tuple(name for name in flattened.block_stack if name),
+        "insert_x": insert_x,
+        "insert_y": insert_y,
+        "block_path": block_path,
+        "text": text_value,
+        "raw": raw_value,
     }
 
 
@@ -1419,68 +1435,6 @@ def _compile_layer_patterns(patterns: Any) -> list[re.Pattern[str]]:
     return compiled
 
 
-def _format_csv_value(value: Any) -> Any:
-    if value in (None, ""):
-        return ""
-    if isinstance(value, (int, float)):
-        return value
-    return str(value)
-
-
-def _write_text_dump_csv(entries: Sequence[Mapping[str, Any]]) -> Path | None:
-    csv_path = Path("debug/dxf_text_dump.csv")
-    try:
-        csv_path.parent.mkdir(parents=True, exist_ok=True)
-        with csv_path.open("w", newline="", encoding="utf-8") as handle:
-            writer = csv.writer(handle)
-            writer.writerow(
-                [
-                    "layout",
-                    "layer",
-                    "etype",
-                    "height",
-                    "rotation",
-                    "insert_x",
-                    "insert_y",
-                    "block_path",
-                    "text",
-                    "raw",
-                ]
-            )
-            for entry in entries:
-                insert_point = _point2d(entry.get("insert"))
-                if insert_point is None:
-                    insert_x: Any = ""
-                    insert_y: Any = ""
-                else:
-                    insert_x, insert_y = insert_point
-                block_path = entry.get("block_path") or ()
-                if not isinstance(block_path, (list, tuple)):
-                    block_items = [block_path]
-                else:
-                    block_items = list(block_path)
-                writer.writerow(
-                    [
-                        _format_csv_value(entry.get("layout")),
-                        _format_csv_value(entry.get("layer")),
-                        _format_csv_value(entry.get("etype")),
-                        _format_csv_value(entry.get("height")),
-                        _format_csv_value(entry.get("rotation")),
-                        _format_csv_value(insert_x),
-                        _format_csv_value(insert_y),
-                        " > ".join(
-                            str(name) for name in block_items if name not in (None, "")
-                        ),
-                        _format_csv_value(entry.get("text")),
-                        _format_csv_value(entry.get("raw")),
-                    ]
-                )
-    except OSError as exc:
-        print(f"[TEXT-DUMP] failed to write CSV: {exc}")
-        return None
-    return csv_path
-
-
 def collect_all_text(
     doc: Any,
     *,
@@ -1489,7 +1443,34 @@ def collect_all_text(
     min_height: float | None = None,
     layers_include: Any = None,
     layers_exclude: Any = None,
-) -> tuple[list[dict[str, Any]], Path | None]:
+) -> list[dict[str, Any]]:
+    """Return a list of raw text records from the DXF document.
+
+    Each record is a mapping with the following fields:
+
+    ``handle``
+        Entity handle when available.
+    ``etype``
+        The entity type (``TEXT``, ``MTEXT``, ``ATTRIB``, ``ATTDEF``, ``MLEADER``,
+        ``DIM``, or ``TABLECELL``).
+    ``layout``
+        Layout label such as ``Model`` or the paper space name.
+    ``layer``
+        Effective layer name for the entity.
+    ``height``
+        Resolved text height, if available.
+    ``rotation``
+        World rotation in degrees, if available.
+    ``insert_x`` / ``insert_y``
+        World insertion point coordinates when they can be resolved.
+    ``block_path``
+        A list describing the nested block stack when traversing INSERTs.
+    ``text``
+        Normalized plain-text content.
+    ``raw``
+        Original raw content, when exposed by the entity.
+    """
+
     layouts = _iter_text_layout_spaces(doc, include_paperspace)
     depth = _MAX_INSERT_DEPTH if include_blocks else 0
     records: list[dict[str, Any]] = []
@@ -1506,19 +1487,17 @@ def collect_all_text(
 
     include_patterns = _compile_layer_patterns(layers_include)
     exclude_patterns = _compile_layer_patterns(layers_exclude)
-    min_height_value = None
+    min_height_value: float | None = None
     if min_height is not None:
         try:
-            min_height_value = float(min_height)
+            candidate = float(min_height)
         except Exception:
-            min_height_value = None
-        else:
-            if not math.isfinite(min_height_value):
-                min_height_value = None
+            candidate = None
+        if candidate is not None and math.isfinite(candidate):
+            min_height_value = candidate
 
-    if not records:
-        csv_path = _write_text_dump_csv([])
-        return [], csv_path
+    if not (include_patterns or exclude_patterns or min_height_value is not None):
+        return records
 
     filtered: list[dict[str, Any]] = []
     for entry in records:
@@ -1533,9 +1512,7 @@ def collect_all_text(
                 continue
         filtered.append(entry)
 
-    csv_path = _write_text_dump_csv(filtered)
-
-    return filtered, csv_path
+    return filtered
 
 
 def set_trace_acad(enabled: bool) -> None:
