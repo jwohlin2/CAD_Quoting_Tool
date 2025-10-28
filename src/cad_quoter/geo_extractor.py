@@ -55,12 +55,11 @@ _IDENTITY_TRANSFORM: TransformMatrix = (1.0, 0.0, 0.0, 0.0, 1.0, 0.0)
 
 
 _OPS_SEGMENT_SPLIT_RE = re.compile(r"[;•]+")
-_TAP_TOKEN_RE = re.compile(r"\bTAP\b", re.IGNORECASE)
-_NPT_TOKEN_RE = re.compile(r"\bN\.?P\.?T\.?\b", re.IGNORECASE)
-_THREAD_TOKEN_RE = re.compile(
-    r"(?:#\s*\d+\s*-\s*\d+|\b\d+\s*/\s*\d+\s*-\s*\d+\b|\b\d+\s*-\s*\d+\b)",
+_TAP_TOKEN_RE = re.compile(
+    r"(?:\bTAP\b|#\s*\d+\s*-\s*\d+|\b\d+\s*/\s*\d+\s*-\s*\d+\b|\bN\.?P\.?T\.?\b)",
     re.IGNORECASE,
 )
+_NPT_TOKEN_RE = re.compile(r"\bN\.?P\.?T\.?\b", re.IGNORECASE)
 _COUNTERBORE_TOKEN_RE = re.compile(
     r"\b(?:C['’]?\s*BORE|CBORE|COUNTER\s*BORE)\b",
     re.IGNORECASE,
@@ -70,7 +69,7 @@ _COUNTERSINK_TOKEN_RE = re.compile(
     re.IGNORECASE,
 )
 _COUNTERDRILL_TOKEN_RE = re.compile(
-    r"\b(?:C['’]?\s*DRILL|COUNTER\s*DRILL|CTR\s*DRILL)\b",
+    r"\b(?:C['’]?\s*DRILL|C['’]DRILL|COUNTER\s*DRILL|CTR\s*DRILL)\b",
     re.IGNORECASE,
 )
 _JIG_GRIND_TOKEN_RE = re.compile(
@@ -2954,11 +2953,10 @@ def classify_op_row(desc: str | None) -> list[dict[str, Any]]:
         kinds: list[tuple[str, str | None]] = []
         is_npt = bool(_NPT_TOKEN_RE.search(segment))
         is_cdrill = bool(_COUNTERDRILL_TOKEN_RE.search(segment))
-        has_thread_tap = bool(_THREAD_TOKEN_RE.search(segment))
-        has_tap_word = bool(_TAP_TOKEN_RE.search(segment))
+        has_tap = bool(_TAP_TOKEN_RE.search(segment))
         if is_npt:
             kinds.append(("npt", None))
-        if is_npt or has_tap_word or has_thread_tap:
+        if is_npt or has_tap:
             kinds.append(("tap", None))
         if _COUNTERBORE_TOKEN_RE.search(segment):
             kinds.append(("cbore", None))
@@ -2977,11 +2975,12 @@ def classify_op_row(desc: str | None) -> list[dict[str, Any]]:
         if not kinds:
             kinds.append(("unknown", None))
 
-        seen_local: set[str] = set()
+        seen_local: set[tuple[str, str | None]] = set()
         for kind, size_text in kinds:
-            if kind in seen_local and not size_text:
+            key = (kind, size_text if size_text is not None else None)
+            if key in seen_local:
                 continue
-            seen_local.add(kind)
+            seen_local.add(key)
             results.append({"kind": kind, "qty": 0, "size": size_text})
 
     return results
@@ -3041,15 +3040,11 @@ def ops_manifest(
             if not operations:
                 table_totals["unknown"] += qty
                 continue
-            seen = set()
             for op in operations:
                 kind = str(op.get("kind") or "unknown").strip().lower()
                 if kind not in _OPS_MANIFEST_KEYS:
                     kind = "unknown"
-                if kind == "unknown" and kind in seen:
-                    continue
                 table_totals[kind] += qty
-                seen.add(kind)
                 if kind == "drill":
                     sized_drill_qty += qty
 
@@ -6347,6 +6342,11 @@ def read_text_table(
                 rows.append(row_text)
             return rows
 
+        if "parsed_rows" not in locals():
+            parsed_rows = []
+        if "total_qty" not in locals():
+            total_qty = 0
+
         if len(parsed_rows) < 8:
             clusters = _cluster_entries_by_y(candidate_entries)
             fallback_rows = _clusters_to_rows(clusters)
@@ -7493,7 +7493,7 @@ def classify_action(fragment: str) -> dict[str, Any]:
     if not text:
         return result
 
-    if _TAP_TOKEN_RE.search(upper) or _THREAD_TOKEN_RE.search(upper) or _NPT_TOKEN_RE.search(upper):
+    if _TAP_TOKEN_RE.search(upper):
         result["kind"] = "tap"
         if _NPT_TOKEN_RE.search(upper):
             result["npt"] = True
