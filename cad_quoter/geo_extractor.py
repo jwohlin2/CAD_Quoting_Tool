@@ -212,6 +212,27 @@ def _point2d(value: Any) -> tuple[float, float] | None:
     return None
 
 
+def _layer_name_is_excluded(layer_name: str | None) -> bool:
+    if not layer_name:
+        return False
+    try:
+        normalized = str(layer_name).strip()
+    except Exception:
+        normalized = ""
+    if not normalized:
+        return False
+    upper_name = normalized.upper()
+    for prefix in _GEO_CIRCLE_LAYER_EXCLUDE_PREFIXES:
+        if upper_name.startswith(prefix):
+            return True
+    for pattern in _GEO_CIRCLE_LAYER_EXCLUDE_GLOBS:
+        if fnmatchcase(upper_name, pattern):
+            return True
+    if _GEO_CIRCLE_LAYER_BLACKLIST_RE.search(normalized):
+        return True
+    return False
+
+
 def _point3d(value: Any) -> tuple[float, float, float] | None:
     if value is None:
         return None
@@ -573,6 +594,25 @@ DEFAULT_TEXT_LAYER_EXCLUDE_REGEX: tuple[str, ...] = (
 )
 
 _GEOM_BLOCK_EXCLUDE_RE = re.compile(r"^(TITLE|BORDER|CHART|FRAME|AM_.*)$", re.IGNORECASE)
+_GEO_CIRCLE_LAYER_EXCLUDE_PREFIXES: tuple[str, ...] = (
+    "AM_BOR",
+    "BORDER",
+    "TITLE",
+    "FRAME",
+    "CHART",
+    "SHEET",
+    "NOTES",
+    "NOTE",
+    "DIM",
+    "ANNO",
+    "CENTER",
+    "CNTR",
+    "SYMBOL",
+    "SYMB",
+    "DEFPOINTS",
+    "PAPER",
+)
+_GEO_CIRCLE_LAYER_EXCLUDE_GLOBS: tuple[str, ...] = ("SHEET*",)
 _GEO_CIRCLE_LAYER_BLACKLIST_RE = re.compile(
     r"^(AM_BOR|BORDER|TITLE|FRAME|CHART|SHEET|NOTES?|DIM|CENTER|CNTR|SY(M|MB)OL|DEFPOINTS|PAPER)$",
     re.IGNORECASE,
@@ -587,16 +627,18 @@ _GEO_H_ANCHOR_MIN = max(_GEO_H_ANCHOR_MIN, 0.0)
 _GEO_H_ANCHOR_HARD_MIN = 0.04
 
 _GEO_DIA_MIN_IN = max(
-    _env_float("GEO_DIA_MIN_IN", "GEO_CIRCLE_DIAM_MIN_IN", default=0.09),
+    _env_float("GEO_DIA_MIN_IN", "GEO_CIRCLE_DIAM_MIN_IN", default=0.04),
     0.0,
 )
-_GEO_DIA_MAX_IN = _env_float("GEO_DIA_MAX_IN", "GEO_CIRCLE_DIAM_MAX_IN", default=3.0)
+_GEO_DIA_MAX_IN = _env_float("GEO_DIA_MAX_IN", "GEO_CIRCLE_DIAM_MAX_IN", default=2.0)
 if _GEO_DIA_MAX_IN <= 0.0:
-    _GEO_DIA_MAX_IN = 3.0
+    _GEO_DIA_MAX_IN = 2.0
 if _GEO_DIA_MAX_IN < _GEO_DIA_MIN_IN:
     _GEO_DIA_MAX_IN = _GEO_DIA_MIN_IN
 _GEO_CIRCLE_Z_ABS_MAX = 1e-6
 _GEO_CIRCLE_DEDUP_DIGITS = 3
+_GEO_CIRCLE_CENTER_GROUP_DIGITS = 3
+_GEO_BBOX_MARGIN_IN = 0.25
 
 
 @dataclass(slots=True)
@@ -7683,6 +7725,47 @@ def _normalize_geom_holes_payload(
 ) -> dict[str, Any]:
     groups_counter: defaultdict[float, int] = defaultdict(int)
     total_candidates: list[int] = []
+    residual_centers: set[tuple[float, float]] = set()
+    non_drill_centers: set[tuple[float, float]] = set()
+    residual_hole_keys: set[tuple[float, float, float]] = set()
+    residual_holes_payload: list[dict[str, float]] = []
+
+    def _center_key(point: tuple[float, float]) -> tuple[float, float]:
+        return (
+            round(float(point[0]), _GEO_CIRCLE_CENTER_GROUP_DIGITS),
+            round(float(point[1]), _GEO_CIRCLE_CENTER_GROUP_DIGITS),
+        )
+
+    def _consume_centers(source: Any, target: set[tuple[float, float]]) -> None:
+        if source is None:
+            return
+        if isinstance(source, Mapping):
+            if "x" in source or "y" in source:
+                point = _point2d(source)
+                if point is not None:
+                    target.add(_center_key(point))
+                return
+            for key in ("center", "point"):
+                if key in source:
+                    point = _point2d(source.get(key))
+                    if point is not None:
+                        target.add(_center_key(point))
+            for value in source.values():
+                if isinstance(value, Mapping) or (
+                    isinstance(value, Sequence)
+                    and not isinstance(value, (str, bytes, bytearray))
+                ):
+                    _consume_centers(value, target)
+            return
+        if isinstance(source, Sequence) and not isinstance(
+            source, (str, bytes, bytearray)
+        ):
+            for item in source:
+                _consume_centers(item, target)
+            return
+        point = _point2d(source)
+        if point is not None:
+            target.add(_center_key(point))
 
     def _ingest_group(entry: Mapping[str, Any]) -> None:
         dia_candidate = (
@@ -7721,6 +7804,38 @@ def _normalize_geom_holes_payload(
                     total_candidates.append(int(float(total_val)))
                 except Exception:
                     pass
+            _consume_centers(source.get("residual_centers"), residual_centers)
+            holes_value = source.get("residual_holes")
+            _consume_centers(holes_value, residual_centers)
+            if isinstance(holes_value, Sequence):
+                for hole in holes_value:
+                    if not isinstance(hole, Mapping):
+                        continue
+                    point = _point2d(hole)
+                    if point is None:
+                        continue
+                    dia_val = (
+                        hole.get("dia_in")
+                        or hole.get("diam_in")
+                        or hole.get("diameter_in")
+                        or hole.get("diameter")
+                    )
+                    try:
+                        hx, hy = float(point[0]), float(point[1])
+                        hd = float(dia_val) if dia_val is not None else 0.0
+                    except Exception:
+                        continue
+                    key = (
+                        round(hx, _GEO_CIRCLE_CENTER_GROUP_DIGITS),
+                        round(hy, _GEO_CIRCLE_CENTER_GROUP_DIGITS),
+                        round(hd, 4),
+                    )
+                    if key in residual_hole_keys:
+                        continue
+                    residual_hole_keys.add(key)
+                    residual_holes_payload.append({"x": hx, "y": hy, "dia_in": hd})
+            _consume_centers(source.get("centers"), residual_centers)
+            _consume_centers(source.get("non_drill_centers"), non_drill_centers)
             for key in ("hole_count", "hole_count_geom", "hole_count_geom_dedup"):
                 value = source.get(key)
                 if value not in (None, ""):
@@ -7754,6 +7869,8 @@ def _normalize_geom_holes_payload(
             for item in source:
                 if isinstance(item, Mapping):
                     _ingest_group(item)
+                else:
+                    _consume_centers(item, residual_centers)
 
     _ingest_source(geom_holes)
     _ingest_source(hole_sets)
@@ -7766,7 +7883,27 @@ def _normalize_geom_holes_payload(
     total = sum(entry["count"] for entry in groups)
     if total <= 0 and total_candidates:
         total = max(total_candidates)
-    return {"groups": groups, "total": total}
+    residual_center_list = sorted(residual_centers)
+    non_drill_center_list = sorted(non_drill_centers)
+    residual_candidate_set = {
+        key for key in residual_centers if key not in non_drill_centers
+    }
+    payload: dict[str, Any] = {
+        "groups": groups,
+        "total": int(total),
+        "center_count": len(residual_center_list),
+        "residual_centers": [
+            {"x": center[0], "y": center[1]} for center in residual_center_list
+        ],
+        "non_drill_centers": [
+            {"x": center[0], "y": center[1]} for center in non_drill_center_list
+        ],
+        "residual_candidates": len(residual_candidate_set),
+        "residual_holes": residual_holes_payload,
+    }
+    if not payload["total"] and residual_center_list:
+        payload["total"] = len(residual_center_list)
+    return payload
 
 
 def ops_manifest(
@@ -7822,13 +7959,68 @@ def ops_manifest(
                     size_map[size_token] = size_map.get(size_token, 0) + qty
 
     geom_info = _normalize_geom_holes_payload(geom_holes, hole_sets)
+
+    def _center_key(point: tuple[float, float]) -> tuple[float, float]:
+        return (
+            round(float(point[0]), _GEO_CIRCLE_CENTER_GROUP_DIGITS),
+            round(float(point[1]), _GEO_CIRCLE_CENTER_GROUP_DIGITS),
+        )
+
+    def _collect_centers(candidate: Any) -> set[tuple[float, float]]:
+        centers: set[tuple[float, float]] = set()
+        if candidate is None:
+            return centers
+        if isinstance(candidate, Mapping):
+            if "x" in candidate or "y" in candidate:
+                point = _point2d(candidate)
+                if point is not None:
+                    centers.add(_center_key(point))
+                    return centers
+            for value in candidate.values():
+                if isinstance(value, Mapping) or (
+                    isinstance(value, Sequence)
+                    and not isinstance(value, (str, bytes, bytearray))
+                ):
+                    centers.update(_collect_centers(value))
+            return centers
+        if isinstance(candidate, Sequence) and not isinstance(
+            candidate, (str, bytes, bytearray)
+        ):
+            for item in candidate:
+                centers.update(_collect_centers(item))
+            return centers
+        point = _point2d(candidate)
+        if point is not None:
+            centers.add(_center_key(point))
+        return centers
+
+    residual_centers_set = _collect_centers(
+        geom_info.get("residual_centers") or geom_info.get("residual_holes")
+    )
+    non_drill_centers_set = _collect_centers(geom_info.get("non_drill_centers"))
+    residual_candidate_set = {
+        center for center in residual_centers_set if center not in non_drill_centers_set
+    }
+
     geom_total = int(geom_info.get("total") or 0)
+    center_count_val = int(geom_info.get("center_count") or 0)
+    if center_count_val > geom_total:
+        geom_total = center_count_val
+    if len(residual_centers_set) > geom_total:
+        geom_total = len(residual_centers_set)
     sized_drill_qty = int(details.get("drill_sized") or 0)
     text_drill_qty = _coerce_positive_int(table_counts.get("drill")) or 0
+    residual_candidate_total = len(residual_candidate_set)
+    if not residual_candidate_total:
+        try:
+            residual_candidate_total = int(geom_info.get("residual_candidates") or 0)
+        except Exception:
+            residual_candidate_total = 0
+    geom_residual_base = residual_candidate_total if residual_candidate_total else geom_total
     geom_residual = (
-        max(geom_total - text_drill_qty, 0)
-        if geom_total and text_drill_qty
-        else geom_total
+        max(geom_residual_base - text_drill_qty, 0)
+        if geom_residual_base and text_drill_qty
+        else geom_residual_base
     )
 
     table_drill_only = int(table_counts.get("drill", 0))
@@ -8254,10 +8446,9 @@ def geom_hole_census(doc: Any) -> dict[str, Any]:
             or layer_upper
             or ""
         )
-        if layer_name:
-            if _GEO_CIRCLE_LAYER_BLACKLIST_RE.search(layer_name):
-                layer_filter_dropped += 1
-                continue
+        if _layer_name_is_excluded(layer_name) or _layer_name_is_excluded(layer_upper):
+            layer_filter_dropped += 1
+            continue
         if layer_upper:
             if any(pattern.search(layer_upper) for pattern in exclude_patterns):
                 layer_filter_dropped += 1
@@ -8311,10 +8502,7 @@ def geom_hole_census(doc: Any) -> dict[str, Any]:
         seen_circle_keys.add(dedup_key)
         circle_records.append({"x": tx_in, "y": ty_in, "dia_in": float(diameter_in)})
 
-    unique_count = len(seen_circle_keys)
-    if total_candidates or unique_count:
-        print(f"[GEOM] unique circles after dedup: {unique_count} (was {total_candidates})")
-    print(f"[GEOM] layer-filter dropped={layer_filter_dropped}")
+    raw_unique_count = len(circle_records)
 
     def _cluster_bbox_from_circle_records(
         records: Sequence[Mapping[str, float]]
@@ -8365,14 +8553,7 @@ def geom_hole_census(doc: Any) -> dict[str, Any]:
     else:
         cluster_bbox = _cluster_bbox_from_circle_records(circle_records)
         if cluster_bbox is not None:
-            xmin, xmax, ymin, ymax = cluster_bbox
-            margin = 0.25
-            part_bbox_in = (
-                xmin - margin,
-                xmax + margin,
-                ymin - margin,
-                ymax + margin,
-            )
+            part_bbox_in = cluster_bbox
     if part_bbox_in is None and dims_hint:
         dims_bbox = _bbox_from_dims(
             tuple(dims_hint),
@@ -8383,8 +8564,15 @@ def geom_hole_census(doc: Any) -> dict[str, Any]:
 
     kept_records = list(circle_records)
     dropped_outside = 0
+    applied_bbox: tuple[float, float, float, float] | None = None
     if part_bbox_in is not None:
         xmin, xmax, ymin, ymax = part_bbox_in
+        margin = _GEO_BBOX_MARGIN_IN
+        if margin and math.isfinite(margin) and margin > 0.0:
+            xmin -= margin
+            xmax += margin
+            ymin -= margin
+            ymax += margin
         if xmin > xmax:
             xmin, xmax = xmax, xmin
         if ymin > ymax:
@@ -8398,6 +8586,7 @@ def geom_hole_census(doc: Any) -> dict[str, Any]:
             else:
                 dropped_outside += 1
         kept_records = filtered
+        applied_bbox = (xmin, xmax, ymin, ymax)
         if dropped_outside > 0:
             print(
                 "[GEOM] bbox=[{xmin:.1f}..{xmax:.1f}, {ymin:.1f}..{ymax:.1f}] "
@@ -8411,9 +8600,52 @@ def geom_hole_census(doc: Any) -> dict[str, Any]:
                 )
             )
 
+    def _collapse_concentric(
+        records: Sequence[Mapping[str, float]]
+    ) -> tuple[list[dict[str, float]], int]:
+        grouped: defaultdict[tuple[int, int], list[dict[str, float]]] = defaultdict(list)
+        for rec in records:
+            cx = round(float(rec.get("x", 0.0)), _GEO_CIRCLE_CENTER_GROUP_DIGITS)
+            cy = round(float(rec.get("y", 0.0)), _GEO_CIRCLE_CENTER_GROUP_DIGITS)
+            grouped[(cx, cy)].append(dict(rec))
+        kept: list[dict[str, float]] = []
+        dropped_count = 0
+        for items in grouped.values():
+            if not items:
+                continue
+            items_sorted = sorted(items, key=lambda item: float(item.get("dia_in", 0.0)))
+            kept.append(items_sorted[0])
+            dropped_count += max(len(items_sorted) - 1, 0)
+        return kept, dropped_count
+
+    collapsed_records, concentric_dropped = _collapse_concentric(kept_records)
+    kept_records = collapsed_records
+
+    final_unique_count = len(kept_records)
+    if total_candidates or final_unique_count:
+        print(
+            "[GEOM] unique circles after dedup: {} (was {})".format(
+                final_unique_count, total_candidates
+            )
+        )
+    if concentric_dropped > 0 and raw_unique_count:
+        print(
+            "[GEOM] concentric collapse dropped={} from raw_unique={}".format(
+                concentric_dropped, raw_unique_count
+            )
+        )
+    print(f"[GEOM] layer-filter dropped={layer_filter_dropped}")
+
     groups_counter = defaultdict(int)
+    residual_holes: list[dict[str, float]] = []
     for rec in kept_records:
-        dia_key = round(float(rec.get("dia_in", 0.0)), 4)
+        hole_record = {
+            "x": float(rec.get("x", 0.0)),
+            "y": float(rec.get("y", 0.0)),
+            "dia_in": float(rec.get("dia_in", 0.0)),
+        }
+        residual_holes.append(hole_record)
+        dia_key = round(float(hole_record.get("dia_in", 0.0)), 4)
         if dia_key > 0:
             groups_counter[dia_key] += 1
 
@@ -8422,8 +8654,8 @@ def geom_hole_census(doc: Any) -> dict[str, Any]:
         for diameter, count in sorted(groups_counter.items())
         if count > 0
     ]
-    total = sum(entry["count"] for entry in groups)
     circle_total = sum(groups_counter.values())
+    total = circle_total
     model_circles = circle_total
     print(
         "[GEOM] counted circles: total={} from model={} paperspace=0 "
@@ -8431,7 +8663,27 @@ def geom_hole_census(doc: Any) -> dict[str, Any]:
             circle_total, model_circles, blocks_included, blocks_skipped
         )
     )
-    return {"groups": groups, "total": total}
+    residual_centers_payload = [
+        {"x": hole["x"], "y": hole["y"]}
+        for hole in residual_holes
+    ]
+    payload: dict[str, Any] = {
+        "groups": groups,
+        "total": int(total),
+        "center_count": len(residual_holes),
+        "residual_candidates": len(residual_holes),
+        "residual_holes": residual_holes,
+        "residual_centers": residual_centers_payload,
+        "non_drill_centers": [],
+        "dropped_concentric": int(concentric_dropped),
+        "dropped_outside_bbox": int(dropped_outside),
+        "raw_unique_count": int(raw_unique_count),
+        "total_candidates": int(total_candidates),
+    }
+    if applied_bbox is not None:
+        payload["bbox_in"] = applied_bbox
+        payload["bbox_margin_in"] = float(_GEO_BBOX_MARGIN_IN)
+    return payload
 
 
 def promote_table_to_geo(
