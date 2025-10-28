@@ -148,7 +148,12 @@ from cad_quoter.render import (
     RenderState as QuoteRenderState,
     render_quote_sections as render_quote_sections_helper,
 )
-from cad_quoter.render.config import apply_render_overrides, ensure_mutable_breakdown
+from cad_quoter.render.payloads import (
+    build_cost_breakdown_payload,
+    build_price_drivers_payload,
+    build_summary_payload,
+    _render_as_float,
+)
 
 try:
     from cad_quoter.geometry.dxf_text import (
@@ -16171,66 +16176,35 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
         logger.exception("Failed to run final drilling debug block")
 
     # --- Structured render payload ------------------------------------------
-    def _render_as_float(value: Any, default: float = 0.0) -> float:
-        try:
-            return float(value)
-        except Exception:
-            return default
-
-    try:
-        qty_float = float(quote_qty or 0.0)
-    except Exception:
-        qty_float = 0.0
-    if qty_float > 0 and abs(round(qty_float) - qty_float) < 1e-9:
-        summary_qty: int | float = int(round(qty_float))
-    else:
-        summary_qty = qty_float if qty_float > 0 else quote_qty
-
-    margin_pct_value = _render_as_float(applied_pcts.get("MarginPct"), 0.0)
-    expedite_pct_value = _render_as_float(applied_pcts.get("ExpeditePct"), 0.0)
-    expedite_amount = _render_as_float(expedite_cost, 0.0)
-    subtotal_before_margin_val = _render_as_float(subtotal_before_margin, 0.0)
-    final_price_val = _render_as_float(price, 0.0)
-    margin_amount = max(0.0, final_price_val - subtotal_before_margin_val)
-    labor_total_amount = _render_as_float(
-        (breakdown or {}).get("total_labor_cost"),
-        _render_as_float(ladder_labor, 0.0),
+    summary_payload, summary_metrics = build_summary_payload(
+        quote_qty=quote_qty,
+        subtotal_before_margin=subtotal_before_margin,
+        price=price,
+        applied_pcts=applied_pcts,
+        expedite_cost=expedite_cost,
+        breakdown=breakdown,
+        ladder_labor=ladder_labor,
+        total_direct_costs_value=total_direct_costs_value,
+        currency=currency,
     )
-    direct_total_amount = _render_as_float(total_direct_costs_value, 0.0)
 
-    summary_payload = {
-        "qty": summary_qty,
-        "final_price": round(final_price_val, 2),
-        "unit_price": round(final_price_val, 2),
-        "subtotal_before_margin": round(subtotal_before_margin_val, 2),
-        "margin_pct": float(margin_pct_value),
-        "margin_amount": round(margin_amount, 2),
-        "expedite_pct": float(expedite_pct_value),
-        "expedite_amount": round(expedite_amount, 2),
-        "currency": currency,
-    }
+    subtotal_before_margin_val = summary_metrics["subtotal_before_margin"]
+    final_price_val = summary_metrics["final_price"]
+    margin_amount = summary_metrics["margin_amount"]
+    expedite_amount = summary_metrics["expedite_amount"]
+    labor_total_amount = summary_metrics["labor_total_amount"]
+    direct_total_amount = summary_metrics["direct_total_amount"]
 
-    driver_details: list[str] = []
-    seen_driver_details: set[str] = set()
-    for detail in list(why_parts) + list(llm_notes):
-        text = str(detail).strip()
-        if not text:
-            continue
-        key = text.lower()
-        if key in seen_driver_details:
-            continue
-        seen_driver_details.add(key)
-        driver_details.append(text)
-    price_drivers_payload = [{"detail": detail} for detail in driver_details]
+    price_drivers_payload = build_price_drivers_payload(why_parts, llm_notes)
 
-    cost_breakdown_payload: list[tuple[str, float]] = []
-    cost_breakdown_payload.append(("Machine & Labor", round(labor_total_amount, 2)))
-    cost_breakdown_payload.append(("Direct Costs", round(direct_total_amount, 2)))
-    if expedite_amount > 0:
-        cost_breakdown_payload.append(("Expedite", round(expedite_amount, 2)))
-    cost_breakdown_payload.append(("Subtotal before Margin", round(subtotal_before_margin_val, 2)))
-    cost_breakdown_payload.append(("Margin", round(margin_amount, 2)))
-    cost_breakdown_payload.append(("Final Price", round(final_price_val, 2)))
+    cost_breakdown_payload = build_cost_breakdown_payload(
+        labor_total_amount=labor_total_amount,
+        direct_total_amount=direct_total_amount,
+        expedite_amount=expedite_amount,
+        subtotal_before_margin=subtotal_before_margin_val,
+        margin_amount=margin_amount,
+        final_price=final_price_val,
+    )
 
     materials_entries: list[dict[str, Any]] = []
     material_label_text = str(
