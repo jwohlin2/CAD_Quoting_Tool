@@ -107,6 +107,25 @@ def _log_text_stats(entries: Sequence[Mapping[str, Any]]) -> Counter[str]:
     layout_counts = Counter(str(entry.get("layout") or "-") for entry in entries)
     print(f"[TEXT-DUMP] total={total} by etype={_format_counter_summary(type_counts)}")
     print(f"[TEXT-DUMP] by layout={_format_counter_summary(layout_counts)}")
+    if entries:
+        layout_type_counts: dict[str, Counter[str]] = {}
+        for entry in entries:
+            layout = str(entry.get("layout") or "-")
+            etype = str(entry.get("etype") or "-")
+            layout_type_counts.setdefault(layout, Counter())[etype] += 1
+        priority_types = ("TEXT", "MTEXT", "ATTRIB", "MLEADER", "TABLE")
+        for layout in sorted(layout_type_counts):
+            counter = layout_type_counts[layout]
+            parts: list[str] = []
+            for etype in priority_types:
+                parts.append(f"{etype}={counter.get(etype, 0)}")
+            extra_types = sorted(
+                etype for etype in counter if etype not in priority_types
+            )
+            for etype in extra_types:
+                parts.append(f"{etype}={counter.get(etype, 0)}")
+            summary = " ".join(parts) if parts else "-"
+            print(f"[TEXT-DUMP] {layout}: {summary}")
     return layout_counts
 
 
@@ -821,8 +840,9 @@ def main(argv: Sequence[str] | None = None) -> int:
         help="Process text tables from all layouts (use --no-all-layouts to restrict)",
     )
     parser.add_argument(
-        "--layouts",
-        dest="layouts",
+        "--layout-pattern",
+        "--layout-regex",
+        dest="layout_patterns",
         action="append",
         help="Regex pattern to match layout names (repeatable; case-insensitive)",
     )
@@ -946,9 +966,14 @@ def main(argv: Sequence[str] | None = None) -> int:
         help="Dump all text entities with layout metadata",
     )
     parser.add_argument(
+        "--layouts",
+        help="Comma-separated list of layouts to include when dumping text entities",
+    )
+    parser.add_argument(
         "--min-height",
         type=float,
         metavar="VALUE",
+        default=0.0,
         help="Minimum text height (drawing units) when dumping text entities",
     )
     parser.add_argument(
@@ -962,6 +987,11 @@ def main(argv: Sequence[str] | None = None) -> int:
         action="append",
         metavar="REGEX",
         help="Regex pattern to exclude layers when dumping text entities (repeatable)",
+    )
+    parser.add_argument(
+        "--no-layer-filter",
+        action="store_true",
+        help="Disable layer include/exclude filtering when dumping text entities",
     )
     parser.add_argument(
         "--no-blocks",
@@ -1039,40 +1069,37 @@ def main(argv: Sequence[str] | None = None) -> int:
     text_jsonl_path: str = "-"
 
     if args.dump_all_text:
-        include_layers = _normalize_pattern_args(args.layers_include)
-        exclude_layers = _normalize_pattern_args(args.layers_exclude)
-        dump_min_height = args.min_height
-        if dump_min_height is None:
-            dump_min_height = 0.0
-        if dump_min_height is not None:
-            if args.min_height is None:
-                print(f"[TEXT-DUMP] min_height={dump_min_height} (default for dump)")
-            else:
-                print(f"[TEXT-DUMP] min_height={dump_min_height}")
-
-        if not getattr(args, "no_exclude_layer", False):
-            default_exclude = {
-                pattern for pattern in DEFAULT_TEXT_LAYER_EXCLUDE_REGEX if pattern
-            }
-            if default_exclude:
-                filtered_layers = [
-                    pattern for pattern in exclude_layers if pattern not in default_exclude
-                ]
-                if len(filtered_layers) != len(exclude_layers):
-                    print("[TEXT-DUMP] ignoring default layer exclusions for dump-all-text")
-                    exclude_layers = filtered_layers
-        if include_layers:
-            print(f"[TEXT-DUMP] layers_include={sorted(set(include_layers))}")
-        if exclude_layers:
-            print(f"[TEXT-DUMP] layers_exclude={sorted(set(exclude_layers))}")
+        include_layers: list[str] | None = None
+        exclude_layers: list[str] | None = None
+        if args.no_layer_filter:
+            print("[TEXT-DUMP] layer filtering disabled")
+        else:
+            include_layers = _normalize_pattern_args(args.layers_include)
+            exclude_layers = _normalize_pattern_args(args.layers_exclude)
+            if include_layers:
+                print(f"[TEXT-DUMP] layers_include={sorted(set(include_layers))}")
+            if exclude_layers:
+                print(f"[TEXT-DUMP] layers_exclude={sorted(set(exclude_layers))}")
+        if args.min_height:
+            print(f"[TEXT-DUMP] min_height={args.min_height}")
+        layout_filter = None
+        if isinstance(args.layouts, str) and args.layouts.strip():
+            layout_filter = [
+                value.strip()
+                for value in args.layouts.split(",")
+                if value and value.strip()
+            ]
+            if layout_filter:
+                print(f"[TEXT-DUMP] layouts={layout_filter}")
         try:
             entries = geo_extractor.collect_all_text(
                 doc,
                 include_blocks=bool(args.include_blocks),
                 include_paperspace=bool(args.include_paperspace),
-                min_height=dump_min_height,
-                layers_include=include_layers,
-                layers_exclude=exclude_layers,
+                min_height=args.min_height,
+                layers_include=None if args.no_layer_filter else include_layers,
+                layers_exclude=None if args.no_layer_filter else exclude_layers,
+                layouts=layout_filter,
             )
         except Exception as exc:
             print(f"[TEXT-DUMP] failed to collect text entities: {exc}")
@@ -1089,7 +1116,7 @@ def main(argv: Sequence[str] | None = None) -> int:
 
     layout_patterns = [
         value.strip()
-        for value in args.layouts or []
+        for value in args.layout_patterns or []
         if isinstance(value, str) and value.strip()
     ]
     layout_regex = None
