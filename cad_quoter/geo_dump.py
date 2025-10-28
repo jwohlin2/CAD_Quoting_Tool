@@ -37,6 +37,7 @@ from cad_quoter.geo_extractor import (
 DEFAULT_SAMPLE_PATH = REPO_ROOT / "Cad Files" / "301_redacted.dwg"
 ARTIFACT_DIR = REPO_ROOT / "out"
 DEFAULT_EXCLUDE_PATTERN_TEXT = ", ".join(DEFAULT_TEXT_LAYER_EXCLUDE_REGEX) or "<none>"
+DEFAULT_TEXT_LAYER_INCLUDE_REGEX = (".*",)
 
 _FULL_TEXT_FIELDS = [
     "layout",
@@ -1009,6 +1010,12 @@ def _normalize_pattern_args(values: Sequence[str] | None) -> list[str]:
             if candidate:
                 patterns.append(candidate)
     return patterns
+
+
+def _unique_patterns(patterns: Sequence[str]) -> tuple[str, ...]:
+    if not patterns:
+        return ()
+    return tuple(dict.fromkeys(patterns))
 
 
 def _truthy_flag(value: Any) -> bool:
@@ -2107,8 +2114,27 @@ def main(argv: Sequence[str] | None = None) -> int:
     text_min_height = args.text_min_height
     text_include_patterns = _normalize_pattern_args(args.text_include_layers)
     text_exclude_patterns = _normalize_pattern_args(args.text_exclude_layers)
-    include_tuple = tuple(text_include_patterns) if text_include_patterns else None
-    exclude_tuple = tuple(text_exclude_patterns) if text_exclude_patterns else None
+    include_tuple: tuple[str, ...] | None = None
+    exclude_tuple: tuple[str, ...] | None = None
+    if text_include_patterns:
+        include_tuple = _unique_patterns(text_include_patterns)
+        if text_exclude_patterns:
+            exclude_tuple = _unique_patterns(text_exclude_patterns)
+        else:
+            exclude_tuple = DEFAULT_TEXT_LAYER_EXCLUDE_REGEX
+    elif text_exclude_patterns:
+        include_tuple = DEFAULT_TEXT_LAYER_INCLUDE_REGEX
+        exclude_tuple = _unique_patterns(text_exclude_patterns)
+    if (
+        include_tuple is None
+        and exclude_tuple is None
+        and (
+            text_anchor_ratio is not None
+            or text_min_height is not None
+        )
+    ):
+        include_tuple = DEFAULT_TEXT_LAYER_INCLUDE_REGEX
+        exclude_tuple = DEFAULT_TEXT_LAYER_EXCLUDE_REGEX
     if (
         text_anchor_ratio is not None
         or text_min_height is not None
