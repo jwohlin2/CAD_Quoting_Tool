@@ -6144,10 +6144,13 @@ def read_text_table(
                     candidate_entries_local.append(entry_copy)
                 if not candidate_entries_local:
                     return None
-                anchor_height, _anchor_count = _compute_anchor_height(candidate_entries_local)
-                if anchor_height > 0 and candidate_entries_local:
+                h_anchor_local, _anchor_count = _compute_anchor_height(
+                    candidate_entries_local
+                )
+                h_anchor_local = float(h_anchor_local or 0.20)
+                if _anchor_count > 0 and h_anchor_local > 0 and candidate_entries_local:
                     filtered_by_height = _filter_entries_by_anchor_height(
-                        candidate_entries_local, anchor_height=anchor_height
+                        candidate_entries_local, anchor_height=h_anchor_local
                     )
                     if filtered_by_height:
                         candidate_entries_local = [dict(entry) for entry in filtered_by_height]
@@ -6345,12 +6348,13 @@ def read_text_table(
             candidate_entries = normalized_entries
             table_lines = normalized_lines
 
-            anchor_height, anchor_count = _compute_anchor_height(candidate_entries)
-            print(f"[TEXT-SCAN] anchors={anchor_count} h_anchor={anchor_height:.2f}")
+            h_anchor, anchor_count = _compute_anchor_height(candidate_entries)
+            h_anchor = float(h_anchor or 0.20)
+            print(f"[TEXT-SCAN] anchors={anchor_count} h_anchor={h_anchor:.2f}")
             total_by_height = len(candidate_entries)
-            if anchor_height > 0 and candidate_entries:
+            if anchor_count > 0 and h_anchor > 0 and candidate_entries:
                 filtered_entries = _filter_entries_by_anchor_height(
-                    candidate_entries, anchor_height=anchor_height
+                    candidate_entries, anchor_height=h_anchor
                 )
                 kept_count = len(filtered_entries)
                 if kept_count != total_by_height:
@@ -6584,7 +6588,7 @@ def read_text_table(
                             entry.get("normalized_text") or entry.get("text")
                         )
                     ],
-                    "anchor_height": anchor_height,
+                    "anchor_height": h_anchor,
                     "layout_order": [
                         idx for idx in layout_order if _coerce_layout_index(idx) in anchor_layouts
                     ],
