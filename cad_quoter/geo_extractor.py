@@ -3231,7 +3231,7 @@ def _combine_text_rows(
     return merged, dedup_dropped, False
 
 
-def _compute_anchor_height(entries: Iterable[Mapping[str, Any]]) -> tuple[float, int]:
+def _compute_anchor_h(entries: Iterable[Mapping[str, Any]]) -> tuple[float, int]:
     heights: list[float] = []
     count = 0
     for entry in entries:
@@ -3256,7 +3256,7 @@ def _compute_anchor_height(entries: Iterable[Mapping[str, Any]]) -> tuple[float,
     return (anchor_h, count)
 
 
-def _filter_entries_by_anchor_height(
+def _filter_entries_by_anchor_h(
     entries: Iterable[Mapping[str, Any]],
     *,
     anchor_h: float,
@@ -4710,19 +4710,6 @@ def _extract_anchor_band_lines(context: Mapping[str, Any] | None) -> list[str]:
         if layout_idx in anchor_layouts:
             entries_by_layout[layout_idx].append(entry)
 
-    anchor_h = 0.0
-    try:
-        anchor_h = float(context.get("anchor_height") or 0.0)
-    except Exception:
-        anchor_h = 0.0
-    if anchor_h < 0:
-        anchor_h = 0.0
-
-    height_lower = anchor_h * 0.6 if anchor_h > 0 else None
-    height_upper = anchor_h * 1.4 if anchor_h > 0 else None
-    height_stop_lower = anchor_h * 0.3 if anchor_h > 0 else None
-    height_stop_upper = anchor_h * 1.7 if anchor_h > 0 else None
-
     anchors = [
         entry
         for entry in anchor_entries
@@ -4732,6 +4719,26 @@ def _extract_anchor_band_lines(context: Mapping[str, Any] | None) -> list[str]:
             )
         )
     ]
+    anchor_h = 0.0
+    try:
+        anchor_h = float(
+            context.get("anchor_h")
+            if isinstance(context, Mapping)
+            else 0.0
+        )
+        if anchor_h == 0.0 and isinstance(context, Mapping):
+            legacy_anchor = context.get("anchor_height")
+            if isinstance(legacy_anchor, (int, float)):
+                anchor_h = float(legacy_anchor)
+    except Exception:
+        anchor_h = 0.0
+    if anchor_h < 0:
+        anchor_h = 0.0
+
+    height_lower = anchor_h * 0.6 if anchor_h > 0 else None
+    height_upper = anchor_h * 1.4 if anchor_h > 0 else None
+    height_stop_lower = anchor_h * 0.3 if anchor_h > 0 else None
+    height_stop_upper = anchor_h * 1.7 if anchor_h > 0 else None
     print(
         f"[TEXT-SCAN] anchors={len(anchors)} h_anchor={anchor_h:.2f}"
         if anchors
@@ -6448,12 +6455,12 @@ def read_text_table(
                     candidate_entries_local.append(entry_copy)
                 if not candidate_entries_local:
                     return None
-                anchor_h_local, _anchor_count = _compute_anchor_height(
+                anchor_h_local, _anchor_count = _compute_anchor_h(
                     candidate_entries_local
                 )
                 anchor_h_local = float(anchor_h_local or 0.20)
                 if _anchor_count > 0 and anchor_h_local > 0 and candidate_entries_local:
-                    filtered_by_height = _filter_entries_by_anchor_height(
+                    filtered_by_height = _filter_entries_by_anchor_h(
                         candidate_entries_local, anchor_h=anchor_h_local
                     )
                     if filtered_by_height:
@@ -6652,8 +6659,6 @@ def read_text_table(
             candidate_entries = normalized_entries
             table_lines = normalized_lines
 
-            anchor_h, anchor_count = _compute_anchor_height(candidate_entries)
-            anchor_h = float(anchor_h or 0.20)
             anchors = [
                 entry
                 for entry in candidate_entries
@@ -6664,6 +6669,12 @@ def read_text_table(
                 )
             ]
             anchor_count = len(anchors)
+            anchor_h = 0.0
+            if anchor_count:
+                anchor_h, counted = _compute_anchor_h(anchors)
+                if counted <= 0:
+                    anchor_h = 0.0
+                anchor_h = float(anchor_h or 0.20)
             print(
                 f"[TEXT-SCAN] anchors={len(anchors)} h_anchor={anchor_h:.2f}"
                 if anchors
@@ -6671,7 +6682,7 @@ def read_text_table(
             )
             total_by_height = len(candidate_entries)
             if anchor_count > 0 and anchor_h > 0 and candidate_entries:
-                filtered_entries = _filter_entries_by_anchor_height(
+                filtered_entries = _filter_entries_by_anchor_h(
                     candidate_entries, anchor_h=anchor_h
                 )
                 kept_count = len(filtered_entries)
@@ -6952,7 +6963,7 @@ def read_text_table(
                             entry.get("normalized_text") or entry.get("text")
                         )
                     ],
-                    "anchor_height": anchor_h,
+                    "anchor_h": anchor_h,
                     "layout_order": [
                         idx for idx in layout_order if _coerce_layout_index(idx) in anchor_layouts
                     ],
