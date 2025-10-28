@@ -97,15 +97,7 @@ class HoleRow:
 _DEBUG_DIR = Path("debug")
 _DEBUG_ROWS_PATH = _DEBUG_DIR / "hole_table_rows.csv"
 _DEBUG_TOTALS_PATH = _DEBUG_DIR / "ops_table_totals.json"
-_DEBUG_FIELDNAMES = (
-    "qty",
-    "kind",
-    "side",
-    "tool",
-    "diam_token",
-    "depth_token",
-    "raw_text",
-)
+_DEBUG_ROW_FIELDNAMES = ("ref", "qty", "raw_desc", "features_json")
 
 
 def _format_inches_token(value_mm: Optional[float]) -> str:
@@ -139,25 +131,29 @@ def _format_tool_token(kind: str, feature: Dict[str, Any]) -> str:
     return ""
 
 
-def _hole_rows_debug_records(rows: List[HoleRow]) -> tuple[list[dict[str, Any]], int]:
-    records: list[dict[str, Any]] = []
+def _hole_rows_debug_records(
+    rows: List[HoleRow],
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]], int]:
+    row_records: list[dict[str, Any]] = []
+    feature_records: list[dict[str, Any]] = []
     qty_sum = 0
     for row in rows:
         qty = int(getattr(row, "qty", 0) or 0)
         raw_desc = getattr(row, "raw_desc", "")
         features = list(getattr(row, "features", []) or [])
+        try:
+            features_json = json.dumps(features, sort_keys=True, default=str)
+        except Exception:
+            features_json = json.dumps([], sort_keys=True)
+        row_records.append(
+            {
+                "ref": getattr(row, "ref", ""),
+                "qty": qty,
+                "raw_desc": raw_desc,
+                "features_json": features_json,
+            }
+        )
         if not features:
-            records.append(
-                {
-                    "qty": qty,
-                    "kind": "",
-                    "side": "",
-                    "tool": "",
-                    "diam_token": "",
-                    "depth_token": "",
-                    "raw_text": raw_desc,
-                }
-            )
             qty_sum += qty
             continue
         for feature in features:
@@ -176,9 +172,9 @@ def _hole_rows_debug_records(rows: List[HoleRow]) -> tuple[list[dict[str, Any]],
                 "depth_token": _format_depth_token(feature),
                 "raw_text": raw_desc,
             }
-            records.append(record)
+            feature_records.append(record)
             qty_sum += qty
-    return records, qty_sum
+    return row_records, feature_records, qty_sum
 
 
 def _hole_rows_totals(records: list[dict[str, Any]]) -> dict[str, int]:
@@ -200,21 +196,23 @@ def _hole_rows_totals(records: list[dict[str, Any]]) -> dict[str, int]:
     return totals
 
 
-def _write_hole_table_debug(records: list[dict[str, Any]], qty_sum: int) -> None:
-    if not records:
-        return
+def _write_hole_table_debug(
+    row_records: list[dict[str, Any]],
+    feature_records: list[dict[str, Any]],
+    qty_sum: int,
+) -> None:
     try:
         _DEBUG_DIR.mkdir(parents=True, exist_ok=True)
         with _DEBUG_ROWS_PATH.open("w", newline="", encoding="utf-8") as handle:
-            writer = csv.DictWriter(handle, fieldnames=_DEBUG_FIELDNAMES)
+            writer = csv.DictWriter(handle, fieldnames=_DEBUG_ROW_FIELDNAMES)
             writer.writeheader()
-            writer.writerows(records)
-        totals = _hole_rows_totals(records)
+            writer.writerows(row_records)
+        totals = _hole_rows_totals(feature_records)
         with _DEBUG_TOTALS_PATH.open("w", encoding="utf-8") as handle:
             json.dump(totals, handle, indent=2, sort_keys=True)
             handle.write("\n")
         print(
-            f"[TABLE-DUMP] rows={len(records)} qty_sum={qty_sum} -> {_DEBUG_ROWS_PATH.as_posix()}"
+            f"[TABLE-DUMP] rows={len(row_records)} qty_sum={qty_sum} -> {_DEBUG_ROWS_PATH.as_posix()}"
         )
         print(f"[OPS] table totals -> {_DEBUG_TOTALS_PATH.as_posix()}")
     except Exception:
@@ -332,8 +330,8 @@ def parse_hole_table_lines(lines: List[str]) -> List[HoleRow]:
         rows.append(HoleRow(ref=ref, qty=qty, features=features, raw_desc=desc))
 
     try:
-        records, qty_sum = _hole_rows_debug_records(rows)
-        _write_hole_table_debug(records, qty_sum)
+        row_records, feature_records, qty_sum = _hole_rows_debug_records(rows)
+        _write_hole_table_debug(row_records, feature_records, qty_sum)
     except Exception:
         pass
 

@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+import csv
 import math
 import re
 from collections import Counter
+from pathlib import Path
 from typing import Any, Dict, Iterable, Iterator, List
 
 from cad_quoter.vendors import ezdxf as _ezdxf_vendor
@@ -83,6 +85,150 @@ def iter_spaces(doc: Any) -> List[Any]:
         spaces.append(entity_space)
 
     return spaces
+
+
+_DEBUG_DIR = Path("debug")
+_DEBUG_CHART_PATH = _DEBUG_DIR / "chart_text_raw.csv"
+_DEBUG_CHART_FIELDNAMES = ("etype", "layer", "height", "x", "y", "text")
+
+
+def _point_to_xy(point: Any) -> tuple[float | None, float | None]:
+    try:
+        if hasattr(point, "xyz"):
+            x_val, y_val, _ = point.xyz
+        else:
+            x_val, y_val = point[0], point[1]
+    except Exception:
+        return (None, None)
+    try:
+        return (float(x_val), float(y_val))
+    except Exception:
+        return (None, None)
+
+
+def _entity_xy(entity: Any) -> tuple[float | None, float | None]:
+    candidates = ("insert", "alignment_point", "center", "start")
+    for attr in candidates:
+        try:
+            value = getattr(entity.dxf, attr)
+        except Exception:
+            value = None
+        if value is None:
+            continue
+        x_val, y_val = _point_to_xy(value)
+        if x_val is not None or y_val is not None:
+            return (x_val, y_val)
+    return (None, None)
+
+
+def _entity_height(entity: Any) -> float | None:
+    for attr in ("char_height", "height"):
+        try:
+            value = getattr(entity.dxf, attr)
+        except Exception:
+            value = None
+        if value in (None, ""):
+            continue
+        try:
+            return float(value)
+        except Exception:
+            continue
+    return None
+
+
+def _entity_text(entity: Any) -> str:
+    try:
+        etype = entity.dxftype()
+    except Exception:
+        etype = ""
+    if etype == "MTEXT":
+        try:
+            if hasattr(entity, "plain_text"):
+                return str(entity.plain_text())
+        except Exception:
+            pass
+        try:
+            return str(entity.text)
+        except Exception:
+            return ""
+    if etype == "TEXT":
+        try:
+            return str(entity.dxf.text)
+        except Exception:
+            return ""
+    return ""
+
+
+def _collect_chart_layout_records(doc: Any) -> list[dict[str, Any]]:
+    records: list[dict[str, Any]] = []
+    if doc is None:
+        return records
+    try:
+        layouts = list(doc.layouts.names_in_taborder())
+    except Exception:
+        layouts = []
+    target_layout = None
+    for layout_name in layouts:
+        if layout_name and layout_name.upper() == "CHART":
+            target_layout = layout_name
+            break
+    if not target_layout:
+        return records
+    try:
+        layout = doc.layouts.get(target_layout)
+    except Exception:
+        return records
+    try:
+        space = layout.entity_space
+    except Exception:
+        return records
+    try:
+        iterator = iter(space)
+    except Exception:
+        iterator = []
+    for entity in iterator:
+        try:
+            etype = entity.dxftype()
+        except Exception:
+            etype = ""
+        try:
+            layer = str(getattr(entity.dxf, "layer", "") or "")
+        except Exception:
+            layer = ""
+        height = _entity_height(entity)
+        x_val, y_val = _entity_xy(entity)
+        text = _entity_text(entity)
+        records.append(
+            {
+                "etype": etype or "",
+                "layer": layer,
+                "height": height,
+                "x": x_val,
+                "y": y_val,
+                "text": text,
+            }
+        )
+    return records
+
+
+def _write_chart_layout_debug(records: list[dict[str, Any]]) -> None:
+    try:
+        _DEBUG_DIR.mkdir(parents=True, exist_ok=True)
+        with _DEBUG_CHART_PATH.open("w", newline="", encoding="utf-8") as handle:
+            writer = csv.DictWriter(handle, fieldnames=_DEBUG_CHART_FIELDNAMES)
+            writer.writeheader()
+            for record in records:
+                row = {
+                    "etype": record.get("etype", ""),
+                    "layer": record.get("layer", ""),
+                    "height": record.get("height"),
+                    "x": record.get("x"),
+                    "y": record.get("y"),
+                    "text": record.get("text", ""),
+                }
+                writer.writerow(row)
+    except Exception:
+        pass
 
 
 def iter_table_entities(doc: Any) -> Iterator[Any]:
@@ -301,6 +447,15 @@ def harvest_hole_table(doc: Any) -> Dict[str, Any]:
     lines: List[str] = []
     family_guess: Counter[float] = Counter()
 
+    try:
+        chart_debug_records = _collect_chart_layout_records(doc)
+    except Exception:
+        chart_debug_records = []
+    try:
+        _write_chart_layout_debug(chart_debug_records)
+    except Exception:
+        pass
+
     for raw in iter_table_text(doc):
         upper = raw.upper()
         if not any(keyword in upper for keyword in ("HOLE", "TAP", "THRU", "CBORE", "C'BORE", "DRILL", "Ø", "⌀")):
@@ -490,4 +645,3 @@ __all__ = [
     "build_geo_from_doc",
     "build_geo_from_dxf",
 ]
-
