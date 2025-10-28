@@ -1747,7 +1747,8 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument(
         "--dump-ents",
         dest="dump_ents",
-        help="Write scanned text entities to CSV",
+        action="store_true",
+        help="Write scanned text entities to debug/ents_dump.jsonl",
     )
     parser.add_argument(
         "--dump-dir",
@@ -3204,31 +3205,38 @@ def main(argv: Sequence[str] | None = None) -> int:
                     text_jsonl_path = str(text_jsonl_written)
 
     if args.dump_ents:
-        entities = debug_info.get("collected_entities") if isinstance(debug_info, Mapping) else None
-        target_path = Path(args.dump_ents)
+        entities = (
+            debug_info.get("collected_entities") if isinstance(debug_info, Mapping) else None
+        )
+        target_path = dump_dir_path / "ents_dump.jsonl"
         try:
             target_path.parent.mkdir(parents=True, exist_ok=True)
-            with target_path.open("w", newline="", encoding="utf-8") as handle:
-                writer = csv.writer(handle)
-                writer.writerow(["layout", "layer", "type", "x", "y", "height", "text"])
+            with target_path.open("w", encoding="utf-8") as handle:
                 for entry in entities or []:
                     if not isinstance(entry, Mapping):
                         continue
-                    writer.writerow(
-                        [
-                            str(entry.get("layout", "")),
-                            str(entry.get("layer", "")),
-                            str(entry.get("type", "")),
-                            "" if entry.get("x") is None else entry.get("x"),
-                            "" if entry.get("y") is None else entry.get("y"),
-                            "" if entry.get("height") is None else entry.get("height"),
-                            str(entry.get("text", "")),
-                        ]
-                    )
+                    record = {
+                        "type": entry.get("type"),
+                        "handle": entry.get("handle"),
+                        "layout": entry.get("layout"),
+                        "layer": entry.get("layer"),
+                        "from_block": bool(entry.get("from_block")),
+                        "block_name": entry.get("block_name"),
+                        "depth": entry.get("depth"),
+                        "height": entry.get("height"),
+                        "rotation": entry.get("rotation"),
+                        "x": entry.get("x"),
+                        "y": entry.get("y"),
+                        "text": entry.get("text"),
+                        "plain_text": entry.get("plain_text"),
+                        "raw_text": entry.get("raw_text"),
+                    }
+                    json.dump(record, handle, ensure_ascii=False)
+                    handle.write("\n")
         except OSError as exc:
             print(f"[geo_dump] failed to write entity dump: {exc}")
         else:
-            print(f"[geo_dump] wrote entity dump to {target_path}")
+            print(f"[ENT-DUMP] -> {target_path}")
 
     def _format_counts(counts: Mapping[str, int] | None) -> str:
         if not counts:

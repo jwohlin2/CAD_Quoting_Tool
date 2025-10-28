@@ -309,6 +309,37 @@ def _matrix_rotate(rad: float) -> TransformMatrix:
     return (cos_a, -sin_a, 0.0, sin_a, cos_a, 0.0)
 
 
+def _matrix_from_matrix44(matrix_obj: Any) -> TransformMatrix | None:
+    """Convert an ``ezdxf`` Matrix44 into a 2D affine transform."""
+
+    if matrix_obj is None:
+        return None
+    data: Any = getattr(matrix_obj, "matrix", None)
+    if data is None:
+        tolist = getattr(matrix_obj, "tolist", None)
+        if callable(tolist):
+            try:
+                data = tolist()
+            except Exception:
+                data = None
+    try:
+        row0 = data[0]
+        row1 = data[1]
+    except Exception:
+        return None
+    try:
+        return (
+            float(row0[0]),
+            float(row0[1]),
+            float(row0[3]),
+            float(row1[0]),
+            float(row1[1]),
+            float(row1[3]),
+        )
+    except Exception:
+        return None
+
+
 def _apply_transform_point(
     matrix: TransformMatrix, point: tuple[float | None, float | None]
 ) -> tuple[float | None, float | None]:
@@ -696,7 +727,18 @@ def flatten_entities(
             return
 
         block_layout = _resolve_block_layout(entity)
-        local_transform = _insert_local_transform(entity, block_layout)
+        matrix44 = None
+        get_matrix = getattr(entity, "matrix44", None)
+        if callable(get_matrix):
+            try:
+                matrix44 = get_matrix()
+            except Exception:
+                matrix44 = None
+        local_transform = None
+        if matrix44 is not None:
+            local_transform = _matrix_from_matrix44(matrix44)
+        if local_transform is None:
+            local_transform = _insert_local_transform(entity, block_layout)
         child_transform = _matrix_multiply(transform, local_transform)
         child_stack = block_stack + (block_name,) if block_name else block_stack
         child_parent_layer = effective_layer or parent_effective_layer
@@ -708,7 +750,7 @@ def flatten_entities(
             nested_entities = _iter_container(entity_space if entity_space is not None else block_layout)
         if not nested_entities:
             try:
-                nested_entities = list(entity.virtual_entities())
+                nested_entities = list(entity.virtual_entities(deep=True))
             except Exception:
                 nested_entities = []
             else:
@@ -6998,6 +7040,10 @@ def read_text_table(
 
     include_patterns = _compile_layer_patterns(layer_include_regex)
     exclude_patterns = _compile_layer_patterns(layer_exclude_regex)
+    if include_patterns:
+        include_patterns = list(dict.fromkeys(include_patterns))
+    if exclude_patterns:
+        exclude_patterns = list(dict.fromkeys(exclude_patterns))
     if scan_overrides.include_layers is not None:
         include_patterns = _compile_layer_patterns(scan_overrides.include_layers)
     if scan_overrides.exclude_layers is not None:
@@ -7402,6 +7448,7 @@ def read_text_table(
                     parent_effective_layer = flattened.effective_layer
                     active_block = flattened.block_name
                     from_block = bool(flattened.from_block)
+                    dxf_obj = getattr(entity, "dxf", None)
                     try:
                         dxftype = entity.dxftype()
                     except Exception:
@@ -7425,6 +7472,33 @@ def read_text_table(
                         text_height = _extract_text_height(entity)
                         if isinstance(text_height, (int, float)):
                             text_height = float(text_height) * _transform_scale_hint(flattened.transform)
+                        rotation_val = None
+                        if dxf_obj is not None and hasattr(dxf_obj, "rotation"):
+                            try:
+                                rotation_val = float(getattr(dxf_obj, "rotation"))
+                            except Exception:
+                                rotation_val = None
+                        if rotation_val is None:
+                            try:
+                                rotation_raw = getattr(entity, "rotation")
+                            except Exception:
+                                rotation_raw = None
+                            if rotation_raw not in (None, ""):
+                                try:
+                                    rotation_val = float(rotation_raw)
+                                except Exception:
+                                    rotation_val = None
+                        handle_value = None
+                        if dxf_obj is not None and hasattr(dxf_obj, "handle"):
+                            try:
+                                handle_value = dxf_obj.handle
+                            except Exception:
+                                handle_value = None
+                        if handle_value in (None, "") and hasattr(entity, "handle"):
+                            try:
+                                handle_value = entity.handle
+                            except Exception:
+                                handle_value = None
                         counted_block_text = False
                         counted_block_attr = False
                         for fragment, is_mtext in _iter_entity_text_fragments(entity):
@@ -7432,6 +7506,11 @@ def read_text_table(
                             if not normalized:
                                 continue
                             normalized_upper = normalized.upper()
+                            try:
+                                raw_fragment = str(fragment)
+                            except Exception:
+                                raw_fragment = fragment if isinstance(fragment, str) else ""
+                            plain_fragment = normalized
                             if kind in {"ATTRIB", "ATTDEF"}:
                                 attrib_count += 1
                                 if active_block and not counted_block_attr:
@@ -7463,6 +7542,9 @@ def read_text_table(
                                 "layout_index": layout_index,
                                 "layout_name": layout_name,
                                 "text": normalized,
+                                "normalized_text": normalized,
+                                "raw_text": raw_fragment,
+                                "plain_text": plain_fragment,
                                 "x": coords[0],
                                 "y": coords[1],
                                 "order": counter,
@@ -7475,6 +7557,9 @@ def read_text_table(
                                 "block_name": active_block,
                                 "block_stack": list(flattened.block_stack),
                                 "entity_type": entity_type,
+                                "handle": handle_value,
+                                "rotation": rotation_val,
+                                "depth": int(flattened.depth),
                             }
                             counter += 1
                             collected_entries.append(entry)
@@ -7722,6 +7807,74 @@ def read_text_table(
                     _LAST_TEXT_TABLE_DEBUG["scanned_layouts"] = list(layout_names_seen)
                 raise RuntimeError("No text found before layer filtering…")
             layout_counts_pre = _count_layouts(collected_entries)
+            anchor_scan_entries: list[dict[str, Any]] = []
+            for entry in collected_entries:
+                raw_text_value = entry.get("text")
+                try:
+                    text_value = str(raw_text_value or "")
+                except Exception:
+                    text_value = ""
+                if not text_value.strip():
+                    continue
+                anchor_scan_entries.append(
+                    {
+                        "layout": entry.get("layout_name"),
+                        "from_block": bool(entry.get("from_block")),
+                        "x": entry.get("x"),
+                        "y": entry.get("y"),
+                        "text": text_value,
+                        "height": entry.get("height"),
+                    }
+                )
+            if anchor_scan_entries:
+                height_samples = [
+                    float(val)
+                    for val in (entry.get("height") for entry in anchor_scan_entries)
+                    if isinstance(val, (int, float)) and float(val) > 0
+                ]
+                try:
+                    base_anchor_height = (
+                        float(statistics.median(height_samples)) if height_samples else 0.0
+                    )
+                except Exception:
+                    base_anchor_height = float(height_samples[0]) if height_samples else 0.0
+                anchor_lines_pre, header_tokens_pre = _detect_anchor_lines(
+                    anchor_scan_entries,
+                    base_height=base_anchor_height,
+                )
+                anchor_height_value = base_anchor_height
+                anchor_specific_heights = [
+                    float(line.get("height"))
+                    for line in anchor_lines_pre
+                    if isinstance(line.get("height"), (int, float)) and float(line.get("height")) > 0
+                ]
+                if anchor_specific_heights:
+                    try:
+                        anchor_height_value = float(statistics.median(anchor_specific_heights))
+                    except Exception:
+                        anchor_height_value = float(anchor_specific_heights[0])
+                if not isinstance(anchor_height_value, (int, float)) or anchor_height_value <= 0:
+                    anchor_height_display = "-"
+                else:
+                    anchor_height_display = f"{float(anchor_height_value):.3f}"
+                tokens_set = {token for token in header_tokens_pre if token}
+                if tokens_set:
+                    tokens_display = "{" + ",".join(f"'{token}'" for token in sorted(tokens_set)) + "}"
+                else:
+                    tokens_display = "{}"
+                print(
+                    "[ANCHOR] tokens={tokens} found={count} anchor_height={height}".format(
+                        tokens=tokens_display,
+                        count=len(anchor_lines_pre),
+                        height=anchor_height_display,
+                    )
+                )
+                if isinstance(_LAST_TEXT_TABLE_DEBUG, dict):
+                    _LAST_TEXT_TABLE_DEBUG["anchors_pre_filter"] = {
+                        "count": len(anchor_lines_pre),
+                        "tokens": list(sorted(tokens_set)),
+                        "anchor_height": anchor_height_value,
+                    }
             if debug_scan_enabled:
                 layout_display = ", ".join(
                     str(name) for name in layout_names_seen if isinstance(name, str)
@@ -7910,8 +8063,15 @@ def read_text_table(
                         "x": entry.get("x"),
                         "y": entry.get("y"),
                         "height": entry.get("height"),
+                        "rotation": entry.get("rotation"),
                         "text": str(entry.get("text") or ""),
+                        "plain_text": entry.get("plain_text"),
+                        "raw_text": entry.get("raw_text"),
                         "from_block": bool(entry.get("from_block")),
+                        "block_name": entry.get("block_name"),
+                        "depth": entry.get("depth"),
+                        "handle": entry.get("handle"),
+                        "block_path": list(entry.get("block_stack") or []),
                     }
                     for entry in collected_entries
                 ]
