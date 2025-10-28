@@ -23,6 +23,7 @@ from cad_quoter.geo_extractor import (
     DEFAULT_TEXT_LAYER_EXCLUDE_REGEX,
     NO_TEXT_ROWS_MESSAGE,
     NoTextRowsError,
+    TextScanOpts,
     extract_for_app,
 )
 
@@ -83,6 +84,7 @@ TABLE_EXTRACT_ALLOWED_KEYS = {
     "layout_filters",
     "debug_layouts",
     "debug_scan",
+    "text_scan_opts",
 }
 
 
@@ -1477,6 +1479,39 @@ def main(argv: Sequence[str] | None = None) -> int:
         ),
     )
     parser.add_argument(
+        "--text-min-height",
+        dest="text_min_height",
+        type=float,
+        help="Minimum text height (drawing units) for anchor text scan",
+    )
+    parser.add_argument(
+        "--text-include-layers",
+        dest="text_include_layers",
+        action="append",
+        metavar="REGEX",
+        help="Regex pattern to include layers during anchor text scan (repeatable)",
+    )
+    parser.add_argument(
+        "--text-exclude-layers",
+        dest="text_exclude_layers",
+        action="append",
+        metavar="REGEX",
+        help="Regex pattern to exclude layers during anchor text scan (repeatable)",
+    )
+    parser.add_argument(
+        "--text-anchor-ratio",
+        dest="text_anchor_ratio",
+        type=float,
+        help="Anchor height tolerance ratio for filtered text scan (e.g. 0.4 for ±40%)",
+    )
+    parser.add_argument(
+        "--text-layout",
+        dest="text_layouts",
+        action="append",
+        metavar="NAME",
+        help="Restrict anchor text scan to the specified layout name (repeatable)",
+    )
+    parser.add_argument(
         "--no-exclude-layer",
         dest="no_exclude_layer",
         action="store_true",
@@ -1781,6 +1816,15 @@ def main(argv: Sequence[str] | None = None) -> int:
             display = ", ".join(layout_names) if layout_names else "<none>"
             print(f"[geo_dump] layouts={display}")
 
+    text_layouts = [
+        value.strip()
+        for value in args.text_layouts or []
+        if isinstance(value, str) and value.strip()
+    ]
+    if text_layouts:
+        read_kwargs["layout_filters"] = list(text_layouts)
+        print(f"[geo_dump] text_layouts={text_layouts}")
+
     layer_allow_args = list(args.layer_allow or [])
     allow_layers_arg = getattr(args, "allow_layers", None)
     if allow_layers_arg:
@@ -1882,6 +1926,34 @@ def main(argv: Sequence[str] | None = None) -> int:
     if args.show_helpers:
         display_regex = ", ".join(active_layer_exclude) if active_layer_exclude else "<none>"
         print(f"[geo_dump] active layer exclude regex={display_regex}")
+
+    text_anchor_ratio = args.text_anchor_ratio
+    text_min_height = args.text_min_height
+    text_include_patterns = _normalize_pattern_args(args.text_include_layers)
+    text_exclude_patterns = _normalize_pattern_args(args.text_exclude_layers)
+    include_tuple = tuple(text_include_patterns) if text_include_patterns else None
+    exclude_tuple = tuple(text_exclude_patterns) if text_exclude_patterns else None
+    if (
+        text_anchor_ratio is not None
+        or text_min_height is not None
+        or include_tuple is not None
+        or exclude_tuple is not None
+    ):
+        scan_opts_obj = TextScanOpts(
+            anchor_ratio=text_anchor_ratio,
+            min_height=text_min_height,
+            include_layers=include_tuple,
+            exclude_layers=exclude_tuple,
+        )
+        read_kwargs["text_scan_opts"] = scan_opts_obj
+        if text_anchor_ratio is not None:
+            print(f"[geo_dump] text_anchor_ratio={text_anchor_ratio}")
+        if text_min_height is not None:
+            print(f"[geo_dump] text_min_height={text_min_height}")
+        if text_include_patterns:
+            print(f"[geo_dump] text_include_layers={text_include_patterns}")
+        if text_exclude_patterns:
+            print(f"[geo_dump] text_exclude_layers={text_exclude_patterns}")
 
     extract_opts = {
         key: read_kwargs[key]
