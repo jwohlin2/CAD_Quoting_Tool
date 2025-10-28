@@ -492,7 +492,7 @@ def test_fallback_semicolon_row_splits_actions() -> None:
     assert buckets.get("drill") == 4
 
 
-def test_anchor_height_filter_drops_small_text() -> None:
+def test_anchor_h_filter_drops_small_text() -> None:
     entries = [
         {"normalized_text": "(2) Ø0.250 DRILL", "height": 0.20},
         {"normalized_text": "FROM FRONT", "height": 0.21},
@@ -500,13 +500,13 @@ def test_anchor_height_filter_drops_small_text() -> None:
         {"normalized_text": "1 1 2 2 3 3 4 4", "height": 0.06},
     ]
 
-    anchor_height, anchor_count = geo_extractor._compute_anchor_height(entries)
+    anchor_h, anchor_count = geo_extractor._compute_anchor_h(entries)
 
     assert anchor_count == 2
-    assert anchor_height == pytest.approx(0.195, rel=1e-3)
+    assert anchor_h == pytest.approx(0.195, rel=1e-3)
 
-    filtered = geo_extractor._filter_entries_by_anchor_height(
-        entries, anchor_height=anchor_height
+    filtered = geo_extractor._filter_entries_by_anchor_h(
+        entries, anchor_h=anchor_h
     )
     filtered_texts = {entry.get("normalized_text") for entry in filtered}
 
@@ -758,7 +758,7 @@ def test_anchor_band_lines_use_expanded_window() -> None:
     context = {
         "entries": [header, *rows, tall_row, terminator, far_entry],
         "anchor_entries": rows[:3],
-        "anchor_height": 5.0,
+        "anchor_h": 5.0,
         "layout_order": [1],
     }
 
