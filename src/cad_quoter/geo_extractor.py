@@ -58,22 +58,25 @@ _OPS_SEGMENT_SPLIT_RE = re.compile(r"[;•]+")
 _TAP_TOKEN_RE = re.compile(r"\bTAP\b", re.IGNORECASE)
 _NPT_TOKEN_RE = re.compile(r"\bN\.?P\.?T\.?\b", re.IGNORECASE)
 _THREAD_TOKEN_RE = re.compile(
-    r"\b(?:#\s*\d+\s*-\s*\d+|#\d+-\d+|\d+\s*/\s*\d+\s*-\s*\d+|\d+-\d+)\b",
+    r"(?:#\s*\d+\s*-\s*\d+|\b\d+\s*/\s*\d+\s*-\s*\d+\b|\b\d+\s*-\s*\d+\b)",
     re.IGNORECASE,
 )
 _COUNTERBORE_TOKEN_RE = re.compile(
-    r"\b(?:C['’]?\s*BORE|C\s*BORE|COUNTER\s*BORE)\b",
+    r"\b(?:C['’]?\s*BORE|CBORE|COUNTER\s*BORE)\b",
     re.IGNORECASE,
 )
 _COUNTERSINK_TOKEN_RE = re.compile(
-    r"\b(?:C['’]?\s*SINK|CSK|COUNTER\s*SINK)\b",
+    r"\b(?:C['’]?\s*SINK|CSK|COUNTERSINK|COUNTER\s*SINK)\b",
     re.IGNORECASE,
 )
 _COUNTERDRILL_TOKEN_RE = re.compile(
     r"\b(?:C['’]?\s*DRILL|COUNTER\s*DRILL|CTR\s*DRILL)\b",
     re.IGNORECASE,
 )
-_JIG_GRIND_TOKEN_RE = re.compile(r"\b(?:JIG\s*GRIND|JG)\b", re.IGNORECASE)
+_JIG_GRIND_TOKEN_RE = re.compile(
+    r"\b(?:JIG\s*GRIND|JIG[-\s]?GROUND|JG)\b",
+    re.IGNORECASE,
+)
 _SPOT_TOKEN_RE = re.compile(r"\bSPOT\b", re.IGNORECASE)
 _DRILL_TOKEN_RE = re.compile(r"\bDRILL\b", re.IGNORECASE)
 _DRILL_SIZE_PATTERNS: tuple[re.Pattern[str], ...] = (
@@ -211,6 +214,59 @@ def _point2d(value: Any) -> tuple[float, float] | None:
     return None
 
 
+def _point3d(value: Any) -> tuple[float, float, float] | None:
+    if value is None:
+        return None
+    if hasattr(value, "xyz"):
+        try:
+            x_val, y_val, z_val = value.xyz
+            return (float(x_val), float(y_val), float(z_val))
+        except Exception:
+            return None
+    for accessor in (("x", "y", "z"), (0, 1, 2)):
+        coords: list[float] = []
+        missing = True
+        for key in accessor:
+            try:
+                candidate = getattr(value, key) if isinstance(key, str) else value[key]
+            except Exception:
+                candidate = None
+            if candidate is None:
+                coords.append(0.0)
+            else:
+                missing = False
+                try:
+                    coords.append(float(candidate))
+                except Exception:
+                    coords = []
+                    break
+        if coords and not missing:
+            try:
+                x_val, y_val, z_val = coords
+                return (x_val, y_val, z_val)
+            except Exception:
+                continue
+    return None
+
+
+def _is_positive_z_normal(candidate: Any, tol: float = 1e-6) -> bool:
+    vector = _point3d(candidate)
+    if vector is None:
+        return True
+    nx, ny, nz = vector
+    magnitude = math.sqrt(nx * nx + ny * ny + nz * nz)
+    if not math.isfinite(magnitude) or magnitude <= 0.0:
+        return False
+    nx /= magnitude
+    ny /= magnitude
+    nz /= magnitude
+    if nz <= tol:
+        return False
+    if abs(nx) > tol or abs(ny) > tol:
+        return False
+    return True
+
+
 def _iter_insert_attributes(entity: Any) -> Iterable[Any]:
     attr_seen: set[int] = set()
     for attr_name in ("attribs", "attribs_raw"):
@@ -240,8 +296,19 @@ def _iter_insert_attributes(entity: Any) -> Iterable[Any]:
             yield attr_entity
 
 
-def flatten_entities(layout: Any, depth: int = 5) -> Iterable[FlattenedEntity]:
-    """Yield entities from ``layout`` with accumulated block transforms."""
+def flatten_entities(
+    layout: Any,
+    depth: int = 5,
+    *,
+    include_block: Callable[[str | None], bool] | None = None,
+) -> Iterable[FlattenedEntity]:
+    """Yield entities from ``layout`` with accumulated block transforms.
+
+    Args:
+        include_block: Optional predicate invoked for each ``INSERT`` block
+            reference. When provided, recursion into the block's entities is
+            skipped unless the predicate returns ``True`` for the block name.
+    """
 
     if layout is None:
         return
@@ -429,6 +496,17 @@ def flatten_entities(layout: Any, depth: int = 5) -> Iterable[FlattenedEntity]:
         if block_name and block_name in block_stack:
             return
 
+        if include_block is not None:
+            try:
+                allow_block = bool(include_block(block_name))
+            except Exception:
+                allow_block = True
+        else:
+            allow_block = True
+
+        if not allow_block:
+            return
+
         block_layout = _resolve_block_layout(entity)
         local_transform = _insert_local_transform(entity, block_layout)
         child_transform = _matrix_multiply(transform, local_transform)
@@ -495,6 +573,8 @@ if _TEXT_LAYER_EXCLUDE_ENV is not None:
     else:
         DEFAULT_TEXT_LAYER_EXCLUDE_REGEX = tuple()
 
+_GEOM_BLOCK_EXCLUDE_RE = re.compile(r"^(TITLE|BORDER|CHART|FRAME|AM_.*)$", re.IGNORECASE)
+
 _GEO_STRICT_ANCHOR = _env_flag("GEO_STRICT_ANCHOR")
 try:
     _GEO_H_ANCHOR_MIN = float(os.environ.get("GEO_H_ANCHOR_MIN", "0.10") or 0.10)
@@ -502,6 +582,23 @@ except Exception:
     _GEO_H_ANCHOR_MIN = 0.10
 _GEO_H_ANCHOR_MIN = max(_GEO_H_ANCHOR_MIN, 0.0)
 _GEO_H_ANCHOR_HARD_MIN = 0.04
+
+try:
+    _GEO_CIRCLE_DIAM_MIN_IN = float(os.environ.get("GEO_CIRCLE_DIAM_MIN_IN", "0.09") or 0.09)
+except Exception:
+    _GEO_CIRCLE_DIAM_MIN_IN = 0.09
+_GEO_CIRCLE_DIAM_MIN_IN = max(_GEO_CIRCLE_DIAM_MIN_IN, 0.0)
+
+try:
+    _GEO_CIRCLE_DIAM_MAX_IN = float(os.environ.get("GEO_CIRCLE_DIAM_MAX_IN", "3.0") or 3.0)
+except Exception:
+    _GEO_CIRCLE_DIAM_MAX_IN = 3.0
+if _GEO_CIRCLE_DIAM_MAX_IN <= 0.0:
+    _GEO_CIRCLE_DIAM_MAX_IN = 3.0
+if _GEO_CIRCLE_DIAM_MAX_IN < _GEO_CIRCLE_DIAM_MIN_IN:
+    _GEO_CIRCLE_DIAM_MAX_IN = _GEO_CIRCLE_DIAM_MIN_IN
+_GEO_CIRCLE_Z_ABS_MAX = 1e-6
+_GEO_CIRCLE_DEDUP_DIGITS = 3
 
 
 @dataclass(slots=True)
@@ -2828,9 +2925,11 @@ def classify_op_row(desc: str | None) -> list[dict[str, Any]]:
         kinds: list[tuple[str, str | None]] = []
         is_npt = bool(_NPT_TOKEN_RE.search(segment))
         is_cdrill = bool(_COUNTERDRILL_TOKEN_RE.search(segment))
+        has_thread_tap = bool(_THREAD_TOKEN_RE.search(segment))
+        has_tap_word = bool(_TAP_TOKEN_RE.search(segment))
         if is_npt:
             kinds.append(("npt", None))
-        elif _TAP_TOKEN_RE.search(segment) or _THREAD_TOKEN_RE.search(segment):
+        if is_npt or has_tap_word or has_thread_tap:
             kinds.append(("tap", None))
         if _COUNTERBORE_TOKEN_RE.search(segment):
             kinds.append(("cbore", None))
@@ -5776,40 +5875,6 @@ def read_text_table(
         am_bor_pre_count, am_bor_post_count, am_bor_drop_count = _perform_text_scan(
             resolved_allowlist
         )
-        if (
-            anchor_authoritative_result is None
-            and am_bor_pre_count >= 20
-            and am_bor_post_count == 0
-            and rows_txt_initial < 8
-        ):
-            tokens: list[str] = []
-            if resolved_allowlist is not None:
-                tokens = list(resolved_allowlist)
-            token_set = {str(token).upper() for token in tokens}
-            if "AM_BOR" not in token_set or resolved_allowlist is None:
-                print(
-                    "[TEXT-SCAN] auto-retry including AM_BOR (first pass dropped chart layer)"
-                )
-                if isinstance(_LAST_TEXT_TABLE_DEBUG, dict):
-                    _LAST_TEXT_TABLE_DEBUG.setdefault("auto_retry", {})["include_am_bor"] = {
-                        "dropped": int(am_bor_drop_count),
-                        "pre": int(am_bor_pre_count),
-                    }
-                if "AM_BOR" not in token_set:
-                    tokens.append("AM_BOR")
-                elif not tokens:
-                    tokens = ["AM_BOR"]
-                resolved_allowlist = _normalize_layer_allowlist(tokens)
-                allowlist_display = (
-                    "None"
-                    if resolved_allowlist is None
-                    else "{" + ",".join(sorted(resolved_allowlist) or []) + "}"
-                )
-                am_bor_pre_count, am_bor_post_count, am_bor_drop_count = _perform_text_scan(
-                    resolved_allowlist,
-                    ignore_regex_excludes=True,
-                )
-        
         def _parse_rows(row_texts: list[str]) -> tuple[list[dict[str, Any]], dict[str, int], int]:
             families: dict[str, int] = {}
             parsed: list[dict[str, Any]] = []
@@ -5878,8 +5943,7 @@ def read_text_table(
             text_rows_info = dict(anchor_authoritative_result)
             if isinstance(_LAST_TEXT_TABLE_DEBUG, dict):
                 _LAST_TEXT_TABLE_DEBUG["anchor_authoritative"] = True
-            if _GEO_STRICT_ANCHOR:
-                return (am_bor_pre_count, am_bor_post_count, am_bor_drop_count)
+            return (am_bor_pre_count, am_bor_post_count, am_bor_drop_count)
 
         if follow_sheet_target_layouts:
             follow_debug_entries: list[dict[str, Any]] = []
@@ -7339,10 +7403,28 @@ def ops_manifest(
 
 
 def geom_hole_census(doc: Any) -> dict[str, Any]:
+    blocks_included = 0
+    blocks_skipped = 0
+    groups_counter: defaultdict[float, int] = defaultdict(int)
+
     try:
         msp = doc.modelspace()
     except Exception:
-        return {"groups": [], "total": 0}
+        layouts = getattr(doc, "layouts", None)
+        layout_get = getattr(layouts, "get", None) if layouts is not None else None
+        if callable(layout_get):
+            try:
+                msp = layout_get("Model")
+            except Exception:
+                msp = None
+        else:
+            msp = None
+        if msp is None:
+            print(
+                "[GEOM] counted circles: total=0 from model=0 paperspace=0 "
+                "blocks_included=0 blocks_skipped=0"
+            )
+            return {"groups": [], "total": 0}
 
     units = detect_units_scale(doc)
     to_in = float(units.get("to_in") or 1.0)
@@ -7350,9 +7432,22 @@ def geom_hole_census(doc: Any) -> dict[str, Any]:
         re.compile(pattern, re.IGNORECASE) for pattern in DEFAULT_TEXT_LAYER_EXCLUDE_REGEX
     ]
     groups_counter: defaultdict[float, int] = defaultdict(int)
-    contributor_counter: defaultdict[tuple[str, str], int] = defaultdict(int)
+    seen_circle_keys: set[tuple[float, float, float]] = set()
+    total_candidates = 0
 
-    for flattened in flatten_entities(msp, depth=_MAX_INSERT_DEPTH):
+    def _allow_block(name: str | None) -> bool:
+        nonlocal blocks_included, blocks_skipped
+        if not name:
+            return True
+        if _GEOM_BLOCK_EXCLUDE_RE.match(name):
+            blocks_skipped += 1
+            return False
+        blocks_included += 1
+        return True
+
+    for flattened in flatten_entities(
+        msp, depth=_MAX_INSERT_DEPTH, include_block=_allow_block
+    ):
         entity = flattened.entity
         try:
             dxftype = entity.dxftype()
@@ -7360,6 +7455,7 @@ def geom_hole_census(doc: Any) -> dict[str, Any]:
             continue
         if str(dxftype or "").upper() != "CIRCLE":
             continue
+        dxf_obj = getattr(entity, "dxf", None)
         layer_upper = (
             getattr(flattened, "effective_layer_upper", "")
             or getattr(flattened, "layer_upper", "")
@@ -7367,21 +7463,57 @@ def geom_hole_census(doc: Any) -> dict[str, Any]:
         if layer_upper:
             if any(pattern.search(layer_upper) for pattern in exclude_patterns):
                 continue
-        layer_key = layer_upper or "-"
-        block_name = getattr(flattened, "block_name", None)
-        block_key = (block_name or "-").upper()
-        contributor_counter[(layer_key, block_key)] += 1
-        radius_val = getattr(getattr(entity, "dxf", None), "radius", None)
+        radius_val = getattr(dxf_obj, "radius", None)
+        if radius_val is None:
+            radius_val = getattr(entity, "radius", None)
         if not isinstance(radius_val, (int, float)):
+            continue
+        center_obj = getattr(dxf_obj, "center", None)
+        if center_obj is None:
+            center_obj = getattr(entity, "center", None)
+        center_coords = _point3d(center_obj)
+        if center_coords is None:
+            continue
+        cx_raw, cy_raw, cz_raw = center_coords
+        if not math.isfinite(cz_raw) or abs(cz_raw) > _GEO_CIRCLE_Z_ABS_MAX:
+            continue
+        tx, ty = _apply_transform_point(flattened.transform, (cx_raw, cy_raw))
+        if tx is None or ty is None:
+            continue
+        if not (math.isfinite(tx) and math.isfinite(ty)):
+            continue
+        normal_candidate = getattr(dxf_obj, "extrusion", None)
+        if normal_candidate is None:
+            normal_candidate = getattr(dxf_obj, "normal", None)
+        if normal_candidate is None:
+            normal_candidate = getattr(entity, "extrusion", None)
+        if normal_candidate is None:
+            normal_candidate = getattr(entity, "normal", None)
+        if not _is_positive_z_normal(normal_candidate):
             continue
         scaled_radius = float(radius_val) * _transform_scale_hint(flattened.transform)
         diameter_in = 2.0 * scaled_radius * to_in
         if not math.isfinite(diameter_in) or diameter_in <= 0:
             continue
-        if diameter_in < 0.04:
+        if diameter_in < _GEO_CIRCLE_DIAM_MIN_IN:
             continue
+        if _GEO_CIRCLE_DIAM_MAX_IN and diameter_in > _GEO_CIRCLE_DIAM_MAX_IN:
+            continue
+        total_candidates += 1
+        dedup_key = (
+            round(float(tx), _GEO_CIRCLE_DEDUP_DIGITS),
+            round(float(ty), _GEO_CIRCLE_DEDUP_DIGITS),
+            round(float(diameter_in), _GEO_CIRCLE_DEDUP_DIGITS),
+        )
+        if dedup_key in seen_circle_keys:
+            continue
+        seen_circle_keys.add(dedup_key)
         dia_key = round(diameter_in, 4)
         groups_counter[dia_key] += 1
+
+    unique_count = len(seen_circle_keys)
+    if total_candidates or unique_count:
+        print(f"[GEOM] unique circles after dedup: {unique_count} (was {total_candidates})")
 
     groups = [
         {"dia_in": float(diameter), "count": count}
@@ -7389,30 +7521,15 @@ def geom_hole_census(doc: Any) -> dict[str, Any]:
         if count > 0
     ]
     total = sum(entry["count"] for entry in groups)
-    contributors: list[dict[str, Any]] = []
-    if contributor_counter:
-        sorted_contributors = sorted(
-            contributor_counter.items(),
-            key=lambda item: (
-                -item[1],
-                item[0][0] or "",
-                item[0][1] or "",
-            ),
+    circle_total = sum(groups_counter.values())
+    model_circles = circle_total
+    print(
+        "[GEOM] counted circles: total={} from model={} paperspace=0 "
+        "blocks_included={} blocks_skipped={}".format(
+            circle_total, model_circles, blocks_included, blocks_skipped
         )
-        for (layer_token, block_token), count in sorted_contributors:
-            if count <= 0:
-                continue
-            layer_value = layer_token if layer_token != "-" else None
-            block_value = block_token if block_token != "-" else None
-            contributors.append({
-                "layer": layer_value,
-                "block": block_value,
-                "count": int(count),
-            })
-    result: dict[str, Any] = {"groups": groups, "total": total}
-    if contributors:
-        result["contributors"] = contributors
-    return result
+    )
+    return {"groups": groups, "total": total}
 
 
 def promote_table_to_geo(
@@ -7780,6 +7897,7 @@ def read_geo(
                 text_layer_allowlist = None
         except TypeError:
             pass
+    anchor_auto_publish = False
     if run_text:
         try:
             text_info = read_text_table(
@@ -7817,6 +7935,8 @@ def read_geo(
 
     if isinstance(text_info, Mapping) and text_info.get("anchor_authoritative"):
         state.anchor_authoritative = True
+        state.published = True
+        anchor_auto_publish = True
 
     acad_rows_list: list[dict[str, Any]] = []
     if isinstance(acad_info, Mapping):
@@ -8131,7 +8251,7 @@ def read_geo(
         publish_path = source_lower
     else:
         publish_path = "geom"
-    if not state.published:
+    if not state.published or anchor_auto_publish:
         print(
             f"[PATH] publish={publish_path} rows={len(rows_for_log)} qty_sum={qty_sum}"
         )
