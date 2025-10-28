@@ -179,7 +179,7 @@ def _log_text_stats(entries: Sequence[Mapping[str, Any]]) -> Counter[str]:
             layout = str(entry.get("layout") or "-")
             etype = str(entry.get("etype") or "-")
             layout_type_counts.setdefault(layout, Counter())[etype] += 1
-        priority_types = ("TEXT", "MTEXT", "ATTRIB", "MLEADER", "TABLE")
+        priority_types = ("TEXT", "MTEXT", "ATTRIB", "MLEADER", "TABLE", "TABLECELL")
         for layout in sorted(layout_type_counts):
             counter = layout_type_counts[layout]
             parts: list[str] = []
@@ -447,6 +447,14 @@ def _resolve_handle(entity: Any) -> str | None:
     return str(handle)
 
 
+def _normalize_mtext_plain_text(raw_text: str) -> str:
+    """Return plain text for ``raw_text`` extracted from an MTEXT entity."""
+
+    text = raw_text.replace("\\P", "\n").replace("\\~", "~")
+    text = re.sub(r"\\[AaCcFfHh][^;]*;", "", text)
+    return text
+
+
 def _extract_text_strings(entity: Any, etype: str) -> tuple[str | None, str | None]:
     raw_text: str | None = None
     plain_text: str | None = None
@@ -462,6 +470,8 @@ def _extract_text_strings(entity: Any, etype: str) -> tuple[str | None, str | No
                 plain_text = str(entity.plain_text())
             except Exception:
                 plain_text = None
+        if plain_text is None and raw_text is not None:
+            plain_text = _normalize_mtext_plain_text(raw_text)
     elif etype in {"TEXT", "ATTRIB", "ATTDEF"}:
         if dxf is not None and hasattr(dxf, "text"):
             try:
@@ -488,6 +498,8 @@ def _extract_text_strings(entity: Any, etype: str) -> tuple[str | None, str | No
                     plain_text = str(mtext_obj.plain_text())
                 except Exception:
                     plain_text = None
+            if plain_text is None and raw_text is not None:
+                plain_text = _normalize_mtext_plain_text(raw_text)
             if hasattr(mtext_obj, "destroy"):
                 try:
                     mtext_obj.destroy()
@@ -499,7 +511,7 @@ def _extract_text_strings(entity: Any, etype: str) -> tuple[str | None, str | No
             except Exception:
                 raw_text = None
         if raw_text is not None and plain_text is None:
-            plain_text = raw_text
+            plain_text = _normalize_mtext_plain_text(raw_text)
 
     if plain_text is None and raw_text is not None:
         plain_text = raw_text
@@ -597,117 +609,62 @@ def dump_all_text(doc: Any, out_dir: Path | str, opts: Mapping[str, Any] | None)
                 return False
         return True
 
-    def _compose_block_name(parts: Sequence[str]) -> str | None:
-        combined = [part for part in parts if part]
-        if not combined:
+    def build_tablecell_record(entry: Mapping[str, Any]) -> dict[str, Any] | None:
+        if not isinstance(entry, Mapping):
             return None
-        return "|".join(combined)
-
-    def _apply_ocs_point(entity: Any, vector: Vec3 | None) -> Vec3 | None:
-        if Vec3 is None or vector is None:
-            return vector
-        ocs = None
-        if hasattr(entity, "ocs"):
-            try:
-                ocs = entity.ocs()
-            except Exception:
-                ocs = None
-        if ocs is None:
-            return vector
+        layout_value = str(entry.get("layout") or "").strip() or "-"
+        raw_value = entry.get("raw")
+        text_value = entry.get("text")
         try:
-            return ocs.to_wcs(vector)
+            raw_text = str(raw_value) if raw_value not in (None, "") else ""
         except Exception:
-            return vector
-
-    def _apply_ocs_direction(entity: Any, vector: Vec3 | None) -> Vec3 | None:
-        if Vec3 is None or vector is None:
-            return vector
-        ocs = None
-        if hasattr(entity, "ocs"):
-            try:
-                ocs = entity.ocs()
-            except Exception:
-                ocs = None
-        if ocs is None:
-            return vector
+            raw_text = ""
         try:
-            origin = ocs.to_wcs(Vec3(0.0, 0.0, 0.0))
-            transformed = ocs.to_wcs(vector)
+            plain_text = str(text_value) if text_value not in (None, "") else ""
         except Exception:
-            return vector
-        return transformed - origin
+            plain_text = raw_text
+        if not plain_text:
+            plain_text = raw_text
+        if not (plain_text or raw_text):
+            return None
 
-    def _world_point(entity: Any, dxf: Any, matrix: Matrix44 | None) -> tuple[float | None, float | None]:
-        if Vec3 is None:
-            return _resolve_xy_from_dxf(dxf)
-        point = _resolve_point_vec(dxf)
-        if point is None:
-            x_val, y_val = _resolve_xy_from_dxf(dxf)
-            if x_val is None and y_val is None:
-                return (None, None)
-            if Vec3 is None:
-                return (x_val, y_val)
-            point = Vec3(x_val or 0.0, y_val or 0.0, 0.0)
-            point = _apply_ocs_point(entity, point) or point
+        block_path = entry.get("block_path")
+        if isinstance(block_path, (list, tuple)) and block_path:
+            block_name = " > ".join(str(part) for part in block_path if part)
+            from_block = 1
         else:
-            point = _apply_ocs_point(entity, point) or point
-        if Matrix44 is not None and matrix is not None:
-            try:
-                point = matrix.transform(point)
-            except Exception:
-                pass
-        return (_safe_float(point.x), _safe_float(point.y))
+            block_name = None
+            from_block = 0
 
-    def _world_rotation(entity: Any, rotation_value: float | None, matrix: Matrix44 | None) -> float | None:
-        if rotation_value is None or Vec3 is None:
-            return rotation_value
-        radians = math.radians(rotation_value)
-        direction = Vec3(math.cos(radians), math.sin(radians), 0.0)
-        direction = _apply_ocs_direction(entity, direction) or direction
-        if Matrix44 is not None and matrix is not None:
+        handle_value = entry.get("handle")
+        if isinstance(handle_value, str):
+            handle_text = handle_value
+        elif handle_value in (None, ""):
+            handle_text = ""
+        else:
             try:
-                direction = _transform_direction(matrix, direction)
+                handle_text = str(handle_value)
             except Exception:
-                pass
-        try:
-            magnitude = float(direction.magnitude)
-        except Exception:
-            magnitude = None
-        if magnitude is None or magnitude <= 1e-9:
-            return rotation_value
-        try:
-            angle = math.degrees(math.atan2(direction.y, direction.x))
-        except Exception:
-            return rotation_value
-        normalized = angle % 360.0
-        if normalized < 0:
-            normalized += 360.0
-        return normalized
+                handle_text = ""
 
-    def _world_height(entity: Any, height_value: float | None, matrix: Matrix44 | None) -> float | None:
-        if height_value is None or Vec3 is None:
-            return height_value
-        axis = Vec3(0.0, height_value, 0.0)
-        axis = _apply_ocs_direction(entity, axis) or axis
-        if Matrix44 is not None and matrix is not None:
-            try:
-                axis = _transform_direction(matrix, axis)
-            except Exception:
-                pass
-        try:
-            magnitude = float(axis.magnitude)
-        except Exception:
-            return height_value
-        return magnitude
+        return {
+            "layout": layout_value,
+            "entity_type": "TABLECELL",
+            "layer": str(entry.get("layer") or ""),
+            "height": _safe_float(entry.get("height")),
+            "width": _safe_float(entry.get("width")),
+            "rotation": _safe_float(entry.get("rotation")),
+            "x": _safe_float(entry.get("insert_x")),
+            "y": _safe_float(entry.get("insert_y")),
+            "raw_text": raw_text or plain_text,
+            "plain_text": plain_text or raw_text,
+            "style": str(entry.get("style") or ""),
+            "handle": handle_text,
+            "block_name": block_name,
+            "from_block": from_block,
+        }
 
-    def build_record(
-        entity: Any,
-        layout_name: str,
-        *,
-        from_block: bool,
-        block_path: tuple[str, ...],
-        matrix: Matrix44 | None,
-    ) -> dict[str, Any] | None:
+    def build_record(entity: Any, layout_name: str, *, from_block: bool, block_name: str | None) -> dict[str, Any] | None:
         dxf = getattr(entity, "dxf", None)
         try:
             etype = str(entity.dxftype()).upper()
@@ -783,14 +740,8 @@ def dump_all_text(doc: Any, out_dir: Path | str, opts: Mapping[str, Any] | None)
             return
         if etype == "MLEADER":
             mleader_total += 1
-            record = build_record(
-                entity,
-                layout_name,
-                from_block=bool(block_path),
-                block_path=block_path,
-                matrix=transform,
-            )
-            if record and record.get("raw_text") and record_matches_filters(record):
+            record = build_record(entity, layout_name, from_block=from_block, block_name=block_name)
+            if record and record.get("plain_text") and record_matches_filters(record):
                 records.append(record)
                 mleader_captured += 1
             return
@@ -861,6 +812,10 @@ def dump_all_text(doc: Any, out_dir: Path | str, opts: Mapping[str, Any] | None)
     for layout_name, layout in layout_spaces:
         if layout is None:
             continue
+        for table_entry in iter_table_cells((layout_name, layout)):
+            table_record = build_tablecell_record(table_entry)
+            if table_record and record_matches_filters(table_record):
+                records.append(table_record)
         for entity in layout:
             walk_entity(
                 entity,

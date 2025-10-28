@@ -1278,7 +1278,7 @@ def _iter_text_layout_spaces(doc: Any, include_paperspace: bool) -> list[tuple[s
 
 
 def _collect_tablecell_records(
-    flattened: FlattenedEntity, layout_name: str, *, etype_override: str
+    flattened: FlattenedEntity, layout_name: str, *, etype_override: str = "TABLECELL"
 ) -> list[dict[str, Any]]:
     entity = flattened.entity
     records: list[dict[str, Any]] = []
@@ -1556,24 +1556,27 @@ def iter_table_cells(layout: Any) -> list[dict[str, Any]]:
 
     query = getattr(layout_obj, "query", None)
     if callable(query):
-        try:
-            queried = list(query("ACAD_TABLE,TABLE"))
-        except Exception:
-            queried = []
-        for entity in queried:
-            if entity is None:
+        for filter_text in ("ACAD_TABLE,TABLE", "TABLE"):
+            try:
+                queried = list(query(filter_text))
+            except Exception:
+                queried = []
+            if not queried:
                 continue
-            entity_id = id(entity)
-            if entity_id in seen_ids:
-                continue
-            handle = _entity_handle(entity)
-            if handle:
-                if handle in seen_handles:
+            for entity in queried:
+                if entity is None:
                     continue
-                seen_handles.add(handle)
-            else:
-                seen_ids.add(entity_id)
-            tables.append(entity)
+                entity_id = id(entity)
+                if entity_id in seen_ids:
+                    continue
+                handle = _entity_handle(entity)
+                if handle:
+                    if handle in seen_handles:
+                        continue
+                    seen_handles.add(handle)
+                else:
+                    seen_ids.add(entity_id)
+                tables.append(entity)
 
     try:
         iterator = iter(layout_obj)  # type: ignore[arg-type]
@@ -1626,7 +1629,7 @@ def iter_table_cells(layout: Any) -> list[dict[str, Any]]:
             _collect_tablecell_records(
                 flattened,
                 layout_label,
-                etype_override="TABLE",
+                etype_override="TABLECELL",
             )
         )
 
@@ -2026,7 +2029,7 @@ def collect_acad_tables(
             table_records = _collect_tablecell_records(
                 flattened,
                 layout_name,
-                etype_override="TABLE",
+                etype_override="TABLECELL",
             )
             if handle_value:
                 seen_handles.add(handle_value)
@@ -2054,7 +2057,7 @@ def collect_all_text(
         Entity handle when available.
     ``etype``
         The entity type (``TEXT``, ``MTEXT``, ``ATTRIB``, ``ATTDEF``, ``MLEADER``,
-        ``DIM``, or ``TABLE``).
+        ``DIM``, ``TABLE``, or ``TABLECELL``).
     ``layout``
         Layout label such as ``Model`` or the paper space name.
     ``layer``
@@ -2109,7 +2112,7 @@ def collect_all_text(
                 table_entries = _collect_tablecell_records(
                     flattened,
                     layout_name,
-                    etype_override="TABLE",
+                    etype_override="TABLECELL",
                 )
                 if handle_value:
                     table_handles.add(handle_value)
