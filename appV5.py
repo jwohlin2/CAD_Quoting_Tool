@@ -16213,9 +16213,16 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
                 pass
     else:
         try:
-            summary_payload["margin_pct"] = float(margin_pct_value)
+            margin_pct_float = float(margin_pct_value)
         except (TypeError, ValueError):
             pass
+        else:
+            summary_payload["margin_pct"] = margin_pct_float
+            try:
+                applied_pcts["MarginPct"] = margin_pct_float
+            except Exception:
+                pass
+            margin_pct_value = margin_pct_float
 
     subtotal_before_margin_val = summary_metrics["subtotal_before_margin"]
     final_price_val = summary_metrics["final_price"]
