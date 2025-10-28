@@ -14,9 +14,9 @@ before export.
 * Optional: locally downloaded Qwen2.5-VL GGUF weights for LLM-assisted quoting
 
 > **Tip:** The runtime checks for a few third-party Python packages at startup
-> (`requests`, `beautifulsoup4`, `lxml`, and the shared `cad-quoter` package).
-> Configure `pip` to see your private package index and install the contents of
-> `requirements.txt` before launching the UI.
+> (`requests`, `beautifulsoup4`, and `lxml`). Install the contents of
+> `requirements.txt` before launching the UI so the bundled `cad_quoter`
+> package can import its dependencies cleanly.
 
 ## Setup
 
@@ -25,8 +25,7 @@ before export.
    python -m venv .venv
    source .venv/bin/activate  # Windows: .venv\Scripts\activate
    ```
-2. Install the runtime dependencies (make sure your private index hosting
-   `cad-quoter` is available via `PIP_EXTRA_INDEX_URL` or `--extra-index-url`):
+2. Install the runtime dependencies:
    ```bash
    pip install -r requirements.txt
    ```
@@ -39,11 +38,19 @@ before export.
 ### Packaged resources
 
 The default variables sheet, McMaster-Carr catalog export and UI configuration
-template now ship with the external `cad_quoter` package. At runtime the
-application uses the packaged copies automatically via
-`cad_quoter.resources`, but you can still override them by pointing the
+template now live directly under the repository's `cad_quoter/resources`
+directory. At runtime the application uses these bundled copies automatically
+via `cad_quoter.resources`, but you can still override them by pointing the
 relevant environment variables (for example `CATALOG_CSV_PATH`) to your own
 files.
+
+## Shared library layout
+
+Historically the reusable quoting helpers were packaged separately under
+`cad_quoter_pkg/` and published to a private index as `cad-quoter`. The code has
+now been consolidated into the local `cad_quoter/` package alongside the UI so
+contributors no longer need private index access during development. Scripts
+and notebooks should import helpers from `cad_quoter.*` directly.
 
 ## Running the application
 

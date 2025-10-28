@@ -36,7 +36,6 @@ Create an archive (`zip`, `tar.gz`, etc.) containing the repository root, the
 Inside the extracted directory run:
 
 ```bash
-export PIP_EXTRA_INDEX_URL="https://<your-private-index>/simple/"
 python -m venv .venv
 # PowerShell: .venv\Scripts\Activate.ps1
 source .venv/bin/activate  # bash/zsh
@@ -44,13 +43,10 @@ pip install --upgrade pip
 pip install -r requirements.txt
 ```
 
-Setting `PIP_EXTRA_INDEX_URL` (or passing `--extra-index-url` explicitly) makes
-the private package index that hosts `cad-quoter` available to `pip`. The
-updated `requirements.txt` file now pulls in the shared `cad-quoter` package in
-addition to the core runtime libraries used by the UI (Tkinter standard lib)
-and backend subsystems: pandas and openpyxl for spreadsheet ingestion,
-OCC/trimesh/ezdxf for CAD processing, and `llama-cpp-python` for the local LLM
-integration.【F:requirements.txt†L1-L11】
+The consolidated `requirements.txt` file installs the core runtime libraries
+used by the UI (Tkinter standard lib) and backend subsystems: pandas and
+openpyxl for spreadsheet ingestion, OCC/trimesh/ezdxf for CAD processing, and
+`llama-cpp-python` for the local LLM integration.【F:requirements.txt†L1-L18】
 
 ## 4. Configure runtime variables
 
@@ -117,5 +113,6 @@ environment.【F:appV5.py†L62-L79】
 * Capture the output of `python appV5.py --print-env` as part of your deployment
   verification record.
 
-* Confirm any auxiliary scripts or notebooks import helpers directly from the `cad_quoter` namespace; the legacy compatibility shim has been removed.
+* Confirm any auxiliary scripts or notebooks import helpers directly from the
+  `cad_quoter` namespace; the legacy compatibility shim has been removed.
 
