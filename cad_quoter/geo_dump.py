@@ -42,6 +42,19 @@ TABLE_EXTRACT_ALLOWED_KEYS = {
 }
 
 
+def iter_table_cells(layout: tuple[str, Any] | Any) -> list[dict[str, Any]]:
+    """Return table cell records for ``layout``."""
+
+    layout_name = None
+    layout_obj = layout
+    if isinstance(layout, tuple) and len(layout) == 2:
+        candidate_name, candidate_layout = layout
+        if isinstance(candidate_name, str):
+            layout_name = candidate_name
+        layout_obj = candidate_layout
+    return geo_extractor.iter_table_cells((layout_name, layout_obj))
+
+
 def _sum_qty(rows: list[Mapping[str, object]] | None) -> int:
     total = 0
     if not rows:

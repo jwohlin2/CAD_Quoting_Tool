@@ -1354,6 +1354,225 @@ def _collect_table_text(
     return _collect_tablecell_records(flattened, layout_name, etype_override=etype_override)
 
 
+def _resolve_layout_pair(layout: Any) -> tuple[str, Any | None]:
+    layout_name: str | None = None
+    layout_obj = layout
+    if isinstance(layout, tuple) and len(layout) == 2:
+        candidate_name, candidate_layout = layout
+        if isinstance(candidate_name, str):
+            layout_name = candidate_name
+        layout_obj = candidate_layout
+    if layout_obj is None:
+        return (layout_name or "-", None)
+    if layout_name is None:
+        direct_name = getattr(layout_obj, "name", None)
+        if isinstance(direct_name, str) and direct_name.strip():
+            layout_name = direct_name
+        else:
+            layout_dxf = getattr(layout_obj, "dxf", None)
+            dxf_name = getattr(layout_dxf, "name", None)
+            if isinstance(dxf_name, str) and dxf_name.strip():
+                layout_name = dxf_name
+    if layout_name is None:
+        try:
+            if bool(getattr(layout_obj, "is_modelspace", False)):
+                layout_name = "Model"
+        except Exception:
+            layout_name = None
+    if layout_name is None:
+        layout_name = "-"
+    return (layout_name, layout_obj)
+
+
+def iter_table_cells(layout: Any) -> list[dict[str, Any]]:
+    """Yield table cell records for the provided layout."""
+
+    layout_name, layout_obj = _resolve_layout_pair(layout)
+    if layout_obj is None:
+        return []
+
+    layout_label = str(layout_name or "").strip() or "-"
+    tables: list[Any] = []
+    seen_handles: set[str] = set()
+    seen_ids: set[int] = set()
+
+    query = getattr(layout_obj, "query", None)
+    if callable(query):
+        try:
+            queried = list(query("ACAD_TABLE,TABLE"))
+        except Exception:
+            queried = []
+        for entity in queried:
+            if entity is None:
+                continue
+            entity_id = id(entity)
+            if entity_id in seen_ids:
+                continue
+            handle = _entity_handle(entity)
+            if handle:
+                if handle in seen_handles:
+                    continue
+                seen_handles.add(handle)
+            else:
+                seen_ids.add(entity_id)
+            tables.append(entity)
+
+    try:
+        iterator = iter(layout_obj)  # type: ignore[arg-type]
+    except TypeError:
+        iterator = None
+    except Exception:
+        iterator = None
+
+    if iterator is not None:
+        for entity in iterator:
+            if entity is None:
+                continue
+            entity_id = id(entity)
+            if entity_id in seen_ids:
+                continue
+            try:
+                dxftype = str(entity.dxftype()).upper()
+            except Exception:
+                dxftype = ""
+            if dxftype not in {"TABLE", "ACAD_TABLE"}:
+                continue
+            handle = _entity_handle(entity)
+            if handle:
+                if handle in seen_handles:
+                    continue
+                seen_handles.add(handle)
+            else:
+                seen_ids.add(entity_id)
+            tables.append(entity)
+
+    records: list[dict[str, Any]] = []
+    for entity in tables:
+        if entity is None:
+            continue
+        layer_name = _entity_layer(entity)
+        layer_upper = layer_name.upper()
+        flattened = FlattenedEntity(
+            entity=entity,
+            transform=_IDENTITY_TRANSFORM,
+            from_block=False,
+            block_name=None,
+            block_stack=(),
+            depth=0,
+            layer=layer_name,
+            layer_upper=layer_upper,
+            effective_layer=layer_name,
+            effective_layer_upper=layer_upper,
+        )
+        records.extend(
+            _collect_tablecell_records(
+                flattened,
+                layout_label,
+                etype_override="TABLE",
+            )
+        )
+
+    return records
+
+
+def _iter_table_cell_content_strings(
+    source: Any, visited: set[int] | None = None
+) -> Iterable[str]:
+    if source is None:
+        return
+    if visited is None:
+        visited = set()
+    if isinstance(source, bytes):
+        try:
+            decoded = source.decode("utf-8", errors="ignore")
+        except Exception:
+            decoded = ""
+        if decoded.strip():
+            yield decoded
+        return
+    if isinstance(source, str):
+        if source.strip():
+            yield source
+        return
+    if isinstance(source, (int, float)):
+        text = str(source).strip()
+        if text:
+            yield text
+        return
+
+    obj_id = id(source)
+    if obj_id in visited:
+        return
+    visited.add(obj_id)
+
+    try:
+        if isinstance(source, Mapping):
+            for value in source.values():
+                yield from _iter_table_cell_content_strings(value, visited)
+    except Exception:
+        pass
+
+    attr_names = (
+        "plain_text",
+        "get_plain_text",
+        "text",
+        "get_text",
+        "value",
+        "get_value",
+        "content",
+        "get_content",
+        "contents",
+        "mtext",
+        "get_mtext",
+        "text_string",
+        "get_text_string",
+    )
+    for attr in attr_names:
+        candidate = getattr(source, attr, None)
+        if candidate is None:
+            continue
+        if callable(candidate):
+            try:
+                candidate = candidate()
+            except Exception:
+                continue
+        if candidate is source:
+            continue
+        yield from _iter_table_cell_content_strings(candidate, visited)
+
+    if isinstance(source, Iterable) and not isinstance(source, (str, bytes, bytearray)):
+        try:
+            iterator = iter(source)
+        except Exception:
+            iterator = None
+        if iterator is not None:
+            for item in iterator:
+                yield from _iter_table_cell_content_strings(item, visited)
+    else:
+        try:
+            text = str(source)
+        except Exception:
+            text = ""
+        cleaned = text.strip()
+        if cleaned and not (cleaned.startswith("<") and cleaned.endswith(">")):
+            yield cleaned
+
+
+def _extract_cell_content_plain_text(cell_obj: Any) -> str:
+    fragments: list[str] = []
+    for fragment in _iter_table_cell_content_strings(cell_obj):
+        normalized = _normalize_table_fragment(fragment)
+        if normalized:
+            fragments.append(normalized)
+    unique: list[str] = []
+    for fragment in fragments:
+        if fragment not in unique:
+            unique.append(fragment)
+    if not unique:
+        return ""
+    return " ".join(unique)
+
+
 def _extract_entity_text_payload(
     flattened: FlattenedEntity, canonical_kind: str
 ) -> dict[str, Any] | None:
@@ -1615,10 +1834,24 @@ def collect_acad_tables(
     for layout_name, layout in layout_spaces:
         if layout is None:
             continue
+
+        layout_label = str(layout_name or "").strip() or "-"
+
+        for record in iter_table_cells((layout_name, layout)):
+            records.append(record)
+
         try:
             flattened_iter = flatten_entities(layout, depth=_MAX_INSERT_DEPTH)
         except Exception:
             flattened_iter = []
+        seen_handles: set[str] = {
+            str(record.get("handle") or "")
+            for record in records
+            if str(record.get("layout") or "").strip() == layout_label
+            and isinstance(record.get("handle"), str)
+            and record.get("handle")
+        }
+        seen_ids: set[int] = set()
         for flattened in flattened_iter:
             try:
                 dxftype = str(flattened.entity.dxftype()).upper()
@@ -1626,13 +1859,22 @@ def collect_acad_tables(
                 dxftype = ""
             if dxftype not in {"ACAD_TABLE", "TABLE"}:
                 continue
-            records.extend(
-                _collect_tablecell_records(
-                    flattened,
-                    layout_name,
-                    etype_override="TABLECELL",
-                )
+            handle_value = _entity_handle(flattened.entity)
+            if handle_value and handle_value in seen_handles:
+                continue
+            entity_id = id(flattened.entity)
+            if not handle_value and entity_id in seen_ids:
+                continue
+            table_records = _collect_tablecell_records(
+                flattened,
+                layout_name,
+                etype_override="TABLE",
             )
+            if handle_value:
+                seen_handles.add(handle_value)
+            else:
+                seen_ids.add(entity_id)
+            records.extend(table_records)
 
     return records
 
@@ -1654,7 +1896,7 @@ def collect_all_text(
         Entity handle when available.
     ``etype``
         The entity type (``TEXT``, ``MTEXT``, ``ATTRIB``, ``ATTDEF``, ``MLEADER``,
-        ``DIM``, or ``TABLECELL``).
+        ``DIM``, or ``TABLE``).
     ``layout``
         Layout label such as ``Model`` or the paper space name.
     ``layer``
@@ -1680,6 +1922,16 @@ def collect_all_text(
     for layout_name, layout in layouts:
         if layout is None:
             continue
+
+        table_handles: set[str] = set()
+        table_ids: set[int] = set()
+
+        for record in iter_table_cells((layout_name, layout)):
+            handle_val = record.get("handle")
+            if isinstance(handle_val, str) and handle_val:
+                table_handles.add(handle_val)
+            records.append(record)
+
         try:
             flattened_iter = flatten_entities(layout, depth=depth)
         except Exception:
@@ -1690,13 +1942,22 @@ def collect_all_text(
             except Exception:
                 dxftype = ""
             if dxftype in {"ACAD_TABLE", "TABLE"}:
-                records.extend(
-                    _collect_tablecell_records(
-                        flattened,
-                        layout_name,
-                        etype_override="TABLECELL",
-                    )
+                handle_value = _entity_handle(flattened.entity)
+                if handle_value and handle_value in table_handles:
+                    continue
+                entity_id = id(flattened.entity)
+                if not handle_value and entity_id in table_ids:
+                    continue
+                table_entries = _collect_tablecell_records(
+                    flattened,
+                    layout_name,
+                    etype_override="TABLE",
                 )
+                if handle_value:
+                    table_handles.add(handle_value)
+                else:
+                    table_ids.add(entity_id)
+                records.extend(table_entries)
                 continue
             records.extend(_collect_text_from_flattened(flattened, layout_name))
 
@@ -2028,6 +2289,10 @@ def _cell_text(entity: Any, row: int, col: int) -> str:
                     text_value = raw if isinstance(raw, str) else ""
                 if text_value:
                     break
+        if not text_value:
+            fragments_text = _extract_cell_content_plain_text(cell_obj)
+            if fragments_text:
+                text_value = fragments_text
     if not text_value:
         cells_attr = getattr(entity, "cells", None)
         if cells_attr is not None:
@@ -12077,6 +12342,7 @@ __all__ = [
     "set_trace_acad",
     "log_last_dxf_fallback",
     "DEFAULT_TEXT_LAYER_EXCLUDE_REGEX",
+    "iter_table_cells",
     "collect_acad_tables",
     "collect_all_text",
 ]
