@@ -752,6 +752,33 @@ def main(argv: Sequence[str] | None = None) -> int:
     print(f"[OPS] geom : {_format_ops_counts(geom_display)}")
     print(f"[OPS] total: {_format_ops_counts(total_counts)}")
 
+    suspect_payload: Mapping[str, Any] | None = None
+    if isinstance(manifest_payload, Mapping):
+        flags_payload = manifest_payload.get("flags")
+        if isinstance(flags_payload, Mapping):
+            candidate = flags_payload.get("suspect_geometry")
+            if isinstance(candidate, Mapping):
+                suspect_payload = candidate
+    if suspect_payload is None and isinstance(ops_summary, Mapping):
+        manifest_existing = ops_summary.get("manifest")
+        if isinstance(manifest_existing, Mapping):
+            flags_payload = manifest_existing.get("flags")
+            if isinstance(flags_payload, Mapping):
+                candidate = flags_payload.get("suspect_geometry")
+                if isinstance(candidate, Mapping):
+                    suspect_payload = candidate
+    if isinstance(suspect_payload, Mapping) and not suspect_payload.get("logged"):
+        geom_total = suspect_payload.get("geom_total")
+        text_estimated = suspect_payload.get("text_estimated_total_drills")
+        print(
+            "[OPS-GUARD] suspect geometry: "
+            f"geom.total={geom_total} text.estimated_total_drills={text_estimated}"
+        )
+        try:
+            suspect_payload["logged"] = True
+        except Exception:
+            pass
+
     default_sample = "301_redacted.dwg"
     try:
         path_name = Path(path).name

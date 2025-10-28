@@ -351,12 +351,15 @@ def test_ops_manifest_combines_table_and_geom() -> None:
     table_counts = manifest.get("table", {})
     total_counts = manifest.get("total", {})
     geom_counts = manifest.get("geom", {})
+    text_info = manifest.get("text", {})
 
     assert table_counts.get("drill") == 4
     assert table_counts.get("tap") == 2
     assert geom_counts.get("drill") == 10
     assert geom_counts.get("residual_drill") == 6
+    assert geom_counts.get("total") == 10
     assert total_counts.get("drill") == 6
+    assert text_info.get("estimated_total_drills") == 4
 
 
 def test_npt_counts_as_tap() -> None:
@@ -367,10 +370,12 @@ def test_npt_counts_as_tap() -> None:
     table_counts = manifest.get("table", {})
     details = manifest.get("details", {})
     total_counts = manifest.get("total", {})
+    text_info = manifest.get("text", {})
 
     assert table_counts.get("tap") == 4
     assert details.get("npt") == 4
     assert total_counts.get("tap") == 4
+    assert text_info.get("estimated_total_drills") == 0
 
 
 def test_manifest_reconcile_subtracts_sized_drills() -> None:
@@ -381,6 +386,7 @@ def test_manifest_reconcile_subtracts_sized_drills() -> None:
 
     assert manifest.get("details", {}).get("drill_sized") == 4
     assert manifest.get("total", {}).get("drill") == 73
+    assert manifest.get("text", {}).get("estimated_total_drills") == 4
 
 
 def test_merge_table_lines_ignores_numeric_ladder_noise() -> None:

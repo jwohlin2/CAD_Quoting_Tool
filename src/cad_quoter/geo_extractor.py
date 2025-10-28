@@ -2936,9 +2936,14 @@ def ops_manifest(
         "table": table_totals,
         "total": total_totals,
         "chart_row_count": row_count,
+        "text": {"estimated_total_drills": int(table_totals.get("drill", 0))},
     }
     if geom_found:
-        manifest["geom"] = {"drill": geom_drill_total, "residual_drill": geom_unsized}
+        manifest["geom"] = {
+            "drill": geom_drill_total,
+            "residual_drill": geom_unsized,
+            "total": geom_drill_total,
+        }
         manifest["geom_drill_count"] = geom_drill_total
     manifest["chart_drill_sized"] = sized_drill_qty
     return manifest
@@ -4535,6 +4540,8 @@ def read_text_table(
     if helper_missing and isinstance(_LAST_TEXT_TABLE_DEBUG, dict):
         _LAST_TEXT_TABLE_DEBUG["layer_counts_pre"] = {}
 
+    am_bor_included = False
+
     def _analyze_helper_signature(func: Callable[..., Any]) -> tuple[bool, bool]:
         needs_lines = False
         allows_lines = False
@@ -4624,6 +4631,7 @@ def read_text_table(
             nonlocal allowlist_display, follow_sheet_target_layouts
             nonlocal collected_entries, candidate_entries, entries_by_layout, layout_names
             nonlocal layout_order, see_sheet_hint_text, see_sheet_hint_logged
+            nonlocal am_bor_included
             collected_entries = []
             candidate_entries = []
             entries_by_layout = defaultdict(list)
@@ -4658,7 +4666,13 @@ def read_text_table(
             visited_layout_keys: set[tuple[str, str]] = set()
             all_layout_names: set[str] = set()
             expanded_layouts: list[str] = []
-    
+
+            try:
+                if current_allowlist is not None and "AM_BOR" in current_allowlist:
+                    am_bor_included = True
+            except Exception:
+                pass
+
             allowlist_display = (
                 "None"
                 if current_allowlist is None
@@ -6334,6 +6348,10 @@ def read_text_table(
                         if cleaned:
                             row["desc"] = cleaned
             fallback["provenance_holes"] = "HOLE TABLE"
+            if am_bor_included:
+                fallback["am_bor_included"] = True
+                if isinstance(_LAST_TEXT_TABLE_DEBUG, dict):
+                    _LAST_TEXT_TABLE_DEBUG["am_bor_included"] = True
             _LAST_TEXT_TABLE_DEBUG["rows"] = list(fallback.get("rows", []))
             return fallback
         _LAST_TEXT_TABLE_DEBUG["rows"] = []
@@ -6382,6 +6400,10 @@ def read_text_table(
         if len(rows_materialized) >= 3 and not primary_result.get("header_validated"):
             primary_result["header_validated"] = True
     _LAST_TEXT_TABLE_DEBUG["rows"] = rows_materialized
+    if am_bor_included:
+        primary_result["am_bor_included"] = True
+    if isinstance(_LAST_TEXT_TABLE_DEBUG, dict):
+        _LAST_TEXT_TABLE_DEBUG["am_bor_included"] = bool(am_bor_included)
     return primary_result
 
 
@@ -7327,11 +7349,18 @@ def ops_manifest(
     else:
         total_counts["drill"] = table_counts.get("drill", 0)
 
+    text_info = {"estimated_total_drills": int(table_counts.get("drill", 0))}
+
     manifest = {
         "table": table_counts,
-        "geom": {"drill": geom_total, "groups": geom_info.get("groups", [])},
+        "geom": {
+            "drill": geom_total,
+            "groups": geom_info.get("groups", []),
+            "total": geom_total,
+        },
         "total": total_counts,
         "details": details,
+        "text": text_info,
     }
     if sized_drill_qty and geom_total:
         manifest["geom"]["residual_drill"] = geom_residual
@@ -7637,6 +7666,19 @@ def _ensure_ops_summary_map(candidate: Any) -> dict[str, Any]:
     if isinstance(candidate, Mapping):
         return dict(candidate)
     return {}
+
+
+def _am_bor_included_from_candidates(*candidates: Mapping[str, Any] | None) -> bool:
+    for candidate in candidates:
+        if not isinstance(candidate, Mapping):
+            continue
+        flag = candidate.get("am_bor_included")
+        if isinstance(flag, bool):
+            if flag:
+                return True
+        elif flag:
+            return True
+    return False
 
 
 def _best_geo_hole_count(geo: Mapping[str, Any]) -> int | None:
@@ -8092,6 +8134,58 @@ def read_geo(
         print(f"[OPS] table: {_format_ops_counts(table_counts)}")
         print(f"[OPS] geom : {_format_ops_counts(geom_display)}")
         print(f"[OPS] total: {_format_ops_counts(total_counts)}")
+        text_manifest = manifest_payload.get("text") if isinstance(manifest_payload, Mapping) else {}
+        text_estimated_total_drills = 0
+        if isinstance(text_manifest, Mapping):
+            try:
+                text_estimated_total_drills = int(
+                    float(text_manifest.get("estimated_total_drills") or 0)
+                )
+            except Exception:
+                text_estimated_total_drills = 0
+        geom_total = 0
+        if isinstance(geom_counts, Mapping):
+            geom_total_candidate = geom_counts.get("total")
+            try:
+                geom_total = int(float(geom_total_candidate or 0))
+            except Exception:
+                geom_total = 0
+            if geom_total <= 0:
+                try:
+                    geom_total = int(float(geom_counts.get("drill") or 0))
+                except Exception:
+                    geom_total = 0
+        am_bor_in_text_flow = _am_bor_included_from_candidates(
+            text_info,
+            fallback_info,
+            publish_info,
+            best_table,
+            current_table_info,
+        )
+        if (
+            am_bor_in_text_flow
+            and geom_total > 0
+            and text_estimated_total_drills > 0
+            and float(geom_total) > 2.0 * float(text_estimated_total_drills)
+        ):
+            suspect_payload: dict[str, Any] = {
+                "geom_total": geom_total,
+                "text_estimated_total_drills": text_estimated_total_drills,
+                "am_bor_included": True,
+                "logged": True,
+            }
+            print(
+                "[OPS-GUARD] suspect geometry: "
+                f"geom.total={geom_total} text.estimated_total_drills={text_estimated_total_drills}"
+            )
+            if isinstance(manifest_payload, dict):
+                flags_map = manifest_payload.setdefault("flags", {})
+                if isinstance(flags_map, dict):
+                    flags_map["suspect_geometry"] = suspect_payload
+            if isinstance(ops_summary, dict):
+                flags_map = ops_summary.setdefault("flags", {})
+                if isinstance(flags_map, dict):
+                    flags_map["suspect_geometry"] = suspect_payload
     source_display = ops_summary.get("source") if isinstance(ops_summary, Mapping) else None
     source_lower = str(source_display or "").lower()
     if source_lower == "text_table":
