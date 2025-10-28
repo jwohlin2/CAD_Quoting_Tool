@@ -8425,6 +8425,7 @@ def ops_manifest(
     details: dict[str, Any] = {"npt": 0, "drill_sized": 0, "drill_sizes": {}}
 
     rows_iter = chart_rows or []
+    table_rows_present = False
     drill_groups: Counter[tuple[str, str]] = Counter()
     tap_implied_candidates: list[tuple[int, tuple[str, str] | None, Any]] = []
 
@@ -8513,6 +8514,7 @@ def ops_manifest(
             qty = 0
         if qty <= 0:
             continue
+        table_rows_present = True
         desc_source = None
         for key in ("desc", "description", "text", "hole"):
             if key in row and row[key]:
@@ -8659,7 +8661,12 @@ def ops_manifest(
         "unknown": int(table_counts.get("unknown", 0)),
     }
 
-    total_drill = table_drill_only + geom_residual + implied_drill_total
+    table_drill_total = table_drill_only + implied_drill_total
+    if table_rows_present:
+        total_drill = table_drill_total
+    else:
+        total_drill = max(geom_total, table_drill_total)
+
     total_counts: dict[str, int] = {
         "drill": total_drill,
         "tap": table_tap,

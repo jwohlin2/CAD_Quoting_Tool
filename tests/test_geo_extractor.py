@@ -78,4 +78,6 @@ def test_geom_residual_and_pilot_logic() -> None:
     assert manifest["table"]["drill_only"] == 0
     assert geom_residual == 6
     assert table_tap == 7
-    assert manifest["total"]["drill"] == geom_residual + table_tap
+    drill_implied = manifest["details"]["drill_implied_from_taps"]
+    assert table_tap == drill_implied
+    assert manifest["total"]["drill"] == manifest["table"]["drill_only"] + drill_implied
