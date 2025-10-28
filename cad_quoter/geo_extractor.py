@@ -3237,19 +3237,19 @@ def _compute_anchor_height(entries: Iterable[Mapping[str, Any]]) -> tuple[float,
     if not heights:
         return (0.0, 0)
     try:
-        anchor_height = float(statistics.median(heights))
+        anchor_h = float(statistics.median(heights))
     except Exception:
-        anchor_height = float(heights[0])
-    return (anchor_height, count)
+        anchor_h = float(heights[0])
+    return (anchor_h, count)
 
 
 def _filter_entries_by_anchor_height(
     entries: Iterable[Mapping[str, Any]],
     *,
-    anchor_height: float,
+    anchor_h: float,
     tolerance: float = 0.4,
 ) -> list[Mapping[str, Any]]:
-    effective_anchor = float(anchor_height or 0.0)
+    effective_anchor = float(anchor_h or 0.0)
     if effective_anchor > 0:
         effective_anchor = max(effective_anchor, _GEO_H_ANCHOR_MIN)
     lower = max(effective_anchor * (1.0 - tolerance), _GEO_H_ANCHOR_HARD_MIN)
@@ -4671,18 +4671,33 @@ def _extract_anchor_band_lines(context: Mapping[str, Any] | None) -> list[str]:
         if layout_idx in anchor_layouts:
             entries_by_layout[layout_idx].append(entry)
 
-    anchor_height = 0.0
+    anchor_h = 0.0
     try:
-        anchor_height = float(context.get("anchor_height") or 0.0)
+        anchor_h = float(context.get("anchor_height") or 0.0)
     except Exception:
-        anchor_height = 0.0
-    if anchor_height < 0:
-        anchor_height = 0.0
+        anchor_h = 0.0
+    if anchor_h < 0:
+        anchor_h = 0.0
 
-    height_lower = anchor_height * 0.6 if anchor_height > 0 else None
-    height_upper = anchor_height * 1.4 if anchor_height > 0 else None
-    height_stop_lower = anchor_height * 0.3 if anchor_height > 0 else None
-    height_stop_upper = anchor_height * 1.7 if anchor_height > 0 else None
+    height_lower = anchor_h * 0.6 if anchor_h > 0 else None
+    height_upper = anchor_h * 1.4 if anchor_h > 0 else None
+    height_stop_lower = anchor_h * 0.3 if anchor_h > 0 else None
+    height_stop_upper = anchor_h * 1.7 if anchor_h > 0 else None
+
+    anchors = [
+        entry
+        for entry in anchor_entries
+        if _ROW_ANCHOR_RE.match(
+            _normalize_candidate_text(
+                entry.get("normalized_text") or entry.get("text") or ""
+            )
+        )
+    ]
+    print(
+        f"[TEXT-SCAN] anchors={len(anchors)} h_anchor={anchor_h:.2f}"
+        if anchors
+        else "[TEXT-SCAN] anchors=0"
+    )
 
     anchor_y_values: list[float] = []
     anchor_x_bounds: dict[int, list[float | None]] = {}
@@ -4728,20 +4743,20 @@ def _extract_anchor_band_lines(context: Mapping[str, Any] | None) -> list[str]:
             span = abs(sorted_anchor_y[-1] - sorted_anchor_y[0])
             divider = max(len(sorted_anchor_y) - 1, 1)
             row_spacing_est = span / divider if divider else span
-        if (not row_spacing_est or row_spacing_est <= 0) and anchor_height > 0:
-            row_spacing_est = anchor_height * 2.5
+        if (not row_spacing_est or row_spacing_est <= 0) and anchor_h > 0:
+            row_spacing_est = anchor_h * 2.5
         if not row_spacing_est or row_spacing_est <= 0:
-            row_spacing_est = anchor_height if anchor_height > 0 else 1.0
+            row_spacing_est = anchor_h if anchor_h > 0 else 1.0
         band_half_height = row_spacing_est * 8.0
-        if anchor_height > 0:
-            band_half_height = max(band_half_height, anchor_height * 12.0)
+        if anchor_h > 0:
+            band_half_height = max(band_half_height, anchor_h * 12.0)
         band_y_low = anchor_center_y - band_half_height
         band_y_high = anchor_center_y + band_half_height
-    elif anchor_height > 0:
-        row_spacing_est = anchor_height * 2.5
+    elif anchor_h > 0:
+        row_spacing_est = anchor_h * 2.5
 
-    if row_spacing_est <= 0 and anchor_height > 0:
-        row_spacing_est = anchor_height
+    if row_spacing_est <= 0 and anchor_h > 0:
+        row_spacing_est = anchor_h
     if row_spacing_est <= 0:
         row_spacing_est = 1.0
 
@@ -4764,8 +4779,8 @@ def _extract_anchor_band_lines(context: Mapping[str, Any] | None) -> list[str]:
         layout_x_extents[layout_idx] = (min_x, max_x)
 
     x_margin = 0.0
-    if anchor_height > 0:
-        x_margin = max(x_margin, anchor_height * 4.0)
+    if anchor_h > 0:
+        x_margin = max(x_margin, anchor_h * 4.0)
     if row_spacing_est > 0:
         x_margin = max(x_margin, row_spacing_est * 0.5)
 
@@ -4847,11 +4862,7 @@ def _extract_anchor_band_lines(context: Mapping[str, Any] | None) -> list[str]:
                 if isinstance(height_val, (int, float)) and math.isfinite(height_val)
                 else None
             )
-            if (
-                anchor_height > 0
-                and height_float is not None
-                and height_float > 0
-            ):
+            if anchor_h > 0 and height_float is not None and height_float > 0:
                 if (
                     height_stop_lower is not None
                     and height_stop_upper is not None
@@ -6365,13 +6376,13 @@ def read_text_table(
                     candidate_entries_local.append(entry_copy)
                 if not candidate_entries_local:
                     return None
-                h_anchor_local, _anchor_count = _compute_anchor_height(
+                anchor_h_local, _anchor_count = _compute_anchor_height(
                     candidate_entries_local
                 )
-                h_anchor_local = float(h_anchor_local or 0.20)
-                if _anchor_count > 0 and h_anchor_local > 0 and candidate_entries_local:
+                anchor_h_local = float(anchor_h_local or 0.20)
+                if _anchor_count > 0 and anchor_h_local > 0 and candidate_entries_local:
                     filtered_by_height = _filter_entries_by_anchor_height(
-                        candidate_entries_local, anchor_height=h_anchor_local
+                        candidate_entries_local, anchor_h=anchor_h_local
                     )
                     if filtered_by_height:
                         candidate_entries_local = [dict(entry) for entry in filtered_by_height]
@@ -6569,13 +6580,27 @@ def read_text_table(
             candidate_entries = normalized_entries
             table_lines = normalized_lines
 
-            h_anchor, anchor_count = _compute_anchor_height(candidate_entries)
-            h_anchor = float(h_anchor or 0.20)
-            print(f"[TEXT-SCAN] anchors={anchor_count} h_anchor={h_anchor:.2f}")
+            anchor_h, anchor_count = _compute_anchor_height(candidate_entries)
+            anchor_h = float(anchor_h or 0.20)
+            anchors = [
+                entry
+                for entry in candidate_entries
+                if _ROW_ANCHOR_RE.match(
+                    _normalize_candidate_text(
+                        entry.get("normalized_text") or entry.get("text") or ""
+                    )
+                )
+            ]
+            anchor_count = len(anchors)
+            print(
+                f"[TEXT-SCAN] anchors={len(anchors)} h_anchor={anchor_h:.2f}"
+                if anchors
+                else "[TEXT-SCAN] anchors=0"
+            )
             total_by_height = len(candidate_entries)
-            if anchor_count > 0 and h_anchor > 0 and candidate_entries:
+            if anchor_count > 0 and anchor_h > 0 and candidate_entries:
                 filtered_entries = _filter_entries_by_anchor_height(
-                    candidate_entries, anchor_height=h_anchor
+                    candidate_entries, anchor_h=anchor_h
                 )
                 kept_count = len(filtered_entries)
                 if kept_count != total_by_height:
@@ -6827,8 +6852,8 @@ def read_text_table(
                                 lower, upper = band_limits
                                 band_min = min(lower, upper)
                                 band_max = max(lower, upper)
-                                if anchor_height > 0:
-                                    band_margin = max(anchor_height * 1.5, 6.0)
+                                if anchor_h > 0:
+                                    band_margin = max(anchor_h * 1.5, 6.0)
                                 else:
                                     band_margin = max((band_max - band_min) * 0.5, 6.0)
                                 lower_bound = band_min - band_margin
@@ -6855,7 +6880,7 @@ def read_text_table(
                             entry.get("normalized_text") or entry.get("text")
                         )
                     ],
-                    "anchor_height": h_anchor,
+                    "anchor_height": anchor_h,
                     "layout_order": [
                         idx for idx in layout_order if _coerce_layout_index(idx) in anchor_layouts
                     ],
