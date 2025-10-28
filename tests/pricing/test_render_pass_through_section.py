@@ -49,12 +49,15 @@ def test_render_pass_through_updates_header_and_placeholders() -> None:
         formatter=lambda value: state.format_row("Direct Costs:", value, indent="  "),
     )
 
-    section_lines = render_pass_through(state)
+    section_lines, pass_total, pass_labor_total = render_pass_through(state)
 
     assert section_lines[0] == "Pass-Through & Direct Costs (Total: $920.00)"
     assert state.sections[1].title == section_lines[0]
     assert state.sections[1].doc_section is not None
     assert state.sections[1].doc_section.title == section_lines[0]
+
+    assert pass_total == 920.0
+    assert pass_labor_total == 0.0
 
     expected_total_line = state.format_row("Direct Costs:", 920.0, indent="  ")
     assert state.sections[0].lines[total_line_index] == expected_total_line
@@ -86,7 +89,7 @@ def test_render_pass_through_material_warning_flag() -> None:
 
     state = _build_state(payload)
 
-    lines = render_pass_through(state)
+    lines, pass_total, pass_labor_total = render_pass_through(state)
 
     assert any("⚠ MATERIALS MISSING" in line for line in lines)
     assert state.warning_flags["material_warning"] is True
@@ -94,4 +97,7 @@ def test_render_pass_through_material_warning_flag() -> None:
 
     header = lines[0]
     assert header.endswith("$60.00)")
+
+    assert pass_total == 60.0
+    assert pass_labor_total == 0.0
 
