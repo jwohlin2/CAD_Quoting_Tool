@@ -377,6 +377,41 @@ def test_ops_manifest_marks_implied_tap_drill() -> None:
     assert tap_row.get("tags", {}).get("drill_implied") is True
 
 
+def test_ops_manifest_authoritative_table_uses_table_totals() -> None:
+    rows = [
+        {"qty": 3, "desc": "10-32 TAP"},
+        {"qty": 2, "desc": "1/4-20 TAP"},
+        {"qty": 1, "desc": "5/16-18 TAP"},
+        {"qty": 4, "desc": "M8 TAP"},
+        {"qty": 3, "desc": "M6 TAP"},
+        {"qty": 2, "desc": "M10 TAP"},
+        {"qty": 2, "desc": "3/8-16 TAP"},
+        {"qty": 1, "desc": "1/2-13 TAP"},
+    ]
+
+    geom = {
+        "groups": [],
+        "total": 40,
+        "residual_centers": [{"x": float(idx), "y": 0.0} for idx in range(10)],
+        "residual_candidates": 10,
+    }
+
+    manifest = geo_extractor.ops_manifest(
+        rows,
+        geom_holes=geom,
+        authoritative_table=True,
+    )
+
+    tap_qty = sum(row["qty"] for row in rows)
+
+    assert manifest.get("table", {}).get("tap") == tap_qty
+    assert manifest.get("total", {}).get("tap") == tap_qty
+    assert manifest.get("total", {}).get("drill") == 0
+    assert manifest.get("geom", {}).get("drill_residual") == 10
+    assert manifest.get("details", {}).get("drill_implied_from_taps") == 0
+    assert all(not row.get("tags") for row in rows)
+
+
 def test_ops_manifest_skips_implied_when_explicit_drill_present() -> None:
     row = {"qty": 4, "desc": "Ø0.201 DRILL THRU; 1/4-20 TAP"}
 

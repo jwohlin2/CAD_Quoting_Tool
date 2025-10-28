@@ -59,6 +59,39 @@ def _int_from_value(value: Any) -> int:
         return 0
 
 
+def _truthy_flag(value: Any) -> bool:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return value != 0
+    if isinstance(value, str):
+        normalized = value.strip().lower()
+        return normalized in {"1", "true", "t", "yes", "y"}
+    return False
+
+
+def _anchor_authoritative_from_candidates(
+    *candidates: Mapping[str, Any] | None,
+) -> bool:
+    keys = ("anchor_authoritative", "table_authoritative", "authoritative")
+    for candidate in candidates:
+        if not isinstance(candidate, Mapping):
+            continue
+        for key in keys:
+            if key not in candidate:
+                continue
+            if _truthy_flag(candidate.get(key)):
+                return True
+    return False
+
+
+def _provenance_is_anchor(value: Any) -> bool:
+    if isinstance(value, str):
+        normalized = value.strip().lower()
+        return "hole table" in normalized and "anchor" in normalized
+    return False
+
+
 def _coerce_float(value: Any) -> float | None:
     try:
         number = float(value)
@@ -1181,17 +1214,50 @@ def main(argv: Sequence[str] | None = None) -> int:
         if isinstance(manifest_candidate, Mapping):
             manifest_payload = dict(manifest_candidate)
     if manifest_payload is None:
+        authoritative_table = geo_extractor._table_source_is_authoritative(
+            source,
+            len(rows),
+        )
         manifest_payload = geo_extractor.ops_manifest(
             rows,
             geom_holes=geom_holes_payload,
             hole_sets=hole_sets_payload,
+            authoritative_table=authoritative_table,
         )
     if isinstance(manifest_payload, Mapping):
         payload["ops_manifest"] = dict(manifest_payload)
 
-    table_counts = manifest_payload.get("table") if isinstance(manifest_payload, Mapping) else {}
-    geom_counts = manifest_payload.get("geom") if isinstance(manifest_payload, Mapping) else {}
-    total_counts = manifest_payload.get("total") if isinstance(manifest_payload, Mapping) else {}
+    table_counts = (
+        manifest_payload.get("table") if isinstance(manifest_payload, Mapping) else {}
+    )
+    geom_counts = (
+        manifest_payload.get("geom") if isinstance(manifest_payload, Mapping) else {}
+    )
+    total_counts = (
+        manifest_payload.get("total") if isinstance(manifest_payload, Mapping) else {}
+    )
+    if not isinstance(table_counts, Mapping):
+        table_counts = {}
+    if not isinstance(geom_counts, Mapping):
+        geom_counts = {}
+    if not isinstance(total_counts, Mapping):
+        total_counts = {}
+
+    table_authoritative = _anchor_authoritative_from_candidates(
+        extract_result if isinstance(extract_result, Mapping) else None,
+        payload if isinstance(payload, Mapping) else None,
+        geo if isinstance(geo, Mapping) else None,
+        ops_summary if isinstance(ops_summary, Mapping) else None,
+        manifest_payload if isinstance(manifest_payload, Mapping) else None,
+    )
+    if not table_authoritative:
+        table_authoritative = _provenance_is_anchor(holes_source)
+
+    effective_total_counts: Mapping[str, Any]
+    if table_authoritative:
+        effective_total_counts = table_counts
+    else:
+        effective_total_counts = total_counts
     apost = "\u2019"
     print(
         "[OPS] table: "
@@ -1216,7 +1282,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     print(
         "[OPS] total: "
         + _format_ops_counts(
-            total_counts,
+            effective_total_counts,
             (
                 ("drill", "Drill"),
                 ("tap", "Tap"),
@@ -1261,8 +1327,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         manifest_existing if isinstance(manifest_existing, Mapping) else None,
     )
     total_drill_count = (
-        _int_from_value(total_counts.get("drill"))
-        if isinstance(total_counts, Mapping)
+        _int_from_value(effective_total_counts.get("drill"))
+        if isinstance(effective_total_counts, Mapping)
         else 0
     )
     if total_drill_count > 100 or (total_drill_count and total_drill_count < 50):
@@ -1303,23 +1369,23 @@ def main(argv: Sequence[str] | None = None) -> int:
     if path_name.lower() == default_sample:
         print("[OPS] expect: Drill 77 | Jig 8 | Tap 21 | C'bore 60 | C'drill 3")
         try:
-            drill_total = int(total_counts.get("drill", 0))
+            drill_total = int(effective_total_counts.get("drill", 0))
         except Exception:
             drill_total = 0
         try:
-            jig_total = int(total_counts.get("jig_grind", 0))
+            jig_total = int(effective_total_counts.get("jig_grind", 0))
         except Exception:
             jig_total = 0
         try:
-            tap_total = int(total_counts.get("tap", 0))
+            tap_total = int(effective_total_counts.get("tap", 0))
         except Exception:
             tap_total = 0
         try:
-            cbore_total = _counts_value(total_counts, "counterbore", "cbore")
+            cbore_total = _counts_value(effective_total_counts, "counterbore", "cbore")
         except Exception:
             cbore_total = 0
         try:
-            cdrill_total = _counts_value(total_counts, "counterdrill", "cdrill")
+            cdrill_total = _counts_value(effective_total_counts, "counterdrill", "cdrill")
         except Exception:
             cdrill_total = 0
         print(

@@ -57,6 +57,36 @@ def test_text_fallback_rows_stitched_and_split() -> None:
     assert sides == {"front", "back"}
 
 
+def test_text_fallback_full_table() -> None:
+    lines = [
+        "(8) 1/4-20 TAP THRU FROM FRONT",
+        "(8) #7 DRILL THRU FROM FRONT",
+        "(6) 3/8-16 TAP THRU FROM BACK",
+        "(6) 5/16 DRILL THRU FROM BACK",
+        "(10) JIG GRIND Ø.375 THRU",
+        "(4) Ø0.750 C'BORE X .38 DEEP FROM BACK",
+        "(4) Ø.500 DRILL THRU FROM BACK",
+        "(12) Ø.281 DRILL THRU FROM FRONT",
+        "(5) C'DRILL .562 FROM FRONT",
+        "(5) Ø.201 DRILL THRU FROM FRONT",
+        "(9) SPOT DRILL .125 DEEP",
+        "(8) #30 DRILL THRU",
+        "(4) JIG GRIND Ø.500",
+    ]
+
+    rows, total = _collect_rows(lines)
+
+    assert len(rows) >= 12
+    assert 80 <= geo_extractor._sum_qty(rows) <= 90
+    assert 80 <= total <= 90
+
+    manifest = geo_extractor.ops_manifest(rows)
+    table_totals = manifest["table"]
+
+    assert table_totals["tap"] > 0
+    assert table_totals["jig_grind"] > 0
+    assert table_totals["counterdrill"] > 0
+
 
 def test_geom_residual_and_pilot_logic() -> None:
     rows = [
@@ -79,3 +109,16 @@ def test_geom_residual_and_pilot_logic() -> None:
     assert geom_residual == 6
     assert table_tap == 7
     assert manifest["total"]["drill"] == geom_residual + table_tap
+
+
+def test_table_authoritative_no_pilot_add() -> None:
+    rows = [
+        {"qty": 4, "desc": "1/4-20 TAP THRU", "ref": "A"},
+        {"qty": 4, "desc": "#7 DRILL THRU", "ref": "A"},
+    ]
+
+    manifest = geo_extractor.ops_manifest(rows)
+
+    assert manifest["table"]["drill"] == 4
+    assert manifest["details"].get("drill_implied_from_taps") == 0
+    assert manifest["total"]["drill"] == manifest["table"]["drill"]
