@@ -62,7 +62,9 @@ _TAP_THREAD_TOKEN_RE = re.compile(
     re.IGNORECASE,
 )
 _NPT_TOKEN_RE = re.compile(r"\bN\.?P\.?T\.?\b", re.IGNORECASE)
-_COUNTERBORE_TOKEN_RE = re.compile(r"\b(?:C['’]?\s*BORE|CBORE)\b", re.IGNORECASE)
+_COUNTERBORE_TOKEN_RE = re.compile(
+    r"\b(?:C['’]?\s*BORE|CBORE|COUNTERBORE)\b", re.IGNORECASE
+)
 _COUNTERSINK_TOKEN_RE = re.compile(r"\b(?:C['’]?\s*SINK|CSK|COUNTERSINK)\b", re.IGNORECASE)
 _COUNTERDRILL_TOKEN_RE = re.compile(
     r"\b(?:C['’]?\s*DRILL|COUNTER\s*DRILL|CTR\s*DRILL|C['’]DRILL)\b",
@@ -2966,6 +2968,7 @@ def classify_op_row(desc: str | None) -> list[dict[str, Any]]:
         is_cdrill = bool(_COUNTERDRILL_TOKEN_RE.search(segment))
         has_thread_tap = bool(_TAP_THREAD_TOKEN_RE.search(segment))
         has_tap_word = bool(_TAP_WORD_TOKEN_RE.search(segment))
+        has_tap = has_thread_tap or has_tap_word
         if is_npt:
             kinds.append(("npt", None))
         if is_npt or has_tap:
@@ -4470,37 +4473,114 @@ def _extract_mechanical_table_from_blocks(doc: Any) -> Mapping[str, Any] | None:
     return best_result
 
 
-def _fallback_text_table(lines: Iterable[str]) -> dict[str, Any]:
-    merged = _merge_table_lines(lines)
+_FALLBACK_ACTION_KINDS = {"tap", "cbore", "drill", "cdrill"}
+_FALLBACK_TRAILING_LADDER_RE = re.compile(r"(?:\s*\d+){3,}$")
+
+
+def _prepare_fallback_lines(lines: Iterable[str]) -> list[str]:
+    try:
+        candidate = list(lines)
+    except Exception:
+        candidate = []
+    return _merge_table_lines(candidate)
+
+
+def _build_fallback_rows_from_lines(lines: Iterable[str]) -> tuple[list[dict[str, Any]], dict[str, int], int]:
     rows: list[dict[str, Any]] = []
     families: dict[str, int] = {}
     total_qty = 0
+    seen_keys: set[tuple[int, str, str, str]] = set()
 
-    for entry in merged:
-        qty_val, remainder = _extract_row_quantity_and_remainder(entry)
+    for entry in lines:
+        normalized_desc = " ".join(str(entry or "").split())
+        if not normalized_desc:
+            continue
+        qty_val, remainder = _extract_row_quantity_and_remainder(normalized_desc)
         if qty_val is None or qty_val <= 0:
             continue
-        normalized_desc = " ".join(entry.split())
-        if not normalized_desc:
+        try:
+            qty_int = int(qty_val)
+        except Exception:
+            continue
+        if qty_int <= 0:
             continue
         remainder_clean = " ".join(remainder.split())
         desc_text = remainder_clean or normalized_desc
-        desc_text = _FALLBACK_LEADING_QTY_RE.sub("", desc_text).strip()
-        rows.append({"hole": "", "ref": "", "qty": qty_val, "desc": desc_text})
-        total_qty += qty_val
+        desc_text = _FALLBACK_LEADING_QTY_RE.sub("", desc_text)
+        desc_text = _FALLBACK_JJ_NOISE_RE.sub("", desc_text)
+        desc_text = _FALLBACK_ETCH_NOISE_RE.sub("", desc_text)
+        desc_text = " ".join(desc_text.split()).strip()
+        desc_text = _FALLBACK_TRAILING_LADDER_RE.sub("", desc_text).strip()
+        if not desc_text:
+            continue
 
-        ref_text, ref_value = _extract_row_reference(remainder_clean or normalized_desc)
-        if ref_text:
-            rows[-1]["ref"] = ref_text
-        side = _detect_row_side(normalized_desc)
-        if side:
-            rows[-1]["side"] = side
-        if ref_value is not None:
-            key = f"{ref_value:.4f}".rstrip("0").rstrip(".")
-            families[key] = families.get(key, 0) + qty_val
+        operations = classify_op_row(desc_text)
+        op_kinds = {str(op.get("kind") or "").strip().lower() for op in operations}
+        fragments = split_actions(desc_text) or [desc_text]
+        candidate_fragments: list[tuple[str, dict[str, Any]]] = []
+        for fragment in fragments:
+            cleaned_fragment = " ".join(str(fragment or "").split()).strip()
+            cleaned_fragment = _FALLBACK_TRAILING_LADDER_RE.sub("", cleaned_fragment).strip()
+            if not cleaned_fragment:
+                continue
+            if _roi_is_admin_noise(cleaned_fragment) or _roi_is_numeric_ladder(cleaned_fragment):
+                continue
+            action = classify_action(cleaned_fragment)
+            kind = str(action.get("kind") or "").strip().lower()
+            is_relevant = kind in _FALLBACK_ACTION_KINDS or action.get("npt")
+            if not is_relevant and len(fragments) > 1 and (op_kinds & _FALLBACK_ACTION_KINDS):
+                # Skip unrelated fragments when we have explicit action rows.
+                continue
+            candidate_fragments.append((cleaned_fragment, action))
+
+        if not candidate_fragments:
+            continue
+
+        base_ref_text, base_ref_value = _extract_row_reference(desc_text)
+        side_hint = _detect_row_side(desc_text) or _detect_row_side(normalized_desc)
+
+        for fragment_text, action in candidate_fragments:
+            ref_text, ref_value = _extract_row_reference(fragment_text)
+            side_value = action.get("side") or _detect_row_side(fragment_text) or side_hint
+            normalized_key = (
+                qty_int,
+                fragment_text.upper(),
+                (side_value or "").upper(),
+                (ref_text or base_ref_text or "").upper(),
+            )
+            if normalized_key in seen_keys:
+                continue
+            seen_keys.add(normalized_key)
+
+            row: dict[str, Any] = {
+                "hole": "",
+                "ref": ref_text or base_ref_text or "",
+                "qty": qty_int,
+                "desc": fragment_text,
+            }
+            if side_value:
+                row["side"] = side_value
+            if action.get("npt"):
+                row["npt"] = True
+            rows.append(row)
+            total_qty += qty_int
+
+            value_for_family = ref_value if ref_value is not None else base_ref_value
+            if value_for_family is not None:
+                key = f"{float(value_for_family):.4f}".rstrip("0").rstrip(".")
+                families[key] = families.get(key, 0) + qty_int
+
+    return rows, families, total_qty
+
+
+def _fallback_text_table(lines: Iterable[str]) -> dict[str, Any]:
+    merged = _prepare_fallback_lines(lines)
+    rows, families, total_qty = _build_fallback_rows_from_lines(merged)
 
     if not rows:
         return {}
+
+    print(f"[TEXT-FALLBACK] rebuilt rows={len(rows)} qty_sum={total_qty}")
 
     result: dict[str, Any] = {"rows": rows, "hole_count": total_qty}
     if families:
@@ -4511,65 +4591,16 @@ def _fallback_text_table(lines: Iterable[str]) -> dict[str, Any]:
 
 
 def _publish_fallback_from_rows_txt(rows_txt: Iterable[Any]) -> dict[str, Any]:
-    parsed_rows: list[dict[str, Any]] = []
-    families: dict[str, int] = {}
-    total_qty = 0
-    seen_keys: set[tuple[int, str]] = set()
+    merged = _prepare_fallback_lines(rows_txt)
+    rows, families, total_qty = _build_fallback_rows_from_lines(merged)
 
-    for raw_line in rows_txt:
-        try:
-            base_text = str(raw_line)
-        except Exception:
-            base_text = ""
-        normalized = " ".join(base_text.split())
-        if not normalized:
-            continue
-        qty_val, remainder = _extract_row_quantity_and_remainder(normalized)
-        if qty_val is None or qty_val <= 0:
-            continue
-        try:
-            qty_int = int(qty_val)
-        except Exception:
-            continue
-        if qty_int <= 0:
-            continue
-        side_hint = _detect_row_side(normalized)
-        desc_value_raw = remainder.strip() or normalized
-        desc_value = _FALLBACK_LEADING_QTY_RE.sub("", desc_value_raw)
-        desc_value = _FALLBACK_JJ_NOISE_RE.sub("", desc_value)
-        desc_value = _FALLBACK_ETCH_NOISE_RE.sub("", desc_value)
-        desc_value = " ".join(desc_value.split()).strip()
-        if not desc_value:
-            continue
-        ref_text, ref_value = _extract_row_reference(desc_value)
-        has_action = bool(_HOLE_ACTION_TOKEN_RE.search(desc_value))
-        has_reference = bool(ref_text or (ref_value is not None))
-        if not has_action and not has_reference:
-            continue
-        side_value = _detect_row_side(desc_value) or side_hint
-        normalized_key = (qty_int, " ".join(desc_value.split()).upper())
-        if normalized_key in seen_keys:
-            continue
-        seen_keys.add(normalized_key)
-        row: dict[str, Any] = {
-            "hole": "",
-            "qty": qty_int,
-            "desc": desc_value,
-            "ref": ref_text or "",
-        }
-        if side_value:
-            row["side"] = side_value
-        parsed_rows.append(row)
-        total_qty += qty_int
-        if ref_value is not None:
-            key = f"{ref_value:.4f}".rstrip("0").rstrip(".")
-            families[key] = families.get(key, 0) + qty_int
-
-    if not parsed_rows:
+    if not rows:
         return {}
 
+    print(f"[TEXT-FALLBACK] rebuilt rows={len(rows)} qty_sum={total_qty}")
+
     result: dict[str, Any] = {
-        "rows": parsed_rows,
+        "rows": rows,
         "hole_count": total_qty,
         "provenance_holes": "HOLE TABLE (fallback)",
         "source": "text_table",
