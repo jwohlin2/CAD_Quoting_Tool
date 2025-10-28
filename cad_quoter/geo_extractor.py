@@ -35,6 +35,157 @@ class NoTextRowsError(RuntimeError):
         super().__init__(message)
 
 
+@dataclass(slots=True)
+class TextScanOpts:
+    """Overrides for the text-table anchor scan heuristics."""
+
+    anchor_ratio: float | None = None
+    min_height: float | None = None
+    include_layers: tuple[str, ...] | None = None
+    exclude_layers: tuple[str, ...] | None = None
+
+    @staticmethod
+    def _env_float_optional(*names: str) -> float | None:
+        for name in names:
+            if not name:
+                continue
+            try:
+                raw = os.environ.get(name)
+            except Exception:
+                raw = None
+            if raw is None:
+                continue
+            text = str(raw).strip()
+            if not text:
+                continue
+            try:
+                number = float(text)
+            except Exception:
+                continue
+            if math.isfinite(number):
+                return float(number)
+        return None
+
+    @staticmethod
+    def _env_patterns(*names: str) -> tuple[str, ...] | None:
+        for name in names:
+            if not name:
+                continue
+            try:
+                raw = os.environ.get(name)
+            except Exception:
+                raw = None
+            if raw is None:
+                continue
+            text = str(raw).strip()
+            if not text:
+                continue
+            parts = [piece.strip() for piece in re.split(r"[,;]", text) if piece.strip()]
+            if parts:
+                return tuple(parts)
+        return None
+
+    @classmethod
+    def from_env(cls) -> "TextScanOpts":
+        return cls(
+            anchor_ratio=cls._env_float_optional(
+                "GEO_TEXT_ANCHOR_RATIO",
+                "GEO_TEXT_ANCHOR_TOLERANCE",
+            ),
+            min_height=cls._env_float_optional("GEO_TEXT_MIN_HEIGHT"),
+            include_layers=cls._env_patterns("GEO_TEXT_INCLUDE_LAYERS"),
+            exclude_layers=cls._env_patterns("GEO_TEXT_EXCLUDE_LAYERS"),
+        )
+
+    @classmethod
+    def from_mapping(cls, payload: Mapping[str, Any] | None) -> "TextScanOpts":
+        if isinstance(payload, cls):
+            return payload
+        if not isinstance(payload, Mapping):
+            return cls()
+
+        def _tuple_from(name: str) -> tuple[str, ...] | None:
+            value = payload.get(name)
+            if value is None:
+                return None
+            if isinstance(value, (str, bytes, bytearray)):
+                text = str(value).strip()
+                if not text:
+                    return ()
+                return (text,)
+            if isinstance(value, Iterable):
+                parts: list[str] = []
+                for item in value:
+                    if not isinstance(item, str):
+                        continue
+                    text = item.strip()
+                    if text:
+                        parts.append(text)
+                return tuple(parts)
+            return None
+
+        def _float_from(name: str) -> float | None:
+            candidate = payload.get(name)
+            if candidate in (None, ""):
+                return None
+            try:
+                number = float(candidate)  # type: ignore[arg-type]
+            except Exception:
+                return None
+            if not math.isfinite(number):
+                return None
+            return float(number)
+
+        return cls(
+            anchor_ratio=_float_from("anchor_ratio"),
+            min_height=_float_from("min_height"),
+            include_layers=_tuple_from("include_layers"),
+            exclude_layers=_tuple_from("exclude_layers"),
+        )
+
+    def merge(self, override: "TextScanOpts" | None) -> "TextScanOpts":
+        if override is None:
+            return TextScanOpts(
+                anchor_ratio=self.anchor_ratio,
+                min_height=self.min_height,
+                include_layers=self.include_layers,
+                exclude_layers=self.exclude_layers,
+            )
+        return TextScanOpts(
+            anchor_ratio=override.anchor_ratio
+            if override.anchor_ratio is not None
+            else self.anchor_ratio,
+            min_height=override.min_height
+            if override.min_height is not None
+            else self.min_height,
+            include_layers=override.include_layers
+            if override.include_layers is not None
+            else self.include_layers,
+            exclude_layers=override.exclude_layers
+            if override.exclude_layers is not None
+            else self.exclude_layers,
+        )
+
+    def is_active(self) -> bool:
+        return any(
+            value is not None and value != ()
+            for value in (
+                self.anchor_ratio,
+                self.min_height,
+                self.include_layers,
+                self.exclude_layers,
+            )
+        )
+
+
+def _resolve_text_scan_opts(
+    opts: TextScanOpts | Mapping[str, Any] | None,
+) -> TextScanOpts:
+    env_opts = TextScanOpts.from_env()
+    override = TextScanOpts.from_mapping(opts) if opts is not None else TextScanOpts()
+    return env_opts.merge(override)
+
+
 TransformMatrix = tuple[float, float, float, float, float, float]
 
 
@@ -6209,6 +6360,7 @@ def read_text_table(
     layer_include_regex: Iterable[str] | str | None = None,
     layer_exclude_regex: Iterable[str] | str | None = DEFAULT_TEXT_LAYER_EXCLUDE_REGEX,
     layout_filters: Mapping[str, Any] | Iterable[str] | str | None = None,
+    text_scan_opts: TextScanOpts | Mapping[str, Any] | None = None,
     debug_layouts: bool = False,
     debug_scan: bool = False,
 ) -> dict[str, Any]:
@@ -6228,6 +6380,7 @@ def read_text_table(
         "layout_filters": layout_filters,
     }
     debug_scan_enabled = bool(debug_scan)
+    scan_overrides = _resolve_text_scan_opts(text_scan_opts)
     roi_hint_effective: Mapping[str, Any] | None = roi_hint
     resolved_allowlist = _normalize_layer_allowlist(layer_allowlist)
     normalized_block_allow = _normalize_block_allowlist(block_name_allowlist)
@@ -6239,6 +6392,13 @@ def read_text_table(
             "patterns": list(layout_filter_patterns),
         }
         _LAST_TEXT_TABLE_DEBUG["debug_scan_requested"] = debug_scan_enabled
+        if scan_overrides.is_active():
+            _LAST_TEXT_TABLE_DEBUG["text_scan_overrides"] = {
+                "anchor_ratio": scan_overrides.anchor_ratio,
+                "min_height": scan_overrides.min_height,
+                "include_layers": list(scan_overrides.include_layers or ()),
+                "exclude_layers": list(scan_overrides.exclude_layers or ()),
+            }
 
     def _compile_layer_patterns(
         patterns: Iterable[str] | str | None,
@@ -6264,8 +6424,15 @@ def read_text_table(
 
     include_patterns = _compile_layer_patterns(layer_include_regex)
     exclude_patterns = _compile_layer_patterns(layer_exclude_regex)
+    if scan_overrides.include_layers is not None:
+        include_patterns = _compile_layer_patterns(scan_overrides.include_layers)
+    if scan_overrides.exclude_layers is not None:
+        exclude_patterns = _compile_layer_patterns(scan_overrides.exclude_layers)
     base_exclude = re.compile(_GEO_EXCLUDE_LAYERS_DEFAULT, re.IGNORECASE)
-    if not any(pattern.pattern == base_exclude.pattern for pattern in exclude_patterns):
+    if (
+        scan_overrides.exclude_layers is None
+        and not any(pattern.pattern == base_exclude.pattern for pattern in exclude_patterns)
+    ):
         exclude_patterns.insert(0, base_exclude)
     am_bor_band_layouts = {"CHART", "SHEET (B)"}
     include_display = [pattern.pattern for pattern in include_patterns]
@@ -7686,6 +7853,33 @@ def read_text_table(
             candidate_entries = normalized_entries
             table_lines = normalized_lines
 
+            if scan_overrides.min_height is not None:
+                try:
+                    min_height_threshold = float(scan_overrides.min_height)
+                except Exception:
+                    min_height_threshold = None
+                if (
+                    min_height_threshold is not None
+                    and math.isfinite(min_height_threshold)
+                    and min_height_threshold > 0
+                ):
+                    filtered_by_min_height: list[dict[str, Any]] = []
+                    for entry in candidate_entries:
+                        height_val = entry.get("height")
+                        if isinstance(height_val, (int, float)):
+                            try:
+                                height_float = float(height_val)
+                            except Exception:
+                                height_float = 0.0
+                            if math.isfinite(height_float) and height_float < min_height_threshold:
+                                continue
+                        filtered_by_min_height.append(entry)
+                    if len(filtered_by_min_height) != len(candidate_entries):
+                        candidate_entries = [dict(entry) for entry in filtered_by_min_height]
+                        table_lines = [
+                            str(entry.get("normalized_text") or "") for entry in candidate_entries
+                        ]
+
             anchors = [
                 entry
                 for entry in candidate_entries
@@ -7708,9 +7902,20 @@ def read_text_table(
                 else "[TEXT-SCAN] anchors=0"
             )
             total_by_height = len(candidate_entries)
+            anchor_tolerance = None
+            if scan_overrides.anchor_ratio is not None:
+                try:
+                    anchor_tolerance = float(scan_overrides.anchor_ratio)
+                except Exception:
+                    anchor_tolerance = None
+                if anchor_tolerance is not None:
+                    if not math.isfinite(anchor_tolerance) or anchor_tolerance <= 0:
+                        anchor_tolerance = None
+
             if anchor_count > 0 and anchor_h > 0 and candidate_entries:
+                tolerance_value = anchor_tolerance if anchor_tolerance is not None else 0.4
                 filtered_entries = _filter_entries_by_anchor_h(
-                    candidate_entries, anchor_h=anchor_h
+                    candidate_entries, anchor_h=anchor_h, tolerance=tolerance_value
                 )
                 kept_count = len(filtered_entries)
                 if kept_count != total_by_height:
@@ -7722,6 +7927,34 @@ def read_text_table(
             else:
                 total_kept = total_by_height
             print(f"[TEXT-SCAN] kept_by_height={total_kept}/{total_by_height}")
+
+            triple_counts: Counter[tuple[str, str, str]] = Counter()
+            if candidate_entries:
+                for entry in candidate_entries:
+                    layout_idx = _coerce_layout_index(entry.get("layout_index"))
+                    layout_name = entry.get("layout_name")
+                    if not layout_name:
+                        layout_name = layout_names.get(layout_idx, layout_idx)
+                    layout_display = str(layout_name or "-")
+                    layer_display = str(
+                        entry.get("effective_layer")
+                        or entry.get("effective_layer_upper")
+                        or entry.get("layer")
+                        or "-"
+                    )
+                    height_val = entry.get("height")
+                    if isinstance(height_val, (int, float)) and math.isfinite(float(height_val)):
+                        height_display = f"{float(height_val):.3f}"
+                    else:
+                        height_display = "-"
+                    triple_counts[(layout_display, layer_display, height_display)] += 1
+            if triple_counts:
+                top_entries = triple_counts.most_common(10)
+                summary_parts = [
+                    f"{layout}/{layer}/h={height}×{count}"
+                    for (layout, layer, height), count in top_entries
+                ]
+                print(f"[TEXT-SCAN] top triples: {', '.join(summary_parts)}")
     
             debug_candidates: list[dict[str, Any]] = []
             for entry in candidate_entries:
@@ -10643,6 +10876,7 @@ def extract_hole_table(
         "layout_filters",
         "debug_layouts",
         "debug_scan",
+        "text_scan_opts",
     }
     read_kwargs = {key: value for key, value in options.items() if key in allowed_keys}
 
@@ -10736,6 +10970,7 @@ def extract_for_app(
     *,
     layouts: Mapping[str, Any] | Iterable[str] | str | None = None,
     text_layer_exclude: Iterable[str] | str | None = None,
+    text_scan_opts: TextScanOpts | Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     """
     Returns:
@@ -10788,6 +11023,8 @@ def extract_for_app(
             text_kwargs["layout_filters"] = layouts
         if text_layer_exclude is not None:
             text_kwargs["layer_exclude_regex"] = text_layer_exclude
+        if text_scan_opts is not None:
+            text_kwargs["text_scan_opts"] = text_scan_opts
         try:
             text_info = read_text_table(doc, **text_kwargs) or {}
         except (NoTextRowsError, RuntimeError):
@@ -10964,6 +11201,7 @@ def read_geo(
     layer_include_regex: Iterable[str] | str | None = None,
     layer_exclude_regex: Iterable[str] | str | None = DEFAULT_TEXT_LAYER_EXCLUDE_REGEX,
     layout_filters: Mapping[str, Any] | Iterable[str] | str | None = None,
+    text_scan_opts: TextScanOpts | Mapping[str, Any] | None = None,
     debug_layouts: bool = False,
     debug_scan: bool = False,
     state: ExtractionState | None = None,
@@ -11067,6 +11305,7 @@ def read_geo(
                 layer_include_regex=layer_include_regex,
                 layer_exclude_regex=layer_exclude_regex,
                 layout_filters=layout_filters,
+                text_scan_opts=text_scan_opts,
                 debug_layouts=debug_layouts,
                 debug_scan=debug_scan,
             ) or {}
@@ -11077,7 +11316,7 @@ def read_geo(
                 for key in ("layer_allowlist", "roi_hint", "layout_filters", "debug_scan")
             ):
                 try:
-                    text_info = read_text_table(doc) or {}
+                    text_info = read_text_table(doc, text_scan_opts=text_scan_opts) or {}
                 except RuntimeError:
                     raise
                 except Exception:
@@ -12059,6 +12298,7 @@ def get_last_acad_table_scan() -> dict[str, Any] | None:
 __all__ = [
     "NoTextRowsError",
     "NO_TEXT_ROWS_MESSAGE",
+    "TextScanOpts",
     "read_geo",
     "extract_for_app",
     "extract_geo_from_path",
