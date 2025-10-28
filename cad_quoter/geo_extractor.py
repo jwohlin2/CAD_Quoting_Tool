@@ -5225,7 +5225,6 @@ def read_text_table(
     base_exclude = re.compile(_GEO_EXCLUDE_LAYERS_DEFAULT, re.IGNORECASE)
     if not any(pattern.pattern == base_exclude.pattern for pattern in exclude_patterns):
         exclude_patterns.insert(0, base_exclude)
-    base_exclude_pattern_text = base_exclude.pattern
     am_bor_band_layouts = {"CHART", "SHEET (B)"}
     include_display = [pattern.pattern for pattern in include_patterns]
     exclude_display = [pattern.pattern for pattern in exclude_patterns]
@@ -5991,8 +5990,6 @@ def read_text_table(
                 def _matches_any(
                     patterns: list[re.Pattern[str]],
                     values: list[str],
-                    *,
-                    skip_base_am_bor: bool = False,
                 ) -> bool:
                     for pattern in patterns:
                         for value in values:
@@ -6001,10 +5998,6 @@ def read_text_table(
                             match = pattern.search(value)
                             if not match:
                                 continue
-                            if skip_base_am_bor and pattern.pattern == base_exclude_pattern_text:
-                                matched_text = match.group(0) if match else value
-                                if str(matched_text or "").strip().upper() == "AM_BOR":
-                                    continue
                             return True
                     return False
 
@@ -6031,16 +6024,9 @@ def read_text_table(
                         include_ok = _matches_any(include_patterns, values)
                     exclude_hit = False
                     if include_ok and exclude_patterns:
-                        entry_is_am_bor = str(layer_text or "").strip().upper() == "AM_BOR" or (
-                            str(upper_text or "").strip().upper() == "AM_BOR"
-                        )
-                        skip_base_am_bor = (
-                            layout_upper in am_bor_band_layouts and entry_is_am_bor
-                        )
                         exclude_hit = _matches_any(
                             list(exclude_patterns),
                             values,
-                            skip_base_am_bor=skip_base_am_bor,
                         )
                     if include_ok and not exclude_hit:
                         regex_filtered.append(entry)
@@ -6110,6 +6096,11 @@ def read_text_table(
             am_bor_pre_count = _lookup_layer_count(layer_counts_pre, "AM_BOR")
             am_bor_post_count = _lookup_layer_count(layer_counts_post, "AM_BOR")
             am_bor_drop_count = max(am_bor_pre_count - am_bor_post_count, 0)
+
+            if am_bor_post_count > 0:
+                raise AssertionError(
+                    "AM_BOR layer must be excluded from text scan results",
+                )
     
             collected_entries = filtered_entries
             if isinstance(_LAST_TEXT_TABLE_DEBUG, dict):
