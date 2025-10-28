@@ -102,6 +102,18 @@ _OPS_MANIFEST_KEYS = (
     "unknown",
 )
 
+_AUTHORITATIVE_TABLE_SOURCES = {"acad_table", "text_table", "text_fallback"}
+
+
+def _table_source_is_authoritative(source: Any, row_count: int) -> bool:
+    if row_count < 8:
+        return False
+    try:
+        source_text = str(source or "")
+    except Exception:
+        source_text = ""
+    return source_text.lower() in _AUTHORITATIVE_TABLE_SOURCES
+
 
 def _matrix_multiply(a: TransformMatrix, b: TransformMatrix) -> TransformMatrix:
     """Return the matrix product ``a @ b`` for affine 2D transforms."""
@@ -8435,6 +8447,7 @@ def ops_manifest(
     geom_holes: Mapping[str, Any] | None = None,
     *,
     hole_sets: Any = None,
+    authoritative_table: bool = False,
 ) -> dict[str, Any]:
     table_keys = (
         "drill",
@@ -8586,18 +8599,22 @@ def ops_manifest(
     table_counts = _apply_aliases(table_counts)
 
     implied_drill_total = 0
-    leftover_drill = Counter(drill_groups)
-    for qty, key, row in tap_implied_candidates:
-        matched = 0
-        if key is not None and leftover_drill.get(key, 0) > 0:
-            available = leftover_drill[key]
-            matched = min(available, qty)
-            leftover_drill[key] -= matched
-        implied_qty = qty - matched
-        if implied_qty > 0:
-            implied_drill_total += implied_qty
-            _set_row_drill_implied(row, True)
-        else:
+    if not authoritative_table:
+        leftover_drill = Counter(drill_groups)
+        for qty, key, row in tap_implied_candidates:
+            matched = 0
+            if key is not None and leftover_drill.get(key, 0) > 0:
+                available = leftover_drill[key]
+                matched = min(available, qty)
+                leftover_drill[key] -= matched
+            implied_qty = qty - matched
+            if implied_qty > 0:
+                implied_drill_total += implied_qty
+                _set_row_drill_implied(row, True)
+            else:
+                _set_row_drill_implied(row, False)
+    else:
+        for _qty, _key, row in tap_implied_candidates:
             _set_row_drill_implied(row, False)
     details["drill_implied_from_taps"] = implied_drill_total
 
@@ -9375,14 +9392,25 @@ def promote_table_to_geo(
             pass
     if not isinstance(table_info, Mapping):
         return
-    rows = table_info.get("rows") or []
+    rows_candidate = table_info.get("rows") or []
+    if isinstance(rows_candidate, list):
+        rows = rows_candidate
+    elif isinstance(rows_candidate, Iterable):
+        rows = list(rows_candidate)
+    else:
+        rows = []
     if not rows:
         return
     ops_summary = geo.setdefault("ops_summary", {})
     ops_summary["rows"] = list(rows)
     ops_summary["source"] = source_tag
     qty_sum = _sum_qty(rows)
-    manifest = ops_manifest(rows, geom_holes=geom_holes)
+    authoritative_table = _table_source_is_authoritative(source_tag, len(rows))
+    manifest = ops_manifest(
+        rows,
+        geom_holes=geom_holes,
+        authoritative_table=authoritative_table,
+    )
     if manifest:
         ops_summary["manifest"] = manifest
         totals_map = manifest.get("total")
@@ -9636,7 +9664,15 @@ def extract_for_app(
         geom_source = None
     geom_payload = _normalize_geom_holes_payload(geom_source)
 
-    manifest = ops_manifest(selected_rows, geom_holes=geom_payload)
+    authoritative_table = _table_source_is_authoritative(
+        selected_source,
+        len(selected_rows),
+    )
+    manifest = ops_manifest(
+        selected_rows,
+        geom_holes=geom_payload,
+        authoritative_table=authoritative_table,
+    )
 
     return {
         "rows": selected_rows,
@@ -10097,7 +10133,15 @@ def read_geo(
                     if getattr(state, "anchor_authoritative", False)
                     else "HOLE TABLE"
                 )
-            manifest_payload = ops_manifest(publish_rows, geom_holes=geom_census)
+            authoritative_table = _table_source_is_authoritative(
+                publish_source_tag,
+                len(publish_rows),
+            )
+            manifest_payload = ops_manifest(
+                publish_rows,
+                geom_holes=geom_census,
+                authoritative_table=authoritative_table,
+            )
             if manifest_payload:
                 ops_summary["manifest"] = manifest_payload
                 totals_map = manifest_payload.get("total")
@@ -10166,7 +10210,20 @@ def read_geo(
     manifest_rows = ops_summary.get("rows")
     if not isinstance(manifest_rows, list):
         manifest_rows = rows_for_log
-    manifest_payload = ops_manifest(manifest_rows, geom_holes=geom_census)
+    if not isinstance(manifest_rows, list):
+        if isinstance(manifest_rows, Iterable):
+            manifest_rows = list(manifest_rows)
+        else:
+            manifest_rows = []
+    authoritative_table = _table_source_is_authoritative(
+        ops_summary.get("source"),
+        len(manifest_rows),
+    )
+    manifest_payload = ops_manifest(
+        manifest_rows,
+        geom_holes=geom_census,
+        authoritative_table=authoritative_table,
+    )
     if manifest_payload:
         ops_summary["manifest"] = manifest_payload
         totals_map = manifest_payload.get("total")
@@ -10660,10 +10717,12 @@ def extract_for_app(doc: Any, *, opts: Mapping[str, Any] | None = None, **read_k
         if isinstance(geom_candidate, Mapping):
             geom_holes_payload = geom_candidate
 
+    authoritative_table = _table_source_is_authoritative(source, len(rows_list))
     manifest_payload = ops_manifest(
         rows_list,
         geom_holes=geom_holes_payload if isinstance(geom_holes_payload, Mapping) else None,
         hole_sets=hole_sets_payload,
+        authoritative_table=authoritative_table,
     )
     payload["ops_manifest"] = dict(manifest_payload)
 

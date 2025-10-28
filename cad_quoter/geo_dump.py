@@ -1214,10 +1214,15 @@ def main(argv: Sequence[str] | None = None) -> int:
         if isinstance(manifest_candidate, Mapping):
             manifest_payload = dict(manifest_candidate)
     if manifest_payload is None:
+        authoritative_table = geo_extractor._table_source_is_authoritative(
+            source,
+            len(rows),
+        )
         manifest_payload = geo_extractor.ops_manifest(
             rows,
             geom_holes=geom_holes_payload,
             hole_sets=hole_sets_payload,
+            authoritative_table=authoritative_table,
         )
     if isinstance(manifest_payload, Mapping):
         payload["ops_manifest"] = dict(manifest_payload)
