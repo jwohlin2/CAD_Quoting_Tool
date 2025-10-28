@@ -1188,7 +1188,7 @@ def _print_chart_audit(
         top_layers_display = "-"
 
     tables_count = int(tables_found)
-    print(
+    summary_message = (
         "[AUDIT] CHART text_raw={text_raw} in_blocks={in_blocks} "
         "kept_by_layer={kept} kept_by_height={height} tables={tables}".format(
             text_raw=text_raw,
@@ -1216,6 +1216,8 @@ def _print_chart_audit(
         print(
             "[AUDIT] Recommendation: lower --text-min-height or adjust layer include."
         )
+
+    print(summary_message)
 
 
 def _am_bor_included_from_candidates(*candidates: Mapping[str, Any] | None) -> bool:
@@ -3215,6 +3217,9 @@ def main(argv: Sequence[str] | None = None) -> int:
                 for entry in entities or []:
                     if not isinstance(entry, Mapping):
                         continue
+                    raw_text = entry.get("raw_text")
+                    text_value = entry.get("text")
+                    plain_text = entry.get("plain_text")
                     record = {
                         "type": entry.get("type"),
                         "handle": entry.get("handle"),
@@ -3224,12 +3229,10 @@ def main(argv: Sequence[str] | None = None) -> int:
                         "block_name": entry.get("block_name"),
                         "depth": entry.get("depth"),
                         "height": entry.get("height"),
-                        "rotation": entry.get("rotation"),
                         "x": entry.get("x"),
                         "y": entry.get("y"),
-                        "text": entry.get("text"),
-                        "plain_text": entry.get("plain_text"),
-                        "raw_text": entry.get("raw_text"),
+                        "raw": raw_text if raw_text is not None else text_value,
+                        "plain": plain_text if plain_text is not None else text_value,
                     }
                     json.dump(record, handle, ensure_ascii=False)
                     handle.write("\n")
