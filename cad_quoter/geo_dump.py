@@ -101,17 +101,24 @@ def _format_counter_summary(counter: Counter[str]) -> str:
     return "{" + summary + "}"
 
 
-def _print_text_dump(
-    entries: Sequence[Mapping[str, Any]],
-    *,
-    sample_limit: int | None = None,
-    group_by_layout: bool = True,
-) -> None:
+def _log_text_stats(entries: Sequence[Mapping[str, Any]]) -> Counter[str]:
     total = len(entries)
     type_counts = Counter(str(entry.get("etype") or "-") for entry in entries)
     layout_counts = Counter(str(entry.get("layout") or "-") for entry in entries)
     print(f"[TEXT-DUMP] total={total} by etype={_format_counter_summary(type_counts)}")
     print(f"[TEXT-DUMP] by layout={_format_counter_summary(layout_counts)}")
+    return layout_counts
+
+
+def _print_text_dump(
+    entries: Sequence[Mapping[str, Any]],
+    *,
+    sample_limit: int | None = None,
+    group_by_layout: bool = True,
+    layout_counts: Mapping[str, int] | None = None,
+) -> None:
+    if layout_counts is None:
+        layout_counts = Counter(str(entry.get("layout") or "-") for entry in entries)
 
     if not entries:
         return
@@ -142,7 +149,7 @@ def _print_text_dump(
             break
         layout = str(entry.get("layout") or "-")
         if group_by_layout and layout not in seen_layouts:
-            print(f"[TEXT-DUMP] layout={layout} count={layout_counts[layout]}")
+            print(f"[TEXT-DUMP] layout={layout} count={layout_counts.get(layout, 0)}")
             seen_layouts.add(layout)
         elif not group_by_layout and layout not in seen_layouts:
             seen_layouts.add(layout)
@@ -940,42 +947,39 @@ def main(argv: Sequence[str] | None = None) -> int:
     )
     parser.add_argument(
         "--min-height",
-        dest="text_min_height",
         type=float,
         metavar="VALUE",
         help="Minimum text height (drawing units) when dumping text entities",
     )
     parser.add_argument(
         "--layers-include",
-        dest="text_layers_include",
         action="append",
         metavar="REGEX",
         help="Regex pattern to include layers when dumping text entities (repeatable)",
     )
     parser.add_argument(
         "--layers-exclude",
-        dest="text_layers_exclude",
         action="append",
         metavar="REGEX",
         help="Regex pattern to exclude layers when dumping text entities (repeatable)",
     )
     parser.add_argument(
         "--no-blocks",
-        dest="text_include_blocks",
+        dest="include_blocks",
         action="store_false",
         default=True,
         help="Skip traversing INSERT blocks when dumping text",
     )
     parser.add_argument(
         "--no-paperspace",
-        dest="text_include_paperspace",
+        dest="include_paperspace",
         action="store_false",
         default=True,
         help="Skip paperspace layouts when dumping text",
     )
     parser.add_argument(
         "--sample",
-        dest="text_sample",
+        dest="sample",
         type=int,
         metavar="N",
         help="Print the first N dumped text rows grouped by layout",
@@ -988,8 +992,6 @@ def main(argv: Sequence[str] | None = None) -> int:
     )
     args = parser.parse_args(argv)
 
-    text_csv_path: str = "-"
-    text_jsonl_path: str = "-"
     dump_dir_path = Path(args.dump_dir).expanduser()
 
     if args.show_rows is not None:
@@ -1033,11 +1035,14 @@ def main(argv: Sequence[str] | None = None) -> int:
         print(f"[geo_dump] failed to load document: {exc}")
         return 1
 
+    text_csv_path: str = "-"
+    text_jsonl_path: str = "-"
+
     if args.dump_all_text:
-        include_layers = _normalize_pattern_args(args.text_layers_include)
-        exclude_layers = _normalize_pattern_args(args.text_layers_exclude)
-        if args.text_min_height is not None:
-            print(f"[TEXT-DUMP] min_height={args.text_min_height}")
+        include_layers = _normalize_pattern_args(args.layers_include)
+        exclude_layers = _normalize_pattern_args(args.layers_exclude)
+        if args.min_height is not None:
+            print(f"[TEXT-DUMP] min_height={args.min_height}")
         if include_layers:
             print(f"[TEXT-DUMP] layers_include={sorted(set(include_layers))}")
         if exclude_layers:
@@ -1045,17 +1050,18 @@ def main(argv: Sequence[str] | None = None) -> int:
         try:
             entries = geo_extractor.collect_all_text(
                 doc,
-                include_blocks=bool(args.text_include_blocks),
-                include_paperspace=bool(args.text_include_paperspace),
-                min_height=args.text_min_height,
+                include_blocks=bool(args.include_blocks),
+                include_paperspace=bool(args.include_paperspace),
+                min_height=args.min_height,
                 layers_include=include_layers,
                 layers_exclude=exclude_layers,
             )
         except Exception as exc:
             print(f"[TEXT-DUMP] failed to collect text entities: {exc}")
             entries = []
-        sample_limit = args.text_sample
-        _print_text_dump(entries, sample_limit=sample_limit)
+        layout_counts = _log_text_stats(entries)
+        sample_limit = args.sample
+        _print_text_dump(entries, sample_limit=sample_limit, layout_counts=layout_counts)
         text_csv_written = write_text_dump_csv(entries, dump_dir_path)
         text_jsonl_written = write_text_dump_jsonl(entries, dump_dir_path)
         text_csv_path = str(text_csv_written)
