@@ -6,6 +6,8 @@ from __future__ import annotations
 from collections import Counter, defaultdict, deque
 from collections.abc import Iterable, Mapping, MutableMapping, Sequence
 from dataclasses import dataclass
+import csv
+import json
 from fractions import Fraction
 import csv
 import inspect
@@ -2645,6 +2647,24 @@ _QSTRIPE_CANDIDATE_RE = re.compile(
     r"(^\(?\d{1,3}\)?$|^\d{1,3}[x×]$|^QTY[:.]?$)",
     re.IGNORECASE,
 )
+
+_DEBUG_DIR = Path("debug")
+_DEBUG_ROWS_PATH = _DEBUG_DIR / "hole_table_rows.csv"
+_DEBUG_TOTALS_PATH = _DEBUG_DIR / "ops_table_totals.json"
+_DEBUG_FIELDNAMES = (
+    "qty",
+    "kind",
+    "side",
+    "tool",
+    "diam_token",
+    "depth_token",
+    "raw_text",
+)
+_DEBUG_DEPTH_RE = re.compile(
+    r"([x×]\s*)?(\d+(?:\.\d+)?)\s*(?:DEEP|DEPTH|THK|THICK)\b",
+    re.IGNORECASE,
+)
+_DEBUG_THRU_RE = re.compile(r"\bTHRU\b", re.IGNORECASE)
 _ROI_ANCHOR_RE = re.compile(
     r"(HOLE\s+CHART|HOLE\s+TABLE|QTY|SIZE|DIA|Ø|⌀|TAP|DRILL|THRU|C['’]?BORE|"
     r"COUNTER\s*BORE|N\.?P\.?T|JIG)",
@@ -5692,6 +5712,122 @@ def _fallback_rows_sample(rows: Sequence[Mapping[str, Any]] | None, limit: int =
     return f"[{', '.join(preview)}]"
 
 
+def _detect_thread_token(text: str) -> str:
+    search_space = text or ""
+    thread_match = _THREAD_CALL_OUT_RE.search(search_space)
+    if thread_match:
+        return thread_match.group(0).upper()
+    pipe_match = _PIPE_NPT_REF_RE.search(search_space)
+    if pipe_match:
+        numeric = pipe_match.group(1)
+        suffix = pipe_match.group(2)
+        return f"{numeric}-{suffix}".upper().replace(" ", "")
+    numbered_thread = _NUMBERED_THREAD_REF_RE.search(search_space)
+    if numbered_thread:
+        return numbered_thread.group(0).upper().replace(" ", "")
+    return ""
+
+
+def _detect_diameter_token(text: str) -> str:
+    search_space = text or ""
+    for pattern in (_DIAMETER_PREFIX_RE, _DIAMETER_SUFFIX_RE):
+        match = pattern.search(search_space)
+        if match:
+            return match.group(0).strip()
+    size = _extract_drill_size(search_space)
+    return size.strip() if size else ""
+
+
+def _detect_depth_token(text: str) -> str:
+    search_space = text or ""
+    match = _DEBUG_DEPTH_RE.search(search_space)
+    if match:
+        token = match.group(0).strip()
+        return token
+    if _DEBUG_THRU_RE.search(search_space):
+        return "THRU"
+    return ""
+
+
+def _fallback_debug_records(rows: Sequence[Mapping[str, Any]]) -> tuple[list[dict[str, Any]], int]:
+    records: list[dict[str, Any]] = []
+    qty_sum = 0
+    for row in rows:
+        if not isinstance(row, Mapping):
+            continue
+        qty = _coerce_positive_int(row.get("qty")) or 0
+        desc = (
+            row.get("desc")
+            or row.get("description")
+            or row.get("text")
+            or row.get("raw")
+            or ""
+        )
+        desc_text = str(desc)
+        operations = classify_op_row(desc_text)
+        kind = ""
+        for op in operations:
+            candidate = str(op.get("kind") or "")
+            if candidate and candidate not in {"unknown", "npt"}:
+                kind = candidate
+                break
+        if not kind:
+            kind = str(classify_action(desc_text).get("kind") or "")
+        record = {
+            "qty": qty,
+            "kind": kind.lower(),
+            "side": str(row.get("side") or ""),
+            "tool": "",
+            "diam_token": _detect_diameter_token(desc_text),
+            "depth_token": _detect_depth_token(desc_text),
+            "raw_text": desc_text,
+        }
+        if record["kind"] == "tap":
+            record["tool"] = _detect_thread_token(desc_text)
+        elif record["kind"] == "drill":
+            record["tool"] = record["diam_token"] or _detect_thread_token(desc_text)
+        else:
+            record["tool"] = record["diam_token"] or _detect_thread_token(desc_text) or record["kind"]
+        records.append(record)
+        qty_sum += qty
+    return records, qty_sum
+
+
+def _write_fallback_debug(records: list[dict[str, Any]], qty_sum: int) -> None:
+    if not records:
+        return
+    totals = {key: 0 for key in ("drill", "tap", "counterbore", "counterdrill", "jig_grind")}
+    for record in records:
+        raw_kind = str(record.get("kind") or "").lower()
+        kind = {
+            "cbore": "counterbore",
+            "counterbore": "counterbore",
+            "cdrill": "counterdrill",
+            "counterdrill": "counterdrill",
+        }.get(raw_kind, raw_kind)
+        if kind in totals:
+            try:
+                qty_val = int(record.get("qty") or 0)
+            except Exception:
+                qty_val = 0
+            totals[kind] += qty_val
+    try:
+        _DEBUG_DIR.mkdir(parents=True, exist_ok=True)
+        with _DEBUG_ROWS_PATH.open("w", newline="", encoding="utf-8") as handle:
+            writer = csv.DictWriter(handle, fieldnames=_DEBUG_FIELDNAMES)
+            writer.writeheader()
+            writer.writerows(records)
+        with _DEBUG_TOTALS_PATH.open("w", encoding="utf-8") as handle:
+            json.dump(totals, handle, indent=2, sort_keys=True)
+            handle.write("\n")
+        print(
+            f"[TABLE-DUMP] rows={len(records)} qty_sum={qty_sum} -> {_DEBUG_ROWS_PATH.as_posix()}"
+        )
+        print(f"[OPS] table totals -> {_DEBUG_TOTALS_PATH.as_posix()}")
+    except Exception:
+        pass
+
+
 def _fallback_text_table(lines: Iterable[str]) -> dict[str, Any]:
     merged = _prepare_fallback_lines(lines)
     rows, families, total_qty = _build_fallback_rows_from_lines(merged)
@@ -5703,6 +5839,12 @@ def _fallback_text_table(lines: Iterable[str]) -> dict[str, Any]:
     print(
         f"[TEXT-FALLBACK] rebuilt rows={len(rows)} qty_sum={total_qty} sample={sample}"
     )
+
+    try:
+        records, qty_sum = _fallback_debug_records(rows)
+        _write_fallback_debug(records, qty_sum)
+    except Exception:
+        pass
 
     result: dict[str, Any] = {"rows": rows, "hole_count": total_qty}
     if families:
@@ -5732,6 +5874,12 @@ def _publish_fallback_from_rows_txt(rows_txt: Iterable[Any]) -> dict[str, Any]:
     }
     if families:
         result["hole_diam_families_in"] = families
+
+    try:
+        records, qty_sum = _fallback_debug_records(rows)
+        _write_fallback_debug(records, qty_sum)
+    except Exception:
+        pass
     return result
 
 
