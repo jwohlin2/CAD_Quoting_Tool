@@ -543,6 +543,26 @@ def _env_flag(name: str) -> bool:
     return text in {"1", "true", "yes", "on"}
 
 
+def _env_float(*names: str, default: float) -> float:
+    for name in names:
+        if not name:
+            continue
+        try:
+            value = os.environ.get(name)
+        except Exception:
+            value = None
+        if value is None:
+            continue
+        text = str(value).strip()
+        if not text:
+            continue
+        try:
+            return float(text)
+        except Exception:
+            continue
+    return float(default)
+
+
 _DEFAULT_LAYER_ALLOWLIST = frozenset({"BALLOON"})
 _GEO_EXCLUDE_LAYERS_DEFAULT = r"^(AM_BOR|DEFPOINTS|PAPER)$"
 DEFAULT_TEXT_LAYER_EXCLUDE_REGEX: tuple[str, ...] = (
@@ -563,20 +583,15 @@ except Exception:
 _GEO_H_ANCHOR_MIN = max(_GEO_H_ANCHOR_MIN, 0.0)
 _GEO_H_ANCHOR_HARD_MIN = 0.04
 
-try:
-    _GEO_CIRCLE_DIAM_MIN_IN = float(os.environ.get("GEO_CIRCLE_DIAM_MIN_IN", "0.09") or 0.09)
-except Exception:
-    _GEO_CIRCLE_DIAM_MIN_IN = 0.09
-_GEO_CIRCLE_DIAM_MIN_IN = max(_GEO_CIRCLE_DIAM_MIN_IN, 0.0)
-
-try:
-    _GEO_CIRCLE_DIAM_MAX_IN = float(os.environ.get("GEO_CIRCLE_DIAM_MAX_IN", "3.0") or 3.0)
-except Exception:
-    _GEO_CIRCLE_DIAM_MAX_IN = 3.0
-if _GEO_CIRCLE_DIAM_MAX_IN <= 0.0:
-    _GEO_CIRCLE_DIAM_MAX_IN = 3.0
-if _GEO_CIRCLE_DIAM_MAX_IN < _GEO_CIRCLE_DIAM_MIN_IN:
-    _GEO_CIRCLE_DIAM_MAX_IN = _GEO_CIRCLE_DIAM_MIN_IN
+_GEO_DIA_MIN_IN = max(
+    _env_float("GEO_DIA_MIN_IN", "GEO_CIRCLE_DIAM_MIN_IN", default=0.09),
+    0.0,
+)
+_GEO_DIA_MAX_IN = _env_float("GEO_DIA_MAX_IN", "GEO_CIRCLE_DIAM_MAX_IN", default=3.0)
+if _GEO_DIA_MAX_IN <= 0.0:
+    _GEO_DIA_MAX_IN = 3.0
+if _GEO_DIA_MAX_IN < _GEO_DIA_MIN_IN:
+    _GEO_DIA_MAX_IN = _GEO_DIA_MIN_IN
 _GEO_CIRCLE_Z_ABS_MAX = 1e-6
 _GEO_CIRCLE_DEDUP_DIGITS = 3
 
@@ -6361,12 +6376,12 @@ def read_text_table(
             )
             if fallback_parsed and (
                 (fallback_qty, len(fallback_parsed))
-                > (total_qty, len(parsed_rows))
+                > (scan_totals.get("qty", 0), len(parsed_rows))
             ):
                 merged_rows = fallback_rows
                 parsed_rows = fallback_parsed
-                families = fallback_families
-                total_qty = fallback_qty
+                scan_totals["families"] = fallback_families
+                scan_totals["qty"] = fallback_qty
 
         if merged_rows and len(parsed_rows) == len(merged_rows):
             for idx, fallback_text in enumerate(merged_rows):
@@ -6488,13 +6503,15 @@ def read_text_table(
             )
 
         if parsed_rows:
+            current_qty = int(scan_totals.get("qty", 0) or 0)
             text_rows_info = {
                 "rows": parsed_rows,
-                "hole_count": total_qty,
+                "hole_count": current_qty,
                 "provenance_holes": "HOLE TABLE",
             }
-            if families:
-                text_rows_info["hole_diam_families_in"] = families
+            families_map = scan_totals.get("families")
+            if isinstance(families_map, Mapping) and families_map:
+                text_rows_info["hole_diam_families_in"] = dict(families_map)
         else:
             text_rows_info = None
 
@@ -8114,9 +8131,9 @@ def geom_hole_census(doc: Any) -> dict[str, Any]:
         diameter_in = 2.0 * scaled_radius * to_in
         if not math.isfinite(diameter_in) or diameter_in <= 0:
             continue
-        if diameter_in < _GEO_CIRCLE_DIAM_MIN_IN:
+        if diameter_in < _GEO_DIA_MIN_IN:
             continue
-        if _GEO_CIRCLE_DIAM_MAX_IN and diameter_in > _GEO_CIRCLE_DIAM_MAX_IN:
+        if _GEO_DIA_MAX_IN and diameter_in > _GEO_DIA_MAX_IN:
             continue
         total_candidates += 1
         tx_in = float(tx) * to_in
