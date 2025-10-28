@@ -149,11 +149,10 @@ def _print_text_dump(entries: Sequence[Mapping[str, Any]]) -> None:
 
 
 def _write_text_dump_csv(
-    entries: Sequence[Mapping[str, Any]], dump_dir: Path
+    entries: Sequence[Mapping[str, Any]],
+    path: Path | str = Path("debug/dxf_text_dump.csv"),
 ) -> Path | None:
-    if not entries:
-        return None
-    csv_path = dump_dir / "dxf_text_dump.csv"
+    csv_path = Path(path)
     try:
         csv_path.parent.mkdir(parents=True, exist_ok=True)
         with csv_path.open("w", newline="", encoding="utf-8") as handle:
@@ -200,19 +199,168 @@ def _write_text_dump_csv(
         return csv_path
 
 
-def _write_geom_dump_json(payload: Mapping[str, Any], dump_dir: Path) -> Path | None:
-    json_path = dump_dir / "geom_circles.json"
+def _write_rows_csv(
+    rows: Sequence[Mapping[str, Any]] | None,
+    path: Path | str = Path("debug/hole_table_rows.csv"),
+) -> Path | None:
+    csv_path = Path(path)
+    try:
+        csv_path.parent.mkdir(parents=True, exist_ok=True)
+        with csv_path.open("w", newline="", encoding="utf-8") as handle:
+            writer = csv.writer(handle)
+            writer.writerow(["qty", "ref", "side", "desc", "hole"])
+            for row in rows or []:
+                if not isinstance(row, Mapping):
+                    continue
+                qty_val = row.get("qty")
+                writer.writerow(
+                    [
+                        "" if qty_val in (None, "") else str(qty_val),
+                        str(row.get("ref") or ""),
+                        str(row.get("side") or ""),
+                        str(row.get("desc") or ""),
+                        str(row.get("hole") or ""),
+                    ]
+                )
+    except OSError as exc:
+        print(f"[geo_dump] failed to write hole table CSV: {exc}")
+        return None
+    else:
+        print(f"[geo_dump] wrote hole table CSV to {csv_path}")
+        return csv_path
+
+
+def _write_json_debug(
+    path: Path | str,
+    payload: Mapping[str, Any] | Sequence[Mapping[str, Any]] | None,
+) -> Path | None:
+    json_path = Path(path)
     try:
         json_path.parent.mkdir(parents=True, exist_ok=True)
         with json_path.open("w", encoding="utf-8") as handle:
-            json.dump(payload, handle, indent=2)
+            json.dump(payload or {}, handle, indent=2)
             handle.write("\n")
-    except (OSError, TypeError) as exc:
-        print(f"[geo_dump] failed to write geom dump: {exc}")
+    except OSError as exc:
+        print(f"[geo_dump] failed to write JSON debug payload {json_path}: {exc}")
         return None
     else:
-        print(f"[geo_dump] wrote geom dump to {json_path}")
+        print(f"[geo_dump] wrote JSON debug payload to {json_path}")
         return json_path
+
+
+def _write_geo_summary(
+    path: Path | str,
+    *,
+    rows: Sequence[Mapping[str, Any]] | None,
+    ops_totals: Mapping[str, Any] | None,
+    geom_summary: Mapping[str, Any],
+    artifact_paths: Mapping[str, Path | None],
+) -> Path | None:
+    target = Path(path)
+    try:
+        target.parent.mkdir(parents=True, exist_ok=True)
+        with target.open("w", encoding="utf-8") as handle:
+            handle.write("GEO SUMMARY\n")
+            handle.write("===========\n\n")
+
+            ordered_ops: dict[str, Any] = {}
+            if ops_totals and isinstance(ops_totals, Mapping):
+                totals_map = ops_totals.get("totals")
+                if isinstance(totals_map, Mapping):
+                    ordered_ops.update(_ordered_totals_map(totals_map))
+                else:
+                    ordered_ops.update(
+                        {
+                            str(key): value
+                            for key, value in ops_totals.items()
+                            if key != "totals"
+                        }
+                    )
+            if ordered_ops:
+                handle.write("[OPERATIONS]\n")
+                for key, value in ordered_ops.items():
+                    handle.write(f"- {key}: {value}\n")
+                handle.write("\n")
+
+            handle.write("[HOLE TABLE]\n")
+            if rows:
+                handle.write("qty | ref | side | desc\n")
+                handle.write("----+-----+------+-----\n")
+                for row in rows[:200]:
+                    qty_val = row.get("qty") if isinstance(row, Mapping) else None
+                    qty_display = "" if qty_val in (None, "") else str(qty_val)
+                    ref_display = str(row.get("ref") or "")
+                    side_display = str(row.get("side") or row.get("face") or "")
+                    desc_display = str(row.get("desc") or row.get("description") or "")
+                    handle.write(
+                        "{qty} | {ref} | {side} | {desc}\n".format(
+                            qty=qty_display,
+                            ref=ref_display,
+                            side=side_display,
+                            desc=desc_display,
+                        )
+                    )
+                if len(rows) > 200:
+                    handle.write(f"... ({len(rows) - 200} more rows)\n")
+            else:
+                handle.write("<no rows>\n")
+            handle.write("\n")
+
+            handle.write("[GEOMETRY]\n")
+            circle_total = geom_summary.get("circle_total")
+            unique_count = geom_summary.get("unique_diameter_count")
+            handle.write(
+                "Circles total: {total} | Unique diameters: {unique}\n".format(
+                    total=circle_total if circle_total is not None else "-",
+                    unique=unique_count if unique_count is not None else "-",
+                )
+            )
+            layer_counts = geom_summary.get("layer_counts")
+            if isinstance(layer_counts, Mapping) and layer_counts:
+                top_layers = sorted(
+                    layer_counts.items(), key=lambda item: (-int(item[1]), item[0])
+                )
+                handle.write("Top layers:\n")
+                for name, count in top_layers[:10]:
+                    handle.write(f"  - {name}: {count}\n")
+                if len(top_layers) > 10:
+                    handle.write("  - …\n")
+            guard_counts = geom_summary.get("guard_drop_counts")
+            if isinstance(guard_counts, Mapping) and guard_counts:
+                handle.write("Guard drops:\n")
+                for name, count in sorted(
+                    guard_counts.items(), key=lambda item: (-int(item[1]), item[0])
+                ):
+                    handle.write(f"  - {name}: {count}\n")
+            handle.write("\n")
+
+            handle.write("[ARTIFACTS]\n")
+            for label, artifact_path in artifact_paths.items():
+                path_display = "-"
+                if artifact_path:
+                    path_display = str(artifact_path)
+                handle.write(f"{label}: {path_display}\n")
+    except OSError as exc:
+        print(f"[geo_dump] failed to write GEO summary: {exc}")
+        return None
+    else:
+        print(f"[geo_dump] wrote GEO summary to {target}")
+        return target
+
+
+def _normalize_pattern_args(values: Sequence[str] | None) -> list[str]:
+    patterns: list[str] = []
+    if not values:
+        return patterns
+    for value in values:
+        if value is None:
+            continue
+        text = str(value)
+        for part in text.split(","):
+            candidate = part.strip()
+            if candidate:
+                patterns.append(candidate)
+    return patterns
 
 
 def _truthy_flag(value: Any) -> bool:
@@ -768,17 +916,33 @@ def main(argv: Sequence[str] | None = None) -> int:
         help="Dump all text entities with layout metadata",
     )
     parser.add_argument(
-        "--dump-dir",
-        default="debug",
-        help="Directory for dump outputs (default: debug/)",
+        "--min-height",
+        dest="text_min_height",
+        type=float,
+        metavar="VALUE",
+        help="Minimum text height (drawing units) when dumping text entities",
+    )
+    parser.add_argument(
+        "--layers-exclude",
+        dest="text_layers_exclude",
+        action="append",
+        metavar="REGEX",
+        help="Regex pattern to exclude layers when dumping text entities (repeatable)",
+    )
+    parser.add_argument(
+        "--save",
+        metavar="PATH",
+        dest="save_geo_path",
+        help="Write consolidated GEO-style output to the provided path",
     )
     args = parser.parse_args(argv)
 
-    dump_dir = Path(args.dump_dir or "debug").expanduser()
-    if args.dump_rows_csv == "__AUTO__":
-        args.dump_rows_csv = str(dump_dir / "hole_table_rows.csv")
-    if args.dump_table and not args.dump_rows_csv:
-        args.dump_rows_csv = str(dump_dir / "hole_table_rows.csv")
+    text_layers_exclude_patterns: list[str] = []
+    if not args.no_exclude_layer:
+        text_layers_exclude_patterns.extend(DEFAULT_TEXT_LAYER_EXCLUDE_REGEX)
+    text_layers_exclude_patterns.extend(_normalize_pattern_args(args.exclude_layer))
+    text_layers_exclude_patterns.extend(_normalize_pattern_args(args.text_layers_exclude))
+    text_layers_exclude = list(dict.fromkeys(text_layers_exclude_patterns))
 
     if args.show_rows is not None:
         os.environ["CAD_QUOTER_SHOW_ROWS"] = str(args.show_rows)
@@ -821,9 +985,22 @@ def main(argv: Sequence[str] | None = None) -> int:
         print(f"[geo_dump] failed to load document: {exc}")
         return 1
 
-    text_csv_path: Path | None = None
+    text_layers_exclude_arg: Sequence[str] | None = text_layers_exclude or None
+
     if args.dump_all_text:
-        entries = geo_extractor.collect_all_text(doc)
+        if args.text_min_height is not None:
+            print(f"[TEXT-DUMP] min_height={args.text_min_height}")
+        if text_layers_exclude_arg:
+            print(
+                "[TEXT-DUMP] layers_exclude={patterns}".format(
+                    patterns=sorted(set(text_layers_exclude_arg))
+                )
+            )
+        entries = geo_extractor.collect_all_text(
+            doc,
+            min_height=args.text_min_height,
+            layers_exclude=text_layers_exclude_arg,
+        )
         _print_text_dump(entries)
         text_csv_path = _write_text_dump_csv(entries, dump_dir)
 
@@ -1305,6 +1482,8 @@ def main(argv: Sequence[str] | None = None) -> int:
             return None
         return number if number >= 0 else None
 
+    geom_layer_counts: dict[str, int] | None = None
+
     if isinstance(geom_holes_payload, Mapping):
         raw_layer_counts = geom_holes_payload.get("layer_counts")
         layers_iter: Iterable[Any]
@@ -1352,6 +1531,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                     continue
                 counts_by_layer[name_key] = counts_by_layer.get(name_key, 0) + count_val
         if counts_by_layer:
+            geom_layer_counts = dict(counts_by_layer)
             layer_totals = sorted(counts_by_layer.items(), key=lambda item: (-item[1], item[0]))
             top_layers = [f"{name or '-'}:{count}" for name, count in layer_totals[:5]]
             display = ", ".join(top_layers)
@@ -1596,6 +1776,18 @@ def main(argv: Sequence[str] | None = None) -> int:
     if ops_totals_artifact:
         _write_artifact(ARTIFACT_DIR / "op_totals.json", ops_totals_artifact)
 
+    ops_totals_payload: Mapping[str, Any] | None = None
+    if ops_totals_artifact:
+        ops_totals_payload = dict(ops_totals_artifact)
+    elif isinstance(effective_total_counts, Mapping):
+        ordered_totals = _ordered_totals_map(effective_total_counts)
+        if ordered_totals:
+            ops_totals_payload = {"totals": ordered_totals}
+
+    ops_totals_debug_path = _write_json_debug(
+        Path("debug/ops_table_totals.json"), ops_totals_payload
+    )
+
     rebuilt_rows: list[Mapping[str, Any]] = []
     if isinstance(ops_summary, Mapping):
         summary_rows = ops_summary.get("rows")
@@ -1608,7 +1800,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     if not rebuilt_rows:
         rebuilt_rows = [row for row in rows if isinstance(row, Mapping)]
 
-    geom_json_path: Path | None = None
+    table_csv_path = _write_rows_csv(rebuilt_rows)
 
     if args.dump_table:
         if rebuilt_rows:
@@ -1643,35 +1835,27 @@ def main(argv: Sequence[str] | None = None) -> int:
         else:
             print("[TABLE] rebuilt rows unavailable")
 
-    circle_samples: list[dict[str, Any]] = []
-    guard_drop_samples: list[dict[str, Any]] = []
-    if args.dump_geom or args.dump_circles:
-        geom_candidates: list[Mapping[str, Any]] = []
-        if isinstance(geom_holes_payload, Mapping):
-            geom_candidates.append(geom_holes_payload)
-        if isinstance(payload, Mapping):
-            payload_geom = payload.get("geom_holes")
-            if isinstance(payload_geom, Mapping):
-                geom_candidates.append(payload_geom)
-        if isinstance(geo, Mapping):
-            geo_geom = geo.get("geom_holes")
-            if isinstance(geo_geom, Mapping):
-                geom_candidates.append(geo_geom)
+    geom_candidates: list[Mapping[str, Any]] = []
+    if isinstance(geom_holes_payload, Mapping):
+        geom_candidates.append(geom_holes_payload)
+    if isinstance(payload, Mapping):
+        payload_geom = payload.get("geom_holes")
+        if isinstance(payload_geom, Mapping):
+            geom_candidates.append(payload_geom)
+    if isinstance(geo, Mapping):
+        geo_geom = geo.get("geom_holes")
+        if isinstance(geo_geom, Mapping):
+            geom_candidates.append(geo_geom)
 
-        circle_samples = _gather_circle_samples(*geom_candidates)
-        guard_drop_samples = _collect_guard_drops(*geom_candidates)
-
-    if args.dump_geom:
-        normalized_geom = geo_extractor._normalize_geom_holes_payload(
-            geom_holes_payload if isinstance(geom_holes_payload, Mapping) else None,
-            hole_sets_payload,
-        )
-        geom_dump_payload: dict[str, Any] = {
-            "normalized": normalized_geom,
-            "circle_samples": circle_samples,
-            "guard_drop_samples": guard_drop_samples,
-        }
-        geom_json_path = _write_geom_dump_json(geom_dump_payload, dump_dir)
+    circle_samples = _gather_circle_samples(*geom_candidates)
+    guard_drop_samples = _collect_guard_drops(*geom_candidates)
+    guard_drop_summary: dict[str, int] | None = None
+    if guard_drop_samples:
+        summary_counts: dict[str, int] = {}
+        for entry in guard_drop_samples:
+            guard_label = str(entry.get("guard") or "-")
+            summary_counts[guard_label] = summary_counts.get(guard_label, 0) + 1
+        guard_drop_summary = summary_counts
 
     if args.dump_circles:
         combined_samples: list[tuple[dict[str, Any], str]] = []
@@ -1719,18 +1903,27 @@ def main(argv: Sequence[str] | None = None) -> int:
         else:
             print("[CIRCLES] sample circles unavailable")
 
-        if guard_drop_samples:
-            guard_counts: dict[str, int] = {}
-            for entry in guard_drop_samples:
-                guard_label = str(entry.get("guard") or "-")
-                guard_counts[guard_label] = guard_counts.get(guard_label, 0) + 1
-            summary_items = sorted(guard_counts.items(), key=lambda item: (-item[1], item[0]))
+        if guard_drop_summary:
+            summary_items = sorted(guard_drop_summary.items(), key=lambda item: (-item[1], item[0]))
             summary_display = ", ".join(
                 f"{name}:{count}" for name, count in summary_items[:5]
             )
             print(f"[CIRCLES] guard_drop_counts={summary_display or '-'}")
         else:
             print("[CIRCLES] guard drop samples unavailable")
+
+    geom_json_payload = {
+        "summary": {
+            "circle_total": geom_total,
+            "unique_diameter_count": geom_groups,
+        },
+        "layer_counts": geom_layer_counts or {},
+        "kept_samples": [dict(sample) for sample in circle_samples],
+        "guard_drops": [dict(entry) for entry in guard_drop_samples],
+    }
+    if guard_drop_summary:
+        geom_json_payload["guard_drop_counts"] = dict(guard_drop_summary)
+    geom_json_path = _write_json_debug(Path("debug/geom_circles.json"), geom_json_payload)
 
     if args.show_rows and rows:
         limit = max(args.show_rows, 0)
@@ -1909,6 +2102,41 @@ def main(argv: Sequence[str] | None = None) -> int:
             rows_csv_path = csv_target
             print(f"[geo_dump] wrote rows CSV to {csv_target}")
 
+    try:
+        text_dump_entries = geo_extractor.collect_all_text(
+            doc,
+            min_height=args.text_min_height,
+            layers_exclude=text_layers_exclude_arg,
+        )
+    except Exception as exc:
+        print(f"[TEXT-DUMP] failed to collect text entities: {exc}")
+        text_dump_entries = []
+    text_csv_path = _write_text_dump_csv(text_dump_entries)
+
+    if args.save_geo_path:
+        geom_summary_payload: dict[str, Any] = {
+            "circle_total": geom_total,
+            "unique_diameter_count": geom_groups,
+        }
+        if geom_layer_counts:
+            geom_summary_payload["layer_counts"] = geom_layer_counts
+        if guard_drop_summary:
+            geom_summary_payload["guard_drop_counts"] = guard_drop_summary
+        artifact_map = {
+            "text_csv": text_csv_path,
+            "table_csv": table_csv_path,
+            "geom_json": geom_json_path,
+            "ops_json": ops_totals_debug_path,
+            "rows_csv": rows_csv_path,
+        }
+        _write_geo_summary(
+            args.save_geo_path,
+            rows=rebuilt_rows,
+            ops_totals=ops_totals_payload,
+            geom_summary=geom_summary_payload,
+            artifact_paths=artifact_map,
+        )
+
     debug_info = geo_extractor.get_last_text_table_debug() or {}
 
     if args.dump_ents:
@@ -1959,13 +2187,17 @@ def main(argv: Sequence[str] | None = None) -> int:
     layer_summary = ",".join(scanned_layers) if scanned_layers else "-"
     include_summary = ",".join(include_patterns_dbg) if include_patterns_dbg else "-"
     exclude_summary = ",".join(exclude_patterns_dbg) if exclude_patterns_dbg else "-"
+    rows_csv_display = str(rows_csv_path) if rows_csv_path else "-"
     text_csv_display = str(text_csv_path) if text_csv_path else "-"
-    table_csv_display = str(rows_csv_path) if rows_csv_path else "-"
+    table_csv_display = str(table_csv_path) if table_csv_path else rows_csv_display
     geom_json_display = str(geom_json_path) if geom_json_path else "-"
+    ops_json_display = (
+        str(ops_totals_debug_path) if ops_totals_debug_path else "-"
+    )
     print(
         "[geo_dump] summary layouts={layouts} layers={layers} incl={incl} "
         "excl={excl} rows={rows} text_csv={text_csv} table_csv={table_csv} "
-        "geom_json={geom_json}".format(
+        "geom_json={geom_json} ops_json={ops_json} rows_csv={rows_csv}".format(
             layouts=layout_summary,
             layers=layer_summary,
             incl=include_summary,
@@ -1974,6 +2206,8 @@ def main(argv: Sequence[str] | None = None) -> int:
             text_csv=text_csv_display,
             table_csv=table_csv_display,
             geom_json=geom_json_display,
+            ops_json=ops_json_display,
+            rows_csv=rows_csv_display,
         )
     )
 
