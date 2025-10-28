@@ -396,6 +396,14 @@ def _resolve_handle(entity: Any) -> str | None:
     return str(handle)
 
 
+def _normalize_mtext_plain_text(raw_text: str) -> str:
+    """Return plain text for ``raw_text`` extracted from an MTEXT entity."""
+
+    text = raw_text.replace("\\P", "\n").replace("\\~", "~")
+    text = re.sub(r"\\[AaCcFfHh][^;]*;", "", text)
+    return text
+
+
 def _extract_text_strings(entity: Any, etype: str) -> tuple[str | None, str | None]:
     raw_text: str | None = None
     plain_text: str | None = None
@@ -411,6 +419,8 @@ def _extract_text_strings(entity: Any, etype: str) -> tuple[str | None, str | No
                 plain_text = str(entity.plain_text())
             except Exception:
                 plain_text = None
+        if plain_text is None and raw_text is not None:
+            plain_text = _normalize_mtext_plain_text(raw_text)
     elif etype in {"TEXT", "ATTRIB", "ATTDEF"}:
         if dxf is not None and hasattr(dxf, "text"):
             try:
@@ -437,6 +447,8 @@ def _extract_text_strings(entity: Any, etype: str) -> tuple[str | None, str | No
                     plain_text = str(mtext_obj.plain_text())
                 except Exception:
                     plain_text = None
+            if plain_text is None and raw_text is not None:
+                plain_text = _normalize_mtext_plain_text(raw_text)
             if hasattr(mtext_obj, "destroy"):
                 try:
                     mtext_obj.destroy()
@@ -448,7 +460,7 @@ def _extract_text_strings(entity: Any, etype: str) -> tuple[str | None, str | No
             except Exception:
                 raw_text = None
         if raw_text is not None and plain_text is None:
-            plain_text = raw_text
+            plain_text = _normalize_mtext_plain_text(raw_text)
 
     if plain_text is None and raw_text is not None:
         plain_text = raw_text
@@ -602,7 +614,7 @@ def dump_all_text(doc: Any, out_dir: Path | str, opts: Mapping[str, Any] | None)
         if etype == "MLEADER":
             mleader_total += 1
             record = build_record(entity, layout_name, from_block=from_block, block_name=block_name)
-            if record and record.get("raw_text") and record_matches_filters(record):
+            if record and record.get("plain_text") and record_matches_filters(record):
                 records.append(record)
                 mleader_captured += 1
             return
