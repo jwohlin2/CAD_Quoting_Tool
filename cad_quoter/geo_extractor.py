@@ -8551,6 +8551,116 @@ def extract_hole_table(
     }
 
 
+# new façade — lightweight adapter
+def extract_for_app(
+    doc_or_path: Any,
+    *,
+    layouts: Mapping[str, Any] | Iterable[str] | str | None = None,
+    text_layer_exclude: Iterable[str] | str | None = None,
+) -> dict[str, Any]:
+    """
+    Returns:
+      {
+        "rows": [...],                # table rows with qty/desc
+        "qty_sum": int,
+        "source": "acad_table|text_table|text_fallback|geom",
+        "provenance": str|None,       # e.g., "HOLE TABLE (anchor)"
+        "geom": { "groups": [...], "total": int },   # dedup'd hole circles
+        "manifest": { "table": {...}, "geom": {...}, "total": {...}, "details": {...}, "text": {...} }
+      }
+    """
+
+    doc = doc_or_path
+    if isinstance(doc_or_path, (str, os.PathLike, Path)):
+        path_obj = Path(doc_or_path)
+        try:
+            doc = _load_doc_for_path(path_obj, use_oda=True)
+        except Exception:
+            doc = None
+
+    if doc is None:
+        geom_payload = _normalize_geom_holes_payload(None)
+        manifest = ops_manifest([], geom_holes=geom_payload)
+        return {
+            "rows": [],
+            "qty_sum": 0,
+            "source": "geom",
+            "provenance": None,
+            "geom": geom_payload,
+            "manifest": manifest,
+        }
+
+    selected_info: Mapping[str, Any] | dict[str, Any] = {}
+    selected_rows: list[dict[str, Any]] = []
+    selected_source = "geom"
+
+    try:
+        acad_info = read_acad_table(doc) or {}
+    except Exception:
+        acad_info = {}
+    acad_rows = _normalize_table_rows(acad_info.get("rows"))
+    if acad_rows:
+        selected_info = dict(acad_info)
+        selected_rows = acad_rows
+        selected_source = "acad_table"
+    else:
+        text_kwargs: dict[str, Any] = {}
+        if layouts is not None:
+            text_kwargs["layout_filters"] = layouts
+        if text_layer_exclude is not None:
+            text_kwargs["layer_exclude_regex"] = text_layer_exclude
+        try:
+            text_info = read_text_table(doc, **text_kwargs) or {}
+        except (NoTextRowsError, RuntimeError):
+            text_info = {}
+        except Exception:
+            text_info = {}
+        text_rows = _normalize_table_rows(text_info.get("rows"))
+        if text_rows:
+            selected_info = dict(text_info)
+            selected_rows = text_rows
+            selected_source = "text_table"
+        else:
+            try:
+                fallback_lines = _collect_table_text_lines(
+                    doc, layout_filters=layouts
+                )
+            except Exception:
+                fallback_lines = []
+            fallback_info = _fallback_text_table(fallback_lines) or {}
+            fallback_rows = _normalize_table_rows(fallback_info.get("rows"))
+            if fallback_rows:
+                selected_info = dict(fallback_info)
+                selected_rows = fallback_rows
+                selected_source = "text_fallback"
+
+    provenance = None
+    if isinstance(selected_info, Mapping):
+        provenance_candidate = selected_info.get("provenance_holes")
+        if provenance_candidate not in (None, ""):
+            provenance_text = str(provenance_candidate).strip()
+            provenance = provenance_text or None
+
+    qty_sum = _sum_qty(selected_rows)
+
+    try:
+        geom_source = geom_hole_census(doc)
+    except Exception:
+        geom_source = None
+    geom_payload = _normalize_geom_holes_payload(geom_source)
+
+    manifest = ops_manifest(selected_rows, geom_holes=geom_payload)
+
+    return {
+        "rows": selected_rows,
+        "qty_sum": qty_sum,
+        "source": selected_source,
+        "provenance": provenance,
+        "geom": geom_payload,
+        "manifest": manifest,
+    }
+
+
 def extract_geometry(doc) -> dict[str, Any]:
     helper = _resolve_app_callable("_build_geo_from_ezdxf_doc")
     if callable(helper):
