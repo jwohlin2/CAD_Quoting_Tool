@@ -758,7 +758,12 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument(
         "--dump-table",
         action="store_true",
-        help="Print the first 8 stitched rows (qty/kind/side/text)",
+        help="Dump stitched rows to CSV and print the first 8 entries",
+    )
+    parser.add_argument(
+        "--dump-geom",
+        action="store_true",
+        help="Dump geometry circle groups and guard drops to JSON",
     )
     parser.add_argument(
         "--dump-circles",
@@ -896,9 +901,9 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument(
         "--dump-rows-csv",
         nargs="?",
-        const="debug/rows.csv",
+        const="__AUTO__",
         default=None,
-        help="Write extracted rows to CSV (optional custom path; default debug/rows.csv)",
+        help="Write extracted rows to CSV (optional custom path; default uses --dump-dir)",
     )
     parser.add_argument(
         "--dump-ents",
@@ -997,8 +1002,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             layers_exclude=text_layers_exclude_arg,
         )
         _print_text_dump(entries)
-        _write_text_dump_csv(entries)
-        return 0
+        text_csv_path = _write_text_dump_csv(entries, dump_dir)
 
     read_kwargs: dict[str, object] = {}
 
@@ -2073,7 +2077,7 @@ def main(argv: Sequence[str] | None = None) -> int:
 
     rows_csv_path: Path | None = None
     if args.dump_rows_csv:
-        csv_target = Path(args.dump_rows_csv)
+        csv_target = Path(args.dump_rows_csv).expanduser()
         try:
             csv_target.parent.mkdir(parents=True, exist_ok=True)
             with csv_target.open("w", newline="", encoding="utf-8") as handle:
