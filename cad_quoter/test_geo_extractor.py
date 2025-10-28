@@ -410,6 +410,36 @@ def test_ops_manifest_authoritative_table_uses_table_totals() -> None:
     assert manifest.get("geom", {}).get("drill_residual") == 10
     assert manifest.get("details", {}).get("drill_implied_from_taps") == 0
     assert all(not row.get("tags") for row in rows)
+    assert manifest.get("authoritative_table") is True
+
+
+def test_ops_manifest_authoritative_table_matches_all_ops() -> None:
+    rows = [
+        {"qty": 4, "desc": "#7 DRILL THRU"},
+        {"qty": 4, "desc": "1/4-20 TAP THRU"},
+        {"qty": 2, "desc": "Ø0.500 COUNTERBORE"},
+        {"qty": 2, "desc": "Ø0.312 COUNTERBORE"},
+        {"qty": 3, "desc": "3/8-16 TAP"},
+        {"qty": 1, "desc": "C'DRILL PILOT"},
+        {"qty": 1, "desc": "JIG GRIND .375 DIA"},
+        {"qty": 2, "desc": "#30 DRILL THRU"},
+    ]
+
+    geom = {"groups": [], "total": 120}
+
+    manifest = geo_extractor.ops_manifest(
+        rows,
+        geom_holes=geom,
+        authoritative_table=True,
+    )
+
+    table_counts = manifest.get("table", {})
+    total_counts = manifest.get("total", {})
+
+    for key in ("drill", "tap", "counterbore", "counterdrill", "jig_grind"):
+        assert total_counts.get(key) == table_counts.get(key)
+
+    assert manifest.get("details", {}).get("drill_implied_from_taps") == 0
 
 
 def test_ops_manifest_skips_implied_when_explicit_drill_present() -> None:
