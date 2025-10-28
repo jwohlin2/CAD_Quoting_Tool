@@ -58,22 +58,25 @@ _OPS_SEGMENT_SPLIT_RE = re.compile(r"[;•]+")
 _TAP_TOKEN_RE = re.compile(r"\bTAP\b", re.IGNORECASE)
 _NPT_TOKEN_RE = re.compile(r"\bN\.?P\.?T\.?\b", re.IGNORECASE)
 _THREAD_TOKEN_RE = re.compile(
-    r"\b(?:#\s*\d+\s*-\s*\d+|#\d+-\d+|\d+\s*/\s*\d+\s*-\s*\d+|\d+-\d+)\b",
+    r"(?:#\s*\d+\s*-\s*\d+|\b\d+\s*/\s*\d+\s*-\s*\d+\b|\b\d+\s*-\s*\d+\b)",
     re.IGNORECASE,
 )
 _COUNTERBORE_TOKEN_RE = re.compile(
-    r"\b(?:C['’]?\s*BORE|C\s*BORE|COUNTER\s*BORE)\b",
+    r"\b(?:C['’]?\s*BORE|CBORE|COUNTER\s*BORE)\b",
     re.IGNORECASE,
 )
 _COUNTERSINK_TOKEN_RE = re.compile(
-    r"\b(?:C['’]?\s*SINK|CSK|COUNTER\s*SINK)\b",
+    r"\b(?:C['’]?\s*SINK|CSK|COUNTERSINK|COUNTER\s*SINK)\b",
     re.IGNORECASE,
 )
 _COUNTERDRILL_TOKEN_RE = re.compile(
     r"\b(?:C['’]?\s*DRILL|COUNTER\s*DRILL|CTR\s*DRILL)\b",
     re.IGNORECASE,
 )
-_JIG_GRIND_TOKEN_RE = re.compile(r"\b(?:JIG\s*GRIND|JG)\b", re.IGNORECASE)
+_JIG_GRIND_TOKEN_RE = re.compile(
+    r"\b(?:JIG\s*GRIND|JIG[-\s]?GROUND|JG)\b",
+    re.IGNORECASE,
+)
 _SPOT_TOKEN_RE = re.compile(r"\bSPOT\b", re.IGNORECASE)
 _DRILL_TOKEN_RE = re.compile(r"\bDRILL\b", re.IGNORECASE)
 _DRILL_SIZE_PATTERNS: tuple[re.Pattern[str], ...] = (
@@ -2828,9 +2831,11 @@ def classify_op_row(desc: str | None) -> list[dict[str, Any]]:
         kinds: list[tuple[str, str | None]] = []
         is_npt = bool(_NPT_TOKEN_RE.search(segment))
         is_cdrill = bool(_COUNTERDRILL_TOKEN_RE.search(segment))
+        has_thread_tap = bool(_THREAD_TOKEN_RE.search(segment))
+        has_tap_word = bool(_TAP_TOKEN_RE.search(segment))
         if is_npt:
             kinds.append(("npt", None))
-        elif _TAP_TOKEN_RE.search(segment) or _THREAD_TOKEN_RE.search(segment):
+        if is_npt or has_tap_word or has_thread_tap:
             kinds.append(("tap", None))
         if _COUNTERBORE_TOKEN_RE.search(segment):
             kinds.append(("cbore", None))
