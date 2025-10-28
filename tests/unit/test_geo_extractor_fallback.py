@@ -68,7 +68,7 @@ def test_publish_fallback_from_rows_txt_multiaction() -> None:
         assert npt_row["qty"] == 2
         assert npt_row.get("side") == "front"
         assert npt_row.get("npt") is True
-        assert classified[npt_row["desc"]].get("tap_type") == "pipe"
+        assert classified[npt_row["desc"]].get("tap_type") == "npt"
 
         notes = [row for row in rows if "BREAK" in row["desc"].upper()]
         assert not notes, "notes should be ignored"
