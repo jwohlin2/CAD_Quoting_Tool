@@ -55,22 +55,16 @@ _IDENTITY_TRANSFORM: TransformMatrix = (1.0, 0.0, 0.0, 0.0, 1.0, 0.0)
 
 
 _OPS_SEGMENT_SPLIT_RE = re.compile(r"[;•]+")
-_TAP_TOKEN_RE = re.compile(r"\bTAP\b", re.IGNORECASE)
+_TAP_WORD_TOKEN_RE = re.compile(r"\bTAP\b", re.IGNORECASE)
+_TAP_THREAD_TOKEN_RE = re.compile(
+    r"(?:#\s*\d+\s*-\s*\d+|\b\d+\s*/\s*\d+\s*-\s*\d+\b)",
+    re.IGNORECASE,
+)
 _NPT_TOKEN_RE = re.compile(r"\bN\.?P\.?T\.?\b", re.IGNORECASE)
-_THREAD_TOKEN_RE = re.compile(
-    r"(?:#\s*\d+\s*-\s*\d+|\b\d+\s*/\s*\d+\s*-\s*\d+\b|\b\d+\s*-\s*\d+\b)",
-    re.IGNORECASE,
-)
-_COUNTERBORE_TOKEN_RE = re.compile(
-    r"\b(?:C['’]?\s*BORE|CBORE|COUNTER\s*BORE)\b",
-    re.IGNORECASE,
-)
-_COUNTERSINK_TOKEN_RE = re.compile(
-    r"\b(?:C['’]?\s*SINK|CSK|COUNTERSINK|COUNTER\s*SINK)\b",
-    re.IGNORECASE,
-)
+_COUNTERBORE_TOKEN_RE = re.compile(r"\b(?:C['’]?\s*BORE|CBORE)\b", re.IGNORECASE)
+_COUNTERSINK_TOKEN_RE = re.compile(r"\b(?:C['’]?\s*SINK|CSK|COUNTERSINK)\b", re.IGNORECASE)
 _COUNTERDRILL_TOKEN_RE = re.compile(
-    r"\b(?:C['’]?\s*DRILL|COUNTER\s*DRILL|CTR\s*DRILL)\b",
+    r"\b(?:C['’]?\s*DRILL|COUNTER\s*DRILL|CTR\s*DRILL|C['’]DRILL)\b",
     re.IGNORECASE,
 )
 _JIG_GRIND_TOKEN_RE = re.compile(
@@ -84,6 +78,7 @@ _DRILL_SIZE_PATTERNS: tuple[re.Pattern[str], ...] = (
     re.compile(r"NO\.?\s*(\d+)", re.IGNORECASE),
     re.compile(r"LETTER\s+([A-Z])", re.IGNORECASE),
     re.compile(r'"([A-Z])"'),
+    re.compile(r"\bR\s*[.#]?\s*([0-9]+(?:\.[0-9]+)?)\b", re.IGNORECASE),
     re.compile(r"R\s*\(([^)]+)\)", re.IGNORECASE),
     re.compile(r"[\u00D8\u2300\u2A00⌀]\s*([0-9]+(?:\.[0-9]+)?)", re.IGNORECASE),
     re.compile(r"([0-9]+(?:\.[0-9]+)?)\s*(?:IN\.?|MM|\"|DIA|DIAM)\b", re.IGNORECASE),
@@ -570,30 +565,15 @@ def _env_float(*names: str, default: float) -> float:
 
 _DEFAULT_LAYER_ALLOWLIST = frozenset({"BALLOON"})
 _GEO_EXCLUDE_LAYERS_DEFAULT = r"^(AM_BOR|DEFPOINTS|PAPER)$"
-_GEO_EXCLUDE_ENV = os.environ.get("GEO_EXCLUDE_LAYERS")
-if _GEO_EXCLUDE_ENV:
-    merged = ",".join(part for part in _GEO_EXCLUDE_ENV.splitlines())
-    exclude_tokens = [token.strip() for token in merged.split(",") if token.strip()]
-    if exclude_tokens:
-        DEFAULT_TEXT_LAYER_EXCLUDE_REGEX: tuple[str, ...] = tuple(
-            token if token.startswith("^") else f"^({token})$" for token in exclude_tokens
-        )
-    else:
-        DEFAULT_TEXT_LAYER_EXCLUDE_REGEX = (_GEO_EXCLUDE_LAYERS_DEFAULT,)
-else:
-    DEFAULT_TEXT_LAYER_EXCLUDE_REGEX = (_GEO_EXCLUDE_LAYERS_DEFAULT,)
-_TEXT_LAYER_EXCLUDE_ENV = os.environ.get("CAD_QUOTER_TEXT_LAYER_EXCLUDE")
-if _TEXT_LAYER_EXCLUDE_ENV is not None:
-    env_pattern = _TEXT_LAYER_EXCLUDE_ENV.strip()
-    if env_pattern:
-        if env_pattern.startswith("^"):
-            DEFAULT_TEXT_LAYER_EXCLUDE_REGEX = (env_pattern,)
-        else:
-            DEFAULT_TEXT_LAYER_EXCLUDE_REGEX = (f"^({env_pattern})$",)
-    else:
-        DEFAULT_TEXT_LAYER_EXCLUDE_REGEX = tuple()
+DEFAULT_TEXT_LAYER_EXCLUDE_REGEX: tuple[str, ...] = (
+    _GEO_EXCLUDE_LAYERS_DEFAULT,
+)
 
 _GEOM_BLOCK_EXCLUDE_RE = re.compile(r"^(TITLE|BORDER|CHART|FRAME|AM_.*)$", re.IGNORECASE)
+_GEO_CIRCLE_LAYER_BLACKLIST_RE = re.compile(
+    r"^(AM_BOR|BORDER|TITLE|FRAME|CHART|SHEET|NOTES?|DIM|CENTER|CNTR|SY(M|MB)OL|DEFPOINTS|PAPER)$",
+    re.IGNORECASE,
+)
 
 _GEO_STRICT_ANCHOR = _env_flag("GEO_STRICT_ANCHOR")
 try:
@@ -620,6 +600,16 @@ _GEO_CIRCLE_DEDUP_DIGITS = 3
 class ExtractionState:
     published: bool = False
     anchor_authoritative: bool = False
+    publish_logged: bool = False
+
+    def mark_published(self) -> bool:
+        """Mark the state as published, returning ``True`` if this is the first publish."""
+
+        if self.publish_logged:
+            return False
+        self.publish_logged = True
+        self.published = True
+        return True
 
 _PREFERRED_BLOCK_NAME_RE = re.compile(r"HOLE.*(?:CHART|TABLE)", re.IGNORECASE)
 _FOLLOW_SHEET_DIRECTIVE_RE = re.compile(
@@ -2969,11 +2959,11 @@ def classify_op_row(desc: str | None) -> list[dict[str, Any]]:
         kinds: list[tuple[str, str | None]] = []
         is_npt = bool(_NPT_TOKEN_RE.search(segment))
         is_cdrill = bool(_COUNTERDRILL_TOKEN_RE.search(segment))
-        has_thread_tap = bool(_THREAD_TOKEN_RE.search(segment))
-        has_tap_word = bool(_TAP_TOKEN_RE.search(segment))
+        has_thread_tap = bool(_TAP_THREAD_TOKEN_RE.search(segment))
+        has_tap_word = bool(_TAP_WORD_TOKEN_RE.search(segment))
         if is_npt:
             kinds.append(("npt", None))
-        if is_npt or has_tap_word or has_thread_tap:
+        if is_npt or has_tap:
             kinds.append(("tap", None))
         if _COUNTERBORE_TOKEN_RE.search(segment):
             kinds.append(("cbore", None))
@@ -2992,11 +2982,12 @@ def classify_op_row(desc: str | None) -> list[dict[str, Any]]:
         if not kinds:
             kinds.append(("unknown", None))
 
-        seen_local: set[str] = set()
+        seen_local: set[tuple[str, str | None]] = set()
         for kind, size_text in kinds:
-            if kind in seen_local and not size_text:
+            key = (kind, size_text if size_text is not None else None)
+            if key in seen_local:
                 continue
-            seen_local.add(kind)
+            seen_local.add(key)
             results.append({"kind": kind, "qty": 0, "size": size_text})
 
     return results
@@ -3056,15 +3047,11 @@ def ops_manifest(
             if not operations:
                 table_totals["unknown"] += qty
                 continue
-            seen = set()
             for op in operations:
                 kind = str(op.get("kind") or "unknown").strip().lower()
                 if kind not in _OPS_MANIFEST_KEYS:
                     kind = "unknown"
-                if kind == "unknown" and kind in seen:
-                    continue
                 table_totals[kind] += qty
-                seen.add(kind)
                 if kind == "drill":
                     sized_drill_qty += qty
 
@@ -4652,6 +4639,9 @@ def read_text_table(
 
     include_patterns = _compile_layer_patterns(layer_include_regex)
     exclude_patterns = _compile_layer_patterns(layer_exclude_regex)
+    base_exclude = re.compile(_GEO_EXCLUDE_LAYERS_DEFAULT, re.IGNORECASE)
+    if not any(pattern.pattern == base_exclude.pattern for pattern in exclude_patterns):
+        exclude_patterns.insert(0, base_exclude)
     include_display = [pattern.pattern for pattern in include_patterns]
     exclude_display = [pattern.pattern for pattern in exclude_patterns]
     allowlist_display = (
@@ -4670,7 +4660,8 @@ def read_text_table(
     text_rows_info: dict[str, Any] | None = None
     merged_rows: list[str] = []
     parsed_rows: list[dict[str, Any]] = []
-    scan_totals: dict[str, Any] = {"families": {}, "qty": 0}
+    families: dict[str, int] = {}
+    total_qty = 0
     columnar_table_info: dict[str, Any] | None = None
     columnar_debug_info: dict[str, Any] | None = None
     anchor_rows_primary: list[dict[str, Any]] = []
@@ -4740,6 +4731,8 @@ def read_text_table(
         combined_fallback_lines: list[str] = []
         fallback_layout_names: list[str] = []
         fallback_follow_entries: list[dict[str, Any]] = []
+        families: dict[str, int] = {}
+        total_qty = 0
         layout_line_map: dict[str, list[str]] = {}
 
         def _filter_and_dedupe_row_texts(row_texts: Iterable[str]) -> list[str]:
@@ -4768,6 +4761,7 @@ def read_text_table(
             current_allowlist: _LayerAllowlist | None,
         ) -> tuple[int, int, int]:
             nonlocal table_lines, text_rows_info, merged_rows, parsed_rows
+            nonlocal families, total_qty
             nonlocal columnar_table_info, columnar_debug_info, roi_hint_effective, rows_txt_initial
             nonlocal anchor_rows_primary, roi_rows_primary, anchor_authoritative_result
             nonlocal anchor_is_authoritative, secondary_anchor_candidate
@@ -4775,6 +4769,8 @@ def read_text_table(
             nonlocal collected_entries, candidate_entries, entries_by_layout, layout_names
             nonlocal layout_order, see_sheet_hint_text, see_sheet_hint_logged
             nonlocal am_bor_included
+            families = {}
+            total_qty = 0
             collected_entries = []
             candidate_entries = []
             entries_by_layout = defaultdict(list)
@@ -5478,12 +5474,11 @@ def read_text_table(
                         filtered_entries.extend(kept_for_layout)
                     else:
                         print(
-                            "[LAYER] layout={layout} allow={allow} kept=0 (using regex-filtered set)".format(
+                            "[LAYER] layout={layout} allow={allow} kept=0".format(
                                 layout=layout_name,
                                 allow=allowlist_display,
                             )
                         )
-                        filtered_entries.extend(layout_entries)
             else:
                 filtered_entries = list(collected_entries)
     
@@ -6220,9 +6215,8 @@ def read_text_table(
                     families[key] = families.get(key, 0) + qty_val
             return (parsed, families, total)
 
-        parsed_rows, families_map, qty_total = _parse_rows(merged_rows)
-        scan_totals["families"] = families_map
-        scan_totals["qty"] = qty_total
+        total_qty = 0
+        parsed_rows, families, total_qty = _parse_rows(merged_rows)
         anchor_rows_primary = list(parsed_rows)
         anchor_qty_total = _sum_qty(anchor_rows_primary)
         anchor_is_authoritative = len(anchor_rows_primary) >= 2
@@ -6364,6 +6358,11 @@ def read_text_table(
                     continue
                 rows.append(row_text)
             return rows
+
+        if "parsed_rows" not in locals():
+            parsed_rows = []
+        if "total_qty" not in locals():
+            total_qty = 0
 
         if len(parsed_rows) < 8:
             clusters = _cluster_entries_by_y(candidate_entries)
@@ -7513,9 +7512,9 @@ def classify_action(fragment: str) -> dict[str, Any]:
     if not text:
         return result
 
-    if _TAP_TOKEN_RE.search(upper) or _THREAD_TOKEN_RE.search(upper) or _NPT_TOKEN_RE.search(upper):
+    if _TAP_WORD_TOKEN_RE.search(text) or _TAP_THREAD_TOKEN_RE.search(text) or _NPT_TOKEN_RE.search(text):
         result["kind"] = "tap"
-        if _NPT_TOKEN_RE.search(upper):
+        if _NPT_TOKEN_RE.search(text):
             result["npt"] = True
         return result
 
@@ -7535,7 +7534,7 @@ def classify_action(fragment: str) -> dict[str, Any]:
         result["kind"] = "jig_grind"
         return result
 
-    if _SPOT_TOKEN_RE.search(upper) and not _TAP_TOKEN_RE.search(upper):
+    if _SPOT_TOKEN_RE.search(upper) and not _TAP_WORD_TOKEN_RE.search(text):
         result["kind"] = "spot"
         return result
 
@@ -8061,6 +8060,7 @@ def geom_hole_census(doc: Any) -> dict[str, Any]:
     groups_counter: defaultdict[float, int] = defaultdict(int)
     seen_circle_keys: set[tuple[float, float, float]] = set()
     total_candidates = 0
+    layer_filter_dropped = 0
 
     def _allow_block(name: str | None) -> bool:
         nonlocal blocks_included, blocks_skipped
@@ -8072,9 +8072,7 @@ def geom_hole_census(doc: Any) -> dict[str, Any]:
         blocks_included += 1
         return True
 
-    for flattened in flatten_entities(
-        msp, depth=_MAX_INSERT_DEPTH, include_block=_allow_block
-    ):
+    for flattened in flatten_entities(msp, depth=0, include_block=_allow_block):
         entity = flattened.entity
         try:
             dxftype = entity.dxftype()
@@ -8087,8 +8085,19 @@ def geom_hole_census(doc: Any) -> dict[str, Any]:
             getattr(flattened, "effective_layer_upper", "")
             or getattr(flattened, "layer_upper", "")
         )
+        layer_name = (
+            getattr(flattened, "effective_layer", None)
+            or getattr(flattened, "layer", None)
+            or layer_upper
+            or ""
+        )
+        if layer_name:
+            if _GEO_CIRCLE_LAYER_BLACKLIST_RE.search(layer_name):
+                layer_filter_dropped += 1
+                continue
         if layer_upper:
             if any(pattern.search(layer_upper) for pattern in exclude_patterns):
+                layer_filter_dropped += 1
                 continue
         radius_val = getattr(dxf_obj, "radius", None)
         if radius_val is None:
@@ -8127,22 +8136,123 @@ def geom_hole_census(doc: Any) -> dict[str, Any]:
         if _GEO_DIA_MAX_IN and diameter_in > _GEO_DIA_MAX_IN:
             continue
         total_candidates += 1
+        tx_in = float(tx) * to_in
+        ty_in = float(ty) * to_in
         dedup_key = (
-            round(float(tx), _GEO_CIRCLE_DEDUP_DIGITS),
-            round(float(ty), _GEO_CIRCLE_DEDUP_DIGITS),
+            round(float(tx_in), _GEO_CIRCLE_DEDUP_DIGITS),
+            round(float(ty_in), _GEO_CIRCLE_DEDUP_DIGITS),
             round(float(diameter_in), _GEO_CIRCLE_DEDUP_DIGITS),
         )
         if dedup_key in seen_circle_keys:
             continue
         seen_circle_keys.add(dedup_key)
-        dia_key = round(diameter_in, 4)
-        groups_counter[dia_key] += 1
+        circle_records.append({"x": tx_in, "y": ty_in, "dia_in": float(diameter_in)})
 
     unique_count = len(seen_circle_keys)
     if total_candidates or unique_count:
         print(f"[GEOM] unique circles after dedup: {unique_count} (was {total_candidates})")
-        if unique_count < 163:
-            print(f"...and {unique_count} drops below 163.")
+    print(f"[GEOM] layer-filter dropped={layer_filter_dropped}")
+
+    def _cluster_bbox_from_circle_records(
+        records: Sequence[Mapping[str, float]]
+    ) -> tuple[float, float, float, float] | None:
+        if not records:
+            return None
+        points = [(float(rec["x"]), float(rec["y"])) for rec in records]
+        if len(points) <= 4:
+            xs = [pt[0] for pt in points]
+            ys = [pt[1] for pt in points]
+            return (min(xs), max(xs), min(ys), max(ys))
+        diameters = [float(rec.get("dia_in", 0.0)) for rec in records if rec.get("dia_in")]
+        try:
+            median_dia = statistics.median(diameters) if diameters else 0.0
+        except Exception:
+            median_dia = 0.0
+        cell_size = float(median_dia) * 4.0 if median_dia and math.isfinite(median_dia) else 0.0
+        if not cell_size or cell_size <= 0.0:
+            cell_size = 6.0
+        cell_size = max(6.0, cell_size)
+        grid: defaultdict[tuple[int, int], list[int]] = defaultdict(list)
+        for idx, (px, py) in enumerate(points):
+            cell_x = int(math.floor(px / cell_size))
+            cell_y = int(math.floor(py / cell_size))
+            grid[(cell_x, cell_y)].append(idx)
+        best_indices: set[int] = set()
+        best_count = 0
+        for (cell_x, cell_y), idxs in grid.items():
+            candidate: set[int] = set()
+            for dx in (-1, 0, 1):
+                for dy in (-1, 0, 1):
+                    neighbor = grid.get((cell_x + dx, cell_y + dy))
+                    if neighbor:
+                        candidate.update(neighbor)
+            if len(candidate) > best_count:
+                best_indices = candidate
+                best_count = len(candidate)
+        if not best_indices:
+            best_indices = set(range(len(points)))
+        chosen_points = [points[idx] for idx in sorted(best_indices)]
+        xs = [pt[0] for pt in chosen_points]
+        ys = [pt[1] for pt in chosen_points]
+        return (min(xs), max(xs), min(ys), max(ys))
+
+    part_bbox_in: tuple[float, float, float, float] | None = None
+    if poly_bbox_in is not None:
+        part_bbox_in = tuple(poly_bbox_in)
+    else:
+        cluster_bbox = _cluster_bbox_from_circle_records(circle_records)
+        if cluster_bbox is not None:
+            xmin, xmax, ymin, ymax = cluster_bbox
+            margin = 0.25
+            part_bbox_in = (
+                xmin - margin,
+                xmax + margin,
+                ymin - margin,
+                ymax + margin,
+            )
+    if part_bbox_in is None and dims_hint:
+        dims_bbox = _bbox_from_dims(
+            tuple(dims_hint),
+            [(float(rec["x"]), float(rec["y"])) for rec in circle_records],
+        )
+        if dims_bbox is not None:
+            part_bbox_in = dims_bbox
+
+    kept_records = list(circle_records)
+    dropped_outside = 0
+    if part_bbox_in is not None:
+        xmin, xmax, ymin, ymax = part_bbox_in
+        if xmin > xmax:
+            xmin, xmax = xmax, xmin
+        if ymin > ymax:
+            ymin, ymax = ymax, ymin
+        filtered: list[dict[str, float]] = []
+        for rec in circle_records:
+            px = float(rec["x"])
+            py = float(rec["y"])
+            if xmin <= px <= xmax and ymin <= py <= ymax:
+                filtered.append(rec)
+            else:
+                dropped_outside += 1
+        kept_records = filtered
+        if dropped_outside > 0:
+            print(
+                "[GEOM] bbox=[{xmin:.1f}..{xmax:.1f}, {ymin:.1f}..{ymax:.1f}] "
+                "kept={kept} dropped_outside={dropped}".format(
+                    xmin=xmin,
+                    xmax=xmax,
+                    ymin=ymin,
+                    ymax=ymax,
+                    kept=len(kept_records),
+                    dropped=dropped_outside,
+                )
+            )
+
+    groups_counter = defaultdict(int)
+    for rec in kept_records:
+        dia_key = round(float(rec.get("dia_in", 0.0)), 4)
+        if dia_key > 0:
+            groups_counter[dia_key] += 1
 
     groups = [
         {"dia_in": float(diameter), "count": count}
@@ -8200,13 +8310,15 @@ def promote_table_to_geo(
             geo["provenance"] = provenance
         if isinstance(provenance, dict):
             provenance["holes"] = "HOLE TABLE"
-        should_log_publish = bool(log_publish and (state is None or not state.published))
-        if should_log_publish:
-            print(
-                f"[PATH] publish=text_table rows={len(rows)} qty_sum={qty_sum}"
-            )
-            if state is not None:
-                state.published = True
+        if log_publish:
+            if state is None:
+                print(
+                    f"[PATH] publish=text_table rows={len(rows)} qty_sum={qty_sum}"
+                )
+            elif state.mark_published():
+                print(
+                    f"[PATH] publish=text_table rows={len(rows)} qty_sum={qty_sum}"
+                )
     hole_count = table_info.get("hole_count")
     if qty_sum > 0:
         hole_count = qty_sum
@@ -8548,7 +8660,6 @@ def read_geo(
                 text_layer_allowlist = None
         except TypeError:
             pass
-    anchor_auto_publish = False
     if run_text:
         try:
             text_info = read_text_table(
@@ -8587,7 +8698,6 @@ def read_geo(
     if isinstance(text_info, Mapping) and text_info.get("anchor_authoritative"):
         state.anchor_authoritative = True
         state.published = True
-        anchor_auto_publish = True
 
     acad_rows_list: list[dict[str, Any]] = []
     if isinstance(acad_info, Mapping):
@@ -8955,11 +9065,11 @@ def read_geo(
         publish_path = source_lower
     else:
         publish_path = "geom"
-    if not state.published or anchor_auto_publish:
+    should_log_publish = True if state is None else state.mark_published()
+    if should_log_publish:
         print(
             f"[PATH] publish={publish_path} rows={len(rows_for_log)} qty_sum={qty_sum}"
         )
-        state.published = True
     print(
         f"[EXTRACT] published rows={len(rows_for_log)} qty_sum={qty_sum} "
         f"source={ops_summary.get('source')}"
