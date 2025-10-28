@@ -4,14 +4,19 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 import textwrap
-from typing import Any, Iterable, Mapping, Sequence
+from typing import Any, Callable, Iterable, Mapping, Sequence, TYPE_CHECKING
+
 from cad_quoter.utils.render_utils import (
+    QuoteDocRecorder,
     format_currency,
     format_hours,
     format_hours_with_rate,
 )
 from cad_quoter.utils.render_utils.tables import draw_kv_table
 from cad_quoter.utils.text_rules import canonicalize_amortized_label as _canonical_amortized_label
+
+if TYPE_CHECKING:  # pragma: no cover - import for type checkers only
+    from cad_quoter.ui.services import QuoteConfiguration
 
 
 def _as_mapping(value: Any) -> dict[str, Any]:
@@ -118,6 +123,24 @@ class RenderState:
     page_width: int = 74
     separate_labor_cfg: bool = True
     default_labor_rate: float = 45.0
+    divider: str | None = None
+    process_meta: Mapping[str, Any] | None = None
+    process_meta_raw: Mapping[str, Any] | None = None
+    hour_summary_entries: Mapping[str, Any] | Sequence[Any] | None = None
+    cfg: "QuoteConfiguration | None" = None
+    llm_debug_enabled: bool = False
+    drill_debug_entries: Sequence[Any] | None = None
+    material_warning_summary: bool = False
+    material_warning_label: str = ""
+    pricing_source_value: str | None = None
+    final_price_row_index: int = -1
+    total_process_cost_row_index: int = -1
+    total_direct_costs_row_index: int = -1
+    process_total_row_index: int = -1
+    lines: list[str] | None = None
+    recorder: QuoteDocRecorder | None = None
+    deferred_replacements: list[tuple[int, str]] = field(default_factory=list)
+    summary_lines: list[str] = field(default_factory=list)
 
     def __post_init__(self) -> None:
         result_map = _as_mapping(self.payload)
@@ -125,7 +148,45 @@ class RenderState:
         breakdown_map = _as_mapping(result_map.get("breakdown"))
         self.breakdown: dict[str, Any] = breakdown_map
 
-        self.divider = "-" * max(self.page_width, 1)
+        if not self.divider:
+            self.divider = "-" * max(self.page_width, 1)
+
+        if self.lines is None:
+            self.lines = []
+
+        if self.drill_debug_entries is None:
+            entries = result_map.get("drill_debug")
+            if isinstance(entries, Sequence) and not isinstance(entries, (str, bytes)):
+                self.drill_debug_entries = list(entries)
+            elif entries in (None, ""):
+                self.drill_debug_entries = []
+            else:
+                self.drill_debug_entries = [entries]
+
+        if self.hour_summary_entries is None:
+            hour_entries = breakdown_map.get("hour_summary_entries")
+            if isinstance(hour_entries, Mapping):
+                self.hour_summary_entries = hour_entries
+            else:
+                self.hour_summary_entries = {}
+
+        if self.process_meta is None:
+            meta = breakdown_map.get("process_meta")
+            self.process_meta = meta if isinstance(meta, Mapping) else None
+
+        if self.process_meta_raw is None:
+            meta_raw = breakdown_map.get("process_meta_raw")
+            self.process_meta_raw = meta_raw if isinstance(meta_raw, Mapping) else None
+
+        if not self.material_warning_label:
+            label = breakdown_map.get("material_warning_label")
+            if isinstance(label, str):
+                self.material_warning_label = label
+
+        if not self.material_warning_summary:
+            self.material_warning_summary = bool(
+                breakdown_map.get("material_warning_needed")
+            )
 
         self.rates: dict[str, float] = {}
         for container in (result_map.get("rates"), breakdown_map.get("rates")):
@@ -192,6 +253,18 @@ class RenderState:
 
     def section(self) -> SectionWriter:
         return SectionWriter(self)
+
+    def defer_replacement(self, index: int, text: str) -> None:
+        """Queue a line replacement to be applied after section rendering."""
+
+        self.deferred_replacements.append((index, text))
+
+    def apply_replacements(self, replace: Callable[[int, str], None]) -> None:
+        """Apply all deferred replacements using *replace* and clear the queue."""
+
+        while self.deferred_replacements:
+            index, text = self.deferred_replacements.pop(0)
+            replace(index, text)
 
     def format_row(self, row: DisplayRow) -> str:
         label = f"{row.indent}{row.label}"
