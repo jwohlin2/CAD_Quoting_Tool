@@ -4951,6 +4951,8 @@ def read_text_table(
     base_exclude = re.compile(_GEO_EXCLUDE_LAYERS_DEFAULT, re.IGNORECASE)
     if not any(pattern.pattern == base_exclude.pattern for pattern in exclude_patterns):
         exclude_patterns.insert(0, base_exclude)
+    base_exclude_pattern_text = base_exclude.pattern
+    am_bor_band_layouts = {"CHART", "SHEET (B)"}
     include_display = [pattern.pattern for pattern in include_patterns]
     exclude_display = [pattern.pattern for pattern in exclude_patterns]
     allowlist_display = (
@@ -5712,11 +5714,24 @@ def read_text_table(
                     }
     
             if include_patterns or exclude_patterns:
-                def _matches_any(patterns: list[re.Pattern[str]], values: list[str]) -> bool:
+                def _matches_any(
+                    patterns: list[re.Pattern[str]],
+                    values: list[str],
+                    *,
+                    skip_base_am_bor: bool = False,
+                ) -> bool:
                     for pattern in patterns:
                         for value in values:
-                            if value and pattern.search(value):
-                                return True
+                            if not value:
+                                continue
+                            match = pattern.search(value)
+                            if not match:
+                                continue
+                            if skip_base_am_bor and pattern.pattern == base_exclude_pattern_text:
+                                matched_text = match.group(0) if match else value
+                                if str(matched_text or "").strip().upper() == "AM_BOR":
+                                    continue
+                            return True
                     return False
 
                 regex_filtered: list[dict[str, Any]] = []
@@ -5731,13 +5746,28 @@ def read_text_table(
                         or entry.get("layer_upper")
                         or layer_text.upper()
                     )
+                    layout_name_value = entry.get("layout_name")
+                    if not layout_name_value:
+                        layout_idx = entry.get("layout_index")
+                        layout_name_value = layout_names.get(layout_idx, layout_idx)
+                    layout_upper = str(layout_name_value or "").strip().upper()
                     values = [layer_text, upper_text]
                     include_ok = True
                     if include_patterns:
                         include_ok = _matches_any(include_patterns, values)
                     exclude_hit = False
                     if include_ok and exclude_patterns:
-                        exclude_hit = _matches_any(list(exclude_patterns), values)
+                        entry_is_am_bor = str(layer_text or "").strip().upper() == "AM_BOR" or (
+                            str(upper_text or "").strip().upper() == "AM_BOR"
+                        )
+                        skip_base_am_bor = (
+                            layout_upper in am_bor_band_layouts and entry_is_am_bor
+                        )
+                        exclude_hit = _matches_any(
+                            list(exclude_patterns),
+                            values,
+                            skip_base_am_bor=skip_base_am_bor,
+                        )
                     if include_ok and not exclude_hit:
                         regex_filtered.append(entry)
                 kept = len(regex_filtered)
@@ -6557,13 +6587,30 @@ def read_text_table(
         )
 
         if anchor_is_authoritative:
-            anchor_layouts = {
-                _coerce_layout_index(entry.get("layout_index"))
-                for entry in candidate_entries
-                if _line_is_table_row_start(entry.get("normalized_text") or entry.get("text"))
-            }
+            anchor_layouts: set[int] = set()
+            layout_band_ranges: dict[int, tuple[float, float]] = {}
+            for entry in candidate_entries:
+                normalized = entry.get("normalized_text") or entry.get("text")
+                if not _line_is_table_row_start(normalized):
+                    continue
+                layout_idx = _coerce_layout_index(entry.get("layout_index"))
+                anchor_layouts.add(layout_idx)
+                y_val = entry.get("y")
+                if isinstance(y_val, (int, float)):
+                    y_float = float(y_val)
+                    low_high = layout_band_ranges.get(layout_idx)
+                    if low_high is None:
+                        layout_band_ranges[layout_idx] = (y_float, y_float)
+                    else:
+                        low, high = low_high
+                        layout_band_ranges[layout_idx] = (
+                            min(low, y_float),
+                            max(high, y_float),
+                        )
+            anchor_layouts = {idx for idx in anchor_layouts if idx is not None}
             if anchor_layouts:
                 anchor_band_entries: list[dict[str, Any]] = []
+                band_drop_counts: defaultdict[int, int] = defaultdict(int)
                 for entry in collected_entries:
                     if not isinstance(entry, Mapping):
                         continue
@@ -6574,7 +6621,36 @@ def read_text_table(
                     entry_copy["normalized_text"] = _normalize_candidate_text(
                         entry_copy.get("normalized_text") or entry_copy.get("text")
                     )
+                    layout_name_value = layout_names.get(layout_idx, layout_idx)
+                    layout_upper = str(layout_name_value or "").strip().upper()
+                    if layout_upper in am_bor_band_layouts:
+                        band_limits = layout_band_ranges.get(layout_idx)
+                        if band_limits is not None:
+                            y_val = entry_copy.get("y")
+                            if isinstance(y_val, (int, float)):
+                                y_float = float(y_val)
+                                lower, upper = band_limits
+                                band_min = min(lower, upper)
+                                band_max = max(lower, upper)
+                                if anchor_height > 0:
+                                    band_margin = max(anchor_height * 1.5, 6.0)
+                                else:
+                                    band_margin = max((band_max - band_min) * 0.5, 6.0)
+                                lower_bound = band_min - band_margin
+                                upper_bound = band_max + band_margin
+                                if y_float < lower_bound or y_float > upper_bound:
+                                    band_drop_counts[layout_idx] += 1
+                                    continue
                     anchor_band_entries.append(entry_copy)
+                if band_drop_counts:
+                    for layout_idx, drop_count in band_drop_counts.items():
+                        layout_name = layout_names.get(layout_idx, layout_idx)
+                        print(
+                            "[BAND] layout={layout} trimmed={count}".format(
+                                layout=layout_name,
+                                count=drop_count,
+                            )
+                        )
                 anchor_band_context = {
                     "entries": anchor_band_entries,
                     "anchor_entries": [
