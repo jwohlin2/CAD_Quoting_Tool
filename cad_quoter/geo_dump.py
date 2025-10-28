@@ -713,30 +713,44 @@ def main(argv: Sequence[str] | None = None) -> int:
     def _format_ops_counts(counts: Mapping[str, Any] | None) -> str:
         apost = "\u2019"
         display_order = (
-            ("drill", "Drill"),
-            ("tap", "Tap"),
-            ("cbore", f"C{apost}bore"),
-            ("cdrill", f"C{apost}drill"),
-            ("jig_grind", "Jig"),
-            ("csink", f"C{apost}sink"),
-            ("spot", "Spot"),
-            ("npt", "NPT"),
+            (("drill",), "Drill"),
+            (("tap",), "Tap"),
+            (("counterbore", "cbore"), f"C{apost}bore"),
+            (("counterdrill", "cdrill"), f"C{apost}drill"),
+            (("jig_grind",), "Jig"),
+            (("csink",), f"C{apost}sink"),
+            (("spot",), "Spot"),
+            (("npt",), "NPT"),
         )
         if not isinstance(counts, Mapping):
             return "Drill 0"
         parts: list[str] = []
-        for key, label_text in display_order:
-            value = counts.get(key)
-            try:
-                value_int = int(round(float(value)))
-            except Exception:
-                value_int = 0
+        for keys, label_text in display_order:
+            value_int = 0
+            for key in keys:
+                value = counts.get(key)
+                try:
+                    candidate = int(round(float(value)))
+                except Exception:
+                    candidate = 0
+                if candidate > 0:
+                    value_int = candidate
+                    break
             if value_int <= 0:
                 continue
             parts.append(f"{label_text} {value_int}")
         if not parts:
             parts.append("Drill 0")
         return " | ".join(parts)
+
+    def _counts_value(counts: Mapping[str, Any] | None, *keys: str) -> int:
+        if not isinstance(counts, Mapping):
+            return 0
+        for key in keys:
+            if key not in counts:
+                continue
+            return _int_from_value(counts.get(key))
+        return 0
 
     hole_sets_payload = None
     if isinstance(extract_result, Mapping):
@@ -962,21 +976,9 @@ def main(argv: Sequence[str] | None = None) -> int:
     print(f"[OPS] geom : {_format_ops_counts(geom_display)}")
     print(f"[OPS] total: {_format_ops_counts(total_counts)}")
 
-    text_drill_total = (
-        _int_from_value(table_counts.get("drill"))
-        if isinstance(table_counts, Mapping)
-        else 0
-    )
-    text_cbore_total = (
-        _int_from_value(table_counts.get("cbore"))
-        if isinstance(table_counts, Mapping)
-        else 0
-    )
-    text_cdrill_total = (
-        _int_from_value(table_counts.get("cdrill"))
-        if isinstance(table_counts, Mapping)
-        else 0
-    )
+    text_drill_total = _counts_value(table_counts, "drill")
+    text_cbore_total = _counts_value(table_counts, "counterbore", "cbore")
+    text_cdrill_total = _counts_value(table_counts, "counterdrill", "cdrill")
     text_ops_total = text_drill_total + text_cbore_total + text_cdrill_total
     geom_total = (
         _int_from_value(geom_counts.get("total"))
@@ -1051,11 +1053,11 @@ def main(argv: Sequence[str] | None = None) -> int:
         except Exception:
             tap_total = 0
         try:
-            cbore_total = int(total_counts.get("cbore", 0))
+            cbore_total = _counts_value(total_counts, "counterbore", "cbore")
         except Exception:
             cbore_total = 0
         try:
-            cdrill_total = int(total_counts.get("cdrill", 0))
+            cdrill_total = _counts_value(total_counts, "counterdrill", "cdrill")
         except Exception:
             cdrill_total = 0
         print(
