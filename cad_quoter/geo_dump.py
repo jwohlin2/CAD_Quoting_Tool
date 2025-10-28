@@ -2234,6 +2234,37 @@ def main(argv: Sequence[str] | None = None) -> int:
 
     debug_info = geo_extractor.get_last_text_table_debug() or {}
 
+    if text_csv_path == "-" and debug_info:
+        fallback_entities = debug_info.get("collected_entities")
+        if isinstance(fallback_entities, Sequence):
+            normalized_entries: list[dict[str, Any]] = []
+            for entity in fallback_entities:
+                if not isinstance(entity, Mapping):
+                    continue
+                normalized_entries.append(
+                    {
+                        "etype": entity.get("type"),
+                        "layout": entity.get("layout"),
+                        "layer": entity.get("layer"),
+                        "height": entity.get("height"),
+                        "rotation": entity.get("rotation"),
+                        "insert_x": entity.get("x"),
+                        "insert_y": entity.get("y"),
+                        "block_path": entity.get("block_path") or [],
+                        "text": entity.get("text"),
+                        "raw": entity.get("raw", entity.get("text")),
+                    }
+                )
+            if normalized_entries:
+                try:
+                    text_csv_written = write_text_dump_csv(normalized_entries, dump_dir_path)
+                    text_jsonl_written = write_text_dump_jsonl(normalized_entries, dump_dir_path)
+                except OSError as exc:
+                    print(f"[TEXT-DUMP] fallback dump failed: {exc}")
+                else:
+                    text_csv_path = str(text_csv_written)
+                    text_jsonl_path = str(text_jsonl_written)
+
     if args.dump_ents:
         entities = debug_info.get("collected_entities") if isinstance(debug_info, Mapping) else None
         target_path = Path(args.dump_ents)
