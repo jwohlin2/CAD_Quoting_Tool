@@ -669,6 +669,49 @@ def test_anchor_authoritative_short_circuits(monkeypatch: pytest.MonkeyPatch, ca
     assert len(publish_lines) == 1
     assert publish_lines[0].startswith("[PATH] publish=text_table")
 
+
+def test_anchor_band_lines_use_expanded_window() -> None:
+    def _entry(text: str, x: float, y: float, *, height: float = 5.0) -> dict[str, object]:
+        return {
+            "text": text,
+            "layout_index": 1,
+            "x": x,
+            "y": y,
+            "height": height,
+            "width": 40.0,
+        }
+
+    header = _entry("QTY DESC REF", 10.0, 110.0)
+    rows = [
+        _entry("1 4X HOLES", 10.0, 100.0),
+        _entry("2 6X HOLES", 10.0, 90.0),
+        _entry("3 8X HOLES", 10.0, 80.0),
+        _entry("4 10X HOLES", 10.0, 70.0),
+        _entry("5 12X HOLES", 10.0, 60.0),
+    ]
+    tall_row = _entry("6 14X HOLES", 10.0, 50.0, height=9.0)
+    terminator = _entry("NOTES", 10.0, 40.0)
+    far_entry = _entry("QTY OUTSIDE", 200.0, 95.0)
+
+    context = {
+        "entries": [header, *rows, tall_row, terminator, far_entry],
+        "anchor_entries": rows[:3],
+        "anchor_height": 5.0,
+        "layout_order": [1],
+    }
+
+    band_lines = geo_extractor._extract_anchor_band_lines(context)
+
+    assert band_lines == [
+        "QTY DESC REF",
+        "1 4X HOLES",
+        "2 6X HOLES",
+        "3 8X HOLES",
+        "4 10X HOLES",
+        "5 12X HOLES",
+    ]
+
+
 def test_read_geo_raises_when_no_text_rows(
     monkeypatch: pytest.MonkeyPatch, fallback_doc: _DummyDoc
 ) -> None:

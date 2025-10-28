@@ -4549,7 +4549,7 @@ def _extract_mechanical_table_from_blocks(doc: Any) -> Mapping[str, Any] | None:
 _FALLBACK_ACTION_KINDS = {"tap", "counterbore", "drill", "counterdrill"}
 _FALLBACK_TRAILING_LADDER_RE = re.compile(r"(?:\s*\d+){3,}$")
 _ANCHOR_TERMINATOR_RE = re.compile(
-    r"\b(NOTES?|TOLERANCES?|TOLERANCE|FINISH|MATERIALS?|REVISION|SCALE|SHT)\b",
+    r"^(?:NOTES?|TOLERANCES?|REVISION|TITLE|DRAWN\s+BY)\b",
     re.IGNORECASE,
 )
 
@@ -4560,6 +4560,16 @@ def _prepare_fallback_lines(lines: Iterable[str]) -> list[str]:
     except Exception:
         candidate = []
     return _merge_table_lines(candidate)
+
+
+def _coerce_float_optional(value: Any) -> float | None:
+    try:
+        result = float(value)
+    except Exception:
+        return None
+    if not math.isfinite(result):
+        return None
+    return result
 
 
 def _coerce_layout_index(value: Any) -> int:
@@ -4658,8 +4668,114 @@ def _extract_anchor_band_lines(context: Mapping[str, Any] | None) -> list[str]:
         anchor_height = 0.0
     if anchor_height < 0:
         anchor_height = 0.0
-    lower_bound = anchor_height * 0.75 if anchor_height > 0 else None
-    upper_bound = anchor_height * 1.25 if anchor_height > 0 else None
+
+    height_lower = anchor_height * 0.6 if anchor_height > 0 else None
+    height_upper = anchor_height * 1.4 if anchor_height > 0 else None
+    height_stop_lower = anchor_height * 0.3 if anchor_height > 0 else None
+    height_stop_upper = anchor_height * 1.7 if anchor_height > 0 else None
+
+    anchor_y_values: list[float] = []
+    anchor_x_bounds: dict[int, list[float | None]] = {}
+    for entry in anchor_entries:
+        y_val = _coerce_float_optional(entry.get("y"))
+        if y_val is not None:
+            anchor_y_values.append(y_val)
+        layout_idx = _coerce_layout_index(entry.get("layout_index"))
+        bounds = anchor_x_bounds.setdefault(layout_idx, [None, None])
+        x_val = _coerce_float_optional(entry.get("x"))
+        width_val = _coerce_float_optional(entry.get("width"))
+        if x_val is None:
+            continue
+        right_val = x_val
+        if width_val is not None and width_val > 0:
+            right_val = x_val + width_val
+        if bounds[0] is None or x_val < bounds[0]:
+            bounds[0] = x_val
+        if bounds[1] is None or (right_val is not None and right_val > bounds[1]):
+            bounds[1] = right_val
+
+    anchor_center_y: float | None = None
+    band_y_low: float | None = None
+    band_y_high: float | None = None
+    row_spacing_est = 0.0
+    if anchor_y_values:
+        sorted_anchor_y = sorted(anchor_y_values)
+        try:
+            anchor_center_y = float(statistics.median(sorted_anchor_y))
+        except Exception:
+            anchor_center_y = float(sorted_anchor_y[0])
+        diffs = [
+            abs(sorted_anchor_y[idx] - sorted_anchor_y[idx - 1])
+            for idx in range(1, len(sorted_anchor_y))
+            if abs(sorted_anchor_y[idx] - sorted_anchor_y[idx - 1]) > 0
+        ]
+        if diffs:
+            try:
+                row_spacing_est = float(statistics.median(diffs))
+            except Exception:
+                row_spacing_est = float(diffs[0])
+        if (not row_spacing_est or row_spacing_est <= 0) and len(sorted_anchor_y) >= 2:
+            span = abs(sorted_anchor_y[-1] - sorted_anchor_y[0])
+            divider = max(len(sorted_anchor_y) - 1, 1)
+            row_spacing_est = span / divider if divider else span
+        if (not row_spacing_est or row_spacing_est <= 0) and anchor_height > 0:
+            row_spacing_est = anchor_height * 2.5
+        if not row_spacing_est or row_spacing_est <= 0:
+            row_spacing_est = anchor_height if anchor_height > 0 else 1.0
+        band_half_height = row_spacing_est * 8.0
+        if anchor_height > 0:
+            band_half_height = max(band_half_height, anchor_height * 12.0)
+        band_y_low = anchor_center_y - band_half_height
+        band_y_high = anchor_center_y + band_half_height
+    elif anchor_height > 0:
+        row_spacing_est = anchor_height * 2.5
+
+    if row_spacing_est <= 0 and anchor_height > 0:
+        row_spacing_est = anchor_height
+    if row_spacing_est <= 0:
+        row_spacing_est = 1.0
+
+    layout_x_extents: dict[int, tuple[float | None, float | None]] = {}
+    for layout_idx, layout_entries in entries_by_layout.items():
+        min_x: float | None = None
+        max_x: float | None = None
+        for entry in layout_entries:
+            x_val = _coerce_float_optional(entry.get("x"))
+            width_val = _coerce_float_optional(entry.get("width"))
+            if x_val is None:
+                continue
+            right_val = x_val
+            if width_val is not None and width_val > 0:
+                right_val = x_val + width_val
+            if min_x is None or x_val < min_x:
+                min_x = x_val
+            if max_x is None or (right_val is not None and right_val > max_x):
+                max_x = right_val
+        layout_x_extents[layout_idx] = (min_x, max_x)
+
+    x_margin = 0.0
+    if anchor_height > 0:
+        x_margin = max(x_margin, anchor_height * 4.0)
+    if row_spacing_est > 0:
+        x_margin = max(x_margin, row_spacing_est * 0.5)
+
+    band_x_bounds: dict[int, tuple[float | None, float | None]] = {}
+    for layout_idx in layout_sequence:
+        anchor_bounds = anchor_x_bounds.get(layout_idx, [None, None])
+        layout_bounds = layout_x_extents.get(layout_idx, (None, None))
+        left = anchor_bounds[0] if anchor_bounds else None
+        right = anchor_bounds[1] if anchor_bounds else None
+        if left is None:
+            left = layout_bounds[0]
+        if right is None:
+            right = layout_bounds[1]
+        if left is not None and right is not None and right < left:
+            left, right = right, left
+        if left is not None and x_margin:
+            left -= x_margin
+        if right is not None and x_margin:
+            right += x_margin
+        band_x_bounds[layout_idx] = (left, right)
 
     band_lines: list[str] = []
     for layout_idx in layout_sequence:
@@ -4669,7 +4785,40 @@ def _extract_anchor_band_lines(context: Mapping[str, Any] | None) -> list[str]:
         sorted_records = sorted(records, key=_entry_band_sort_key)
         layout_lines: list[str] = []
         started = False
+        x_bounds = band_x_bounds.get(layout_idx)
+        x_left_bound = x_bounds[0] if x_bounds else None
+        x_right_bound = x_bounds[1] if x_bounds else None
+        if (
+            x_left_bound is not None
+            and x_right_bound is not None
+            and x_right_bound < x_left_bound
+        ):
+            x_left_bound, x_right_bound = x_right_bound, x_left_bound
         for record in sorted_records:
+            y_val = _coerce_float_optional(record.get("y"))
+            if (
+                band_y_low is not None
+                and band_y_high is not None
+                and y_val is not None
+            ):
+                low = band_y_low if band_y_low <= band_y_high else band_y_high
+                high = band_y_high if band_y_high >= band_y_low else band_y_low
+                if y_val < low or y_val > high:
+                    continue
+
+            if x_left_bound is not None or x_right_bound is not None:
+                x_val = _coerce_float_optional(record.get("x"))
+                width_val = _coerce_float_optional(record.get("width"))
+                left = x_val
+                right = x_val
+                if left is not None and width_val is not None and width_val > 0:
+                    right = left + width_val
+                if left is not None and right is not None:
+                    if x_left_bound is not None and right < x_left_bound:
+                        continue
+                    if x_right_bound is not None and left > x_right_bound:
+                        continue
+
             text = _normalize_entry_text(record)
             if not text:
                 continue
@@ -4683,14 +4832,29 @@ def _extract_anchor_band_lines(context: Mapping[str, Any] | None) -> list[str]:
             if _ANCHOR_TERMINATOR_RE.search(text):
                 break
             height_val = record.get("height")
+            height_float = (
+                float(height_val)
+                if isinstance(height_val, (int, float)) and math.isfinite(height_val)
+                else None
+            )
             if (
-                lower_bound is not None
-                and upper_bound is not None
-                and isinstance(height_val, (int, float))
+                anchor_height > 0
+                and height_float is not None
+                and height_float > 0
             ):
-                height_float = float(height_val)
-                if height_float > 0 and not (lower_bound <= height_float <= upper_bound):
-                    break
+                if (
+                    height_stop_lower is not None
+                    and height_stop_upper is not None
+                    and (height_float < height_stop_lower or height_float > height_stop_upper)
+                ):
+                    if layout_lines or started:
+                        break
+                    continue
+                if (
+                    (height_lower is not None and height_float < height_lower)
+                    or (height_upper is not None and height_float > height_upper)
+                ):
+                    continue
             layout_lines.append(text)
         band_lines.extend(layout_lines)
 
