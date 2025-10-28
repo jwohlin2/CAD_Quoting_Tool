@@ -89,6 +89,26 @@ def _payload_has_rows(payload: Mapping[str, object] | None) -> bool:
     return False
 
 
+def _int_from_value(value: Any) -> int:
+    try:
+        return int(round(float(value or 0)))
+    except Exception:
+        return 0
+
+
+def _am_bor_included_from_candidates(*candidates: Mapping[str, Any] | None) -> bool:
+    for candidate in candidates:
+        if not isinstance(candidate, Mapping):
+            continue
+        flag = candidate.get("am_bor_included")
+        if isinstance(flag, bool):
+            if flag:
+                return True
+        elif flag:
+            return True
+    return False
+
+
 def _ordered_hole_row(row: Mapping[str, object]) -> dict[str, object]:
     ordered: dict[str, object] = {}
     preferred_order = ("hole", "qty", "ref", "side", "desc")
@@ -842,6 +862,48 @@ def main(argv: Sequence[str] | None = None) -> int:
     print(f"[OPS] table: {_format_ops_counts(table_counts)}")
     print(f"[OPS] geom : {_format_ops_counts(geom_display)}")
     print(f"[OPS] total: {_format_ops_counts(total_counts)}")
+
+    text_drill_total = (
+        _int_from_value(table_counts.get("drill"))
+        if isinstance(table_counts, Mapping)
+        else 0
+    )
+    text_cbore_total = (
+        _int_from_value(table_counts.get("cbore"))
+        if isinstance(table_counts, Mapping)
+        else 0
+    )
+    text_cdrill_total = (
+        _int_from_value(table_counts.get("cdrill"))
+        if isinstance(table_counts, Mapping)
+        else 0
+    )
+    text_ops_total = text_drill_total + text_cbore_total + text_cdrill_total
+    geom_total = (
+        _int_from_value(geom_counts.get("total"))
+        if isinstance(geom_counts, Mapping)
+        else 0
+    )
+    if geom_total <= 0 and isinstance(geom_counts, Mapping):
+        geom_total = _int_from_value(geom_counts.get("drill"))
+    manifest_existing = (
+        ops_summary.get("manifest") if isinstance(ops_summary, Mapping) else None
+    )
+    am_bor_in_text_flow = _am_bor_included_from_candidates(
+        payload if isinstance(payload, Mapping) else None,
+        geo if isinstance(geo, Mapping) else None,
+        ops_summary if isinstance(ops_summary, Mapping) else None,
+        manifest_payload if isinstance(manifest_payload, Mapping) else None,
+        manifest_existing if isinstance(manifest_existing, Mapping) else None,
+    )
+    suspect_overcount = False
+    if geom_total > 0:
+        if text_ops_total > 0 and float(geom_total) > 1.6 * float(text_ops_total):
+            suspect_overcount = True
+        elif am_bor_in_text_flow and geom_total > 150:
+            suspect_overcount = True
+    if suspect_overcount:
+        print("[GEOM] suspect overcount – check layer blacklist or bbox guard")
 
     suspect_payload: Mapping[str, Any] | None = None
     if isinstance(manifest_payload, Mapping):
