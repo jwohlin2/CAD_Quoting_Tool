@@ -574,6 +574,10 @@ if _TEXT_LAYER_EXCLUDE_ENV is not None:
         DEFAULT_TEXT_LAYER_EXCLUDE_REGEX = tuple()
 
 _GEOM_BLOCK_EXCLUDE_RE = re.compile(r"^(TITLE|BORDER|CHART|FRAME|AM_.*)$", re.IGNORECASE)
+_GEO_CIRCLE_LAYER_BLACKLIST_RE = re.compile(
+    r"^(AM_BOR|BORDER|TITLE|FRAME|CHART|SHEET|NOTES?|DIM|CENTER|CNTR|SY(M|MB)OL|DEFPOINTS|PAPER)$",
+    re.IGNORECASE,
+)
 
 _GEO_STRICT_ANCHOR = _env_flag("GEO_STRICT_ANCHOR")
 try:
@@ -8041,7 +8045,7 @@ def geom_hole_census(doc: Any) -> dict[str, Any]:
     groups_counter: defaultdict[float, int] = defaultdict(int)
     seen_circle_keys: set[tuple[float, float, float]] = set()
     total_candidates = 0
-    circle_records: list[dict[str, float]] = []
+    layer_filter_dropped = 0
 
     def _allow_block(name: str | None) -> bool:
         nonlocal blocks_included, blocks_skipped
@@ -8053,9 +8057,7 @@ def geom_hole_census(doc: Any) -> dict[str, Any]:
         blocks_included += 1
         return True
 
-    for flattened in flatten_entities(
-        msp, depth=_MAX_INSERT_DEPTH, include_block=_allow_block
-    ):
+    for flattened in flatten_entities(msp, depth=0, include_block=_allow_block):
         entity = flattened.entity
         try:
             dxftype = entity.dxftype()
@@ -8068,8 +8070,19 @@ def geom_hole_census(doc: Any) -> dict[str, Any]:
             getattr(flattened, "effective_layer_upper", "")
             or getattr(flattened, "layer_upper", "")
         )
+        layer_name = (
+            getattr(flattened, "effective_layer", None)
+            or getattr(flattened, "layer", None)
+            or layer_upper
+            or ""
+        )
+        if layer_name:
+            if _GEO_CIRCLE_LAYER_BLACKLIST_RE.search(layer_name):
+                layer_filter_dropped += 1
+                continue
         if layer_upper:
             if any(pattern.search(layer_upper) for pattern in exclude_patterns):
+                layer_filter_dropped += 1
                 continue
         radius_val = getattr(dxf_obj, "radius", None)
         if radius_val is None:
@@ -8123,6 +8136,7 @@ def geom_hole_census(doc: Any) -> dict[str, Any]:
     unique_count = len(seen_circle_keys)
     if total_candidates or unique_count:
         print(f"[GEOM] unique circles after dedup: {unique_count} (was {total_candidates})")
+    print(f"[GEOM] layer-filter dropped={layer_filter_dropped}")
 
     def _cluster_bbox_from_circle_records(
         records: Sequence[Mapping[str, float]]
