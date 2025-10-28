@@ -4888,6 +4888,9 @@ def _extract_anchor_band_lines(context: Mapping[str, Any] | None) -> list[str]:
         anchors_seen = 0
         band_started = anchors_needed == 0
         started = False
+        consumed_anchor_keys: set[
+            tuple[str, float | None, float | None]
+        ] = set()
         x_bounds = band_x_bounds.get(layout_idx)
         x_left_bound = x_bounds[0] if x_bounds else None
         x_right_bound = x_bounds[1] if x_bounds else None
@@ -4928,6 +4931,7 @@ def _extract_anchor_band_lines(context: Mapping[str, Any] | None) -> list[str]:
             if _roi_is_admin_noise(text):
                 continue
             anchor_key = _anchor_key(record)
+            allow_current_record = False
             if not band_started and anchors_needed:
                 if (
                     anchor_key is not None
@@ -4935,22 +4939,31 @@ def _extract_anchor_band_lines(context: Mapping[str, Any] | None) -> list[str]:
                 ):
                     layout_anchor_counts[anchor_key] -= 1
                     anchors_seen += 1
+                    allow_current_record = True
                     if anchors_seen >= anchors_needed:
                         band_started = True
+                elif anchors_seen < anchors_needed:
                     continue
-                if anchors_seen < anchors_needed:
-                    continue
-                band_started = True
-            if band_started and anchor_key is not None:
-                original_count = anchor_keys_by_layout.get(layout_idx, Counter()).get(
-                    anchor_key, 0
+            current_band_started = band_started or allow_current_record
+            if not current_band_started:
+                continue
+            anchor_in_layout = False
+            if anchor_key is not None:
+                anchor_in_layout = (
+                    anchor_keys_by_layout.get(layout_idx, Counter()).get(
+                        anchor_key, 0
+                    )
+                    > 0
                 )
-                if original_count:
-                    continue
+            if current_band_started and anchor_in_layout and anchor_key in consumed_anchor_keys:
+                continue
             if not started:
                 if _line_is_table_row_start(text) or re.search(r"\bQTY\b", text, re.IGNORECASE):
                     started = True
+                    band_started = True
                 else:
+                    if allow_current_record and anchor_in_layout and anchor_key is not None:
+                        consumed_anchor_keys.add(anchor_key)
                     continue
             if _ANCHOR_TERMINATOR_RE.search(text):
                 break
@@ -4975,6 +4988,12 @@ def _extract_anchor_band_lines(context: Mapping[str, Any] | None) -> list[str]:
                 ):
                     continue
             layout_lines.append(text)
+            if (
+                current_band_started
+                and anchor_in_layout
+                and anchor_key is not None
+            ):
+                consumed_anchor_keys.add(anchor_key)
         band_lines.extend(layout_lines)
 
     return band_lines
