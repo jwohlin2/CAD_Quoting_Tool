@@ -10605,9 +10605,18 @@ def extract_for_app(doc: Any, *, opts: Mapping[str, Any] | None = None, **read_k
         if not isinstance(candidate, Mapping):
             return None
         direct = candidate.get("hole_sets")
-        if direct is not None:
-            return direct
         nested = candidate.get("geo")
+        if direct is not None:
+            if (
+                isinstance(direct, (Mapping, Sequence))
+                and not isinstance(direct, (str, bytes))
+                and not direct
+                and isinstance(nested, Mapping)
+            ):
+                nested_result = _extract_hole_sets_from_geo(nested)
+                if nested_result is not None:
+                    return nested_result
+            return direct
         if isinstance(nested, Mapping):
             return _extract_hole_sets_from_geo(nested)
         return None
