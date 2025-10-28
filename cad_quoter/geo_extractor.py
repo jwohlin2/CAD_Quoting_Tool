@@ -4549,9 +4549,17 @@ _ANCHOR_TERMINATOR_RE = re.compile(
             [-*•]
         )\s+
     )?
-    (?:NOTES?|TOLERANCES?|REVISION|TITLE|DRAWN\s+BY)\b
-    |
-    \b(?:FINISH|MATERIALS?|SCALE|SHT)\b
+    (?:
+        NOTES?|
+        TOLERANCES?|
+        REVISION|
+        TITLE|
+        DRAWN\s+BY|
+        FINISH|
+        MATERIALS?|
+        SCALE|
+        SHT
+    )\b
     """,
 )
 
