@@ -732,6 +732,39 @@ def main(argv: Sequence[str] | None = None) -> int:
         if isinstance(geom_candidate, Mapping):
             geom_holes_payload = geom_candidate
 
+    if isinstance(geom_holes_payload, Mapping):
+        raw_contributors = geom_holes_payload.get("contributors")
+        contributor_records: list[Mapping[str, Any]] = []
+        if isinstance(raw_contributors, Mapping):
+            contributor_records = [raw_contributors]
+        elif isinstance(raw_contributors, Iterable) and not isinstance(
+            raw_contributors, (str, bytes, bytearray)
+        ):
+            contributor_records = [
+                entry for entry in raw_contributors if isinstance(entry, Mapping)
+            ]
+        top_lines: list[str] = []
+        for entry in contributor_records[:5]:
+            count_val = entry.get("count")
+            try:
+                count_int = int(round(float(count_val)))
+            except Exception:
+                continue
+            layer_text = str(entry.get("layer") or "").strip().upper()
+            block_text = str(entry.get("block") or "").strip().upper()
+            if layer_text and block_text:
+                label = f"{layer_text}/{block_text}"
+            elif layer_text:
+                label = layer_text
+            elif block_text:
+                label = block_text
+            else:
+                label = "-"
+            top_lines.append(f"{label} : {count_int}")
+        if top_lines:
+            summary_display = "; ".join(top_lines) + ";"
+            print(f"[GEOM] top contributors: {summary_display}")
+
     manifest_payload = ops_manifest(
         rows,
         geom_holes=geom_holes_payload,
