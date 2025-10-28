@@ -988,6 +988,10 @@ def main(argv: Sequence[str] | None = None) -> int:
     )
     args = parser.parse_args(argv)
 
+    text_csv_path: str = "-"
+    text_jsonl_path: str = "-"
+    dump_dir_path = Path(args.dump_dir).expanduser()
+
     if args.show_rows is not None:
         os.environ["CAD_QUOTER_SHOW_ROWS"] = str(args.show_rows)
 
@@ -1030,7 +1034,6 @@ def main(argv: Sequence[str] | None = None) -> int:
         return 1
 
     if args.dump_all_text:
-        dump_dir_path = Path(args.dump_dir).expanduser()
         include_layers = _normalize_pattern_args(args.text_layers_include)
         exclude_layers = _normalize_pattern_args(args.text_layers_exclude)
         if args.text_min_height is not None:
@@ -1053,12 +1056,10 @@ def main(argv: Sequence[str] | None = None) -> int:
             entries = []
         sample_limit = args.text_sample
         _print_text_dump(entries, sample_limit=sample_limit)
-        text_csv_path = write_text_dump_csv(entries, dump_dir_path)
-        text_jsonl_path = write_text_dump_jsonl(entries, dump_dir_path)
-    else:
-        dump_dir_path = Path(args.dump_dir).expanduser()
-        text_csv_path = None
-        text_jsonl_path = None
+        text_csv_written = write_text_dump_csv(entries, dump_dir_path)
+        text_jsonl_written = write_text_dump_jsonl(entries, dump_dir_path)
+        text_csv_path = str(text_csv_written)
+        text_jsonl_path = str(text_jsonl_written)
 
     read_kwargs: dict[str, object] = {}
 
@@ -2210,8 +2211,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         if guard_drop_summary:
             geom_summary_payload["guard_drop_counts"] = guard_drop_summary
         artifact_map = {
-            "text_csv": text_csv_path,
-            "text_jsonl": text_jsonl_path,
+            "text_csv": None if text_csv_path == "-" else Path(text_csv_path),
+            "text_jsonl": None if text_jsonl_path == "-" else Path(text_jsonl_path),
             "table_csv": table_csv_path,
             "geom_json": geom_json_path,
             "ops_json": ops_totals_debug_path,
@@ -2276,8 +2277,8 @@ def main(argv: Sequence[str] | None = None) -> int:
     include_summary = ",".join(include_patterns_dbg) if include_patterns_dbg else "-"
     exclude_summary = ",".join(exclude_patterns_dbg) if exclude_patterns_dbg else "-"
     rows_csv_display = str(rows_csv_path) if rows_csv_path else "-"
-    text_csv_display = str(text_csv_path) if text_csv_path else "-"
-    text_jsonl_display = str(text_jsonl_path) if text_jsonl_path else "-"
+    text_csv_display = text_csv_path
+    text_jsonl_display = text_jsonl_path
     table_csv_display = str(table_csv_path) if table_csv_path else rows_csv_display
     geom_json_display = str(geom_json_path) if geom_json_path else "-"
     ops_json_display = (
