@@ -7350,6 +7350,7 @@ def geom_hole_census(doc: Any) -> dict[str, Any]:
         re.compile(pattern, re.IGNORECASE) for pattern in DEFAULT_TEXT_LAYER_EXCLUDE_REGEX
     ]
     groups_counter: defaultdict[float, int] = defaultdict(int)
+    contributor_counter: defaultdict[tuple[str, str], int] = defaultdict(int)
 
     for flattened in flatten_entities(msp, depth=_MAX_INSERT_DEPTH):
         entity = flattened.entity
@@ -7366,6 +7367,10 @@ def geom_hole_census(doc: Any) -> dict[str, Any]:
         if layer_upper:
             if any(pattern.search(layer_upper) for pattern in exclude_patterns):
                 continue
+        layer_key = layer_upper or "-"
+        block_name = getattr(flattened, "block_name", None)
+        block_key = (block_name or "-").upper()
+        contributor_counter[(layer_key, block_key)] += 1
         radius_val = getattr(getattr(entity, "dxf", None), "radius", None)
         if not isinstance(radius_val, (int, float)):
             continue
@@ -7384,7 +7389,30 @@ def geom_hole_census(doc: Any) -> dict[str, Any]:
         if count > 0
     ]
     total = sum(entry["count"] for entry in groups)
-    return {"groups": groups, "total": total}
+    contributors: list[dict[str, Any]] = []
+    if contributor_counter:
+        sorted_contributors = sorted(
+            contributor_counter.items(),
+            key=lambda item: (
+                -item[1],
+                item[0][0] or "",
+                item[0][1] or "",
+            ),
+        )
+        for (layer_token, block_token), count in sorted_contributors:
+            if count <= 0:
+                continue
+            layer_value = layer_token if layer_token != "-" else None
+            block_value = block_token if block_token != "-" else None
+            contributors.append({
+                "layer": layer_value,
+                "block": block_value,
+                "count": int(count),
+            })
+    result: dict[str, Any] = {"groups": groups, "total": total}
+    if contributors:
+        result["contributors"] = contributors
+    return result
 
 
 def promote_table_to_geo(
