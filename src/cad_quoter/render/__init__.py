@@ -43,9 +43,10 @@ def render_quote_sections(state: RenderState) -> list[list[str]]:
     if nre_section:
         sections.append(nre_section)
 
-    if isinstance(writer, QuoteWriter):
-        state.lines = writer.lines
-        state.summary_lines = list(writer.lines)
+    final_writer = getattr(state, "writer", None)
+    if isinstance(final_writer, QuoteWriter):
+        state.lines = final_writer.lines
+        state.summary_lines = list(final_writer.lines)
     else:
         combined: list[str] = []
         for block in sections:

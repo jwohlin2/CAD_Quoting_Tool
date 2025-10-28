@@ -63,6 +63,7 @@ def render_nre(state: "RenderState") -> list[str]:
     )
     state.lines = writer.lines
     state.recorder = writer.recorder
+    setattr(state, "writer", writer)
     start_index = len(writer.lines)
 
     section = state.section()
@@ -350,6 +351,9 @@ def render_nre(state: "RenderState") -> list[str]:
             writer.line(formatted_rows[index])
         else:
             writer.line(section.detail_lines[index])
+
+    if programming_per_lot_val > 0 or show_zeros:
+        writer.line(state.format_row("Programming Cost:", programming_per_lot_val))
 
     if (
         (prog or fix or other_nre_total > 0)
