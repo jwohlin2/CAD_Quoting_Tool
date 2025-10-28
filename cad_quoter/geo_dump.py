@@ -7,6 +7,7 @@ import importlib
 import json
 import math
 import os
+import re
 import sys
 from collections import Counter
 from collections.abc import Iterable, Mapping
@@ -22,12 +23,56 @@ from cad_quoter.geo_extractor import (
     DEFAULT_TEXT_LAYER_EXCLUDE_REGEX,
     NO_TEXT_ROWS_MESSAGE,
     NoTextRowsError,
+    TextScanOpts,
     extract_for_app,
 )
 
 DEFAULT_SAMPLE_PATH = REPO_ROOT / "Cad Files" / "301_redacted.dwg"
 ARTIFACT_DIR = REPO_ROOT / "out"
 DEFAULT_EXCLUDE_PATTERN_TEXT = ", ".join(DEFAULT_TEXT_LAYER_EXCLUDE_REGEX) or "<none>"
+
+_FULL_TEXT_FIELDS = [
+    "layout",
+    "entity_type",
+    "layer",
+    "height",
+    "width",
+    "rotation",
+    "x",
+    "y",
+    "raw_text",
+    "plain_text",
+    "style",
+    "handle",
+    "block_name",
+    "from_block",
+]
+
+_HEIGHT_ATTRS = tuple(
+    getattr(
+        geo_extractor,
+        "_DEFAULT_HEIGHT_ATTRS",
+        ("char_height", "text_height", "height", "size"),
+    )
+)
+_ROTATION_ATTRS = tuple(
+    getattr(geo_extractor, "_DEFAULT_ROTATION_ATTRS", ("rotation", "rot"))
+)
+_INSERT_ATTRS = tuple(
+    getattr(
+        geo_extractor,
+        "_DEFAULT_INSERT_ATTRS",
+        (
+            "insert",
+            "alignment_point",
+            "location",
+            "base_point",
+            "defpoint",
+            "start",
+            "point",
+        ),
+    )
+)
 
 TABLE_EXTRACT_ALLOWED_KEYS = {
     "layer_allowlist",
@@ -39,7 +84,21 @@ TABLE_EXTRACT_ALLOWED_KEYS = {
     "layout_filters",
     "debug_layouts",
     "debug_scan",
+    "text_scan_opts",
 }
+
+
+def iter_table_cells(layout: tuple[str, Any] | Any) -> list[dict[str, Any]]:
+    """Return table cell records for ``layout``."""
+
+    layout_name = None
+    layout_obj = layout
+    if isinstance(layout, tuple) and len(layout) == 2:
+        candidate_name, candidate_layout = layout
+        if isinstance(candidate_name, str):
+            layout_name = candidate_name
+        layout_obj = candidate_layout
+    return geo_extractor.iter_table_cells((layout_name, layout_obj))
 
 
 def _sum_qty(rows: list[Mapping[str, object]] | None) -> int:
@@ -241,6 +300,381 @@ def write_text_dump_jsonl(rows: Sequence[Mapping[str, Any]], out_dir: str | os.P
             f.write("\n")
     print(f"[TEXT-DUMP] jsonl -> {path}")
     return path
+
+
+def _safe_float(value: Any) -> float | None:
+    try:
+        number = float(value)
+    except Exception:
+        return None
+    if not math.isfinite(number):
+        return None
+    return number
+
+
+def _resolve_first_attr(dxf: Any, attrs: Sequence[str]) -> Any:
+    if dxf is None:
+        return None
+    for name in attrs:
+        if not hasattr(dxf, name):
+            continue
+        try:
+            value = getattr(dxf, name)
+        except Exception:
+            continue
+        if value is None:
+            continue
+        if isinstance(value, str) and not value:
+            continue
+        return value
+    return None
+
+
+def _vector_xy(value: Any) -> tuple[float | None, float | None]:
+    if value is None:
+        return (None, None)
+    if hasattr(value, "x") and hasattr(value, "y"):
+        return (_safe_float(value.x), _safe_float(value.y))
+    if isinstance(value, Iterable) and not isinstance(value, (str, bytes, bytearray)):
+        try:
+            data = list(value)
+        except Exception:
+            data = []
+        if len(data) >= 2:
+            return (_safe_float(data[0]), _safe_float(data[1]))
+    return (None, None)
+
+
+def _resolve_xy_from_dxf(dxf: Any) -> tuple[float | None, float | None]:
+    for attr in _INSERT_ATTRS:
+        if not hasattr(dxf, attr):
+            continue
+        try:
+            point = getattr(dxf, attr)
+        except Exception:
+            continue
+        x_val, y_val = _vector_xy(point)
+        if x_val is not None or y_val is not None:
+            return (x_val, y_val)
+    return (None, None)
+
+
+def _resolve_style_name(dxf: Any) -> str | None:
+    if dxf is None:
+        return None
+    for attr in ("style", "text_style", "dimstyle"):
+        if not hasattr(dxf, attr):
+            continue
+        try:
+            value = getattr(dxf, attr)
+        except Exception:
+            continue
+        if value is None:
+            continue
+        text = str(value)
+        if text:
+            return text
+    return None
+
+
+def _resolve_handle(entity: Any) -> str | None:
+    handle = None
+    dxf = getattr(entity, "dxf", None)
+    if dxf is not None and hasattr(dxf, "handle"):
+        try:
+            handle = dxf.handle
+        except Exception:
+            handle = None
+    if handle in (None, "") and hasattr(entity, "handle"):
+        try:
+            handle = entity.handle
+        except Exception:
+            handle = None
+    if handle in (None, ""):
+        return None
+    return str(handle)
+
+
+def _extract_text_strings(entity: Any, etype: str) -> tuple[str | None, str | None]:
+    raw_text: str | None = None
+    plain_text: str | None = None
+    dxf = getattr(entity, "dxf", None)
+
+    if etype == "MTEXT":
+        try:
+            raw_text = str(getattr(entity, "text", ""))
+        except Exception:
+            raw_text = None
+        if hasattr(entity, "plain_text"):
+            try:
+                plain_text = str(entity.plain_text())
+            except Exception:
+                plain_text = None
+    elif etype in {"TEXT", "ATTRIB", "ATTDEF"}:
+        if dxf is not None and hasattr(dxf, "text"):
+            try:
+                raw_text = str(dxf.text)
+            except Exception:
+                raw_text = None
+        if raw_text is not None:
+            plain_text = raw_text
+    elif etype == "MLEADER":
+        mtext_obj = None
+        get_mtext = getattr(entity, "get_mtext", None)
+        if callable(get_mtext):
+            try:
+                mtext_obj = get_mtext()
+            except Exception:
+                mtext_obj = None
+        if mtext_obj is not None:
+            try:
+                raw_text = str(getattr(mtext_obj, "text", ""))
+            except Exception:
+                raw_text = None
+            if hasattr(mtext_obj, "plain_text"):
+                try:
+                    plain_text = str(mtext_obj.plain_text())
+                except Exception:
+                    plain_text = None
+            if hasattr(mtext_obj, "destroy"):
+                try:
+                    mtext_obj.destroy()
+                except Exception:
+                    pass
+        if raw_text is None and dxf is not None and hasattr(dxf, "text"):
+            try:
+                raw_text = str(dxf.text)
+            except Exception:
+                raw_text = None
+        if raw_text is not None and plain_text is None:
+            plain_text = raw_text
+
+    if plain_text is None and raw_text is not None:
+        plain_text = raw_text
+
+    return (raw_text, plain_text)
+
+
+def _compile_regex_list(patterns: Sequence[str] | None, *, default: Sequence[str] | None = None) -> list[re.Pattern[str]]:
+    raw_patterns: list[str] = []
+    if patterns:
+        for value in patterns:
+            if value is None:
+                continue
+            text = str(value).strip()
+            if text:
+                raw_patterns.append(text)
+    elif default:
+        raw_patterns.extend(str(value).strip() for value in default if str(value).strip())
+    compiled: list[re.Pattern[str]] = []
+    for text in raw_patterns:
+        try:
+            compiled.append(re.compile(text, re.IGNORECASE))
+        except re.error as exc:
+            print(f"[TEXT-DUMP] layer regex error pattern={text!r} err={exc}")
+    return compiled
+
+
+def _iter_insert_attribs(insert: Any) -> list[Any]:
+    attribs: list[Any] = []
+    if insert is None:
+        return attribs
+    candidate = getattr(insert, "attribs", None)
+    if callable(candidate):
+        try:
+            attribs = list(candidate())
+        except Exception:
+            attribs = []
+    elif isinstance(candidate, Iterable) and not isinstance(candidate, (str, bytes, bytearray)):
+        try:
+            attribs = list(candidate)
+        except Exception:
+            attribs = []
+    return attribs
+
+
+def dump_all_text(doc: Any, out_dir: Path | str, opts: Mapping[str, Any] | None) -> tuple[list[dict[str, Any]], Path, Path]:
+    options = dict(opts or {})
+    min_height_raw = options.get("text_min_height", 0.0)
+    min_height_value: float | None = None
+    if min_height_raw is not None:
+        try:
+            candidate = float(min_height_raw)
+        except Exception:
+            candidate = None
+        if candidate is not None and math.isfinite(candidate) and candidate > 0:
+            min_height_value = candidate
+
+    include_patterns = _compile_regex_list(
+        options.get("text_include_layers"), default=[".*"]
+    )
+    exclude_patterns = _compile_regex_list(options.get("text_exclude_layers"))
+
+    layout_filters = [
+        str(value).strip()
+        for value in options.get("text_layouts") or []
+        if isinstance(value, str) and value.strip()
+    ]
+    if layout_filters:
+        layout_arg: Mapping[str, Any] | Iterable[str] | None = {
+            "all_layouts": False,
+            "patterns": layout_filters,
+        }
+    else:
+        layout_arg = {"all_layouts": True, "patterns": []}
+
+    try:
+        layout_spaces = geo_extractor.iter_layouts(doc, layout_arg, log=False)
+    except Exception:
+        layout_spaces = []
+
+    records: list[dict[str, Any]] = []
+    max_depth = 8
+    mleader_total = 0
+    mleader_captured = 0
+
+    def record_matches_filters(entry: Mapping[str, Any]) -> bool:
+        layer_name = str(entry.get("layer") or "")
+        if include_patterns and not any(pattern.search(layer_name) for pattern in include_patterns):
+            return False
+        if exclude_patterns and any(pattern.search(layer_name) for pattern in exclude_patterns):
+            return False
+        if min_height_value is not None:
+            height_value = entry.get("height")
+            if isinstance(height_value, (int, float)) and height_value < min_height_value:
+                return False
+        return True
+
+    def build_record(entity: Any, layout_name: str, *, from_block: bool, block_name: str | None) -> dict[str, Any] | None:
+        dxf = getattr(entity, "dxf", None)
+        try:
+            etype = str(entity.dxftype()).upper()
+        except Exception:
+            etype = ""
+        raw_text, plain_text = _extract_text_strings(entity, etype)
+        if raw_text is None and plain_text is None:
+            return None
+        layer_value = ""
+        if dxf is not None and hasattr(dxf, "layer"):
+            try:
+                layer_value = str(dxf.layer or "")
+            except Exception:
+                layer_value = ""
+        height_candidate = _resolve_first_attr(dxf, _HEIGHT_ATTRS)
+        width_candidate = _resolve_first_attr(dxf, ("width", "text_width", "char_width"))
+        rotation_candidate = _resolve_first_attr(dxf, _ROTATION_ATTRS)
+        x_val, y_val = _resolve_xy_from_dxf(dxf)
+        style_value = _resolve_style_name(dxf)
+        handle_value = _resolve_handle(entity)
+        block_value = None if not block_name else str(block_name)
+        entry = {
+            "layout": str(layout_name or "").strip() or "-",
+            "entity_type": etype or "-",
+            "layer": layer_value,
+            "height": _safe_float(height_candidate),
+            "width": _safe_float(width_candidate),
+            "rotation": _safe_float(rotation_candidate),
+            "x": x_val,
+            "y": y_val,
+            "raw_text": raw_text or "",
+            "plain_text": plain_text or "",
+            "style": style_value,
+            "handle": handle_value,
+            "block_name": block_value,
+            "from_block": 1 if from_block else 0,
+        }
+        return entry
+
+    def walk_entity(entity: Any, layout_name: str, *, from_block: bool = False, block_name: str | None = None, depth_left: int = max_depth) -> None:
+        nonlocal mleader_total, mleader_captured
+        if entity is None:
+            return
+        try:
+            etype = str(entity.dxftype()).upper()
+        except Exception:
+            etype = ""
+        if etype in {"TEXT", "MTEXT", "ATTRIB", "ATTDEF"}:
+            record = build_record(entity, layout_name, from_block=from_block, block_name=block_name)
+            if record and record_matches_filters(record):
+                records.append(record)
+            return
+        if etype == "MLEADER":
+            mleader_total += 1
+            record = build_record(entity, layout_name, from_block=from_block, block_name=block_name)
+            if record and record.get("raw_text") and record_matches_filters(record):
+                records.append(record)
+                mleader_captured += 1
+            return
+        if etype != "INSERT" or depth_left <= 0:
+            return
+
+        insert_name = None
+        dxf = getattr(entity, "dxf", None)
+        if dxf is not None:
+            for attr in ("name", "block_name"):
+                if hasattr(dxf, attr):
+                    try:
+                        value = getattr(dxf, attr)
+                    except Exception:
+                        value = None
+                    if value not in (None, ""):
+                        insert_name = str(value)
+                        break
+
+        for attrib in _iter_insert_attribs(entity):
+            walk_entity(
+                attrib,
+                layout_name,
+                from_block=True,
+                block_name=insert_name,
+                depth_left=depth_left - 1,
+            )
+
+        virtual_entities: list[Any] = []
+        try:
+            virtual_entities = list(entity.virtual_entities())
+        except Exception:
+            virtual_entities = []
+        for child in virtual_entities:
+            walk_entity(
+                child,
+                layout_name,
+                from_block=True,
+                block_name=insert_name,
+                depth_left=depth_left - 1,
+            )
+            if hasattr(child, "destroy"):
+                try:
+                    child.destroy()
+                except Exception:
+                    pass
+
+    for layout_name, layout in layout_spaces:
+        if layout is None:
+            continue
+        for entity in layout:
+            walk_entity(entity, str(layout_name or ""))
+
+    out_dir_path = Path(out_dir).expanduser()
+    out_dir_path.mkdir(parents=True, exist_ok=True)
+    csv_path = out_dir_path / "dxf_text_dump_full.csv"
+    jsonl_path = out_dir_path / "dxf_text_dump_full.jsonl"
+
+    with csv_path.open("w", newline="", encoding="utf-8") as handle:
+        writer = csv.writer(handle)
+        writer.writerow(_FULL_TEXT_FIELDS)
+        for entry in records:
+            writer.writerow([entry.get(field) for field in _FULL_TEXT_FIELDS])
+
+    with jsonl_path.open("w", encoding="utf-8") as handle:
+        for entry in records:
+            json.dump(entry, handle, ensure_ascii=False)
+            handle.write("\n")
+
+    print(f"[TEXT-DUMP] full csv -> {csv_path}")
+    print(f"[TEXT-DUMP] full jsonl -> {jsonl_path}")
+
+    return (records, csv_path, jsonl_path)
 
 
 def _write_rows_csv(
@@ -455,6 +889,163 @@ def _format_float_str(value: Any) -> str:
     if number is None:
         return "-"
     return f"{number:.3f}"
+
+
+def _compile_regex_patterns_for_audit(
+    patterns: Iterable[Any] | None,
+) -> list[re.Pattern[str]]:
+    compiled: list[re.Pattern[str]] = []
+    if not patterns:
+        return compiled
+    for pattern in patterns:
+        text = str(pattern or "").strip()
+        if not text:
+            continue
+        try:
+            compiled.append(re.compile(text, re.IGNORECASE))
+        except re.error:
+            continue
+    return compiled
+
+
+def _chart_height_value(entry: Mapping[str, Any]) -> float | None:
+    value = entry.get("height")
+    number = _coerce_float(value)
+    if number is None or not math.isfinite(number):
+        return None
+    if number <= 0:
+        return None
+    return float(number)
+
+
+def _print_chart_audit(
+    debug_info: Mapping[str, Any] | None,
+    *,
+    tables_found: int,
+    text_min_height: float | None = None,
+) -> None:
+    if not isinstance(debug_info, Mapping):
+        return
+    raw_entities = debug_info.get("collected_entities")
+    if not isinstance(raw_entities, Sequence):
+        return
+    chart_entries: list[Mapping[str, Any]] = []
+    for entry in raw_entities:
+        if not isinstance(entry, Mapping):
+            continue
+        layout_name = str(entry.get("layout") or "")
+        if "CHART" not in layout_name.upper():
+            continue
+        chart_entries.append(entry)
+    if not chart_entries:
+        return
+
+    text_raw = len(chart_entries)
+    in_blocks = sum(1 for entry in chart_entries if bool(entry.get("from_block")))
+
+    include_patterns = _compile_regex_patterns_for_audit(
+        debug_info.get("layer_regex_include")
+    )
+    exclude_patterns = _compile_regex_patterns_for_audit(
+        debug_info.get("layer_regex_exclude")
+    )
+
+    def _matches(patterns: Sequence[re.Pattern[str]], layer: str) -> bool:
+        for pattern in patterns:
+            try:
+                if pattern.search(layer):
+                    return True
+            except re.error:
+                continue
+        return False
+
+    filtered_layer: list[Mapping[str, Any]] = []
+    for entry in chart_entries:
+        layer_name = str(entry.get("layer") or "")
+        include_ok = True
+        if include_patterns:
+            include_ok = _matches(include_patterns, layer_name)
+        if not include_ok:
+            continue
+        if exclude_patterns and _matches(exclude_patterns, layer_name):
+            continue
+        filtered_layer.append(entry)
+    kept_by_layer = len(filtered_layer)
+
+    height_threshold: float | None = None
+    if text_min_height is not None:
+        try:
+            candidate = float(text_min_height)
+        except Exception:
+            candidate = None
+        if candidate is not None and math.isfinite(candidate) and candidate > 0:
+            height_threshold = candidate
+
+    filtered_height: list[Mapping[str, Any]] = []
+    for entry in filtered_layer:
+        height_value = _chart_height_value(entry)
+        if height_threshold is not None:
+            if height_value is None or height_value < height_threshold:
+                continue
+        filtered_height.append(entry)
+    kept_by_height = len(filtered_height)
+
+    height_samples = [
+        value
+        for entry in chart_entries
+        for value in [_chart_height_value(entry)]
+        if value is not None
+    ]
+    if height_samples:
+        min_display = f"{min(height_samples):.3f}"
+        med_display = f"{statistics.median(height_samples):.3f}"
+        max_display = f"{max(height_samples):.3f}"
+    else:
+        min_display = med_display = max_display = "-"
+
+    layer_counter: Counter[str] = Counter()
+    for entry in chart_entries:
+        layer_name = str(entry.get("layer") or "").strip()
+        if not layer_name:
+            layer_name = "-"
+        layer_counter[layer_name] += 1
+    if layer_counter:
+        top_layers = sorted(layer_counter.items(), key=lambda item: (-item[1], item[0]))
+        top_layers_display = ", ".join(
+            f"{name}:{count}" for name, count in top_layers[:3]
+        )
+    else:
+        top_layers_display = "-"
+
+    tables_count = int(tables_found)
+    print(
+        "[AUDIT] CHART text_raw={text_raw} in_blocks={in_blocks} "
+        "kept_by_layer={kept} kept_by_height={height} tables={tables}".format(
+            text_raw=text_raw,
+            in_blocks=in_blocks,
+            kept=kept_by_layer,
+            height=kept_by_height,
+            tables=tables_count,
+        )
+    )
+    print(f"Top layers: {top_layers_display}")
+    print(f"Min/Med/Max heights: {min_display} / {med_display} / {max_display}")
+
+    def _significant_gap(raw: int, kept: int) -> bool:
+        if raw <= 0:
+            return False
+        if kept <= 0:
+            return raw >= 5
+        return raw >= kept * 3 and raw - kept >= 5
+
+    if (
+        tables_count == 0
+        and _significant_gap(text_raw, kept_by_layer)
+        and _significant_gap(text_raw, kept_by_height)
+    ):
+        print(
+            "[AUDIT] Recommendation: lower --text-min-height or adjust layer include."
+        )
 
 
 def _am_bor_included_from_candidates(*candidates: Mapping[str, Any] | None) -> bool:
@@ -888,6 +1479,39 @@ def main(argv: Sequence[str] | None = None) -> int:
         ),
     )
     parser.add_argument(
+        "--text-min-height",
+        dest="text_min_height",
+        type=float,
+        help="Minimum text height (drawing units) for anchor text scan",
+    )
+    parser.add_argument(
+        "--text-include-layers",
+        dest="text_include_layers",
+        action="append",
+        metavar="REGEX",
+        help="Regex pattern to include layers during anchor text scan (repeatable)",
+    )
+    parser.add_argument(
+        "--text-exclude-layers",
+        dest="text_exclude_layers",
+        action="append",
+        metavar="REGEX",
+        help="Regex pattern to exclude layers during anchor text scan (repeatable)",
+    )
+    parser.add_argument(
+        "--text-anchor-ratio",
+        dest="text_anchor_ratio",
+        type=float,
+        help="Anchor height tolerance ratio for filtered text scan (e.g. 0.4 for ±40%)",
+    )
+    parser.add_argument(
+        "--text-layout",
+        dest="text_layouts",
+        action="append",
+        metavar="NAME",
+        help="Restrict anchor text scan to the specified layout name (repeatable)",
+    )
+    parser.add_argument(
         "--no-exclude-layer",
         dest="no_exclude_layer",
         action="store_true",
@@ -964,6 +1588,37 @@ def main(argv: Sequence[str] | None = None) -> int:
         "--dump-all-text",
         action="store_true",
         help="Dump all text entities with layout metadata",
+    )
+    parser.add_argument(
+        "--dump-text-all",
+        action="store_true",
+        help="Write an unfiltered text dump (CSV and JSONL)",
+    )
+    parser.add_argument(
+        "--text-min-height",
+        type=float,
+        metavar="IN",
+        default=0.0,
+        help="Minimum text height in inches for --dump-text-all (default: %(default).2f)",
+    )
+    parser.add_argument(
+        "--text-include-layers",
+        action="append",
+        metavar="REGEX",
+        help="Regex pattern to include layers for --dump-text-all (repeatable; default: .*)",
+    )
+    parser.add_argument(
+        "--text-exclude-layers",
+        action="append",
+        metavar="REGEX",
+        help="Regex pattern to exclude layers for --dump-text-all (repeatable)",
+    )
+    parser.add_argument(
+        "--text-layout",
+        dest="text_layouts",
+        action="append",
+        metavar="NAME",
+        help="Restrict --dump-text-all to specific layouts (repeatable)",
     )
     parser.add_argument(
         "--layouts",
@@ -1068,6 +1723,26 @@ def main(argv: Sequence[str] | None = None) -> int:
     text_csv_path: str = "-"
     text_jsonl_path: str = "-"
 
+    if args.dump_text_all:
+        text_dump_opts = {
+            "text_min_height": args.text_min_height,
+            "text_include_layers": args.text_include_layers,
+            "text_exclude_layers": args.text_exclude_layers,
+            "text_layouts": args.text_layouts,
+        }
+        try:
+            _full_entries, full_csv_path, full_jsonl_path = dump_all_text(
+                doc,
+                dump_dir_path,
+                text_dump_opts,
+            )
+        except Exception as exc:
+            print(f"[TEXT-DUMP] full dump failed: {exc}")
+        else:
+            # Update summary paths even if --dump-all-text also runs later.
+            text_csv_path = str(full_csv_path)
+            text_jsonl_path = str(full_jsonl_path)
+
     if args.dump_all_text:
         include_layers: list[str] | None = None
         exclude_layers: list[str] | None = None
@@ -1140,6 +1815,15 @@ def main(argv: Sequence[str] | None = None) -> int:
             ]
             display = ", ".join(layout_names) if layout_names else "<none>"
             print(f"[geo_dump] layouts={display}")
+
+    text_layouts = [
+        value.strip()
+        for value in args.text_layouts or []
+        if isinstance(value, str) and value.strip()
+    ]
+    if text_layouts:
+        read_kwargs["layout_filters"] = list(text_layouts)
+        print(f"[geo_dump] text_layouts={text_layouts}")
 
     layer_allow_args = list(args.layer_allow or [])
     allow_layers_arg = getattr(args, "allow_layers", None)
@@ -1242,6 +1926,34 @@ def main(argv: Sequence[str] | None = None) -> int:
     if args.show_helpers:
         display_regex = ", ".join(active_layer_exclude) if active_layer_exclude else "<none>"
         print(f"[geo_dump] active layer exclude regex={display_regex}")
+
+    text_anchor_ratio = args.text_anchor_ratio
+    text_min_height = args.text_min_height
+    text_include_patterns = _normalize_pattern_args(args.text_include_layers)
+    text_exclude_patterns = _normalize_pattern_args(args.text_exclude_layers)
+    include_tuple = tuple(text_include_patterns) if text_include_patterns else None
+    exclude_tuple = tuple(text_exclude_patterns) if text_exclude_patterns else None
+    if (
+        text_anchor_ratio is not None
+        or text_min_height is not None
+        or include_tuple is not None
+        or exclude_tuple is not None
+    ):
+        scan_opts_obj = TextScanOpts(
+            anchor_ratio=text_anchor_ratio,
+            min_height=text_min_height,
+            include_layers=include_tuple,
+            exclude_layers=exclude_tuple,
+        )
+        read_kwargs["text_scan_opts"] = scan_opts_obj
+        if text_anchor_ratio is not None:
+            print(f"[geo_dump] text_anchor_ratio={text_anchor_ratio}")
+        if text_min_height is not None:
+            print(f"[geo_dump] text_min_height={text_min_height}")
+        if text_include_patterns:
+            print(f"[geo_dump] text_include_layers={text_include_patterns}")
+        if text_exclude_patterns:
+            print(f"[geo_dump] text_exclude_layers={text_exclude_patterns}")
 
     extract_opts = {
         key: read_kwargs[key]
@@ -2278,6 +2990,12 @@ def main(argv: Sequence[str] | None = None) -> int:
         )
 
     debug_info = geo_extractor.get_last_text_table_debug() or {}
+
+    _print_chart_audit(
+        debug_info,
+        tables_found=tables_found,
+        text_min_height=args.text_min_height,
+    )
 
     if text_csv_path == "-" and debug_info:
         fallback_entities = debug_info.get("collected_entities")

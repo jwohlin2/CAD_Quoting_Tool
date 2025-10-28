@@ -35,6 +35,157 @@ class NoTextRowsError(RuntimeError):
         super().__init__(message)
 
 
+@dataclass(slots=True)
+class TextScanOpts:
+    """Overrides for the text-table anchor scan heuristics."""
+
+    anchor_ratio: float | None = None
+    min_height: float | None = None
+    include_layers: tuple[str, ...] | None = None
+    exclude_layers: tuple[str, ...] | None = None
+
+    @staticmethod
+    def _env_float_optional(*names: str) -> float | None:
+        for name in names:
+            if not name:
+                continue
+            try:
+                raw = os.environ.get(name)
+            except Exception:
+                raw = None
+            if raw is None:
+                continue
+            text = str(raw).strip()
+            if not text:
+                continue
+            try:
+                number = float(text)
+            except Exception:
+                continue
+            if math.isfinite(number):
+                return float(number)
+        return None
+
+    @staticmethod
+    def _env_patterns(*names: str) -> tuple[str, ...] | None:
+        for name in names:
+            if not name:
+                continue
+            try:
+                raw = os.environ.get(name)
+            except Exception:
+                raw = None
+            if raw is None:
+                continue
+            text = str(raw).strip()
+            if not text:
+                continue
+            parts = [piece.strip() for piece in re.split(r"[,;]", text) if piece.strip()]
+            if parts:
+                return tuple(parts)
+        return None
+
+    @classmethod
+    def from_env(cls) -> "TextScanOpts":
+        return cls(
+            anchor_ratio=cls._env_float_optional(
+                "GEO_TEXT_ANCHOR_RATIO",
+                "GEO_TEXT_ANCHOR_TOLERANCE",
+            ),
+            min_height=cls._env_float_optional("GEO_TEXT_MIN_HEIGHT"),
+            include_layers=cls._env_patterns("GEO_TEXT_INCLUDE_LAYERS"),
+            exclude_layers=cls._env_patterns("GEO_TEXT_EXCLUDE_LAYERS"),
+        )
+
+    @classmethod
+    def from_mapping(cls, payload: Mapping[str, Any] | None) -> "TextScanOpts":
+        if isinstance(payload, cls):
+            return payload
+        if not isinstance(payload, Mapping):
+            return cls()
+
+        def _tuple_from(name: str) -> tuple[str, ...] | None:
+            value = payload.get(name)
+            if value is None:
+                return None
+            if isinstance(value, (str, bytes, bytearray)):
+                text = str(value).strip()
+                if not text:
+                    return ()
+                return (text,)
+            if isinstance(value, Iterable):
+                parts: list[str] = []
+                for item in value:
+                    if not isinstance(item, str):
+                        continue
+                    text = item.strip()
+                    if text:
+                        parts.append(text)
+                return tuple(parts)
+            return None
+
+        def _float_from(name: str) -> float | None:
+            candidate = payload.get(name)
+            if candidate in (None, ""):
+                return None
+            try:
+                number = float(candidate)  # type: ignore[arg-type]
+            except Exception:
+                return None
+            if not math.isfinite(number):
+                return None
+            return float(number)
+
+        return cls(
+            anchor_ratio=_float_from("anchor_ratio"),
+            min_height=_float_from("min_height"),
+            include_layers=_tuple_from("include_layers"),
+            exclude_layers=_tuple_from("exclude_layers"),
+        )
+
+    def merge(self, override: "TextScanOpts" | None) -> "TextScanOpts":
+        if override is None:
+            return TextScanOpts(
+                anchor_ratio=self.anchor_ratio,
+                min_height=self.min_height,
+                include_layers=self.include_layers,
+                exclude_layers=self.exclude_layers,
+            )
+        return TextScanOpts(
+            anchor_ratio=override.anchor_ratio
+            if override.anchor_ratio is not None
+            else self.anchor_ratio,
+            min_height=override.min_height
+            if override.min_height is not None
+            else self.min_height,
+            include_layers=override.include_layers
+            if override.include_layers is not None
+            else self.include_layers,
+            exclude_layers=override.exclude_layers
+            if override.exclude_layers is not None
+            else self.exclude_layers,
+        )
+
+    def is_active(self) -> bool:
+        return any(
+            value is not None and value != ()
+            for value in (
+                self.anchor_ratio,
+                self.min_height,
+                self.include_layers,
+                self.exclude_layers,
+            )
+        )
+
+
+def _resolve_text_scan_opts(
+    opts: TextScanOpts | Mapping[str, Any] | None,
+) -> TextScanOpts:
+    env_opts = TextScanOpts.from_env()
+    override = TextScanOpts.from_mapping(opts) if opts is not None else TextScanOpts()
+    return env_opts.merge(override)
+
+
 TransformMatrix = tuple[float, float, float, float, float, float]
 
 
@@ -1354,6 +1505,225 @@ def _collect_table_text(
     return _collect_tablecell_records(flattened, layout_name, etype_override=etype_override)
 
 
+def _resolve_layout_pair(layout: Any) -> tuple[str, Any | None]:
+    layout_name: str | None = None
+    layout_obj = layout
+    if isinstance(layout, tuple) and len(layout) == 2:
+        candidate_name, candidate_layout = layout
+        if isinstance(candidate_name, str):
+            layout_name = candidate_name
+        layout_obj = candidate_layout
+    if layout_obj is None:
+        return (layout_name or "-", None)
+    if layout_name is None:
+        direct_name = getattr(layout_obj, "name", None)
+        if isinstance(direct_name, str) and direct_name.strip():
+            layout_name = direct_name
+        else:
+            layout_dxf = getattr(layout_obj, "dxf", None)
+            dxf_name = getattr(layout_dxf, "name", None)
+            if isinstance(dxf_name, str) and dxf_name.strip():
+                layout_name = dxf_name
+    if layout_name is None:
+        try:
+            if bool(getattr(layout_obj, "is_modelspace", False)):
+                layout_name = "Model"
+        except Exception:
+            layout_name = None
+    if layout_name is None:
+        layout_name = "-"
+    return (layout_name, layout_obj)
+
+
+def iter_table_cells(layout: Any) -> list[dict[str, Any]]:
+    """Yield table cell records for the provided layout."""
+
+    layout_name, layout_obj = _resolve_layout_pair(layout)
+    if layout_obj is None:
+        return []
+
+    layout_label = str(layout_name or "").strip() or "-"
+    tables: list[Any] = []
+    seen_handles: set[str] = set()
+    seen_ids: set[int] = set()
+
+    query = getattr(layout_obj, "query", None)
+    if callable(query):
+        try:
+            queried = list(query("ACAD_TABLE,TABLE"))
+        except Exception:
+            queried = []
+        for entity in queried:
+            if entity is None:
+                continue
+            entity_id = id(entity)
+            if entity_id in seen_ids:
+                continue
+            handle = _entity_handle(entity)
+            if handle:
+                if handle in seen_handles:
+                    continue
+                seen_handles.add(handle)
+            else:
+                seen_ids.add(entity_id)
+            tables.append(entity)
+
+    try:
+        iterator = iter(layout_obj)  # type: ignore[arg-type]
+    except TypeError:
+        iterator = None
+    except Exception:
+        iterator = None
+
+    if iterator is not None:
+        for entity in iterator:
+            if entity is None:
+                continue
+            entity_id = id(entity)
+            if entity_id in seen_ids:
+                continue
+            try:
+                dxftype = str(entity.dxftype()).upper()
+            except Exception:
+                dxftype = ""
+            if dxftype not in {"TABLE", "ACAD_TABLE"}:
+                continue
+            handle = _entity_handle(entity)
+            if handle:
+                if handle in seen_handles:
+                    continue
+                seen_handles.add(handle)
+            else:
+                seen_ids.add(entity_id)
+            tables.append(entity)
+
+    records: list[dict[str, Any]] = []
+    for entity in tables:
+        if entity is None:
+            continue
+        layer_name = _entity_layer(entity)
+        layer_upper = layer_name.upper()
+        flattened = FlattenedEntity(
+            entity=entity,
+            transform=_IDENTITY_TRANSFORM,
+            from_block=False,
+            block_name=None,
+            block_stack=(),
+            depth=0,
+            layer=layer_name,
+            layer_upper=layer_upper,
+            effective_layer=layer_name,
+            effective_layer_upper=layer_upper,
+        )
+        records.extend(
+            _collect_tablecell_records(
+                flattened,
+                layout_label,
+                etype_override="TABLE",
+            )
+        )
+
+    return records
+
+
+def _iter_table_cell_content_strings(
+    source: Any, visited: set[int] | None = None
+) -> Iterable[str]:
+    if source is None:
+        return
+    if visited is None:
+        visited = set()
+    if isinstance(source, bytes):
+        try:
+            decoded = source.decode("utf-8", errors="ignore")
+        except Exception:
+            decoded = ""
+        if decoded.strip():
+            yield decoded
+        return
+    if isinstance(source, str):
+        if source.strip():
+            yield source
+        return
+    if isinstance(source, (int, float)):
+        text = str(source).strip()
+        if text:
+            yield text
+        return
+
+    obj_id = id(source)
+    if obj_id in visited:
+        return
+    visited.add(obj_id)
+
+    try:
+        if isinstance(source, Mapping):
+            for value in source.values():
+                yield from _iter_table_cell_content_strings(value, visited)
+    except Exception:
+        pass
+
+    attr_names = (
+        "plain_text",
+        "get_plain_text",
+        "text",
+        "get_text",
+        "value",
+        "get_value",
+        "content",
+        "get_content",
+        "contents",
+        "mtext",
+        "get_mtext",
+        "text_string",
+        "get_text_string",
+    )
+    for attr in attr_names:
+        candidate = getattr(source, attr, None)
+        if candidate is None:
+            continue
+        if callable(candidate):
+            try:
+                candidate = candidate()
+            except Exception:
+                continue
+        if candidate is source:
+            continue
+        yield from _iter_table_cell_content_strings(candidate, visited)
+
+    if isinstance(source, Iterable) and not isinstance(source, (str, bytes, bytearray)):
+        try:
+            iterator = iter(source)
+        except Exception:
+            iterator = None
+        if iterator is not None:
+            for item in iterator:
+                yield from _iter_table_cell_content_strings(item, visited)
+    else:
+        try:
+            text = str(source)
+        except Exception:
+            text = ""
+        cleaned = text.strip()
+        if cleaned and not (cleaned.startswith("<") and cleaned.endswith(">")):
+            yield cleaned
+
+
+def _extract_cell_content_plain_text(cell_obj: Any) -> str:
+    fragments: list[str] = []
+    for fragment in _iter_table_cell_content_strings(cell_obj):
+        normalized = _normalize_table_fragment(fragment)
+        if normalized:
+            fragments.append(normalized)
+    unique: list[str] = []
+    for fragment in fragments:
+        if fragment not in unique:
+            unique.append(fragment)
+    if not unique:
+        return ""
+    return " ".join(unique)
+
+
 def _extract_entity_text_payload(
     flattened: FlattenedEntity, canonical_kind: str
 ) -> dict[str, Any] | None:
@@ -1615,10 +1985,24 @@ def collect_acad_tables(
     for layout_name, layout in layout_spaces:
         if layout is None:
             continue
+
+        layout_label = str(layout_name or "").strip() or "-"
+
+        for record in iter_table_cells((layout_name, layout)):
+            records.append(record)
+
         try:
             flattened_iter = flatten_entities(layout, depth=_MAX_INSERT_DEPTH)
         except Exception:
             flattened_iter = []
+        seen_handles: set[str] = {
+            str(record.get("handle") or "")
+            for record in records
+            if str(record.get("layout") or "").strip() == layout_label
+            and isinstance(record.get("handle"), str)
+            and record.get("handle")
+        }
+        seen_ids: set[int] = set()
         for flattened in flattened_iter:
             try:
                 dxftype = str(flattened.entity.dxftype()).upper()
@@ -1626,13 +2010,22 @@ def collect_acad_tables(
                 dxftype = ""
             if dxftype not in {"ACAD_TABLE", "TABLE"}:
                 continue
-            records.extend(
-                _collect_tablecell_records(
-                    flattened,
-                    layout_name,
-                    etype_override="TABLECELL",
-                )
+            handle_value = _entity_handle(flattened.entity)
+            if handle_value and handle_value in seen_handles:
+                continue
+            entity_id = id(flattened.entity)
+            if not handle_value and entity_id in seen_ids:
+                continue
+            table_records = _collect_tablecell_records(
+                flattened,
+                layout_name,
+                etype_override="TABLE",
             )
+            if handle_value:
+                seen_handles.add(handle_value)
+            else:
+                seen_ids.add(entity_id)
+            records.extend(table_records)
 
     return records
 
@@ -1654,7 +2047,7 @@ def collect_all_text(
         Entity handle when available.
     ``etype``
         The entity type (``TEXT``, ``MTEXT``, ``ATTRIB``, ``ATTDEF``, ``MLEADER``,
-        ``DIM``, or ``TABLECELL``).
+        ``DIM``, or ``TABLE``).
     ``layout``
         Layout label such as ``Model`` or the paper space name.
     ``layer``
@@ -1680,6 +2073,16 @@ def collect_all_text(
     for layout_name, layout in layouts:
         if layout is None:
             continue
+
+        table_handles: set[str] = set()
+        table_ids: set[int] = set()
+
+        for record in iter_table_cells((layout_name, layout)):
+            handle_val = record.get("handle")
+            if isinstance(handle_val, str) and handle_val:
+                table_handles.add(handle_val)
+            records.append(record)
+
         try:
             flattened_iter = flatten_entities(layout, depth=depth)
         except Exception:
@@ -1690,13 +2093,22 @@ def collect_all_text(
             except Exception:
                 dxftype = ""
             if dxftype in {"ACAD_TABLE", "TABLE"}:
-                records.extend(
-                    _collect_tablecell_records(
-                        flattened,
-                        layout_name,
-                        etype_override="TABLECELL",
-                    )
+                handle_value = _entity_handle(flattened.entity)
+                if handle_value and handle_value in table_handles:
+                    continue
+                entity_id = id(flattened.entity)
+                if not handle_value and entity_id in table_ids:
+                    continue
+                table_entries = _collect_tablecell_records(
+                    flattened,
+                    layout_name,
+                    etype_override="TABLE",
                 )
+                if handle_value:
+                    table_handles.add(handle_value)
+                else:
+                    table_ids.add(entity_id)
+                records.extend(table_entries)
                 continue
             records.extend(_collect_text_from_flattened(flattened, layout_name))
 
@@ -2028,6 +2440,10 @@ def _cell_text(entity: Any, row: int, col: int) -> str:
                     text_value = raw if isinstance(raw, str) else ""
                 if text_value:
                     break
+        if not text_value:
+            fragments_text = _extract_cell_content_plain_text(cell_obj)
+            if fragments_text:
+                text_value = fragments_text
     if not text_value:
         cells_attr = getattr(entity, "cells", None)
         if cells_attr is not None:
@@ -6213,6 +6629,7 @@ def read_text_table(
     layer_include_regex: Iterable[str] | str | None = None,
     layer_exclude_regex: Iterable[str] | str | None = DEFAULT_TEXT_LAYER_EXCLUDE_REGEX,
     layout_filters: Mapping[str, Any] | Iterable[str] | str | None = None,
+    text_scan_opts: TextScanOpts | Mapping[str, Any] | None = None,
     debug_layouts: bool = False,
     debug_scan: bool = False,
 ) -> dict[str, Any]:
@@ -6232,6 +6649,7 @@ def read_text_table(
         "layout_filters": layout_filters,
     }
     debug_scan_enabled = bool(debug_scan)
+    scan_overrides = _resolve_text_scan_opts(text_scan_opts)
     roi_hint_effective: Mapping[str, Any] | None = roi_hint
     resolved_allowlist = _normalize_layer_allowlist(layer_allowlist)
     normalized_block_allow = _normalize_block_allowlist(block_name_allowlist)
@@ -6243,6 +6661,13 @@ def read_text_table(
             "patterns": list(layout_filter_patterns),
         }
         _LAST_TEXT_TABLE_DEBUG["debug_scan_requested"] = debug_scan_enabled
+        if scan_overrides.is_active():
+            _LAST_TEXT_TABLE_DEBUG["text_scan_overrides"] = {
+                "anchor_ratio": scan_overrides.anchor_ratio,
+                "min_height": scan_overrides.min_height,
+                "include_layers": list(scan_overrides.include_layers or ()),
+                "exclude_layers": list(scan_overrides.exclude_layers or ()),
+            }
 
     def _compile_layer_patterns(
         patterns: Iterable[str] | str | None,
@@ -6268,8 +6693,15 @@ def read_text_table(
 
     include_patterns = _compile_layer_patterns(layer_include_regex)
     exclude_patterns = _compile_layer_patterns(layer_exclude_regex)
+    if scan_overrides.include_layers is not None:
+        include_patterns = _compile_layer_patterns(scan_overrides.include_layers)
+    if scan_overrides.exclude_layers is not None:
+        exclude_patterns = _compile_layer_patterns(scan_overrides.exclude_layers)
     base_exclude = re.compile(_GEO_EXCLUDE_LAYERS_DEFAULT, re.IGNORECASE)
-    if not any(pattern.pattern == base_exclude.pattern for pattern in exclude_patterns):
+    if (
+        scan_overrides.exclude_layers is None
+        and not any(pattern.pattern == base_exclude.pattern for pattern in exclude_patterns)
+    ):
         exclude_patterns.insert(0, base_exclude)
     am_bor_exclusion_requested = any(
         pattern.search("AM_BOR") for pattern in exclude_patterns
@@ -7174,6 +7606,7 @@ def read_text_table(
                         "y": entry.get("y"),
                         "height": entry.get("height"),
                         "text": str(entry.get("text") or ""),
+                        "from_block": bool(entry.get("from_block")),
                     }
                     for entry in collected_entries
                 ]
@@ -7702,6 +8135,33 @@ def read_text_table(
             candidate_entries = normalized_entries
             table_lines = normalized_lines
 
+            if scan_overrides.min_height is not None:
+                try:
+                    min_height_threshold = float(scan_overrides.min_height)
+                except Exception:
+                    min_height_threshold = None
+                if (
+                    min_height_threshold is not None
+                    and math.isfinite(min_height_threshold)
+                    and min_height_threshold > 0
+                ):
+                    filtered_by_min_height: list[dict[str, Any]] = []
+                    for entry in candidate_entries:
+                        height_val = entry.get("height")
+                        if isinstance(height_val, (int, float)):
+                            try:
+                                height_float = float(height_val)
+                            except Exception:
+                                height_float = 0.0
+                            if math.isfinite(height_float) and height_float < min_height_threshold:
+                                continue
+                        filtered_by_min_height.append(entry)
+                    if len(filtered_by_min_height) != len(candidate_entries):
+                        candidate_entries = [dict(entry) for entry in filtered_by_min_height]
+                        table_lines = [
+                            str(entry.get("normalized_text") or "") for entry in candidate_entries
+                        ]
+
             anchors = [
                 entry
                 for entry in candidate_entries
@@ -7724,9 +8184,20 @@ def read_text_table(
                 else "[TEXT-SCAN] anchors=0"
             )
             total_by_height = len(candidate_entries)
-            if anchor_count > 0 and anchor_height > 0 and candidate_entries:
-                filtered_entries = _filter_entries_by_anchor_height(
-                    candidate_entries, anchor_height=anchor_height
+            anchor_tolerance = None
+            if scan_overrides.anchor_ratio is not None:
+                try:
+                    anchor_tolerance = float(scan_overrides.anchor_ratio)
+                except Exception:
+                    anchor_tolerance = None
+                if anchor_tolerance is not None:
+                    if not math.isfinite(anchor_tolerance) or anchor_tolerance <= 0:
+                        anchor_tolerance = None
+
+            if anchor_count > 0 and anchor_h > 0 and candidate_entries:
+                tolerance_value = anchor_tolerance if anchor_tolerance is not None else 0.4
+                filtered_entries = _filter_entries_by_anchor_h(
+                    candidate_entries, anchor_h=anchor_h, tolerance=tolerance_value
                 )
                 kept_count = len(filtered_entries)
                 if kept_count != total_by_height:
@@ -7738,6 +8209,34 @@ def read_text_table(
             else:
                 total_kept = total_by_height
             print(f"[TEXT-SCAN] kept_by_height={total_kept}/{total_by_height}")
+
+            triple_counts: Counter[tuple[str, str, str]] = Counter()
+            if candidate_entries:
+                for entry in candidate_entries:
+                    layout_idx = _coerce_layout_index(entry.get("layout_index"))
+                    layout_name = entry.get("layout_name")
+                    if not layout_name:
+                        layout_name = layout_names.get(layout_idx, layout_idx)
+                    layout_display = str(layout_name or "-")
+                    layer_display = str(
+                        entry.get("effective_layer")
+                        or entry.get("effective_layer_upper")
+                        or entry.get("layer")
+                        or "-"
+                    )
+                    height_val = entry.get("height")
+                    if isinstance(height_val, (int, float)) and math.isfinite(float(height_val)):
+                        height_display = f"{float(height_val):.3f}"
+                    else:
+                        height_display = "-"
+                    triple_counts[(layout_display, layer_display, height_display)] += 1
+            if triple_counts:
+                top_entries = triple_counts.most_common(10)
+                summary_parts = [
+                    f"{layout}/{layer}/h={height}×{count}"
+                    for (layout, layer, height), count in top_entries
+                ]
+                print(f"[TEXT-SCAN] top triples: {', '.join(summary_parts)}")
     
             debug_candidates: list[dict[str, Any]] = []
             for entry in candidate_entries:
@@ -10659,6 +11158,7 @@ def extract_hole_table(
         "layout_filters",
         "debug_layouts",
         "debug_scan",
+        "text_scan_opts",
     }
     read_kwargs = {key: value for key, value in options.items() if key in allowed_keys}
 
@@ -10752,6 +11252,7 @@ def extract_for_app(
     *,
     layouts: Mapping[str, Any] | Iterable[str] | str | None = None,
     text_layer_exclude: Iterable[str] | str | None = None,
+    text_scan_opts: TextScanOpts | Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     """
     Returns:
@@ -10804,6 +11305,8 @@ def extract_for_app(
             text_kwargs["layout_filters"] = layouts
         if text_layer_exclude is not None:
             text_kwargs["layer_exclude_regex"] = text_layer_exclude
+        if text_scan_opts is not None:
+            text_kwargs["text_scan_opts"] = text_scan_opts
         try:
             text_info = read_text_table(doc, **text_kwargs) or {}
         except (NoTextRowsError, RuntimeError):
@@ -10980,6 +11483,7 @@ def read_geo(
     layer_include_regex: Iterable[str] | str | None = None,
     layer_exclude_regex: Iterable[str] | str | None = DEFAULT_TEXT_LAYER_EXCLUDE_REGEX,
     layout_filters: Mapping[str, Any] | Iterable[str] | str | None = None,
+    text_scan_opts: TextScanOpts | Mapping[str, Any] | None = None,
     debug_layouts: bool = False,
     debug_scan: bool = False,
     state: ExtractionState | None = None,
@@ -11083,6 +11587,7 @@ def read_geo(
                 layer_include_regex=layer_include_regex,
                 layer_exclude_regex=layer_exclude_regex,
                 layout_filters=layout_filters,
+                text_scan_opts=text_scan_opts,
                 debug_layouts=debug_layouts,
                 debug_scan=debug_scan,
             ) or {}
@@ -11093,7 +11598,7 @@ def read_geo(
                 for key in ("layer_allowlist", "roi_hint", "layout_filters", "debug_scan")
             ):
                 try:
-                    text_info = read_text_table(doc) or {}
+                    text_info = read_text_table(doc, text_scan_opts=text_scan_opts) or {}
                 except RuntimeError:
                     raise
                 except Exception:
@@ -12075,6 +12580,7 @@ def get_last_acad_table_scan() -> dict[str, Any] | None:
 __all__ = [
     "NoTextRowsError",
     "NO_TEXT_ROWS_MESSAGE",
+    "TextScanOpts",
     "read_geo",
     "extract_for_app",
     "extract_geo_from_path",
@@ -12093,6 +12599,7 @@ __all__ = [
     "set_trace_acad",
     "log_last_dxf_fallback",
     "DEFAULT_TEXT_LAYER_EXCLUDE_REGEX",
+    "iter_table_cells",
     "collect_acad_tables",
     "collect_all_text",
 ]
