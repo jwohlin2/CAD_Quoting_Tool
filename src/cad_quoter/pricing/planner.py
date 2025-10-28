@@ -188,12 +188,24 @@ def _geom(geom: dict) -> dict:
         else {}
     )
 
+    manifest_drill_total = _as_float(manifest_totals.get("drill"), None)
+    manifest_geom_drill_total = None
+    if isinstance(ops_manifest_payload, Mapping):
+        manifest_geom_drill_total = _as_float(
+            ops_manifest_payload.get("geom_drill_count"), None
+        )
+
     ops_totals = _dict(ops_summary.get("totals"))
+    drill_fallback = _as_float(ops_totals.get("drill"), 0)
+    if manifest_drill_total is not None and manifest_drill_total > 0:
+        drill_total = manifest_drill_total
+    elif manifest_geom_drill_total is not None and manifest_geom_drill_total > 0:
+        drill_total = manifest_geom_drill_total
+    else:
+        drill_total = drill_fallback
+
     out["ops"] = {
-        "drill": int(
-            _as_float(manifest_totals.get("drill"), _as_float(ops_totals.get("drill"), 0))
-            or 0
-        ),
+        "drill": int(drill_total or 0),
         "tap_front": int(_as_float(ops_totals.get("tap_front"), 0) or 0),
         "tap_back": int(_as_float(ops_totals.get("tap_back"), 0) or 0),
         "cbore_front": int(_as_float(ops_totals.get("cbore_front"), 0) or 0),

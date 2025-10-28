@@ -15288,7 +15288,19 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
         for key, value in manifest_geom_counts.items():
             manifest_geom_int[key] = _safe_int(value)
 
+    manifest_has_signal = False
     if manifest_totals_int:
+        manifest_has_signal = any(value > 0 for value in manifest_totals_int.values())
+    if not manifest_has_signal and manifest_table_int:
+        manifest_has_signal = any(value > 0 for value in manifest_table_int.values())
+    if not manifest_has_signal and manifest_geom_int:
+        manifest_has_signal = any(value > 0 for value in manifest_geom_int.values())
+    if not manifest_has_signal and isinstance(manifest_payload, Mapping):
+        chart_rows = _safe_int(manifest_payload.get("chart_row_count"))
+        geom_drill_count = _safe_int(manifest_payload.get("geom_drill_count"))
+        manifest_has_signal = chart_rows > 0 or geom_drill_count > 0
+
+    if manifest_has_signal:
         tallies["drill"] = manifest_totals_int.get("drill", tallies.get("drill", 0))
         tallies["tap"] = manifest_totals_int.get("tap", 0) + manifest_totals_int.get("npt", 0)
         tallies["counterbore"] = manifest_totals_int.get("cbore", tallies.get("counterbore", 0))
