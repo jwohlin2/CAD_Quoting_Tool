@@ -948,6 +948,527 @@ def iter_layouts(
     return filtered_layouts
 
 
+_DEFAULT_HEIGHT_ATTRS: tuple[str, ...] = ("char_height", "text_height", "height", "size")
+_DEFAULT_ROTATION_ATTRS: tuple[str, ...] = ("rotation", "rot")
+_DEFAULT_INSERT_ATTRS: tuple[str, ...] = (
+    "insert",
+    "alignment_point",
+    "location",
+    "base_point",
+    "defpoint",
+    "center",
+    "position",
+)
+
+
+def _first_text_value(*values: Any) -> str | None:
+    for value in values:
+        if value is None:
+            continue
+        try:
+            text = str(value)
+        except Exception:
+            continue
+        if text:
+            return text
+    return None
+
+
+def _extract_numeric_attr(entity: Any, names: Sequence[str]) -> float | None:
+    if entity is None:
+        return None
+    dxf_obj = getattr(entity, "dxf", None)
+    sources = (entity, dxf_obj)
+    for source in sources:
+        if source is None:
+            continue
+        for name in names:
+            if not hasattr(source, name):
+                continue
+            value = getattr(source, name, None)
+            if value is None:
+                continue
+            if callable(value):
+                try:
+                    value = value()
+                except Exception:
+                    continue
+            try:
+                number = float(value)
+            except Exception:
+                continue
+            if math.isfinite(number):
+                return number
+    return None
+
+
+def _extract_insert_point(
+    entity: Any, transform: TransformMatrix, attrs: Sequence[str] = _DEFAULT_INSERT_ATTRS
+) -> tuple[float, float] | None:
+    if entity is None:
+        return None
+    dxf_obj = getattr(entity, "dxf", None)
+    sources = (entity, dxf_obj)
+    for source in sources:
+        if source is None:
+            continue
+        for name in attrs:
+            if not hasattr(source, name):
+                continue
+            point = _point2d(getattr(source, name, None))
+            if point is None:
+                continue
+            world = _apply_transform_point(transform, point)
+            if world[0] is None or world[1] is None:
+                continue
+            try:
+                return (float(world[0]), float(world[1]))
+            except Exception:
+                continue
+    return None
+
+
+def _normalize_text_output(value: Any) -> str:
+    try:
+        text = str(value)
+    except Exception:
+        text = ""
+    if not text:
+        return ""
+    candidate = text.replace("\r\n", "\n").replace("\r", "\n")
+    candidate = candidate.replace("\\P", "\n")
+    return candidate.strip()
+
+
+def _iter_text_layout_spaces(doc: Any, include_paperspace: bool) -> list[tuple[str, Any]]:
+    spaces: list[tuple[str, Any]] = []
+    if doc is None:
+        return spaces
+
+    modelspace = getattr(doc, "modelspace", None)
+    if callable(modelspace):
+        try:
+            ms = modelspace()
+        except Exception:
+            ms = None
+        if ms is not None:
+            spaces.append(("Model", ms))
+
+    if not include_paperspace:
+        return spaces
+
+    layouts_manager = getattr(doc, "layouts", None)
+    if layouts_manager is None:
+        return spaces
+
+    try:
+        raw_names = getattr(layouts_manager, "names", None)
+        if callable(raw_names):
+            names_iter = raw_names()
+        else:
+            names_iter = raw_names
+        layout_names = list(names_iter or [])
+    except Exception:
+        layout_names = []
+
+    get_layout = getattr(layouts_manager, "get", None)
+    for raw_name in layout_names:
+        if not isinstance(raw_name, str):
+            continue
+        name = raw_name.strip() or raw_name
+        if name.lower() == "model":
+            continue
+        layout_obj = None
+        if callable(get_layout):
+            try:
+                layout_obj = get_layout(raw_name)
+            except Exception:
+                layout_obj = None
+        if layout_obj is None:
+            continue
+        is_paper = False
+        layout_dxf = getattr(layout_obj, "dxf", None)
+        if layout_dxf is not None:
+            try:
+                is_paper = bool(int(getattr(layout_dxf, "paperspace", 0)))
+            except Exception:
+                is_paper = False
+        if not is_paper:
+            continue
+        block_obj = None
+        block_method = getattr(layout_obj, "block", None)
+        if callable(block_method):
+            try:
+                block_obj = block_method()
+            except Exception:
+                block_obj = None
+        if block_obj is None:
+            block_obj = getattr(layout_obj, "entity_space", None) or layout_obj
+        spaces.append((name, block_obj))
+
+    unique: list[tuple[str, Any]] = []
+    seen: set[str] = set()
+    for label, space in spaces:
+        key = _normalize_layout_key(label)
+        if key in seen:
+            continue
+        seen.add(key)
+        unique.append((label, space))
+    return unique
+
+
+def _collect_table_text(
+    flattened: FlattenedEntity, layout_name: str, *, etype_override: str
+) -> list[dict[str, Any]]:
+    entity = flattened.entity
+    try:
+        virtual_entities = list(entity.virtual_entities())
+    except Exception:
+        virtual_entities = []
+
+    records: list[dict[str, Any]] = []
+    for child in virtual_entities:
+        try:
+            child_type = str(child.dxftype()).upper()
+        except Exception:
+            child_type = ""
+        if child_type not in {"TEXT", "MTEXT"}:
+            continue
+        child_layer = _entity_layer(child) or flattened.effective_layer or flattened.layer
+        effective_layer = child_layer or flattened.effective_layer or flattened.layer or ""
+        child_flattened = FlattenedEntity(
+            entity=child,
+            transform=flattened.transform,
+            from_block=flattened.from_block,
+            block_name=flattened.block_name,
+            block_stack=flattened.block_stack,
+            depth=flattened.depth + 1,
+            layer=child_layer or "",
+            layer_upper=(child_layer or "").upper(),
+            effective_layer=effective_layer,
+            effective_layer_upper=effective_layer.upper(),
+        )
+        records.extend(
+            _collect_text_from_flattened(
+                child_flattened,
+                layout_name,
+                etype_override=etype_override,
+            )
+        )
+
+    if records:
+        return records
+
+    rows = _get_table_dimension(entity, ("n_rows", "row_count", "nrows", "rows"))
+    cols = _get_table_dimension(entity, ("n_cols", "col_count", "ncols", "columns"))
+    if not isinstance(rows, int) or not isinstance(cols, int) or rows <= 0 or cols <= 0:
+        return records
+
+    for row in range(rows):
+        for col in range(cols):
+            cell_text = _cell_text(entity, row, col)
+            if not cell_text:
+                continue
+            record = _build_text_record(
+                flattened,
+                layout_name,
+                etype=etype_override,
+                text=cell_text,
+                raw=cell_text,
+                height_entity=None,
+                rotation_entity=None,
+                insert_entity=None,
+            )
+            if record is not None:
+                records.append(record)
+    return records
+
+
+def _extract_entity_text_payload(
+    flattened: FlattenedEntity, canonical_kind: str
+) -> dict[str, Any] | None:
+    entity = flattened.entity
+    dxf_obj = getattr(entity, "dxf", None)
+
+    if canonical_kind in {"TEXT", "ATTRIB", "ATTDEF"}:
+        raw = _first_text_value(
+            getattr(dxf_obj, "text", None),
+            getattr(dxf_obj, "value", None),
+            getattr(entity, "text", None),
+            getattr(entity, "value", None),
+            getattr(entity, "default", None),
+        )
+        if raw is None:
+            return None
+        return {
+            "text": raw,
+            "raw": raw,
+            "height_entity": entity,
+            "rotation_entity": entity,
+            "insert_entity": entity,
+        }
+
+    if canonical_kind == "MTEXT":
+        plain_text = None
+        plain_method = getattr(entity, "plain_text", None)
+        if callable(plain_method):
+            try:
+                plain_text = plain_method()
+            except Exception:
+                plain_text = None
+        raw = _first_text_value(
+            getattr(entity, "text", None),
+            getattr(entity, "raw_text", None),
+            getattr(dxf_obj, "text", None),
+            getattr(dxf_obj, "content", None),
+        )
+        text_value = plain_text or raw
+        if text_value is None:
+            return None
+        return {
+            "text": text_value,
+            "raw": raw if raw is not None else text_value,
+            "height_entity": entity,
+            "rotation_entity": entity,
+            "insert_entity": entity,
+        }
+
+    if canonical_kind == "MLEADER":
+        context = getattr(entity, "context", None)
+        mtext = getattr(context, "mtext", None) if context is not None else None
+        if mtext is None:
+            return None
+        plain_text = None
+        plain_method = getattr(mtext, "plain_text", None)
+        if callable(plain_method):
+            try:
+                plain_text = plain_method()
+            except Exception:
+                plain_text = None
+        raw = _first_text_value(
+            getattr(mtext, "text", None),
+            getattr(getattr(mtext, "dxf", None), "text", None),
+            getattr(mtext, "raw_text", None),
+        )
+        text_value = plain_text or raw
+        if text_value is None:
+            return None
+        return {
+            "text": text_value,
+            "raw": raw if raw is not None else text_value,
+            "height_entity": mtext,
+            "rotation_entity": mtext,
+            "insert_entity": mtext,
+        }
+
+    if canonical_kind == "DIM":
+        raw = _first_text_value(
+            getattr(dxf_obj, "text", None),
+            getattr(entity, "text", None),
+        )
+        if raw is None:
+            return None
+        raw_stripped = str(raw).strip()
+        if not raw_stripped or raw_stripped == "<>":
+            return None
+        return {
+            "text": raw,
+            "raw": raw,
+            "height_entity": entity,
+            "rotation_entity": entity,
+            "insert_entity": entity,
+        }
+
+    return None
+
+
+def _build_text_record(
+    flattened: FlattenedEntity,
+    layout_name: str,
+    *,
+    etype: str,
+    text: Any,
+    raw: Any = None,
+    height_entity: Any | None = None,
+    rotation_entity: Any | None = None,
+    insert_entity: Any | None = None,
+    layer: str | None = None,
+) -> dict[str, Any] | None:
+    text_value = _normalize_text_output(text)
+    if not text_value:
+        return None
+
+    raw_value = None
+    if raw is not None:
+        try:
+            raw_value = str(raw)
+        except Exception:
+            raw_value = repr(raw)
+
+    height_value = None
+    if height_entity is not None:
+        height_raw = _extract_numeric_attr(height_entity, _DEFAULT_HEIGHT_ATTRS)
+        if height_raw is None and height_entity is not flattened.entity:
+            height_raw = _extract_numeric_attr(flattened.entity, _DEFAULT_HEIGHT_ATTRS)
+        if height_raw is not None:
+            try:
+                height_value = abs(float(height_raw)) * _transform_scale_hint(flattened.transform)
+            except Exception:
+                height_value = None
+
+    transform_angle = math.degrees(math.atan2(flattened.transform[3], flattened.transform[0]))
+
+    rotation_value = None
+    if rotation_entity is not None:
+        rotation_raw = _extract_numeric_attr(rotation_entity, _DEFAULT_ROTATION_ATTRS)
+        if rotation_raw is None and rotation_entity is not flattened.entity:
+            rotation_raw = _extract_numeric_attr(flattened.entity, _DEFAULT_ROTATION_ATTRS)
+        if rotation_raw is not None:
+            try:
+                rotation_value = float(rotation_raw) + transform_angle
+            except Exception:
+                rotation_value = float(rotation_raw)
+
+    if rotation_value is None and transform_angle:
+        rotation_value = transform_angle
+
+    insert_value = None
+    if insert_entity is not None:
+        insert_value = _extract_insert_point(insert_entity, flattened.transform)
+        if insert_value is None and insert_entity is not flattened.entity:
+            insert_value = _extract_insert_point(flattened.entity, flattened.transform)
+
+    layer_name = layer if layer is not None else flattened.effective_layer or flattened.layer or ""
+    layout_label = str(layout_name or "").strip() or "-"
+
+    return {
+        "text": text_value,
+        "raw": raw_value,
+        "etype": etype,
+        "layout": layout_label,
+        "layer": layer_name,
+        "height": height_value,
+        "rotation": rotation_value,
+        "insert": insert_value,
+        "block_path": tuple(name for name in flattened.block_stack if name),
+    }
+
+
+def _collect_text_from_flattened(
+    flattened: FlattenedEntity,
+    layout_name: str,
+    *,
+    etype_override: str | None = None,
+) -> list[dict[str, Any]]:
+    entity = flattened.entity
+    try:
+        dxftype = str(entity.dxftype()).upper()
+    except Exception:
+        dxftype = ""
+
+    if dxftype == "ACAD_TABLE":
+        override = etype_override or "TABLECELL"
+        return _collect_table_text(flattened, layout_name, etype_override=override)
+
+    canonical = dxftype
+    if canonical == "DIMENSION":
+        canonical = "DIM"
+
+    if canonical not in {"TEXT", "MTEXT", "ATTRIB", "ATTDEF", "MLEADER", "DIM"}:
+        return []
+
+    payload = _extract_entity_text_payload(flattened, canonical)
+    if payload is None:
+        return []
+
+    record = _build_text_record(
+        flattened,
+        layout_name,
+        etype=etype_override or canonical,
+        text=payload.get("text"),
+        raw=payload.get("raw"),
+        height_entity=payload.get("height_entity"),
+        rotation_entity=payload.get("rotation_entity"),
+        insert_entity=payload.get("insert_entity"),
+    )
+    return [record] if record is not None else []
+
+
+def _compile_layer_patterns(patterns: Any) -> list[re.Pattern[str]]:
+    if patterns in (None, ""):
+        return []
+    if isinstance(patterns, str):
+        candidates = [patterns]
+    elif isinstance(patterns, Iterable) and not isinstance(patterns, (str, bytes, bytearray)):
+        candidates = [str(item) for item in patterns if str(item).strip()]
+    else:
+        candidates = [str(patterns)]
+    compiled: list[re.Pattern[str]] = []
+    for text in candidates:
+        cleaned = text.strip()
+        if not cleaned:
+            continue
+        try:
+            compiled.append(re.compile(cleaned, re.IGNORECASE))
+        except re.error:
+            continue
+    return compiled
+
+
+def collect_all_text(
+    doc: Any,
+    *,
+    include_blocks: bool = True,
+    include_paperspace: bool = True,
+    min_height: float | None = None,
+    layers_include: Any = None,
+    layers_exclude: Any = None,
+) -> list[dict[str, Any]]:
+    layouts = _iter_text_layout_spaces(doc, include_paperspace)
+    depth = _MAX_INSERT_DEPTH if include_blocks else 0
+    records: list[dict[str, Any]] = []
+
+    for layout_name, layout in layouts:
+        if layout is None:
+            continue
+        try:
+            flattened_iter = flatten_entities(layout, depth=depth)
+        except Exception:
+            flattened_iter = []
+        for flattened in flattened_iter:
+            records.extend(_collect_text_from_flattened(flattened, layout_name))
+
+    include_patterns = _compile_layer_patterns(layers_include)
+    exclude_patterns = _compile_layer_patterns(layers_exclude)
+    min_height_value = None
+    if min_height is not None:
+        try:
+            min_height_value = float(min_height)
+        except Exception:
+            min_height_value = None
+        else:
+            if not math.isfinite(min_height_value):
+                min_height_value = None
+
+    if not records:
+        return []
+
+    filtered: list[dict[str, Any]] = []
+    for entry in records:
+        layer_name = str(entry.get("layer") or "")
+        if include_patterns and not any(pattern.search(layer_name) for pattern in include_patterns):
+            continue
+        if exclude_patterns and any(pattern.search(layer_name) for pattern in exclude_patterns):
+            continue
+        if min_height_value is not None:
+            height_value = entry.get("height")
+            if isinstance(height_value, (int, float)) and height_value < min_height_value:
+                continue
+        filtered.append(entry)
+
+    return filtered
+
+
 def set_trace_acad(enabled: bool) -> None:
     """Toggle verbose tracing for AutoCAD table discovery helpers."""
 
@@ -10997,5 +11518,6 @@ __all__ = [
     "set_trace_acad",
     "log_last_dxf_fallback",
     "DEFAULT_TEXT_LAYER_EXCLUDE_REGEX",
+    "collect_all_text",
 ]
 
