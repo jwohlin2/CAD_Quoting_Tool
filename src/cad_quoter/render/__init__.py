@@ -9,6 +9,7 @@ from .nre import render_nre
 from .pass_through import render_pass_through
 from .state import RenderState
 from .summary import render_summary
+from .writer import QuoteWriter
 
 
 def render_quote_sections(state: RenderState) -> list[list[str]]:
@@ -20,6 +21,37 @@ def render_quote_sections(state: RenderState) -> list[list[str]]:
     for block in summary_sections:
         if block:
             sections.append(block)
+
+    writer = getattr(state, "writer", None)
+    if not isinstance(writer, QuoteWriter):
+        divider = state.divider or "-" * max(1, state.page_width)
+        writer = QuoteWriter(
+            divider=divider,
+            page_width=state.page_width,
+            currency=state.currency,
+            recorder=state.recorder,
+            lines=state.lines,
+        )
+        setattr(state, "writer", writer)
+        state.lines = writer.lines
+
+    material_section = render_material(state)
+    if material_section:
+        sections.append(material_section)
+
+    nre_section = render_nre(state)
+    if nre_section:
+        sections.append(nre_section)
+
+    if isinstance(writer, QuoteWriter):
+        state.lines = writer.lines
+        state.summary_lines = list(writer.lines)
+    else:
+        combined: list[str] = []
+        for block in sections:
+            combined.extend(block)
+        state.lines = combined
+        state.summary_lines = list(combined)
 
     return sections
 
