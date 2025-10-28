@@ -1,40 +1,114 @@
+"""Shared fixtures for render tests."""
+
 from __future__ import annotations
 
-import importlib
-from types import ModuleType
-
-from cad_quoter import render as render_package
-from cad_quoter.render.config import apply_render_overrides, ensure_mutable_breakdown
-from cad_quoter.render.guards import render_drilling_guard
-from cad_quoter.render.writer import QuoteWriter
+import copy
+from typing import Any, Iterable
 
 import pytest
 
-from tests.conftest import _install_runtime_dep_stubs
+from cad_quoter.render.state import RenderState as ModernRenderState
+from cad_quoter.utils.render_state import RenderState as LegacyRenderState
+from cad_quoter.utils.render_utils import QuoteDocRecorder
+from tests.pricing.test_dummy_quote_acceptance import _dummy_quote_payload
+
+_DEFAULT_CURRENCY = "$"
+_DEFAULT_PAGE_WIDTH = 74
+_DEFAULT_DIVIDER = "-" * _DEFAULT_PAGE_WIDTH
 
 
-@pytest.fixture(scope="module")
-def appv5_module() -> ModuleType:
-    """Load ``appV5`` with runtime dependency stubs for headless execution."""
+@pytest.fixture
+def dummy_quote_payload_components() -> dict[str, Any]:
+    """Provide an isolated dummy quote payload and frequently used shortcuts."""
 
-    _install_runtime_dep_stubs()
-    import appV5
+    payload = copy.deepcopy(_dummy_quote_payload())
+    breakdown = payload.setdefault("breakdown", {})
+    decision_state = payload.setdefault("decision_state", {})
+    baseline = decision_state.setdefault("baseline", {})
+    baseline_breakdown = baseline.setdefault("breakdown", {})
 
-    module = importlib.reload(appV5)
+    material_block = breakdown.setdefault("material_block", {})
+    material_detail = breakdown.setdefault("material_detail", {})
+    material_cost_components = breakdown.setdefault("material_cost_components", {})
+    material_overrides = breakdown.setdefault("material_overrides", {})
+    material_selection = breakdown.setdefault("material_selected", {})
+    nre_detail = breakdown.setdefault("nre_detail", {})
 
-    # ``appV5`` expects these helpers in its global namespace; provide them here so
-    # the legacy entry points behave the same way in a headless test harness.
-    module.apply_render_overrides = apply_render_overrides
-    module.ensure_mutable_breakdown = ensure_mutable_breakdown
-    module.QuoteWriter = QuoteWriter
+    pricing = payload.get("pricing")
+    if not isinstance(pricing, dict):
+        pricing = dict(breakdown.get("pricing") or {})
+    breakdown.setdefault("pricing", pricing)
+    payload["pricing"] = pricing
 
-    for name in getattr(render_package, "__all__", []):
-        if not hasattr(module, name):
-            setattr(module, name, getattr(render_package, name))
+    ui_vars = payload.setdefault("ui_vars", {})
 
-    if not hasattr(module, "render_state_has_planner_drilling"):
-        module.render_state_has_planner_drilling = render_package.has_planner_drilling
-    if not hasattr(module, "render_drilling_guard"):
-        module.render_drilling_guard = render_drilling_guard
+    return {
+        "payload": payload,
+        "breakdown": breakdown,
+        "baseline": baseline,
+        "baseline_breakdown": baseline_breakdown,
+        "material_block": material_block,
+        "material_detail": material_detail,
+        "material_cost_components": material_cost_components,
+        "material_overrides": material_overrides,
+        "material_selection": material_selection,
+        "nre_detail": nre_detail,
+        "pricing": pricing,
+        "ui_vars": ui_vars,
+    }
 
-    return module
+
+@pytest.fixture
+def legacy_render_state(dummy_quote_payload_components: dict[str, Any]) -> LegacyRenderState:
+    """Build a legacy render state mirroring the v5 pipeline behaviour."""
+
+    payload = copy.deepcopy(dummy_quote_payload_components["payload"])
+    breakdown = payload.get("breakdown", {})
+    lines: list[str] = []
+
+    state = LegacyRenderState(
+        result=payload,
+        breakdown=breakdown,
+        currency=_DEFAULT_CURRENCY,
+        show_zeros=False,
+        page_width=_DEFAULT_PAGE_WIDTH,
+        divider=_DEFAULT_DIVIDER,
+        lines=lines,
+    )
+
+    def append_line(value: Any) -> None:
+        lines.append("" if value is None else str(value))
+
+    def append_lines(values: Iterable[str]) -> None:
+        for value in values:
+            append_line(value)
+
+    def write_wrapped(text: str, indent: str = "") -> None:
+        if text in (None, ""):
+            return
+        for chunk in str(text).splitlines():
+            append_line(f"{indent}{chunk}" if indent else chunk)
+
+    state.append_line = append_line
+    state.append_lines = append_lines
+    state.write_wrapped = write_wrapped
+
+    yield state
+
+
+@pytest.fixture
+def modern_render_state(dummy_quote_payload_components: dict[str, Any]) -> ModernRenderState:
+    """Build a modern render state ready for section renderers."""
+
+    payload = copy.deepcopy(dummy_quote_payload_components["payload"])
+
+    state = ModernRenderState(
+        payload=payload,
+        currency=_DEFAULT_CURRENCY,
+        show_zeros=False,
+        page_width=_DEFAULT_PAGE_WIDTH,
+    )
+    state.lines = []
+    state.recorder = QuoteDocRecorder(state.divider)
+
+    yield state
