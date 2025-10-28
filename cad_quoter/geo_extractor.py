@@ -3322,11 +3322,13 @@ _DEBUG_DEPTH_RE = re.compile(
     re.IGNORECASE,
 )
 _DEBUG_THRU_RE = re.compile(r"\bTHRU\b", re.IGNORECASE)
-_ROI_ANCHOR_RE = re.compile(
-    r"(HOLE\s+CHART|HOLE\s+TABLE|QTY|SIZE|DIA|Ø|⌀|TAP|DRILL|THRU|C['’]?BORE|"
-    r"COUNTER\s*BORE|N\.?P\.?T|JIG)",
-    re.IGNORECASE,
-)
+_HOLE_TABLE_ANCHOR_RE = re.compile(r"\bHOLE\s+TABLE\b", re.IGNORECASE)
+_ANCHOR_HEADER_TOKENS = ("HOLE", "REF", "QTY", "DESCRIPTION")
+_ANCHOR_HEADER_TOKEN_RES = {
+    token: re.compile(rf"\b{token}\b", re.IGNORECASE)
+    for token in _ANCHOR_HEADER_TOKENS
+}
+_ANCHOR_TAP_RE = re.compile(r"[#0-9/]+\s*-\s*[0-9]+", re.IGNORECASE)
 _TITLE_AXIS_DROP_RE = re.compile(
     r"(GENTITLE|TITLE|DRAWING|SHEET|SCALE|REV|DWG|DATE)",
     re.IGNORECASE,
@@ -4739,6 +4741,254 @@ def _line_is_table_row_start(text: str) -> bool:
     return False
 
 
+def _coerce_float(value: Any) -> float | None:
+    try:
+        number = float(value)
+    except Exception:
+        return None
+    if not math.isfinite(number):
+        return None
+    return float(number)
+
+
+def _compute_percentile(values: Sequence[float], fraction: float) -> float:
+    if not values:
+        return 0.0
+    ordered = sorted(values)
+    if len(ordered) == 1:
+        return ordered[0]
+    position = (len(ordered) - 1) * fraction
+    lower = math.floor(position)
+    upper = math.ceil(position)
+    if lower == upper:
+        return ordered[int(position)]
+    lower_val = ordered[lower]
+    upper_val = ordered[upper]
+    return lower_val + (upper_val - lower_val) * (position - lower)
+
+
+def _ordered_header_tokens(tokens: Iterable[str]) -> list[str]:
+    seen: set[str] = set()
+    ordered: list[str] = []
+    for token in _ANCHOR_HEADER_TOKENS:
+        if token in tokens and token not in seen:
+            seen.add(token)
+            ordered.append(token)
+    return ordered
+
+
+def _detect_anchor_lines(
+    records: Sequence[Mapping[str, Any]],
+    *,
+    base_height: float,
+) -> tuple[list[Mapping[str, Any]], list[str]]:
+    anchor_lines: list[Mapping[str, Any]] = []
+    header_tokens_found: list[str] = []
+    if not isinstance(records, Sequence) or not records:
+        return (anchor_lines, header_tokens_found)
+
+    processed_records: list[tuple[Mapping[str, Any], float, float, str]] = []
+    height_values: list[float] = []
+    for record in records:
+        if not isinstance(record, Mapping):
+            continue
+        x_val = _coerce_float(record.get("x"))
+        y_val = _coerce_float(record.get("y"))
+        if x_val is None or y_val is None:
+            continue
+        text = str(record.get("text") or "")
+        processed_records.append((record, x_val, y_val, text))
+        height_raw = record.get("height")
+        if isinstance(height_raw, (int, float)):
+            height_float = float(height_raw)
+            if math.isfinite(height_float) and height_float > 0:
+                height_values.append(height_float)
+
+    if not processed_records:
+        return (anchor_lines, header_tokens_found)
+
+    effective_height = float(base_height or 0.0)
+    if (not math.isfinite(effective_height) or effective_height <= 0) and height_values:
+        effective_height = float(statistics.median(height_values))
+    if not math.isfinite(effective_height) or effective_height < 0:
+        effective_height = 0.0
+
+    y_tolerance = max(6.0, effective_height * 1.5) if effective_height > 0 else 12.0
+
+    x_values = [item[1] for item in processed_records]
+    x_min = min(x_values)
+    x_max = max(x_values)
+    layout_width = x_max - x_min
+    percentile_x = _compute_percentile(x_values, 0.75)
+    right_threshold = x_min + layout_width * 0.75 if layout_width > 0 else x_max
+    right_threshold = max(right_threshold, percentile_x)
+
+    hole_table_matches = [
+        record
+        for record, _, _, text in processed_records
+        if _HOLE_TABLE_ANCHOR_RE.search(text)
+    ]
+    if hole_table_matches:
+        return (hole_table_matches, ["HOLE TABLE"])
+
+    token_candidates: list[tuple[Mapping[str, Any], float, float, set[str]]] = []
+    for record, x_val, y_val, text in processed_records:
+        tokens_here = {
+            token for token, pattern in _ANCHOR_HEADER_TOKEN_RES.items() if pattern.search(text)
+        }
+        if tokens_here:
+            token_candidates.append((record, x_val, y_val, tokens_here))
+
+    if token_candidates:
+        sorted_candidates = sorted(
+            token_candidates, key=lambda item: (-item[2], item[1])
+        )
+        clusters: list[list[tuple[Mapping[str, Any], float, float, set[str]]]] = []
+        current_cluster: list[tuple[Mapping[str, Any], float, float, set[str]]] = []
+        prev_y: float | None = None
+        for candidate in sorted_candidates:
+            y_val = candidate[2]
+            if (
+                current_cluster
+                and prev_y is not None
+                and abs(y_val - prev_y) <= y_tolerance
+            ):
+                current_cluster.append(candidate)
+            else:
+                if current_cluster:
+                    clusters.append(current_cluster)
+                current_cluster = [candidate]
+            prev_y = y_val
+        if current_cluster:
+            clusters.append(current_cluster)
+
+        header_set = set(_ANCHOR_HEADER_TOKENS)
+        best_full_cluster: list[tuple[Mapping[str, Any], float, float, set[str]]] | None = None
+        best_full_tokens: set[str] = set()
+        best_full_span = float("inf")
+        best_full_size = 0
+        best_right_cluster: list[tuple[Mapping[str, Any], float, float, set[str]]] | None = None
+        best_right_tokens: set[str] = set()
+        best_right_span = float("inf")
+        best_right_size = 0
+
+        for cluster in clusters:
+            cluster_tokens: set[str] = set()
+            x_cluster: list[float] = []
+            y_cluster: list[float] = []
+            for _, x_val, y_val, token_set in cluster:
+                x_cluster.append(x_val)
+                y_cluster.append(y_val)
+                cluster_tokens.update(token_set)
+            if not x_cluster or not y_cluster:
+                continue
+            span = max(y_cluster) - min(y_cluster) if len(y_cluster) > 1 else 0.0
+            center_x = sum(x_cluster) / len(x_cluster)
+
+            if header_set.issubset(cluster_tokens):
+                if (
+                    best_full_cluster is None
+                    or span < best_full_span
+                    or (
+                        math.isclose(span, best_full_span)
+                        and len(cluster_tokens) > len(best_full_tokens)
+                    )
+                    or (
+                        math.isclose(span, best_full_span)
+                        and len(cluster_tokens) == len(best_full_tokens)
+                        and len(cluster) > best_full_size
+                    )
+                ):
+                    best_full_cluster = cluster
+                    best_full_tokens = set(cluster_tokens)
+                    best_full_span = span
+                    best_full_size = len(cluster)
+
+            if len(cluster_tokens) >= 3 and center_x >= right_threshold:
+                if (
+                    best_right_cluster is None
+                    or len(cluster_tokens) > len(best_right_tokens)
+                    or (
+                        len(cluster_tokens) == len(best_right_tokens)
+                        and span < best_right_span
+                    )
+                    or (
+                        len(cluster_tokens) == len(best_right_tokens)
+                        and math.isclose(span, best_right_span)
+                        and len(cluster) > best_right_size
+                    )
+                ):
+                    best_right_cluster = cluster
+                    best_right_tokens = set(cluster_tokens)
+                    best_right_span = span
+                    best_right_size = len(cluster)
+
+        if best_full_cluster:
+            anchor_lines = [item[0] for item in best_full_cluster]
+            header_tokens_found = _ordered_header_tokens(best_full_tokens)
+            return (anchor_lines, header_tokens_found)
+        if best_right_cluster:
+            anchor_lines = [item[0] for item in best_right_cluster]
+            header_tokens_found = _ordered_header_tokens(best_right_tokens)
+            return (anchor_lines, header_tokens_found)
+
+    fallback_candidates: list[tuple[Mapping[str, Any], float, float, str]] = []
+    for record, x_val, y_val, text in processed_records:
+        text_upper = text.upper()
+        if x_val < right_threshold:
+            continue
+        if "Ø" in text or "⌀" in text or "TAP" in text_upper or _ANCHOR_TAP_RE.search(text):
+            fallback_candidates.append((record, x_val, y_val, text))
+
+    if fallback_candidates:
+        sorted_fallback = sorted(
+            fallback_candidates, key=lambda item: (-item[2], item[1])
+        )
+        clusters_fb: list[list[tuple[Mapping[str, Any], float, float, str]]] = []
+        current_fb: list[tuple[Mapping[str, Any], float, float, str]] = []
+        prev_y_fb: float | None = None
+        for candidate in sorted_fallback:
+            y_val = candidate[2]
+            if (
+                current_fb
+                and prev_y_fb is not None
+                and abs(y_val - prev_y_fb) <= y_tolerance
+            ):
+                current_fb.append(candidate)
+            else:
+                if current_fb:
+                    clusters_fb.append(current_fb)
+                current_fb = [candidate]
+            prev_y_fb = y_val
+        if current_fb:
+            clusters_fb.append(current_fb)
+
+        best_cluster_fb: list[tuple[Mapping[str, Any], float, float, str]] | None = None
+        best_size_fb = 0
+        best_span_fb = float("inf")
+        for cluster in clusters_fb:
+            size = len(cluster)
+            y_vals = [item[2] for item in cluster]
+            span = max(y_vals) - min(y_vals) if len(y_vals) > 1 else 0.0
+            if size > best_size_fb or (size == best_size_fb and span < best_span_fb):
+                best_cluster_fb = cluster
+                best_size_fb = size
+                best_span_fb = span
+
+        if best_cluster_fb:
+            anchor_lines = [item[0] for item in best_cluster_fb]
+            cluster_tokens: set[str] = set()
+            for record in anchor_lines:
+                text_value = str(record.get("text") or "")
+                for token, pattern in _ANCHOR_HEADER_TOKEN_RES.items():
+                    if pattern.search(text_value):
+                        cluster_tokens.add(token)
+            header_tokens_found = _ordered_header_tokens(cluster_tokens)
+            return (anchor_lines, header_tokens_found)
+
+    return (anchor_lines, header_tokens_found)
+
+
 def _merge_table_lines(lines: Iterable[str]) -> list[str]:
     merged: list[str] = []
     current: list[str] = []
@@ -4805,21 +5055,6 @@ def _build_columnar_table_from_panel_entries(
     roi_hint: Mapping[str, Any] | None = None,
     column_centers_hint: Sequence[float] | None = None,
 ) -> tuple[dict[str, Any] | None, dict[str, Any]]:
-    def _percentile(values: list[float], fraction: float) -> float:
-        if not values:
-            return 0.0
-        ordered = sorted(values)
-        if len(ordered) == 1:
-            return ordered[0]
-        position = (len(ordered) - 1) * fraction
-        lower = math.floor(position)
-        upper = math.ceil(position)
-        if lower == upper:
-            return ordered[int(position)]
-        lower_val = ordered[lower]
-        upper_val = ordered[upper]
-        return lower_val + (upper_val - lower_val) * (position - lower)
-
     records: list[dict[str, Any]] = []
     for entry in entries:
         text_value = (entry.get("normalized_text") or entry.get("text") or "").strip()
@@ -4954,10 +5189,15 @@ def _build_columnar_table_from_panel_entries(
     )
     if roi_median_height <= 0:
         roi_median_height = median_height_all
-    anchor_lines = [rec for rec in records_all if _ROI_ANCHOR_RE.search(rec["text"])]
+    base_anchor_height = roi_median_height if roi_median_height > 0 else median_height_all
+    anchor_lines, header_tokens_found = _detect_anchor_lines(
+        records_all,
+        base_height=base_anchor_height,
+    )
+    anchor_count = len(anchor_lines)
+    print(f"[ROI] anchors={anchor_count} header_tokens_found={header_tokens_found}")
     filtered_records = records_all
     if roi_bounds is None and anchor_lines:
-        anchor_count = len(anchor_lines)
         sorted_anchors = sorted(anchor_lines, key=lambda rec: -rec["y"])
         clusters: list[list[dict[str, Any]]] = []
         if sorted_anchors:
@@ -5057,6 +5297,7 @@ def _build_columnar_table_from_panel_entries(
             "clusters": clusters_count,
             "bbox": [cluster_xmin, cluster_xmax, cluster_ymin, cluster_ymax],
             "total": len(records_all),
+            "header_tokens": list(header_tokens_found),
         }
     records = list(filtered_records)
 
@@ -9497,10 +9738,15 @@ def _cluster_panel_entries(
                     median_hint=roi_median_height,
                 )
 
-    anchor_lines = [rec for rec in usable_records if _ROI_ANCHOR_RE.search(rec["text"])]
+    base_anchor_height = roi_median_height if roi_median_height > 0 else median_height_all
+    anchor_lines, header_tokens_found = _detect_anchor_lines(
+        usable_records,
+        base_height=base_anchor_height,
+    )
+    anchor_count = len(anchor_lines)
+    print(f"[ROI] anchors={anchor_count} header_tokens_found={header_tokens_found}")
     if anchor_lines:
         sorted_anchors = sorted(anchor_lines, key=lambda rec: -rec["y"])
-        anchor_count = len(sorted_anchors)
         clusters: list[list[dict[str, Any]]] = []
         if sorted_anchors:
             height_values = [
@@ -9554,6 +9800,7 @@ def _cluster_panel_entries(
                 ],
                 "total": len(usable_records),
                 "cluster_index": cluster_index,
+                "header_tokens": list(header_tokens_found),
             }
             metadata = {
                 "anchors": len(cluster),
