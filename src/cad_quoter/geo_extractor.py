@@ -2957,7 +2957,7 @@ def classify_op_row(desc: str | None) -> list[dict[str, Any]]:
         has_tap_word = bool(_TAP_WORD_TOKEN_RE.search(segment))
         if is_npt:
             kinds.append(("npt", None))
-        if is_npt or has_tap_word or has_thread_tap:
+        if is_npt or has_tap:
             kinds.append(("tap", None))
         if _COUNTERBORE_TOKEN_RE.search(segment):
             kinds.append(("cbore", None))
@@ -2976,11 +2976,12 @@ def classify_op_row(desc: str | None) -> list[dict[str, Any]]:
         if not kinds:
             kinds.append(("unknown", None))
 
-        seen_local: set[str] = set()
+        seen_local: set[tuple[str, str | None]] = set()
         for kind, size_text in kinds:
-            if kind in seen_local and not size_text:
+            key = (kind, size_text if size_text is not None else None)
+            if key in seen_local:
                 continue
-            seen_local.add(kind)
+            seen_local.add(key)
             results.append({"kind": kind, "qty": 0, "size": size_text})
 
     return results
@@ -3040,15 +3041,11 @@ def ops_manifest(
             if not operations:
                 table_totals["unknown"] += qty
                 continue
-            seen = set()
             for op in operations:
                 kind = str(op.get("kind") or "unknown").strip().lower()
                 if kind not in _OPS_MANIFEST_KEYS:
                     kind = "unknown"
-                if kind == "unknown" and kind in seen:
-                    continue
                 table_totals[kind] += qty
-                seen.add(kind)
                 if kind == "drill":
                     sized_drill_qty += qty
 
@@ -6346,6 +6343,11 @@ def read_text_table(
                     continue
                 rows.append(row_text)
             return rows
+
+        if "parsed_rows" not in locals():
+            parsed_rows = []
+        if "total_qty" not in locals():
+            total_qty = 0
 
         if len(parsed_rows) < 8:
             clusters = _cluster_entries_by_y(candidate_entries)

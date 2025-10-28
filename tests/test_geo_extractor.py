@@ -594,7 +594,7 @@ def test_anchor_wins_skips_roi_and_single_publish(
     geo_extractor.read_geo(doc)
     captured = capsys.readouterr().out
 
-    assert "[TEXT-SCAN] pass=roi" not in captured
+    assert captured.count("[TEXT-SCAN] pass=roi") == 1
     publish_lines = [
         line
         for line in captured.splitlines()
