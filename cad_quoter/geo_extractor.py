@@ -8525,6 +8525,7 @@ def ops_manifest(
     rows_iter = chart_rows or []
     table_rows_present = False
     drill_groups: Counter[tuple[str, str]] = Counter()
+    unkeyed_unsized_drill_qty = 0
     tap_implied_candidates: list[tuple[int, tuple[str, str] | None, Any]] = []
 
     def _row_value(row_obj: Any, key: str) -> Any:
@@ -8621,6 +8622,7 @@ def ops_manifest(
         desc_text = str(desc_source or "")
         group_key = _row_group_key(row, desc_text)
         row_has_drill = False
+        row_drill_sized = False
         row_has_tap = False
         fragments = split_actions(desc_text) or [desc_text]
         for fragment in fragments:
@@ -8641,9 +8643,12 @@ def ops_manifest(
                     details["drill_sized"] += qty
                     size_map = details.setdefault("drill_sizes", {})
                     size_map[size_token] = size_map.get(size_token, 0) + qty
+                    row_drill_sized = True
 
         if row_has_drill and not row_has_tap and group_key:
             drill_groups[group_key] += qty
+        elif row_has_drill and not row_has_tap and not row_drill_sized:
+            unkeyed_unsized_drill_qty += qty
         if row_has_tap and not row_has_drill:
             tap_implied_candidates.append((qty, group_key, row))
         elif row_has_tap:
@@ -8668,6 +8673,10 @@ def ops_manifest(
                 matched = min(available, qty)
                 leftover_drill[key] -= matched
             implied_qty = qty - matched
+            if implied_qty > 0 and unkeyed_unsized_drill_qty > 0:
+                consume = min(implied_qty, unkeyed_unsized_drill_qty)
+                implied_qty -= consume
+                unkeyed_unsized_drill_qty -= consume
             if implied_qty > 0:
                 implied_drill_total += implied_qty
                 _set_row_drill_implied(row, True)
