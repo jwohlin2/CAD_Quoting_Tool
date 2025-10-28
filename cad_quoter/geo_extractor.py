@@ -1119,16 +1119,187 @@ def _iter_text_layout_spaces(doc: Any, include_paperspace: bool) -> list[tuple[s
     return unique
 
 
-def _collect_table_text(
+def _collect_tablecell_records(
     flattened: FlattenedEntity, layout_name: str, *, etype_override: str
 ) -> list[dict[str, Any]]:
     entity = flattened.entity
+    records: list[dict[str, Any]] = []
+
+    rows = _get_table_dimension(entity, ("n_rows", "row_count", "nrows", "rows"))
+    cols = _get_table_dimension(entity, ("n_cols", "col_count", "ncols", "columns"))
+
+    if isinstance(rows, int) and isinstance(cols, int) and rows > 0 and cols > 0:
+        dxf_obj = getattr(entity, "dxf", None)
+        insert = getattr(dxf_obj, "insert", None) if dxf_obj is not None else None
+        if insert is None:
+            insert = getattr(entity, "insert", None)
+
+        base_x = None
+        base_y = None
+        if insert is not None:
+            try:
+                base_x = float(getattr(insert, "x", None))
+            except Exception:
+                base_x = None
+            try:
+                base_y = float(getattr(insert, "y", None))
+            except Exception:
+                base_y = None
+            if (base_x is None or base_y is None) and hasattr(insert, "__iter__"):
+                try:
+                    parts = list(insert)
+                except Exception:
+                    parts = []
+                if base_x is None and len(parts) >= 1:
+                    try:
+                        base_x = float(parts[0])
+                    except Exception:
+                        base_x = None
+                if base_y is None and len(parts) >= 2:
+                    try:
+                        base_y = float(parts[1])
+                    except Exception:
+                        base_y = None
+
+        get_cell_extents = getattr(entity, "get_cell_extents", None)
+        get_column_width = getattr(entity, "get_column_width", None)
+        get_row_height = getattr(entity, "get_row_height", None)
+
+        fallback_col_edges: list[float] | None = None
+        if not callable(get_cell_extents) and callable(get_column_width):
+            edges: list[float] = [0.0]
+            total = 0.0
+            for col_idx in range(int(cols)):
+                width_val = 0.0
+                try:
+                    width_val = float(get_column_width(col_idx) or 0.0)
+                except Exception:
+                    width_val = 0.0
+                if not math.isfinite(width_val) or width_val < 0:
+                    width_val = 0.0
+                total += width_val
+                edges.append(total)
+            if len(edges) == int(cols) + 1:
+                fallback_col_edges = edges
+
+        fallback_row_edges: list[float] | None = None
+        if not callable(get_cell_extents) and callable(get_row_height):
+            edges_y: list[float] = [0.0]
+            total_y = 0.0
+            for row_idx in range(int(rows)):
+                height_val = 0.0
+                try:
+                    height_val = float(get_row_height(row_idx) or 0.0)
+                except Exception:
+                    height_val = 0.0
+                if not math.isfinite(height_val) or height_val < 0:
+                    height_val = 0.0
+                total_y += height_val
+                edges_y.append(total_y)
+            if len(edges_y) == int(rows) + 1:
+                fallback_row_edges = edges_y
+
+        def _cell_center(row_idx: int, col_idx: int) -> tuple[float, float] | None:
+            if callable(get_cell_extents):
+                try:
+                    extents = get_cell_extents(row_idx, col_idx)
+                except Exception:
+                    extents = None
+                if extents and len(extents) >= 4:
+                    try:
+                        x_min = float(extents[0])
+                        y_min = float(extents[1])
+                        x_max = float(extents[2])
+                        y_max = float(extents[3])
+                    except Exception:
+                        x_min = y_min = x_max = y_max = float("nan")
+                    if (
+                        math.isfinite(x_min)
+                        and math.isfinite(x_max)
+                        and math.isfinite(y_min)
+                        and math.isfinite(y_max)
+                    ):
+                        return ((x_min + x_max) / 2.0, (y_min + y_max) / 2.0)
+            if (
+                base_x is not None
+                and base_y is not None
+                and fallback_col_edges
+                and fallback_row_edges
+                and col_idx + 1 < len(fallback_col_edges)
+                and row_idx + 1 < len(fallback_row_edges)
+            ):
+                x_min = fallback_col_edges[col_idx]
+                x_max = fallback_col_edges[col_idx + 1]
+                y_top = fallback_row_edges[row_idx]
+                y_bottom = fallback_row_edges[row_idx + 1]
+                if (
+                    math.isfinite(x_min)
+                    and math.isfinite(x_max)
+                    and math.isfinite(y_top)
+                    and math.isfinite(y_bottom)
+                ):
+                    x_center = base_x + (x_min + x_max) / 2.0
+                    y_center = base_y - (y_top + y_bottom) / 2.0
+                    if math.isfinite(x_center) and math.isfinite(y_center):
+                        return (x_center, y_center)
+            return None
+
+        for row_idx in range(int(rows)):
+            for col_idx in range(int(cols)):
+                try:
+                    cell_text = _cell_text(entity, row_idx, col_idx)
+                except Exception:
+                    cell_text = ""
+                if not cell_text:
+                    continue
+                center_val: tuple[float, float] | None = None
+                try:
+                    center_val = _cell_center(row_idx, col_idx)
+                except Exception:
+                    center_val = None
+                if center_val is not None:
+                    tx, ty = _apply_transform_point(flattened.transform, center_val)
+                    if tx is None or ty is None:
+                        center_val = None
+                    else:
+                        try:
+                            center_val = (float(tx), float(ty))
+                        except Exception:
+                            center_val = (tx, ty)
+                record = _build_text_record(
+                    flattened,
+                    layout_name,
+                    etype=etype_override,
+                    text=cell_text,
+                    raw=cell_text,
+                    height_entity=None,
+                    rotation_entity=None,
+                    insert_entity=None,
+                )
+                if record is None:
+                    continue
+                record["row"] = row_idx
+                record["col"] = col_idx
+                if center_val is not None:
+                    cx, cy = center_val
+                    if isinstance(cx, (int, float)) and isinstance(cy, (int, float)):
+                        cx_f = float(cx)
+                        cy_f = float(cy)
+                        record["insert_x"] = cx_f
+                        record["insert_y"] = cy_f
+                        record["xy"] = (cx_f, cy_f)
+                    else:
+                        record["xy"] = center_val
+                records.append(record)
+
+    if records:
+        return records
+
     try:
         virtual_entities = list(entity.virtual_entities())
     except Exception:
         virtual_entities = []
 
-    records: list[dict[str, Any]] = []
     for child in virtual_entities:
         try:
             child_type = str(child.dxftype()).upper()
@@ -1150,40 +1321,37 @@ def _collect_table_text(
             effective_layer=effective_layer,
             effective_layer_upper=effective_layer.upper(),
         )
-        records.extend(
-            _collect_text_from_flattened(
-                child_flattened,
-                layout_name,
-                etype_override=etype_override,
-            )
+        canonical_kind = "MTEXT" if child_type == "MTEXT" else "TEXT"
+        payload = _extract_entity_text_payload(child_flattened, canonical_kind)
+        if payload is None:
+            continue
+        record = _build_text_record(
+            child_flattened,
+            layout_name,
+            etype=etype_override,
+            text=payload.get("text"),
+            raw=payload.get("raw"),
+            height_entity=payload.get("height_entity"),
+            rotation_entity=payload.get("rotation_entity"),
+            insert_entity=payload.get("insert_entity"),
         )
+        if record is None:
+            continue
+        record["row"] = None
+        record["col"] = None
+        insert_x = record.get("insert_x")
+        insert_y = record.get("insert_y")
+        if isinstance(insert_x, (int, float)) and isinstance(insert_y, (int, float)):
+            record["xy"] = (float(insert_x), float(insert_y))
+        records.append(record)
 
-    if records:
-        return records
-
-    rows = _get_table_dimension(entity, ("n_rows", "row_count", "nrows", "rows"))
-    cols = _get_table_dimension(entity, ("n_cols", "col_count", "ncols", "columns"))
-    if not isinstance(rows, int) or not isinstance(cols, int) or rows <= 0 or cols <= 0:
-        return records
-
-    for row in range(rows):
-        for col in range(cols):
-            cell_text = _cell_text(entity, row, col)
-            if not cell_text:
-                continue
-            record = _build_text_record(
-                flattened,
-                layout_name,
-                etype=etype_override,
-                text=cell_text,
-                raw=cell_text,
-                height_entity=None,
-                rotation_entity=None,
-                insert_entity=None,
-            )
-            if record is not None:
-                records.append(record)
     return records
+
+
+def _collect_table_text(
+    flattened: FlattenedEntity, layout_name: str, *, etype_override: str
+) -> list[dict[str, Any]]:
+    return _collect_tablecell_records(flattened, layout_name, etype_override=etype_override)
 
 
 def _extract_entity_text_payload(
@@ -1384,9 +1552,8 @@ def _collect_text_from_flattened(
     except Exception:
         dxftype = ""
 
-    if dxftype == "ACAD_TABLE":
-        override = etype_override or "TABLECELL"
-        return _collect_table_text(flattened, layout_name, etype_override=override)
+    if dxftype in {"ACAD_TABLE", "TABLE"}:
+        return []
 
     canonical = dxftype
     if canonical == "DIMENSION":
@@ -1431,6 +1598,43 @@ def _compile_layer_patterns(patterns: Any) -> list[re.Pattern[str]]:
         except re.error:
             continue
     return compiled
+
+
+def collect_acad_tables(
+    doc: Any, layouts: Mapping[str, Any] | Iterable[str] | str | None = None
+) -> list[dict[str, Any]]:
+    """Return AutoCAD table cell records discovered in ``doc``."""
+
+    records: list[dict[str, Any]] = []
+
+    try:
+        layout_spaces = iter_layouts(doc, layouts, log=False)
+    except RuntimeError:
+        return records
+
+    for layout_name, layout in layout_spaces:
+        if layout is None:
+            continue
+        try:
+            flattened_iter = flatten_entities(layout, depth=_MAX_INSERT_DEPTH)
+        except Exception:
+            flattened_iter = []
+        for flattened in flattened_iter:
+            try:
+                dxftype = str(flattened.entity.dxftype()).upper()
+            except Exception:
+                dxftype = ""
+            if dxftype not in {"ACAD_TABLE", "TABLE"}:
+                continue
+            records.extend(
+                _collect_tablecell_records(
+                    flattened,
+                    layout_name,
+                    etype_override="TABLECELL",
+                )
+            )
+
+    return records
 
 
 def collect_all_text(
@@ -1481,6 +1685,19 @@ def collect_all_text(
         except Exception:
             flattened_iter = []
         for flattened in flattened_iter:
+            try:
+                dxftype = str(flattened.entity.dxftype()).upper()
+            except Exception:
+                dxftype = ""
+            if dxftype in {"ACAD_TABLE", "TABLE"}:
+                records.extend(
+                    _collect_tablecell_records(
+                        flattened,
+                        layout_name,
+                        etype_override="TABLECELL",
+                    )
+                )
+                continue
             records.extend(_collect_text_from_flattened(flattened, layout_name))
 
     include_patterns = _compile_layer_patterns(layers_include)
@@ -1752,7 +1969,7 @@ def scan_tables_everywhere(doc) -> list[TableHit]:
 
 def _cell_text(entity: Any, row: int, col: int) -> str:
     text_value = ""
-    for method_name in ("text_cell_content", "cell_content"):
+    for method_name in ("text_cell_content", "cell_content", "get_cell_content"):
         method = getattr(entity, method_name, None)
         if not callable(method):
             continue
@@ -1811,6 +2028,44 @@ def _cell_text(entity: Any, row: int, col: int) -> str:
                     text_value = raw if isinstance(raw, str) else ""
                 if text_value:
                     break
+    if not text_value:
+        cells_attr = getattr(entity, "cells", None)
+        if cells_attr is not None:
+            try:
+                cell_candidate = cells_attr[row][col]
+            except Exception:
+                cell_candidate = None
+            if cell_candidate is not None:
+                if isinstance(cell_candidate, (list, tuple)):
+                    joined = " ".join(
+                        str(part) for part in cell_candidate if part is not None
+                    )
+                    text_value = joined
+                else:
+                    for attr in (
+                        "get_text",
+                        "get_plain_text",
+                        "get_text_string",
+                        "text",
+                        "plain_text",
+                        "value",
+                        "content",
+                    ):
+                        raw = getattr(cell_candidate, attr, None)
+                        if raw is None:
+                            continue
+                        if callable(raw):
+                            try:
+                                raw = raw()
+                            except Exception:
+                                continue
+                        try:
+                            text_value = str(raw)
+                        except Exception:
+                            text_value = raw if isinstance(raw, str) else ""
+                        if text_value:
+                            break
+
     if not text_value:
         for method_name in (
             "get_cell_text",
@@ -11822,6 +12077,6 @@ __all__ = [
     "set_trace_acad",
     "log_last_dxf_fallback",
     "DEFAULT_TEXT_LAYER_EXCLUDE_REGEX",
+    "collect_acad_tables",
     "collect_all_text",
 ]
-
