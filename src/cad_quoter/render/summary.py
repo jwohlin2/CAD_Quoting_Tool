@@ -83,13 +83,22 @@ def render_summary(state: "RenderState") -> tuple[list[str], list[str]]:
 
     divider = state.divider or "-" * max(1, state.page_width)
 
-    writer = QuoteWriter(
-        divider=divider,
-        page_width=state.page_width,
-        currency=state.currency,
-        recorder=state.recorder,
-        lines=state.lines,
-    )
+    writer_candidate = getattr(state, "writer", None)
+    if isinstance(writer_candidate, QuoteWriter):
+        writer = writer_candidate
+        writer.divider = divider
+        writer.page_width = max(10, int(state.page_width or 0))
+        writer.currency = state.currency
+        writer.recorder = state.recorder
+    else:
+        writer = QuoteWriter(
+            divider=divider,
+            page_width=state.page_width,
+            currency=state.currency,
+            recorder=state.recorder,
+            lines=state.lines,
+        )
+    setattr(state, "writer", writer)
 
     # Ensure downstream sections share the observable writer state
     state.lines = writer.lines
