@@ -7591,7 +7591,46 @@ def _collect_entity_points_in(
                     points.append(
                         (float(center_world[0]) * to_in, float(center_world[1]) * to_in)
                     )
-            for angle_deg in (float(start_angle), float(end_angle)):
+            sample_angles: list[float] = []
+            seen_norms: list[float] = []
+
+            def _append_angle(angle: float) -> None:
+                norm = math.fmod(angle, 360.0)
+                if norm < 0.0:
+                    norm += 360.0
+                for existing in seen_norms:
+                    if math.isclose(existing, norm, abs_tol=1e-9):
+                        return
+                seen_norms.append(norm)
+                sample_angles.append(angle)
+
+            start_deg = float(start_angle)
+            end_deg = float(end_angle)
+            _append_angle(start_deg)
+            _append_angle(end_deg)
+
+            start_norm = math.fmod(start_deg, 360.0)
+            if start_norm < 0.0:
+                start_norm += 360.0
+            end_norm = math.fmod(end_deg, 360.0)
+            if end_norm < 0.0:
+                end_norm += 360.0
+            sweep = (end_norm - start_norm) % 360.0
+            if math.isclose(sweep, 0.0, abs_tol=1e-9) and not math.isclose(
+                start_deg, end_deg, abs_tol=1e-9
+            ):
+                sweep = 360.0
+            if sweep > 0.0:
+                for quadrant in (0.0, 90.0, 180.0, 270.0):
+                    delta = (quadrant - start_norm) % 360.0
+                    if math.isclose(delta, 0.0, abs_tol=1e-9) or math.isclose(
+                        delta, sweep, abs_tol=1e-9
+                    ):
+                        continue
+                    if delta < sweep or math.isclose(delta, sweep, abs_tol=1e-9):
+                        _append_angle(quadrant)
+
+            for angle_deg in sample_angles:
                 angle_rad = math.radians(angle_deg)
                 x = center[0] + float(radius) * math.cos(angle_rad)
                 y = center[1] + float(radius) * math.sin(angle_rad)
