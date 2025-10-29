@@ -32,7 +32,11 @@ from cad_quoter.geo_extractor import (
     TextScanOpts,
     extract_for_app,
 )
-from cad_quoter.geometry.mtext_utils import normalize_mtext_plain_text
+from cad_quoter.geometry.mtext_utils import (
+    compute_plain_text_norm,
+    flush_plain_text_normalization_log,
+    normalize_mtext_plain_text,
+)
 
 DEFAULT_SAMPLE_PATH = REPO_ROOT / "Cad Files" / "301_redacted.dwg"
 ARTIFACT_DIR = REPO_ROOT / "out"
@@ -50,6 +54,8 @@ _FULL_TEXT_FIELDS = [
     "y",
     "raw_text",
     "plain_text",
+    "plain_text_norm",
+    "plain_text_norm_upper",
     "style",
     "handle",
     "block_name",
@@ -537,7 +543,9 @@ def _resolve_handle(entity: Any) -> str | None:
     if handle in (None, ""):
         return None
     return str(handle)
-def _extract_text_strings(entity: Any, etype: str) -> tuple[str | None, str | None]:
+def _extract_text_strings(
+    entity: Any, etype: str
+) -> tuple[str | None, str | None, str, str]:
     raw_text: str | None = None
     plain_text: str | None = None
     dxf = getattr(entity, "dxf", None)
@@ -598,7 +606,10 @@ def _extract_text_strings(entity: Any, etype: str) -> tuple[str | None, str | No
     if plain_text is None and raw_text is not None:
         plain_text = raw_text
 
-    return (raw_text, plain_text)
+    norm_lower, norm_upper = compute_plain_text_norm(
+        plain_text=plain_text, raw_text=raw_text
+    )
+    return (raw_text, plain_text, norm_lower, norm_upper)
 
 
 def _compile_regex_list(patterns: Sequence[str] | None, *, default: Sequence[str] | None = None) -> list[re.Pattern[str]]:
@@ -719,6 +730,10 @@ def dump_all_text(doc: Any, out_dir: Path | str, opts: Mapping[str, Any] | None)
         if not (plain_text or raw_text):
             return None
 
+        norm_lower, norm_upper = compute_plain_text_norm(
+            plain_text=plain_text, raw_text=raw_text
+        )
+
         block_path = entry.get("block_path")
         if isinstance(block_path, (list, tuple)) and block_path:
             block_name = " > ".join(str(part) for part in block_path if part)
@@ -751,6 +766,8 @@ def dump_all_text(doc: Any, out_dir: Path | str, opts: Mapping[str, Any] | None)
             "y": _safe_float(entry.get("insert_y")),
             "raw_text": raw_text or plain_text,
             "plain_text": plain_text or raw_text,
+            "plain_text_norm": norm_lower,
+            "plain_text_norm_upper": norm_upper,
             "style": str(entry.get("style") or ""),
             "handle": handle_text,
             "block_name": block_name,
@@ -772,7 +789,9 @@ def dump_all_text(doc: Any, out_dir: Path | str, opts: Mapping[str, Any] | None)
             etype = str(entity.dxftype()).upper()
         except Exception:
             etype = ""
-        raw_text, plain_text = _extract_text_strings(entity, etype)
+        raw_text, plain_text, norm_lower, norm_upper = _extract_text_strings(
+            entity, etype
+        )
         if raw_text is None and plain_text is None:
             return None
         layer_value = ""
@@ -805,6 +824,8 @@ def dump_all_text(doc: Any, out_dir: Path | str, opts: Mapping[str, Any] | None)
             "y": y_val,
             "raw_text": raw_text or "",
             "plain_text": plain_text or "",
+            "plain_text_norm": norm_lower,
+            "plain_text_norm_upper": norm_upper,
             "style": style_value,
             "handle": handle_value,
             "block_name": block_value,
@@ -961,6 +982,7 @@ def dump_all_text(doc: Any, out_dir: Path | str, opts: Mapping[str, Any] | None)
 
     mleader_captured = sum(1 for entry in records if entry.get("entity_type") == "MLEADER")
 
+    flush_plain_text_normalization_log()
     return (records, csv_path, jsonl_path)
 
 

@@ -21,7 +21,11 @@ from fnmatch import fnmatchcase
 
 from cad_quoter import geometry
 from cad_quoter.geometry import convert_dwg_to_dxf
-from cad_quoter.geometry.mtext_utils import normalize_mtext_plain_text
+from cad_quoter.geometry.mtext_utils import (
+    compute_plain_text_norm,
+    flush_plain_text_normalization_log,
+    normalize_mtext_plain_text,
+)
 from cad_quoter.geometry.dxf_enrich import detect_units_scale
 from cad_quoter.vendors import ezdxf as _ezdxf_vendor
 
@@ -1961,6 +1965,9 @@ def _build_text_record(
     depth_value = int(flattened.depth)
     from_block_value = 1 if flattened.from_block else 0
     raw_text_value = raw_value if raw_value is not None else text_value
+    norm_lower, norm_upper = compute_plain_text_norm(
+        plain_text=text_value, raw_text=raw_text_value
+    )
 
     return {
         "handle": handle_value or None,
@@ -1981,6 +1988,9 @@ def _build_text_record(
         "depth": depth_value,
         "plain_text": text_value,
         "raw_text": raw_text_value,
+        "plain_text_norm": norm_lower,
+        "plain_text_norm_upper": norm_upper,
+        "normalized_text": norm_upper,
     }
 
 
@@ -2151,6 +2161,10 @@ def collect_all_text(
         Normalized plain-text content (alias of ``text``).
     ``raw_text``
         Original raw content (alias of ``raw``).
+    ``plain_text_norm``
+        Lowercase normalized plain text suitable for token detection.
+    ``plain_text_norm_upper``
+        Uppercase counterpart of ``plain_text_norm`` for display/debug output.
     """
 
     layouts = _iter_text_layout_spaces(doc, include_paperspace)
@@ -2222,6 +2236,7 @@ def collect_all_text(
             min_height_value = candidate
 
     if not (include_patterns or exclude_patterns or min_height_value is not None):
+        flush_plain_text_normalization_log()
         return records
 
     filtered: list[dict[str, Any]] = []
@@ -2237,6 +2252,7 @@ def collect_all_text(
                 continue
         filtered.append(entry)
 
+    flush_plain_text_normalization_log()
     return filtered
 
 
@@ -4339,6 +4355,16 @@ def _normalize_candidate_text(text: Any) -> str:
     return " ".join(base.split())
 
 
+def _entry_plain_text_norm(entry: Mapping[str, Any]) -> str:
+    text = entry.get("plain_text_norm") if isinstance(entry, Mapping) else None
+    if isinstance(text, str) and text.strip():
+        return text
+    normalized = entry.get("normalized_text") if isinstance(entry, Mapping) else None
+    if normalized:
+        return _normalize_candidate_text(normalized).lower()
+    return _normalize_candidate_text(entry.get("text") if isinstance(entry, Mapping) else "").lower()
+
+
 def _is_numeric_ladder_line(text: str) -> bool:
     return bool(_NUMERIC_LADDER_RE.match(text or ""))
 
@@ -4595,9 +4621,8 @@ def _compute_anchor_height(entries: Iterable[Mapping[str, Any]]) -> tuple[float,
     heights: list[float] = []
     count = 0
     for entry in entries:
-        text_value = entry.get("normalized_text") or entry.get("text") or ""
-        normalized = _normalize_candidate_text(text_value)
-        if not _ROW_ANCHOR_RE.match(normalized):
+        text_value = _entry_plain_text_norm(entry)
+        if not _ROW_ANCHOR_RE.match(text_value):
             continue
         height_val = entry.get("height")
         if not isinstance(height_val, (int, float)):
@@ -4878,7 +4903,7 @@ def _detect_anchor_lines(
         y_val = _coerce_float_optional(record.get("y"))
         if x_val is None or y_val is None:
             continue
-        text = str(record.get("text") or "")
+        text = _entry_plain_text_norm(record)
         processed_records.append((record, x_val, y_val, text))
         height_raw = record.get("height")
         if isinstance(height_raw, (int, float)):
@@ -5139,7 +5164,7 @@ def _build_columnar_table_from_panel_entries(
 ) -> tuple[dict[str, Any] | None, dict[str, Any]]:
     records: list[dict[str, Any]] = []
     for entry in entries:
-        text_value = (entry.get("normalized_text") or entry.get("text") or "").strip()
+        text_value = _entry_plain_text_norm(entry).strip()
         if not text_value:
             continue
         x_val = entry.get("x")
@@ -5155,6 +5180,7 @@ def _build_columnar_table_from_panel_entries(
             "x": x_float,
             "y": y_float,
             "text": text_value,
+            "plain_text_norm": text_value,
             "height": entry.get("height"),
         }
         records.append(record)
@@ -6247,10 +6273,7 @@ def _coerce_layout_index(value: Any) -> int:
 
 
 def _normalize_entry_text(entry: Mapping[str, Any]) -> str:
-    text = entry.get("normalized_text")
-    if text:
-        return _normalize_candidate_text(text)
-    return _normalize_candidate_text(entry.get("text"))
+    return _entry_plain_text_norm(entry)
 
 
 def _normalize_ref_token_text(text: Any) -> str:
@@ -6350,11 +6373,7 @@ def _extract_anchor_band_lines(
     anchors = [
         entry
         for entry in anchor_entries
-        if _ROW_ANCHOR_RE.match(
-            _normalize_candidate_text(
-                entry.get("normalized_text") or entry.get("text") or ""
-            )
-        )
+        if _ROW_ANCHOR_RE.match(_entry_plain_text_norm(entry))
     ]
 
     if anchor_height is None and isinstance(context, Mapping):
@@ -6384,9 +6403,7 @@ def _extract_anchor_band_lines(
     ] = defaultdict(Counter)
 
     def _anchor_key(entry: Mapping[str, Any]) -> tuple[str, float | None, float | None] | None:
-        normalized = _normalize_candidate_text(
-            entry.get("normalized_text") or entry.get("text")
-        )
+        normalized = _entry_plain_text_norm(entry)
         if not normalized:
             return None
         x_val = _coerce_float_optional(entry.get("x"))
@@ -7538,15 +7555,18 @@ def read_text_table(
                         counted_block_text = False
                         counted_block_attr = False
                         for fragment, is_mtext in _iter_entity_text_fragments(entity):
-                            normalized = _normalize_table_fragment(fragment)
-                            if not normalized:
+                            normalized_display = _normalize_table_fragment(fragment)
+                            if not normalized_display:
                                 continue
-                            normalized_upper = normalized.upper()
                             try:
                                 raw_fragment = str(fragment)
                             except Exception:
                                 raw_fragment = fragment if isinstance(fragment, str) else ""
-                            plain_fragment = normalized
+                            plain_fragment = normalized_display
+                            norm_lower, norm_upper = compute_plain_text_norm(
+                                plain_text=plain_fragment, raw_text=raw_fragment
+                            )
+                            normalized_upper = norm_upper or normalized_display.upper()
                             if kind in {"ATTRIB", "ATTDEF"}:
                                 attrib_count += 1
                                 if active_block and not counted_block_attr:
@@ -7565,22 +7585,26 @@ def read_text_table(
                                     "[HINT] Chart may live on an alternate sheet/block; ensure its INSERT is present and not on a frozen/off layer."
                                 )
                                 hint_logged = True
-                            match = _FOLLOW_SHEET_DIRECTIVE_RE.search(normalized)
+                            match = _FOLLOW_SHEET_DIRECTIVE_RE.search(
+                                norm_lower or plain_fragment
+                            )
                             if match:
                                 directive_entry = {
                                     "layout": layout_name,
                                     "token": match.group("target"),
-                                    "text": normalized,
+                                    "text": norm_upper or normalized_display,
                                 }
                                 follow_sheet_directive = directive_entry
                                 follow_sheet_directives.append(directive_entry)
                             entry = {
                                 "layout_index": layout_index,
                                 "layout_name": layout_name,
-                                "text": normalized,
-                                "normalized_text": normalized,
+                                "text": normalized_display,
+                                "normalized_text": norm_upper or normalized_display,
                                 "raw_text": raw_fragment,
                                 "plain_text": plain_fragment,
+                                "plain_text_norm": norm_lower,
+                                "plain_text_norm_upper": norm_upper,
                                 "x": coords[0],
                                 "y": coords[1],
                                 "order": counter,
@@ -7846,11 +7870,7 @@ def read_text_table(
             anchor_scan_entries: list[dict[str, Any]] = []
             token_hits: list[tuple[dict[str, Any], float, set[str]]] = []
             for entry in collected_entries:
-                raw_text_value = entry.get("text")
-                try:
-                    text_value = str(raw_text_value or "")
-                except Exception:
-                    text_value = ""
+                text_value = _entry_plain_text_norm(entry)
                 if not text_value.strip():
                     continue
                 x_val = entry.get("x")
@@ -7869,6 +7889,7 @@ def read_text_table(
                     "x": x_float,
                     "y": y_float,
                     "text": text_value,
+                    "plain_text_norm": text_value,
                     "height": entry.get("height"),
                 }
                 anchor_scan_entries.append(scan_entry)
@@ -8443,7 +8464,7 @@ def read_text_table(
                 filtered_entries = [
                     entry
                     for entry in layout_entries
-                    if str(entry.get("normalized_text") or entry.get("text") or "").strip()
+                    if _entry_plain_text_norm(entry).strip()
                 ]
                 if not filtered_entries:
                     return None
@@ -8452,8 +8473,7 @@ def read_text_table(
                 row_active = False
                 continuation_budget = 0
                 for idx, entry in enumerate(ordered_entries):
-                    base_text = entry.get("normalized_text") or entry.get("text") or ""
-                    stripped = str(base_text).strip()
+                    stripped = _entry_plain_text_norm(entry).strip()
                     if not stripped:
                         row_active = False
                         continuation_budget = 0
@@ -8463,12 +8483,9 @@ def read_text_table(
                         continuation_budget = 0
                         continue
                     if idx + 1 < len(ordered_entries):
-                        next_source = (
-                            ordered_entries[idx + 1].get("normalized_text")
-                            or ordered_entries[idx + 1].get("text")
-                            or ""
-                        )
-                        next_text = str(next_source)
+                        next_text = _entry_plain_text_norm(
+                            ordered_entries[idx + 1]
+                        ) or ""
                     else:
                         next_text = None
                     row_start = _is_row_start(stripped, next_text=next_text)
@@ -8526,18 +8543,18 @@ def read_text_table(
                     if filtered_by_height:
                         candidate_entries_local = [dict(entry) for entry in filtered_by_height]
                 table_lines_local = [
-                    str(entry.get("normalized_text") or "") for entry in candidate_entries_local
+                    _entry_plain_text_norm(entry) for entry in candidate_entries_local
                 ]
                 row_data: list[dict[str, Any]] = []
                 current_texts: list[str] = []
                 current_positions: list[float] = []
                 for idx, entry in enumerate(candidate_entries_local):
-                    line = str(entry.get("normalized_text", "")).strip()
+                    line = _entry_plain_text_norm(entry).strip()
                     if not line or _ADMIN_ROW_DROP_RE.search(line):
                         continue
                     if idx + 1 < len(candidate_entries_local):
-                        next_line = str(
-                            candidate_entries_local[idx + 1].get("normalized_text", "") or ""
+                        next_line = _entry_plain_text_norm(
+                            candidate_entries_local[idx + 1]
                         )
                     else:
                         next_line = None
@@ -8599,7 +8616,7 @@ def read_text_table(
                 anchor_count_effective = sum(
                     1
                     for entry in candidate_entries_local
-                    if _ROW_ANCHOR_RE.match(str(entry.get("normalized_text") or ""))
+                    if _ROW_ANCHOR_RE.match(_entry_plain_text_norm(entry))
                 )
                 layout_name = str(layout_names.get(layout_index, layout_index))
                 score = (
@@ -8626,7 +8643,7 @@ def read_text_table(
             row_active = False
             continuation_budget = 0
             for idx, entry in enumerate(collected_entries):
-                stripped = entry.get("text", "").strip()
+                stripped = _entry_plain_text_norm(entry).strip()
                 if not stripped:
                     row_active = False
                     continuation_budget = 0
@@ -8636,7 +8653,7 @@ def read_text_table(
                     continuation_budget = 0
                     continue
                 next_text = (
-                    collected_entries[idx + 1].get("text", "")
+                    _entry_plain_text_norm(collected_entries[idx + 1])
                     if idx + 1 < len(collected_entries)
                     else None
                 )
@@ -8743,17 +8760,13 @@ def read_text_table(
                     if len(filtered_by_min_height) != len(candidate_entries):
                         candidate_entries = [dict(entry) for entry in filtered_by_min_height]
                         table_lines = [
-                            str(entry.get("normalized_text") or "") for entry in candidate_entries
+                            _entry_plain_text_norm(entry) for entry in candidate_entries
                         ]
 
             anchors = [
                 entry
                 for entry in candidate_entries
-                if _ROW_ANCHOR_RE.match(
-                    _normalize_candidate_text(
-                        entry.get("normalized_text") or entry.get("text") or ""
-                    )
-                )
+                if _ROW_ANCHOR_RE.match(_entry_plain_text_norm(entry))
             ]
             anchor_count = len(anchors)
             anchor_height = 0.0
@@ -8787,7 +8800,7 @@ def read_text_table(
                 if kept_count != total_by_height:
                     candidate_entries = [dict(entry) for entry in filtered_entries]
                     table_lines = [
-                        str(entry.get("normalized_text") or "") for entry in candidate_entries
+                        _entry_plain_text_norm(entry) for entry in candidate_entries
                     ]
                 total_kept = len(candidate_entries)
             else:
@@ -8831,22 +8844,23 @@ def read_text_table(
                         "block": entry.get("block_name"),
                         "x": entry.get("x"),
                         "y": entry.get("y"),
-                        "text": entry.get("normalized_text")
+                        "text": entry.get("plain_text_norm_upper")
+                        or entry.get("normalized_text")
                         or entry.get("text")
                         or "",
                     }
                 )
             _LAST_TEXT_TABLE_DEBUG["candidates"] = debug_candidates
-    
+
             current_row: list[str] = []
             for idx, entry in enumerate(candidate_entries):
-                line = entry.get("normalized_text", "").strip()
+                line = _entry_plain_text_norm(entry).strip()
                 if not line:
                     continue
                 if _ADMIN_ROW_DROP_RE.search(line):
                     continue
                 next_line = (
-                    candidate_entries[idx + 1].get("normalized_text", "")
+                    _entry_plain_text_norm(candidate_entries[idx + 1])
                     if idx + 1 < len(candidate_entries)
                     else None
                 )
@@ -8905,7 +8919,8 @@ def read_text_table(
                                 "block": entry.get("block_name"),
                                 "x": entry.get("x"),
                                 "y": entry.get("y"),
-                                "text": entry.get("normalized_text")
+                                "text": entry.get("plain_text_norm_upper")
+                                or entry.get("normalized_text")
                                 or entry.get("text")
                                 or "",
                             }
@@ -9019,7 +9034,7 @@ def read_text_table(
             anchor_layouts: set[int] = set()
             layout_band_ranges: dict[int, tuple[float, float]] = {}
             for entry in candidate_entries:
-                normalized = entry.get("normalized_text") or entry.get("text")
+                normalized = _entry_plain_text_norm(entry)
                 if not _line_is_table_row_start(normalized):
                     continue
                 layout_idx = _coerce_layout_index(entry.get("layout_index"))
@@ -9047,8 +9062,15 @@ def read_text_table(
                     if layout_idx not in anchor_layouts:
                         continue
                     entry_copy = dict(entry)
-                    entry_copy["normalized_text"] = _normalize_candidate_text(
-                        entry_copy.get("normalized_text") or entry_copy.get("text")
+                    entry_copy["plain_text_norm"] = _entry_plain_text_norm(entry_copy)
+                    entry_copy["plain_text_norm_upper"] = (
+                        entry.get("plain_text_norm_upper")
+                        or entry_copy["plain_text_norm"].upper()
+                    )
+                    entry_copy["normalized_text"] = (
+                        entry.get("plain_text_norm_upper")
+                        or entry.get("normalized_text")
+                        or entry_copy["plain_text_norm"].upper()
                     )
                     layout_name_value = layout_names.get(layout_idx, layout_idx)
                     layout_upper = str(layout_name_value or "").strip().upper()
@@ -9085,9 +9107,7 @@ def read_text_table(
                     "anchor_entries": [
                         dict(entry)
                         for entry in candidate_entries
-                        if _line_is_table_row_start(
-                            entry.get("normalized_text") or entry.get("text")
-                        )
+                        if _line_is_table_row_start(_entry_plain_text_norm(entry))
                     ],
                     "anchor_height": anchor_height,
                     "layout_order": [
@@ -9117,7 +9137,7 @@ def read_text_table(
                     layout_value = str(entry.get("layout_name") or "").strip()
                     if layout_value.upper() != target_upper:
                         continue
-                    text_value = str(entry.get("text") or "").strip()
+                    text_value = _entry_plain_text_norm(entry).strip()
                     if not text_value:
                         continue
                     follow_entries.append(
@@ -9127,8 +9147,13 @@ def read_text_table(
                             "x": entry.get("x"),
                             "y": entry.get("y"),
                             "height": entry.get("height"),
-                            "text": text_value,
+                            "text": entry.get("plain_text_norm_upper")
+                            or entry.get("normalized_text")
+                            or text_value,
                             "normalized_text": text_value,
+                            "plain_text_norm": text_value,
+                            "plain_text_norm_upper": entry.get("plain_text_norm_upper")
+                            or text_value.upper(),
                         }
                     )
                 if not follow_entries:
@@ -9155,7 +9180,7 @@ def read_text_table(
         def _legacy_cluster_entries_by_y(
             entries: list[dict[str, Any]]
         ) -> list[list[dict[str, Any]]]:
-            valid = [entry for entry in entries if entry.get("normalized_text")]
+            valid = [entry for entry in entries if _entry_plain_text_norm(entry).strip()]
             if not valid:
                 return []
 
@@ -9292,7 +9317,7 @@ def read_text_table(
             filtered: list[dict[str, Any]] = []
             heights: list[float] = []
             for entry in entries:
-                text_value = str(entry.get("normalized_text") or "").strip()
+                text_value = _entry_plain_text_norm(entry).strip()
                 if not text_value:
                     continue
                 x_val = entry.get("x")
@@ -9306,6 +9331,15 @@ def read_text_table(
                     if x_float < xmin or x_float > xmax or y_float < ymin or y_float > ymax:
                         continue
                 entry_copy = dict(entry)
+                entry_copy["plain_text_norm"] = text_value
+                entry_copy["plain_text_norm_upper"] = (
+                    entry.get("plain_text_norm_upper") or text_value.upper()
+                )
+                entry_copy["normalized_text"] = (
+                    entry.get("plain_text_norm_upper")
+                    or entry.get("normalized_text")
+                    or text_value.upper()
+                )
                 entry_copy["x"] = x_float
                 entry_copy["y"] = y_float
                 entry_copy["_x_in"] = x_float * to_in
@@ -9374,10 +9408,15 @@ def read_text_table(
                 )
                 column_tokens: dict[str, list[str]] = {label: [] for label in column_labels}
                 for entry in cluster_entries:
-                    text = str(entry.get("normalized_text") or entry.get("text") or "").strip()
-                    if not text:
+                    text_lower = _entry_plain_text_norm(entry).strip()
+                    if not text_lower:
                         continue
-                    normalized_text = text.replace("⌀", "Ø").replace("ø", "Ø")
+                    text_upper = (
+                        entry.get("plain_text_norm_upper")
+                        or entry.get("normalized_text")
+                        or text_lower.upper()
+                    )
+                    normalized_text = str(text_upper).replace("⌀", "Ø").replace("ø", "Ø")
                     idx = min(
                         range(len(column_centers_in)),
                         key=lambda index: (
@@ -10115,7 +10154,7 @@ def _cluster_panel_entries(
 
     usable_records: list[dict[str, Any]] = []
     for idx, entry in enumerate(entries):
-        text_value = (entry.get("normalized_text") or entry.get("text") or "").strip()
+        text_value = _entry_plain_text_norm(entry).strip()
         if not text_value:
             continue
         x_val = entry.get("x")
@@ -10133,6 +10172,7 @@ def _cluster_panel_entries(
             "x": x_float,
             "y": y_float,
             "text": text_value,
+            "plain_text_norm": text_value,
             "height": entry.get("height"),
         }
         usable_records.append(record)
