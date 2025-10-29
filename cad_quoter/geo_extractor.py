@@ -9227,6 +9227,367 @@ def read_text_table(
                 rows.append(row_text)
             return rows
 
+        def _build_robust_columnar_rows(
+            entries: list[dict[str, Any]]
+        ) -> tuple[list[str], list[dict[str, Any]], dict[str, Any]]:
+            strong_boundary_patterns = (
+                re.compile(r"^[a-z]$", re.IGNORECASE),
+                re.compile(r"^dia\b", re.IGNORECASE),
+                re.compile(r"^\d+(?:\.\d+)?$"),
+                re.compile(r"^#?\d{1,2}-\d{1,2}$"),
+                re.compile(r"^tap$", re.IGNORECASE),
+                re.compile(r"^thru$", re.IGNORECASE),
+                re.compile(r"^npt$", re.IGNORECASE),
+                re.compile(r"^c['’]?bore$", re.IGNORECASE),
+            )
+
+            filtered: list[dict[str, Any]] = []
+            heights: list[float] = []
+            char_width_samples: list[float] = []
+            entries_by_layout: defaultdict[int, list[dict[str, Any]]] = defaultdict(list)
+
+            for entry in entries:
+                text_value = str(entry.get("normalized_text") or entry.get("text") or "").strip()
+                if not text_value:
+                    continue
+                x_val = _coerce_float_optional(entry.get("x"))
+                y_val = _coerce_float_optional(entry.get("y"))
+                if x_val is None or y_val is None:
+                    continue
+                record = dict(entry)
+                record["x"] = x_val
+                record["y"] = y_val
+                record["text"] = text_value
+                filtered.append(record)
+                layout_idx = _coerce_layout_index(entry.get("layout_index"))
+                entries_by_layout[layout_idx].append(record)
+                height_val = _coerce_float_optional(entry.get("height"))
+                if height_val is not None and height_val > 0:
+                    heights.append(height_val)
+                width_val = _coerce_float_optional(entry.get("width"))
+                if width_val is not None and width_val > 0:
+                    char_count = max(len(text_value), 1)
+                    char_width = width_val / char_count
+                    if char_width > 0:
+                        char_width_samples.append(char_width)
+
+            debug_payload: dict[str, Any] = {
+                "rows": [],
+                "y_tolerance": None,
+                "median_char_width": None,
+            }
+
+            if not filtered:
+                return [], [], debug_payload
+
+            median_height = statistics.median(heights) if heights else 0.0
+            if not math.isfinite(median_height) or median_height <= 0:
+                median_height = 0.0
+
+            median_char_width = (
+                statistics.median(char_width_samples)
+                if char_width_samples
+                else (median_height * 0.6 if median_height > 0 else 1.0)
+            )
+            if not math.isfinite(median_char_width) or median_char_width <= 0:
+                median_char_width = 1.0
+            debug_payload["median_char_width"] = median_char_width
+
+            def _token_is_boundary(token: str) -> bool:
+                for pattern in strong_boundary_patterns:
+                    if pattern.search(token):
+                        return True
+                return False
+
+            def _estimate_width(token: dict[str, Any]) -> float:
+                width_val = _coerce_float_optional(token.get("width"))
+                if width_val is not None and width_val > 0:
+                    return width_val
+                text_val = str(token.get("text") or "")
+                char_count = max(len(text_val), 1)
+                return median_char_width * char_count
+
+            row_candidates: list[dict[str, Any]] = []
+
+            for layout_idx, layout_entries in entries_by_layout.items():
+                layout_heights = [
+                    _coerce_float_optional(item.get("height"))
+                    for item in layout_entries
+                    if _coerce_float_optional(item.get("height"))
+                ]
+                layout_median_height = (
+                    statistics.median(layout_heights)
+                    if layout_heights
+                    else (median_height if median_height > 0 else None)
+                )
+                if layout_median_height is None or layout_median_height <= 0:
+                    layout_median_height = median_char_width * 1.5
+                y_tolerance = max(layout_median_height * 1.5, median_char_width * 1.5)
+                if debug_payload.get("y_tolerance") is None:
+                    debug_payload["y_tolerance"] = y_tolerance
+                else:
+                    debug_payload["y_tolerance"] = max(
+                        float(debug_payload["y_tolerance"]), y_tolerance
+                    )
+                sorted_layout = sorted(
+                    layout_entries,
+                    key=lambda item: (-float(item.get("y")), float(item.get("x"))),
+                )
+                clusters: list[dict[str, Any]] = []
+                for token in sorted_layout:
+                    token_y = float(token.get("y"))
+                    if not clusters:
+                        clusters.append({"tokens": [token], "y_values": [token_y]})
+                        continue
+                    last_cluster = clusters[-1]
+                    center_y = sum(last_cluster["y_values"]) / len(last_cluster["y_values"])
+                    if abs(token_y - center_y) <= y_tolerance:
+                        last_cluster["tokens"].append(token)
+                        last_cluster["y_values"].append(token_y)
+                    else:
+                        clusters.append({"tokens": [token], "y_values": [token_y]})
+                for cluster in clusters:
+                    tokens = sorted(
+                        cluster["tokens"],
+                        key=lambda item: (float(item.get("x")), int(item.get("order", 0))),
+                    )
+                    cells: list[dict[str, Any]] = []
+                    current_tokens: list[dict[str, Any]] = []
+                    prev_end: float | None = None
+                    gap_threshold = median_char_width * 2.5
+                    for token in tokens:
+                        text_val = str(token.get("text") or "").strip()
+                        if not text_val:
+                            continue
+                        width_est = _estimate_width(token)
+                        token_start = float(token.get("x"))
+                        token_center = token_start + width_est / 2.0
+                        if prev_end is not None:
+                            gap = token_start - prev_end
+                        else:
+                            gap = 0.0
+                        if (
+                            current_tokens
+                            and (
+                                gap > gap_threshold
+                                or _token_is_boundary(text_val)
+                            )
+                        ):
+                            cell_text = " ".join(
+                                str(part.get("text") or "").strip()
+                                for part in current_tokens
+                                if str(part.get("text") or "").strip()
+                            )
+                            if cell_text:
+                                cell_center = sum(
+                                    float(item.get("x")) + _estimate_width(item) / 2.0
+                                    for item in current_tokens
+                                ) / len(current_tokens)
+                                cells.append(
+                                    {
+                                        "text": cell_text,
+                                        "center": cell_center,
+                                    }
+                                )
+                            current_tokens = []
+                        current_tokens.append(token)
+                        if prev_end is None:
+                            prev_end = token_start + width_est
+                        else:
+                            prev_end = max(prev_end, token_start + width_est)
+                    if current_tokens:
+                        cell_text = " ".join(
+                            str(part.get("text") or "").strip()
+                            for part in current_tokens
+                            if str(part.get("text") or "").strip()
+                        )
+                        if cell_text:
+                            cell_center = sum(
+                                float(item.get("x")) + _estimate_width(item) / 2.0
+                                for item in current_tokens
+                            ) / len(current_tokens)
+                            cells.append({"text": cell_text, "center": cell_center})
+                    if not cells:
+                        continue
+                    row_candidates.append(
+                        {
+                            "layout": layout_idx,
+                            "cells": cells,
+                            "y": sum(cluster["y_values"]) / len(cluster["y_values"]),
+                        }
+                    )
+
+            if not row_candidates:
+                return [], [], debug_payload
+
+            row_candidates.sort(key=lambda item: -float(item.get("y", 0.0)))
+
+            column_labels = ["hole_ref", "dia", "q", "qty", "description"]
+            structured_rows: list[dict[str, Any]] = []
+
+            def _assign_columns(cells: list[dict[str, Any]]) -> tuple[
+                dict[str, list[str]],
+                float,
+                str,
+            ]:
+                x_centers = [float(cell.get("center", 0.0)) for cell in cells]
+                assignments: dict[str, list[str]] = {label: [] for label in column_labels}
+                if len(cells) >= len(column_labels):
+                    centers = _kmeans_1d(x_centers, len(column_labels))
+                    if len(centers) == len(column_labels):
+                        cluster_counts = [0] * len(column_labels)
+                        cell_clusters: list[int] = []
+                        for center in x_centers:
+                            cluster_idx = min(
+                                range(len(centers)),
+                                key=lambda index: (
+                                    abs(center - centers[index]),
+                                    index,
+                                ),
+                            )
+                            cluster_counts[cluster_idx] += 1
+                            cell_clusters.append(cluster_idx)
+                        range_x = max(x_centers) - min(x_centers) if x_centers else 0.0
+                        inertia = sum(
+                            (x_centers[idx] - centers[cell_clusters[idx]]) ** 2
+                            for idx in range(len(cells))
+                        )
+                        norm_denominator = max(range_x ** 2 * max(len(cells), 1), 1.0)
+                        normalized_inertia = inertia / norm_denominator
+                        if all(count > 0 for count in cluster_counts) and normalized_inertia <= 0.2:
+                            cluster_order = sorted(
+                                range(len(centers)), key=lambda index: centers[index]
+                            )
+                            index_to_label = {
+                                cluster_index: column_labels[pos]
+                                for pos, cluster_index in enumerate(cluster_order)
+                            }
+                            for idx, cell in enumerate(cells):
+                                label = index_to_label[cell_clusters[idx]]
+                                text_val = str(cell.get("text") or "").strip()
+                                if text_val:
+                                    assignments[label].append(text_val)
+                            return assignments, 0.9, "kmeans"
+
+                integer_re = re.compile(r"^\d+$")
+                dia_prefix_re = re.compile(r"^(?:dia|\.|ø|⌀|0\.)", re.IGNORECASE)
+                hole_ref_re = re.compile(r"^[A-Z](?:\)|)$")
+                used_indices: set[int] = set()
+
+                for idx, cell in enumerate(cells):
+                    text_val = str(cell.get("text") or "").strip()
+                    if not text_val:
+                        continue
+                    if hole_ref_re.match(text_val):
+                        assignments["hole_ref"].append(text_val)
+                        used_indices.add(idx)
+                        continue
+                    if dia_prefix_re.match(text_val):
+                        assignments["dia"].append(text_val)
+                        used_indices.add(idx)
+
+                integer_cells = [
+                    (idx, cell)
+                    for idx, cell in enumerate(cells)
+                    if idx not in used_indices
+                    and integer_re.match(str(cell.get("text") or "").strip())
+                ]
+                if integer_cells:
+                    integer_cells.sort(key=lambda item: cells[item[0]]["center"])
+                    qty_idx, qty_cell = integer_cells[-1]
+                    assignments["qty"].append(str(qty_cell.get("text") or "").strip())
+                    used_indices.add(qty_idx)
+                    for idx, cell in integer_cells[:-1]:
+                        assignments["q"].append(str(cell.get("text") or "").strip())
+                        used_indices.add(idx)
+
+                for idx, cell in enumerate(cells):
+                    if idx in used_indices:
+                        continue
+                    text_val = str(cell.get("text") or "").strip()
+                    if not text_val:
+                        continue
+                    assignments["description"].append(text_val)
+
+                confidence = 0.45
+                if assignments["qty"]:
+                    confidence += 0.25
+                if assignments["dia"]:
+                    confidence += 0.15
+                if assignments["hole_ref"]:
+                    confidence += 0.1
+                if assignments["description"]:
+                    confidence += 0.05
+                confidence = min(confidence, 0.75)
+                return assignments, confidence, "heuristic"
+
+            for candidate in row_candidates:
+                cells = candidate.get("cells", [])
+                if not cells:
+                    continue
+                assignments, confidence, assignment_kind = _assign_columns(cells)
+                qty_text = " ".join(assignments.get("qty") or [])
+                qty_match = re.match(r"\s*(\d+)\s*$", qty_text)
+                if not qty_match:
+                    continue
+                qty_token = qty_match.group(1)
+                hole_text = " ".join(assignments.get("hole_ref") or []).strip()
+                dia_text = " ".join(assignments.get("dia") or []).strip()
+                q_text = " ".join(assignments.get("q") or []).strip()
+                qty_tail = " ".join(assignments.get("qty") or []).strip()
+                desc_text = " ".join(assignments.get("description") or []).strip()
+                detail_parts = [
+                    part for part in (hole_text, dia_text, q_text, qty_tail, desc_text) if part
+                ]
+                if not detail_parts:
+                    continue
+                row_text = f"({qty_token}) {' | '.join(detail_parts)}"
+                structured_map = {label: "" for label in _DEBUG_STRUCTURED_COLUMNS}
+                structured_map["A"] = hole_text
+                structured_map["B"] = dia_text
+                structured_map["C"] = q_text
+                structured_map["D"] = qty_tail
+                structured_map["E"] = desc_text
+                structured_rows.append(
+                    {
+                        "row_text": row_text,
+                        "structured": structured_map,
+                        "assignments": assignments,
+                        "confidence": float(confidence),
+                        "assignment_kind": assignment_kind,
+                        "y": float(candidate.get("y", 0.0)),
+                    }
+                )
+
+            if not structured_rows:
+                return [], [], debug_payload
+
+            structured_rows.sort(key=lambda item: -item.get("y", 0.0))
+            deduped = _filter_and_dedupe_row_texts([row["row_text"] for row in structured_rows])
+            if not deduped:
+                return [], [], debug_payload
+
+            lookup: dict[str, dict[str, Any]] = {}
+            ordered_rows: list[dict[str, Any]] = []
+            for row in structured_rows:
+                row_text = row["row_text"]
+                if row_text not in lookup:
+                    lookup[row_text] = row
+            for row_text in deduped:
+                info = lookup.get(row_text)
+                if info:
+                    ordered_rows.append(info)
+
+            debug_payload["rows"] = [
+                {
+                    "text": row["row_text"],
+                    "confidence": row.get("confidence"),
+                    "assignment": row.get("assignment_kind"),
+                }
+                for row in ordered_rows
+            ]
+            return deduped, ordered_rows, debug_payload
+
         def _extract_roi_bounds(
             mapping: Mapping[str, Any] | None,
         ) -> tuple[float, float, float, float] | None:
@@ -9490,6 +9851,12 @@ def read_text_table(
                             key: list(value) for key, value in assignments.items()
                         }
                     row_entry["structured_row_text"] = structured_rows_info[idx].get("row_text")
+                    confidence_val = structured_rows_info[idx].get("confidence")
+                    if isinstance(confidence_val, (int, float)):
+                        row_entry["structured_confidence"] = float(confidence_val)
+                    assignment_kind = structured_rows_info[idx].get("assignment_kind")
+                    if isinstance(assignment_kind, str):
+                        row_entry["structured_assignment_kind"] = assignment_kind
                 if isinstance(_LAST_TEXT_TABLE_DEBUG, dict):
                     if structured_debug.get("rows"):
                         _LAST_TEXT_TABLE_DEBUG["band_structured_rows"] = structured_debug["rows"]
@@ -9510,15 +9877,39 @@ def read_text_table(
                     scan_totals["families"] = fallback_families
                     scan_totals["qty"] = fallback_qty
             else:
-                clusters = _legacy_cluster_entries_by_y(candidate_entries)
-                fallback_rows = _legacy_clusters_to_rows(clusters)
-                fallback_rows = [row for row in fallback_rows if row]
-                fallback_rows = _filter_and_dedupe_row_texts(fallback_rows)
+                fallback_rows, structured_rows_info, structured_debug = _build_robust_columnar_rows(
+                    candidate_entries
+                )
                 fallback_parsed, fallback_families, fallback_qty = _parse_rows(fallback_rows)
                 print(
-                    f"[TEXT-SCAN] fallback clusters={len(clusters)} "
+                    f"[TEXT-SCAN] fallback clusters={len(structured_rows_info)} "
                     f"chosen_rows={len(fallback_parsed)} qty_sum={fallback_qty}"
                 )
+                if isinstance(_LAST_TEXT_TABLE_DEBUG, dict) and structured_debug:
+                    _LAST_TEXT_TABLE_DEBUG["band_structured_rows"] = structured_debug.get("rows", [])
+                    if structured_debug.get("median_char_width") is not None:
+                        _LAST_TEXT_TABLE_DEBUG["band_median_char_width"] = structured_debug[
+                            "median_char_width"
+                        ]
+                if fallback_parsed and structured_rows_info:
+                    for idx, row_entry in enumerate(fallback_parsed):
+                        if idx >= len(structured_rows_info):
+                            break
+                        structured_map = structured_rows_info[idx].get("structured")
+                        if isinstance(structured_map, Mapping):
+                            row_entry["structured_columns"] = dict(structured_map)
+                        assignments = structured_rows_info[idx].get("assignments")
+                        if isinstance(assignments, Mapping):
+                            row_entry["structured_assignments"] = {
+                                key: list(value) for key, value in assignments.items()
+                            }
+                        row_entry["structured_row_text"] = structured_rows_info[idx].get("row_text")
+                        confidence_val = structured_rows_info[idx].get("confidence")
+                        if isinstance(confidence_val, (int, float)):
+                            row_entry["structured_confidence"] = float(confidence_val)
+                        assignment_kind = structured_rows_info[idx].get("assignment_kind")
+                        if isinstance(assignment_kind, str):
+                            row_entry["structured_assignment_kind"] = assignment_kind
                 if fallback_parsed and (
                     (fallback_qty, len(fallback_parsed))
                     > (scan_totals.get("qty", 0), len(parsed_rows))
@@ -9797,7 +10188,19 @@ def read_text_table(
             print(f"  [{idx:02d}] {row_text}")
 
         _LAST_TEXT_TABLE_DEBUG["text_row_count"] = len(parsed_rows)
-        print(f"[TEXT-SCAN] parsed rows: {len(parsed_rows)}")
+        high_conf_count = sum(
+            1
+            for row in parsed_rows
+            if isinstance(row.get("structured_confidence"), (int, float))
+            and float(row.get("structured_confidence") or 0.0) >= 0.7
+        )
+        if high_conf_count:
+            print(
+                f"[TEXT-SCAN] parsed rows: {len(parsed_rows)} "
+                f"(confidence≥0.7: {high_conf_count})"
+            )
+        else:
+            print(f"[TEXT-SCAN] parsed rows: {len(parsed_rows)}")
         for idx, row in enumerate(parsed_rows[:3]):
             ref_val = row.get("ref") or ""
             side_val = row.get("side") or ""
