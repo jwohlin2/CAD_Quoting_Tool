@@ -1,4 +1,26 @@
-# cad_quoter/geo_extractor.py
+"""
+geo_extractor.py
+================
+Low-level CAD text extractor.
+
+Purpose:
+    Open DWG/DXF, walk entities, and normalize ALL human-visible text
+    (TEXT, MTEXT, TABLE, ACAD_PROXY_ENTITY fragments, etc.) into a
+    machine-friendly stream.
+
+What it emits:
+    - dxf_text_dump.csv   # rows like: Space,Layer,Kind,Text,x,y,rot,…
+    - dxf_text_dump.jsonl # same content as JSON Lines
+
+Key behaviors:
+    - Reassembles proxy-entity fragments (HOLE TABLEs often live here).
+    - Decodes odd encodings (e.g., "\U+2205" → "∅"), normalizes quotes.
+    - Leaves layout/geometry to higher layers; this module is a “CAD → plain text” vacuum.
+
+Typical pipeline:
+    DWG/DXF → geo_extractor → dxf_text_dump.(csv|jsonl) → geo_dump → hole_ops
+"""
+
 from __future__ import annotations
 
 import re

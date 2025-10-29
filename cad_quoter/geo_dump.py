@@ -1,4 +1,28 @@
-# cad_quoter/geo_dump.py
+"""
+geo_dump.py
+===========
+Text organizer + HOLE TABLE structurer.
+
+Purpose:
+    Read the normalized text stream from geo_extractor (dxf_text_dump.csv/jsonl),
+    find HOLE TABLE blocks, and emit clean CSVs for quoting.
+
+What it writes:
+    - hole_table_structured.csv  # HOLE, REF_DIAM, QTY, DESCRIPTION (coarse per-hole view)
+    - hole_table_ops.csv         # HOLE, REF_DIAM, QTY, DESCRIPTION/DEPTH (atomic ops)
+
+How it works:
+    1) Load dxf_text_dump.(csv|jsonl).
+    2) Detect HOLE TABLE header/body lines.
+    3) Parse headers (A..N, REF diameters, QTY), pair with coarse descriptions.
+    4) Delegate operation splitting/logic to hole_ops.explode_rows_to_operations(text_rows).
+
+Division of responsibilities:
+    - geo_extractor: “CAD → plain text” (robust extraction/decoding).
+    - geo_dump:      “text → structured tables” (find HOLE TABLE + I/O).
+    - hole_ops:      “make it machinable” (split, redistribute, tap rules, depths).
+"""
+
 from __future__ import annotations
 
 import argparse

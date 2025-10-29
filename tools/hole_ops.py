@@ -1,4 +1,25 @@
-"""Utilities for exploding hole table descriptions into operation rows."""
+"""
+hole_ops.py
+===========
+Explode HOLE TABLE text into atomic machining operations.
+
+Input:
+    text_rows: List[str]   # HOLE TABLE lines (header then body) from geo_dump/geo_extractor
+
+Output:
+    List[Tuple[str, str, int, str]]
+        (HOLE, REF_DIAM, QTY, DESCRIPTION/DEPTH) suitable for hole_table_ops.csv
+
+Core rules:
+    - Parse diameters only when marked with Ø/∅ or fractionØ (e.g., '13/32∅').
+    - Never treat plain decimals (.38, .62, .0001) as diameters (they’re depths/tolerances).
+    - TAP ops use the hole’s REF_DIAM (not thread majors). 'THRU…TAP…' splits; 'TAP…THRU' stays combined.
+    - Move quoted-letter cross-hits (e.g., '"Q"(Ø.332)') to the referenced hole; remove from source.
+    - 'FROM FRONT & BACK' → two ops; '(Ø.3750 JIG GRIND)' → own op routed to nearest hole with that Ø.
+    - Stop parsing at 'LIST OF COORDINATES'.
+
+This module is pure and stateless; all file I/O is done by geo_dump.py.
+"""
 
 from __future__ import annotations
 
