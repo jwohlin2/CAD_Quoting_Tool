@@ -2133,8 +2133,11 @@ def main(argv: Sequence[str] | None = None) -> int:
             or text_min_height is not None
         )
     ):
-        include_tuple = DEFAULT_TEXT_LAYER_INCLUDE_REGEX
-        exclude_tuple = DEFAULT_TEXT_LAYER_EXCLUDE_REGEX
+        env_scan_defaults = TextScanOpts.from_env()
+        if env_scan_defaults.include_layers is None:
+            include_tuple = DEFAULT_TEXT_LAYER_INCLUDE_REGEX
+        if env_scan_defaults.exclude_layers is None:
+            exclude_tuple = DEFAULT_TEXT_LAYER_EXCLUDE_REGEX
     if (
         text_anchor_ratio is not None
         or text_min_height is not None
