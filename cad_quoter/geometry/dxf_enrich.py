@@ -586,7 +586,7 @@ def build_geo_from_doc(doc: Any) -> Dict[str, Any]:
     hole_table = harvest_hole_table(doc)
     title = harvest_title_notes(doc)
 
-    return {
+    geo = {
         "ok": True,
         "units": units,
         "plate_len_in": dims.get("plate_len_in"),
@@ -616,6 +616,52 @@ def build_geo_from_doc(doc: Any) -> Dict[str, Any]:
             "material": title.get("prov"),
         },
     }
+
+    # >>> HOLE_TABLE ADAPTER START
+    try:
+        from cad_quoter.geometry.hole_table_adapter import extract_hole_table_from_doc
+    except Exception:
+        extract_hole_table_from_doc = None  # type: ignore[assignment]
+    if extract_hole_table_from_doc is not None:
+        try:
+            structured, ops = extract_hole_table_from_doc(doc)
+        except Exception:
+            pass
+        else:
+            geo["hole_table_structured"] = structured
+            geo["hole_table_ops"] = [
+                {
+                    "HOLE": hole,
+                    "REF_DIAM": ref_diam,
+                    "QTY": qty,
+                    "DESCRIPTION/DEPTH": desc,
+                }
+                for hole, ref_diam, qty, desc in ops
+            ]
+            hole_count_total = 0
+            for row in structured:
+                qty_val = row.get("QTY") if isinstance(row, dict) else None
+                try:
+                    hole_count_total += int(qty_val) if qty_val not in (None, "") else 0
+                except Exception:
+                    continue
+            geo["hole_count"] = hole_count_total
+            geo["hole_count_provenance"] = "text"
+            if not geo.get("bins_list"):
+                try:
+                    from cad_quoter.utils.geo_ctx import build_drill_bins_from_ops
+                except Exception:
+                    build_drill_bins_from_ops = None  # type: ignore[assignment]
+                if build_drill_bins_from_ops:
+                    try:
+                        bins_from_ops = build_drill_bins_from_ops(ops)
+                    except Exception:
+                        bins_from_ops = None
+                    if bins_from_ops:
+                        geo["bins_list"] = bins_from_ops
+    # <<< HOLE_TABLE ADAPTER END
+
+    return geo
 
 
 def build_geo_from_dxf(path: str) -> Dict[str, Any]:
