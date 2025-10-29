@@ -340,6 +340,7 @@ def infer_part_dims(
 
     # 1) ordinate dimensions first
     max_x, max_y, count_x, count_y = _max_ordinate_xy(msp)
+    print(f"[part-dims] ordinates: Xmax={max_x} Ymax={max_y}")
     length_in: Optional[float] = None
     width_in: Optional[float] = None
     length_source: Optional[str] = None
@@ -404,6 +405,12 @@ def infer_part_dims(
         "thickness_in": thickness_in,
         "source": source,
     }
+
+    if length_in is not None and width_in is not None:
+        print(f"[part-dims] L/W from {source}: {length_in:.3f} x {width_in:.3f} in")
+    if thickness_in is not None:
+        thickness_label = "text" if thickness_source == "text" else "geometry"
+        print(f"[part-dims] thickness from {thickness_label}: {thickness_in:.4f} in")
 
     return result
 
