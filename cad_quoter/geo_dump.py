@@ -420,7 +420,13 @@ _RE_DIAM_TRAIL  = re.compile(r'^[\(\s]*([0-9]+/[0-9]+)\s*[Ø∅]\)?\s*', re.I)  
 _RE_DIAM_ANY    = re.compile(
     r'(?:[Ø∅]\s*([0-9]+/[0-9]+|[0-9.]+))|(?:([0-9]+/[0-9]+)\s*[Ø∅])',
     re.I,
-)  # ← NO plain decimals
+)  # explicit Ø/∅ tokens
+_RE_NAKED_DIAM  = re.compile(r'(?<![#0-9A-Z])([0-9]+/[0-9]+|[0-9]*\.[0-9]+)(?![0-9])', re.I)
+_RE_OP_IN_DESC  = re.compile(
+    r"\b(DRILL|COUNTERDRILL|C['’]DRILL|COUNTERBORE|C['’]BORE|SPOT\s+DRILL|JIG\s+GRIND|REAM(?:ER)?|TAP|THRU)\b",
+    re.I,
+)
+_RE_DEEP_TAIL   = re.compile(r'^\s*(?:DEEP|DEPTH)\b', re.I)
 _RE_PAREN_JG    = re.compile(r'\(\s*[Ø∅]\s*([0-9]+/[0-9]+|[0-9.]+)\s+JIG\s+GRIND\s*\)', re.I)
 _RE_TAP         = re.compile(r'\bTAP\b', re.I)
 _RE_THRU        = re.compile(r'\bTHRU\b', re.I)
@@ -466,6 +472,37 @@ def _matched_diam_token(m: Optional[re.Match]) -> str:
     if not m:
         return ""
     return (m.group(1) or m.group(2) or "").strip()
+
+
+def _mid_clause_diam_token(desc: str) -> str:
+    token = _matched_diam_token(_RE_DIAM_ANY.search(desc))
+    if token:
+        return token
+
+    if not _RE_OP_IN_DESC.search(desc):
+        return ""
+
+    depth_spans = [m.span(1) for m in _RE_DEPTH_PHRASE.finditer(desc)]
+
+    for naked in _RE_NAKED_DIAM.finditer(desc):
+        start, end = naked.span(1)
+
+        if any(start >= ds and end <= de for ds, de in depth_spans):
+            continue
+
+        if start > 0 and desc[start - 1] in "Ø∅":
+            continue
+
+        if end < len(desc) and desc[end] == '-':
+            continue
+
+        tail = desc[end:]
+        if _RE_DEEP_TAIL.match(tail):
+            continue
+
+        return naked.group(1)
+
+    return ""
 
 
 def _smart_clause_split(s: str) -> List[str]:
@@ -618,9 +655,9 @@ def _parse_clause_to_ops(
         desc = _clean_clause_text(part)
 
         # If desc contains a Ø/∅ token mid-clause, adopt it as op diameter (KEEP HOLE)
-        anyd = _RE_DIAM_ANY.search(desc)
-        if anyd:
-            diam_for_clause = _fmt_diam(anyd)
+        diam_token = _mid_clause_diam_token(desc)
+        if diam_token:
+            diam_for_clause = _fmt_diam(diam_token)
 
         # ---- TAP policy: TAP ops always use the HOLE's REF_DIAM ----
         if _RE_TAP.search(desc):
