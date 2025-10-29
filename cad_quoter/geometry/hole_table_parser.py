@@ -7,7 +7,7 @@ import json
 import re
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Mapping, Optional
 
 LETTER_DRILLS_INCH = {
     "A": 0.234,
@@ -99,6 +99,67 @@ _DEBUG_ROWS_PATH = _DEBUG_DIR / "hole_table_rows.csv"
 _DEBUG_TOTALS_PATH = _DEBUG_DIR / "ops_table_totals.json"
 _DEBUG_ROW_FIELDNAMES = ("ref", "qty", "raw_desc", "features_json")
 
+_OPS_TOTAL_KEYS = ("Drill", "Tap", "C'bore", "C'drill", "Jig", "NPT")
+_NPT_TOKEN_RE = re.compile(r"N\.?P\.?T", re.IGNORECASE)
+
+
+def _normalize_side_token(value: Any) -> str:
+    text = str(value or "").strip()
+    if not text:
+        return ""
+    upper = text.upper()
+    if upper.startswith("BACK"):
+        return "BACK"
+    if upper.startswith("FRONT"):
+        return "FRONT"
+    if upper.startswith("BOTH"):
+        return "BOTH"
+    return upper
+
+
+def _operation_bucket(record: Mapping[str, Any]) -> str | None:
+    kind = str(record.get("kind") or "").strip().lower()
+    if not kind:
+        return None
+
+    raw_text = str(record.get("raw_text") or "")
+    tool_text = str(record.get("tool") or "")
+    thread_text = str(record.get("thread") or "")
+    tap_type = str(record.get("tap_type") or "").strip().lower()
+    combined = " ".join(part for part in (raw_text, tool_text, thread_text) if part)
+
+    if tap_type == "pipe" or _NPT_TOKEN_RE.search(combined):
+        return "NPT"
+
+    if kind == "tap":
+        return "Tap"
+    if kind in {"counterbore", "cbore"}:
+        return "C'bore"
+    if kind in {"counterdrill", "cdrill"}:
+        return "C'drill"
+    if kind in {"jig", "jig_grind", "jig grind"}:
+        return "Jig"
+
+    if kind == "drill":
+        upper_text = combined.upper()
+        if "TAP" in upper_text or _NPT_TOKEN_RE.search(upper_text):
+            return None
+        return "Drill"
+
+    return None
+
+
+def _format_ops_totals_line(totals: Mapping[str, int]) -> str:
+    parts: list[str] = []
+    for label in _OPS_TOTAL_KEYS:
+        try:
+            value = int(totals.get(label, 0))
+        except Exception:
+            value = 0
+        if value:
+            parts.append(f"{label} {value}")
+    return " | ".join(parts) if parts else "—"
+
 
 def _format_inches_token(value_mm: Optional[float]) -> str:
     if value_mm is None:
@@ -166,33 +227,34 @@ def _hole_rows_debug_records(
             record = {
                 "qty": qty,
                 "kind": kind,
-                "side": side,
+                "side": _normalize_side_token(side),
                 "tool": _format_tool_token(kind, feature),
                 "diam_token": diam_token,
                 "depth_token": _format_depth_token(feature),
                 "raw_text": raw_desc,
             }
+            thread_val = feature.get("thread")
+            if thread_val:
+                record["thread"] = str(thread_val)
+            tap_type_val = feature.get("tap_type")
+            if tap_type_val:
+                record["tap_type"] = str(tap_type_val)
             feature_records.append(record)
             qty_sum += qty
     return row_records, feature_records, qty_sum
 
 
 def _hole_rows_totals(records: list[dict[str, Any]]) -> dict[str, int]:
-    totals = {key: 0 for key in ("drill", "tap", "counterbore", "counterdrill", "jig_grind")}
+    totals = {key: 0 for key in _OPS_TOTAL_KEYS}
     for record in records:
-        raw_kind = str(record.get("kind") or "").lower()
-        kind = {
-            "cbore": "counterbore",
-            "counterbore": "counterbore",
-            "cdrill": "counterdrill",
-            "counterdrill": "counterdrill",
-        }.get(raw_kind, raw_kind)
-        if kind in totals:
-            try:
-                qty_val = int(record.get("qty") or 0)
-            except Exception:
-                qty_val = 0
-            totals[kind] += qty_val
+        bucket = _operation_bucket(record)
+        if not bucket:
+            continue
+        try:
+            qty_val = int(record.get("qty") or 0)
+        except Exception:
+            qty_val = 0
+        totals[bucket] += qty_val
     return totals
 
 
@@ -214,6 +276,7 @@ def _write_hole_table_debug(
         print(
             f"[TABLE-DUMP] rows={len(row_records)} qty_sum={qty_sum} -> {_DEBUG_ROWS_PATH.as_posix()}"
         )
+        print(f"[OPS] table: {_format_ops_totals_line(totals)}")
         print(f"[OPS] table totals -> {_DEBUG_TOTALS_PATH.as_posix()}")
     except Exception:
         pass

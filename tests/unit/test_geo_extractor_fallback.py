@@ -3,6 +3,8 @@ from __future__ import annotations
 import sys
 import types
 
+import pytest
+
 _geometry_stub = types.ModuleType("cad_quoter.geometry")
 _geometry_stub.convert_dwg_to_dxf = lambda *_args, **_kwargs: None
 _geometry_stub.detect_units_scale = lambda *_args, **_kwargs: (1.0, "inch")
@@ -72,4 +74,88 @@ def test_publish_fallback_from_rows_txt_multiaction() -> None:
 
         notes = [row for row in rows if "BREAK" in row["desc"].upper()]
         assert not notes, "notes should be ignored"
+
+
+def test_read_geo_prefers_chart_rows_over_fallback(monkeypatch: pytest.MonkeyPatch) -> None:
+    doc = object()
+
+    monkeypatch.setattr(geo_extractor, "extract_geometry", lambda _doc: {})
+    monkeypatch.setattr(geo_extractor, "geom_hole_census", lambda _doc: {})
+    monkeypatch.setattr(geo_extractor, "read_acad_table", lambda *args, **kwargs: {})
+
+    def fake_read_text_table(_doc, **kwargs):
+        filters = kwargs.get("layout_filters")
+        if isinstance(filters, list):
+            assert any("CHART" in str(item).upper() for item in filters)
+        rows = [{"qty": 1, "desc": f"ROW {idx}"} for idx in range(8)]
+        return {
+            "rows": rows,
+            "hole_count": 8,
+            "confidence_avg": 0.75,
+            "provenance_holes": "HOLE TABLE",
+            "source": "text_table",
+        }
+
+    monkeypatch.setattr(geo_extractor, "read_text_table", fake_read_text_table)
+
+    def fake_debug() -> dict[str, object]:
+        return {"rows_txt_lines": ["(2) 1/4-20 TAP"], "rows_txt_count": 1}
+
+    monkeypatch.setattr(geo_extractor, "get_last_text_table_debug", fake_debug)
+
+    def forbid_fallback(_rows: list[str]) -> dict[str, object]:
+        raise AssertionError("fallback should not be used when chart rows are confident")
+
+    monkeypatch.setattr(geo_extractor, "_publish_fallback_from_rows_txt", forbid_fallback)
+
+    result = geo_extractor.read_geo(doc, layout_filters=["CHART"])
+
+    assert result["provenance_holes"] == "HOLE TABLE (chart)"
+    assert result["source"] == "text_table"
+    assert len(result.get("rows") or []) == 8
+
+
+def test_read_geo_uses_fallback_when_chart_rows_sparse(monkeypatch: pytest.MonkeyPatch) -> None:
+    doc = object()
+
+    monkeypatch.setattr(geo_extractor, "extract_geometry", lambda _doc: {})
+    monkeypatch.setattr(geo_extractor, "geom_hole_census", lambda _doc: {})
+    monkeypatch.setattr(geo_extractor, "read_acad_table", lambda *args, **kwargs: {})
+
+    def fake_read_text_table(_doc, **kwargs):
+        rows = [{"qty": 1, "desc": "ROW A"}, {"qty": 1, "desc": "ROW B"}]
+        return {
+            "rows": rows,
+            "hole_count": 2,
+            "confidence_avg": 0.9,
+            "provenance_holes": "HOLE TABLE",
+            "source": "text_table",
+        }
+
+    monkeypatch.setattr(geo_extractor, "read_text_table", fake_read_text_table)
+
+    def fake_debug() -> dict[str, object]:
+        return {"rows_txt_lines": ["(2) 1/4-20 TAP", "(4) DRILL"], "rows_txt_count": 2}
+
+    monkeypatch.setattr(geo_extractor, "get_last_text_table_debug", fake_debug)
+
+    fallback_calls: list[list[str]] = []
+
+    def record_fallback(rows: list[str]) -> dict[str, object]:
+        fallback_calls.append(list(rows))
+        return {
+            "rows": [{"qty": 99, "desc": "FALLBACK"}],
+            "hole_count": 99,
+            "provenance_holes": "HOLE TABLE (fallback)",
+            "source": "text_fallback",
+        }
+
+    monkeypatch.setattr(geo_extractor, "_publish_fallback_from_rows_txt", record_fallback)
+
+    result = geo_extractor.read_geo(doc, layout_filters=["CHART"])
+
+    assert fallback_calls, "expected fallback rows to be generated when chart rows are sparse"
+    rows = result.get("rows") or []
+    assert rows == [{"qty": 99, "desc": "FALLBACK"}]
+    assert result["provenance_holes"] == "HOLE TABLE (fallback)"
 
