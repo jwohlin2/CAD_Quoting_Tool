@@ -14231,48 +14231,49 @@ def extract_2d_features_from_dxf_or_dwg(path: str | Path) -> dict[str, Any]:
         except Exception:
             ops_rows = []
         # --- end publish rows ---
-    # ---- Fallback/augment from geo_dump-produced CSV (if present) ----
-    try:
-        # Prefer a sibling CSV next to the DXF/PDF the user picked
-        # Example: dxf_path = geometry loader's chosen file
-        src_path = Path(typing.cast(str, geo.get("source_path", "")) or "")
-        if not src_path.exists():
-            src_path = Path(typing.cast(str, geo.get("path", "")) or "")
-        ops_csv = (
-            src_path.parent / "hole_table_ops.csv"
-            if src_path.parent.exists()
-            else Path("hole_table_ops.csv")
-        )
-        if ops_csv.exists():
-            csv_rows = _load_hole_table_ops_csv(ops_csv)
-            if csv_rows:
-                # Merge rows into the UI-friendly ops summary & cards
-                # 1) Aggregate totals
-                agg = aggregate_ops(csv_rows)  # returns totals, rows_simple, detail, simple_rows
-                ops_summary = geo.get("ops_summary") or {}
-                if isinstance(ops_summary, dict):
-                    # merge totals
-                    for k, v in (agg.get("totals") or {}).items():
-                        ops_summary[k] = int(ops_summary.get(k, 0) or 0) + int(v or 0)
+        # ---- Fallback/augment from geo_dump-produced CSV (if present) ----
+        try:
+            # Prefer a sibling CSV next to the DXF/PDF the user picked
+            # Example: dxf_path = geometry loader's chosen file
+            src_path = Path(typing.cast(str, geo.get("source_path", "")) or "")
+            if not src_path.exists():
+                src_path = Path(typing.cast(str, geo.get("path", "")) or "")
+            ops_csv = (
+                src_path.parent / "hole_table_ops.csv"
+                if src_path.parent.exists()
+                else Path("hole_table_ops.csv")
+            )
+            if ops_csv.exists():
+                csv_rows = _load_hole_table_ops_csv(ops_csv)
+                if csv_rows:
+                    # Merge rows into the UI-friendly ops summary & cards
+                    # 1) Aggregate totals
+                    agg = aggregate_ops(csv_rows)  # returns totals, rows_simple, detail, simple_rows
+                    ops_summary = geo.get("ops_summary") or {}
+                    if isinstance(ops_summary, dict):
+                        # merge totals
+                        for k, v in (agg.get("totals") or {}).items():
+                            ops_summary[k] = int(ops_summary.get(k, 0) or 0) + int(v or 0)
 
-                    # 2) Append/replace ops_card rows
-                    prior_cards = list(ops_summary.get("ops_rows") or [])
-                    merged_cards = prior_cards + (agg.get("simple_rows") or [])
-                    ops_summary["ops_rows"] = merged_cards
+                        # 2) Append/replace ops_card rows
+                        prior_cards = list(ops_summary.get("ops_rows") or [])
+                        merged_cards = prior_cards + (agg.get("simple_rows") or [])
+                        ops_summary["ops_rows"] = merged_cards
+                        ops_summary["rows"] = merged_cards
 
-                    # 3) Update built_rows count
-                    _apply_built_rows(ops_summary, merged_cards)
+                        # 3) Update built_rows count
+                        _apply_built_rows(ops_summary, merged_cards)
 
-                    # 4) Provenance hint
-                    prov = geo.get("provenance") or {}
-                    if isinstance(prov, dict):
-                        prov["holes"] = prov.get("holes") or "HOLE TABLE (CSV)"
-                        geo["provenance"] = prov
+                        # 4) Provenance hint
+                        prov = geo.get("provenance") or {}
+                        if isinstance(prov, dict):
+                            prov["holes"] = prov.get("holes") or "HOLE TABLE (CSV)"
+                            geo["provenance"] = prov
 
-                    geo["ops_summary"] = ops_summary
-    except Exception:
-        # Non-fatal: CSV is optional
-        pass
+                        geo["ops_summary"] = ops_summary
+        except Exception:
+            # Non-fatal: CSV is optional
+            pass
     if chart_summary:
         geo.setdefault("chart_summary", chart_summary)
         if chart_summary.get("tap_qty"):
