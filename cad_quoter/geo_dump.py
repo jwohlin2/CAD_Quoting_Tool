@@ -384,19 +384,19 @@ def _route_tap_only_chunks(descs: List[str], diam_list: List[str]) -> List[str]:
         clauses = _smart_clause_split(txt)
         keep_parts: List[str] = []
         for cl in clauses:
-            if "TAP" not in cl.upper():
+            moved_clause = False
+            if "TAP" in cl.upper():
+                # Try to read thread token and estimate tap drill
+                parsed = _parse_thread_token(cl)
+                if parsed:
+                    major_in, tpi = parsed
+                    tap_in = major_in if "#" in cl or re.search(r'#[0-9]+', cl) else _tap_drill_from(major_in, tpi)
+                    tgt_idx = _snap_to_nearest(tap_in, diam_list)
+                    # Move this clause to its target hole
+                    moved[tgt_idx] = (moved[tgt_idx] + " " + cl).strip() if moved[tgt_idx] else cl
+                    moved_clause = True
+            if not moved_clause:
                 keep_parts.append(cl)
-                continue
-            # Try to read thread token and estimate tap drill
-            parsed = _parse_thread_token(cl)
-            if not parsed:
-                keep_parts.append(cl)
-                continue
-            major_in, tpi = parsed
-            tap_in = major_in if "#" in cl or re.search(r'#[0-9]+', cl) else _tap_drill_from(major_in, tpi)
-            tgt_idx = _snap_to_nearest(tap_in, diam_list)
-            # Move this clause to its target hole
-            moved[tgt_idx] = (moved[tgt_idx] + " " + cl).strip() if moved[tgt_idx] else cl
 
         keep[i] = " ".join(p for p in (p.strip() for p in keep_parts) if p)
 
