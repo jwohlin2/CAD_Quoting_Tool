@@ -222,105 +222,81 @@ def _max_ordinate_xy(msp) -> Tuple[Optional[float], Optional[float], int, int]:
     return max_x, max_y, count_x, count_y
 
 
-def _should_include_layer(layer: str, include: Optional[Iterable[str]], exclude: Optional[Iterable[str]]) -> bool:
-    name = layer or ""
-    lname = name.lower()
-
-    if include:
-        include_lower = {value.lower() for value in include}
-        if lname not in include_lower:
-            return False
-
-    if exclude:
-        exclude_lower = {value.lower() for value in exclude}
-        if lname in exclude_lower:
-            return False
-
-    undesirable = ("title" in lname) or ("border" in lname) or ("frame" in lname) or ("sheet" in lname)
-    if undesirable and (not include or lname not in {value.lower() for value in include}):
-        return False
-
-    return True
-
-
-_AABB_ALLOWED = {
-    "LINE",
-    "LWPOLYLINE",
-    "POLYLINE",
-    "ARC",
-    "CIRCLE",
-    "ELLIPSE",
-    "SPLINE",
-    "SOLID",
-    "TRACE",
-    "INSERT",
-}
-
-_AABB_EXCLUDED = {"DIMENSION", "TEXT", "MTEXT", "TABLE", "HATCH"}
-
-
-def _extend_bbox(bbox, entity) -> None:
-    try:
-        entity_bbox = entity.bbox()
-    except Exception:
-        entity_bbox = None
-
-    if entity_bbox is None:
-        return
-
-    extmin = getattr(entity_bbox, "extmin", None)
-    extmax = getattr(entity_bbox, "extmax", None)
-
-    if extmin is not None:
-        bbox.extend(extmin)
-    if extmax is not None:
-        bbox.extend(extmax)
-
-
 def _aabb_size(
     msp,
     include: Optional[Iterable[str]] = None,
     exclude: Optional[Iterable[str]] = None,
 ) -> Tuple[Optional[float], Optional[float], Optional[float]]:
-    try:
-        import ezdxf
-        from ezdxf import EzdxfError  # type: ignore[attr-defined]
-        from ezdxf.math import BoundingBox
-    except Exception:  # pragma: no cover - ezdxf missing at runtime
-        return None, None, None
+    """
+    Compute AABB over likely 'part' geometry.
+    - Includes LINE, LWPOLYLINE, POLYLINE, ARC, CIRCLE, ELLIPSE, SPLINE, SOLID, TRACE, INSERT (expanded)
+    - Excludes DIMENSION, TEXT, MTEXT, TABLE, HATCH by default (can be tuned)
+    - Honors layer include/exclude filters if provided
+    """
+    from ezdxf.math import BoundingBox
+
+    geom_types = {
+        "LINE",
+        "LWPOLYLINE",
+        "POLYLINE",
+        "ARC",
+        "CIRCLE",
+        "ELLIPSE",
+        "SPLINE",
+        "SOLID",
+        "TRACE",
+        "INSERT",
+    }
+    anno_types = {"DIMENSION", "TEXT", "MTEXT", "TABLE", "HATCH"}
 
     bbox = BoundingBox()
 
-    include = list(include) if include else None
-    exclude = list(exclude) if exclude else None
+    def _layer_ok(ent) -> bool:
+        layer = (ent.dxf.layer or "").upper()
+        if include:
+            if all(layer.upper() != pat.upper() for pat in include):
+                return False
+        if exclude:
+            if any(layer.upper() == pat.upper() for pat in exclude):
+                return False
+        # heuristic: skip common annotation layers if not explicitly included
+        if not include and layer.startswith(("AM_", "DEFPOINTS", "DIM", "ANNOT", "TITLE", "BORDER", "FRAME")):
+            return False
+        return True
 
-    for entity in msp:
-        dxftype = entity.dxftype()
-        if dxftype in _AABB_EXCLUDED:
+    # 1) add entities
+    for e in msp:
+        kind = e.dxftype()
+        if kind in anno_types:
             continue
-        if dxftype not in _AABB_ALLOWED:
+        if kind not in geom_types:
             continue
-        if not _should_include_layer(getattr(entity.dxf, "layer", ""), include, exclude):
+        if not _layer_ok(e):
             continue
-
-        if dxftype == "INSERT":
+        try:
+            if kind == "INSERT":
+                # expand block references
+                for ve in e.virtual_entities():
+                    if _layer_ok(ve):
+                        bbox.extend(ve.bbox())  # ezdxf ≥ 1.0
+            else:
+                bbox.extend(e.bbox())
+        except Exception:
+            # last resort: accumulate explicit vertex points if available
             try:
-                for sub_entity in entity.virtual_entities():
-                    _extend_bbox(bbox, sub_entity)
+                bbox.extend(list(e.vertices()))
             except Exception:
-                continue
-        else:
-            _extend_bbox(bbox, entity)
+                pass
 
     if not bbox.has_data:
-        print("[part-dims] AABB: no geometry found")
         return None, None, None
 
-    size = bbox.size
-    dx = float(size.x)
-    dy = float(size.y)
-    dz = float(size.z)
-    print(f"[part-dims] AABB size: dx={dx:.4f}, dy={dy:.4f}, dz={dz:.4f}")
+    (xmin, ymin, zmin), (xmax, ymax, zmax) = bbox.extmin, bbox.extmax
+    dx, dy, dz = (xmax - xmin), (ymax - ymin), (zmax - zmin)
+    # guard against garbage zeros
+    dx = dx if dx > 1e-6 else None
+    dy = dy if dy > 1e-6 else None
+    dz = dz if dz > 1e-6 else None
     return dx, dy, dz
 
 
