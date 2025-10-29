@@ -164,6 +164,62 @@ def _collect_table_cells(tbl) -> List[str]:
     return out
 
 
+def _merge_proxy_fragments(lines: Iterable[str]) -> List[str]:
+    """Merge split proxy-text fragments that belong to the same logical row.
+
+    AutoCAD's HOLE TABLE proxy graphics frequently break a single row across
+    multiple short text snippets. The heuristics below concatenate fragments
+    until the buffer "feels" complete: we keep merging when the row ends with a
+    dangling token (``FROM``, ``&``, ``BACK`` …) or punctuation that usually
+    indicates continuation, or when the following fragment is a short
+    all-caps clause such as ``FROM FRONT`` or ``BACK AS SHOWN``.
+    """
+
+    merged: List[str] = []
+    buf = ""
+
+    def push() -> None:
+        nonlocal buf
+        if buf:
+            merged.append(" ".join(buf.split()))
+            buf = ""
+
+    fragments = [s.strip() for s in lines if s and s.strip()]
+    if not fragments:
+        return merged
+
+    dangling = {"FROM", "FRONT", "BACK", "&", "AS", "SHOWN", "DEEP"}
+
+    def short_all_caps(s: str) -> bool:
+        cleaned = re.sub(r"[^A-Z0-9& ]+", "", s.strip())
+        if not cleaned:
+            return False
+        if cleaned != cleaned.upper():
+            return False
+        return len(cleaned) <= 18
+
+    for idx, frag in enumerate(fragments):
+        buf = f"{buf} {frag}".strip() if buf else frag
+
+        stripped = buf.rstrip()
+        if not stripped:
+            continue
+        end = stripped[-1:]
+        last_word = stripped.split()[-1]
+
+        if end in ";,(":
+            continue
+        if last_word.upper() in dangling:
+            continue
+        next_frag = fragments[idx + 1] if idx + 1 < len(fragments) else ""
+        if next_frag and short_all_caps(next_frag):
+            continue
+        push()
+
+    push()
+    return merged
+
+
 def _proxy_texts(ent) -> List[str]:
     """
     Extract TEXT/MTEXT rendered inside ACAD_PROXY_ENTITY via proxy graphics.
@@ -220,7 +276,9 @@ def _proxy_texts(ent) -> List[str]:
                 continue
     except Exception:
         pass
-    return texts
+    if not texts:
+        return texts
+    return _merge_proxy_fragments(texts)
 
 
 def iter_text_records(
