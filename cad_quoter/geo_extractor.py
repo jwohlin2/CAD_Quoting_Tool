@@ -3409,6 +3409,7 @@ _DEBUG_FIELDNAMES = (
     "raw_text",
     *_DEBUG_STRUCTURED_COLUMNS,
 )
+_OPS_TOTAL_KEYS = ("Drill", "Tap", "C'bore", "C'drill", "Jig", "NPT")
 _DEBUG_DEPTH_RE = re.compile(
     r"([x×]\s*)?(\d+(?:\.\d+)?)\s*(?:DEEP|DEPTH|THK|THICK)\b",
     re.IGNORECASE,
@@ -6780,6 +6781,78 @@ def _detect_depth_token(text: str) -> str:
     return ""
 
 
+def _normalize_side_token(value: Any) -> str:
+    text = str(value or "").strip()
+    if not text:
+        return ""
+    upper = text.upper()
+    if upper.startswith("BACK"):
+        return "BACK"
+    if upper.startswith("FRONT"):
+        return "FRONT"
+    if upper.startswith("BOTH"):
+        return "BOTH"
+    return upper
+
+
+def _operation_bucket(record: Mapping[str, Any]) -> str | None:
+    kind = str(record.get("kind") or "").strip().lower()
+    if not kind:
+        return None
+
+    raw_text = str(record.get("raw_text") or "")
+    tool_text = str(record.get("tool") or "")
+    thread_text = str(record.get("thread") or "")
+    tap_type = str(record.get("tap_type") or "").strip().lower()
+    combined = " ".join(part for part in (raw_text, tool_text, thread_text) if part)
+
+    if tap_type == "pipe" or _NPT_TOKEN_RE.search(combined):
+        return "NPT"
+
+    if kind == "tap":
+        return "Tap"
+    if kind in {"counterbore", "cbore"}:
+        return "C'bore"
+    if kind in {"counterdrill", "cdrill"}:
+        return "C'drill"
+    if kind in {"jig", "jig_grind", "jig grind"}:
+        return "Jig"
+
+    if kind == "drill":
+        upper_text = combined.upper()
+        if "TAP" in upper_text or _NPT_TOKEN_RE.search(upper_text):
+            return None
+        return "Drill"
+
+    return None
+
+
+def _operation_totals(records: Iterable[Mapping[str, Any]]) -> dict[str, int]:
+    totals = {key: 0 for key in _OPS_TOTAL_KEYS}
+    for record in records:
+        bucket = _operation_bucket(record)
+        if not bucket:
+            continue
+        try:
+            qty_val = int(record.get("qty") or 0)
+        except Exception:
+            qty_val = 0
+        totals[bucket] += qty_val
+    return totals
+
+
+def _format_ops_totals_line(totals: Mapping[str, int]) -> str:
+    parts: list[str] = []
+    for label in _OPS_TOTAL_KEYS:
+        try:
+            value = int(totals.get(label, 0))
+        except Exception:
+            value = 0
+        if value:
+            parts.append(f"{label} {value}")
+    return " | ".join(parts) if parts else "—"
+
+
 def _fallback_debug_records(rows: Sequence[Mapping[str, Any]]) -> tuple[list[dict[str, Any]], int]:
     records: list[dict[str, Any]] = []
     qty_sum = 0
@@ -6807,7 +6880,7 @@ def _fallback_debug_records(rows: Sequence[Mapping[str, Any]]) -> tuple[list[dic
         record = {
             "qty": qty,
             "kind": kind.lower(),
-            "side": str(row.get("side") or ""),
+            "side": _normalize_side_token(row.get("side")),
             "tool": "",
             "diam_token": _detect_diameter_token(desc_text),
             "depth_token": _detect_depth_token(desc_text),
@@ -6819,6 +6892,12 @@ def _fallback_debug_records(rows: Sequence[Mapping[str, Any]]) -> tuple[list[dic
             record["tool"] = record["diam_token"] or _detect_thread_token(desc_text)
         else:
             record["tool"] = record["diam_token"] or _detect_thread_token(desc_text) or record["kind"]
+        tap_type_val = row.get("tap_type")
+        if tap_type_val:
+            record["tap_type"] = str(tap_type_val)
+        thread_val = row.get("thread")
+        if thread_val:
+            record["thread"] = str(thread_val)
         structured_columns = row.get("structured_columns")
         if isinstance(structured_columns, Mapping):
             for column_label in _DEBUG_STRUCTURED_COLUMNS:
@@ -6833,21 +6912,7 @@ def _fallback_debug_records(rows: Sequence[Mapping[str, Any]]) -> tuple[list[dic
 def _write_fallback_debug(records: list[dict[str, Any]], qty_sum: int) -> None:
     if not records:
         return
-    totals = {key: 0 for key in ("drill", "tap", "counterbore", "counterdrill", "jig_grind")}
-    for record in records:
-        raw_kind = str(record.get("kind") or "").lower()
-        kind = {
-            "cbore": "counterbore",
-            "counterbore": "counterbore",
-            "cdrill": "counterdrill",
-            "counterdrill": "counterdrill",
-        }.get(raw_kind, raw_kind)
-        if kind in totals:
-            try:
-                qty_val = int(record.get("qty") or 0)
-            except Exception:
-                qty_val = 0
-            totals[kind] += qty_val
+    totals = _operation_totals(records)
     try:
         _DEBUG_DIR.mkdir(parents=True, exist_ok=True)
         with _DEBUG_ROWS_PATH.open("w", newline="", encoding="utf-8") as handle:
@@ -6860,6 +6925,7 @@ def _write_fallback_debug(records: list[dict[str, Any]], qty_sum: int) -> None:
         print(
             f"[TABLE-DUMP] rows={len(records)} qty_sum={qty_sum} -> {_DEBUG_ROWS_PATH.as_posix()}"
         )
+        print(f"[OPS] table: {_format_ops_totals_line(totals)}")
         print(f"[OPS] table totals -> {_DEBUG_TOTALS_PATH.as_posix()}")
     except Exception:
         pass
