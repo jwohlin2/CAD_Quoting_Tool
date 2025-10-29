@@ -604,7 +604,7 @@ def test_default_text_layer_excludes_do_not_filter_am_bor() -> None:
         for pattern in geo_extractor.DEFAULT_TEXT_LAYER_EXCLUDE_REGEX
     ]
 
-    assert any(pattern.search("AM_BOR") for pattern in patterns)
+    assert not any(pattern.search("AM_BOR") for pattern in patterns)
 
 
 def test_normalize_layer_allowlist_adds_defaults() -> None:
