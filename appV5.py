@@ -429,12 +429,11 @@ def _clamp_minutes(v: Any, lo: float = 0.0, hi: float = 10000.0) -> float:
 def _format_hole_table_section(
     entries: Sequence[Mapping[str, Any]] | None,
 ) -> list[str]:
-    """Return formatted HOLE TABLE lines for the rendered quote."""
+    """Return formatted HOLE TABLE operation lines for the rendered quote."""
 
     if not entries:
         return []
 
-    header = ("HOLE", "REF_DIAM", "QTY", "DESCRIPTION/DEPTH")
     normalized: list[tuple[str, str, str, str]] = []
 
     for entry in entries:
@@ -486,7 +485,7 @@ def _format_hole_table_section(
     if not normalized:
         return []
 
-    widths = [len(value) for value in header]
+    widths = [0, 0, 0, 0]
     for row in normalized:
         for idx, cell in enumerate(row):
             widths[idx] = max(widths[idx], len(cell))
@@ -496,6 +495,8 @@ def _format_hole_table_section(
     def _fmt_row(cells: Sequence[str]) -> str:
         padded: list[str] = []
         for idx, cell in enumerate(cells):
+            if not cell:
+                continue
             width = widths[idx] if idx < len(widths) else len(cell)
             alignment = align[idx] if idx < len(align) else "left"
             if alignment == "right":
@@ -504,12 +505,11 @@ def _format_hole_table_section(
                 padded.append(cell.ljust(width))
         return "  ".join(padded)
 
-    header_line = _fmt_row(header)
-    divider = "-" * len(header_line)
-
-    lines = ["HOLE TABLE (from chart)", divider, header_line, divider]
+    lines = ["HOLE TABLE OPERATIONS"]
     for row in normalized:
-        lines.append(_fmt_row(row))
+        formatted = _fmt_row(row)
+        if formatted:
+            lines.append(formatted)
     lines.append("")
     return lines
 
