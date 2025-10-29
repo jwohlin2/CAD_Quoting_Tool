@@ -5733,14 +5733,36 @@ def _build_columnar_table_from_panel_entries(
             ),
         )
 
-    row_debug_entries = [
-        {
-            "index": row["index"],
-            "y": row["y"],
-            "cells": row.get("cells", []),
-        }
-        for row in snapped_rows
-    ]
+    row_debug_entries: list[dict[str, Any]] = []
+    for row in snapped_rows:
+        assignments = row.get("assignments") or []
+        token_records: list[dict[str, Any]] = []
+        if isinstance(assignments, list):
+            for col_idx, bucket in enumerate(assignments):
+                if not isinstance(bucket, list):
+                    continue
+                for token_index, token in enumerate(bucket):
+                    if not isinstance(token, (list, tuple)) or len(token) != 4:
+                        continue
+                    x_val, y_val, height_val, text_val = token
+                    token_records.append(
+                        {
+                            "col": col_idx,
+                            "token_index": token_index,
+                            "x": x_val,
+                            "y": y_val,
+                            "height": height_val,
+                            "text": text_val,
+                        }
+                    )
+        row_debug_entries.append(
+            {
+                "index": row["index"],
+                "y": row["y"],
+                "cells": row.get("cells", []),
+                "tokens": token_records,
+            }
+        )
 
     base_rows: list[dict[str, Any]] = []
     base_row_keys: set[tuple[int, str]] = set()

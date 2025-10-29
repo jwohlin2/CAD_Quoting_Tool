@@ -202,7 +202,7 @@ def test_text_dumper_smoke(tmp_path: Path) -> None:
         if isinstance(raw_value, str):
             token_sources.append(raw_value)
 
-    table_path = dump_dir / "hole_table_rows.csv"
+    table_path = dump_dir / "hole_table_rows_parsed.csv"
     if table_path.exists():
         token_sources.append(table_path.read_text(encoding="utf-8"))
 
