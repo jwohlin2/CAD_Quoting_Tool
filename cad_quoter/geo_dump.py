@@ -445,46 +445,30 @@ def _smart_clause_split(s: str) -> List[str]:
 
 
 def _fmt_diam(token: str) -> str:
-    """Format a numeric token to an Ø… string:
-       - keep fraction as-is (Ø13/32)
-       - keep decimal precision present in the token (e.g., 0.3750 → Ø.3750)
-       - drop leading zero if value < 1 (0.623 → Ø.623)
-       - for whole inches like '1' or '1.0' render Ø1.00
+    """Ø formatter:
+       - fractions: Ø13/32
+       - decimals: keep given precision; drop leading 0 if <1 (0.623 -> Ø.623)
+       - integers: Ø1.00
     """
     tok = token.strip()
-    if "/" in tok:  # fraction
+    if '/' in tok:
         return f"Ø{tok}"
-    # decimals/integers
     try:
         val = float(tok)
     except Exception:
         return f"Ø{tok}"
-
-    # preserve given precision
-    if "." in tok:
-        _, dec_part = tok.split(".", 1)
-
-        # strip leading zero for <1 while keeping supplied decimals
+    if '.' in tok:
+        dec = tok.split('.', 1)[1]
         if val < 1.0:
-            sign = ""
-            rest = tok
-            if rest.startswith(("+", "-")):
-                sign = rest[0]
-                rest = rest[1:]
-            if rest.startswith("0."):
-                return f"Ø{sign}." + rest.split(".", 1)[1]
-            if rest.startswith("."):
-                return f"Ø{sign}." + rest.split(".", 1)[1]
-            # fallback if the token was unconventional (e.g., leading zeros elsewhere)
-            return f"Ø{sign}{rest}"
-
-        # >= 1: keep token as entered unless it's effectively an integer
-        if dec_part == "" or set(dec_part) <= {"0"}:
-            return f"Ø{int(val):.2f}"
-        return f"Ø{tok}"
-    else:
-        # integer like 1 → Ø1.00
-        return f"Ø{int(val):.2f}"
+            # keep original decimals, drop leading zero
+            return f"Ø.{dec}".rstrip()
+        # keep as given unless it's a whole
+        if abs(val - round(val)) < 1e-9:
+            return f"Ø{int(round(val)):.2f}"
+        # preserve user precision without trailing junk
+        s = tok.rstrip('0').rstrip('.')
+        return f"Ø{s}"
+    return f"Ø{int(val):.2f}"
 
 
 def _fmt_primary_ref_diam(token: str) -> str:
