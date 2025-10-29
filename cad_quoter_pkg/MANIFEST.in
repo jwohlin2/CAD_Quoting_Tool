@@ -1,3 +1,3 @@
-recursive-include src/cad_quoter/resources *
-recursive-include src/cad_quoter/pricing/resources *
-recursive-include src/cad_quoter/llm *
+recursive-include ../cad_quoter/resources *
+recursive-include ../cad_quoter/pricing/resources *
+recursive-include ../cad_quoter/llm *

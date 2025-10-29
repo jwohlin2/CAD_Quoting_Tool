@@ -27,9 +27,12 @@ dependencies = [
 
 [tool.setuptools]
 include-package-data = true
+package-dir = {"" = ".."}
 
 [tool.setuptools.packages.find]
-where = ["src"]
+where = [".."]
+include = ["cad_quoter*"]
+exclude = ["cad_quoter_pkg*"]
 
 [tool.setuptools.package-data]
 cad_quoter = [
