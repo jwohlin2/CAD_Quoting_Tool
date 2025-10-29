@@ -80,6 +80,28 @@ def _ensure_geo_context_fields(
         except Exception:
             pass
 
+        table_info = geom.get("hole_table")
+        if isinstance(table_info, Mapping):
+            ops_seq = table_info.get("ops")
+            if isinstance(ops_seq, Sequence) and ops_seq:
+                geom.setdefault("hole_table_ops", list(ops_seq))
+                structured_seq = table_info.get("structured") or []
+                if isinstance(structured_seq, Sequence) and structured_seq:
+                    geom.setdefault("hole_table_structured", list(structured_seq))
+                geom.setdefault("hole_count_provenance", "table_ops")
+                prov_val = table_info.get("provenance") or "table_ops"
+                provenance_map = geom.get("provenance")
+                if isinstance(provenance_map, Mapping):
+                    existing_holes = provenance_map.get("holes")
+                    if existing_holes not in ("table_ops",) and existing_holes != prov_val:
+                        updated = dict(provenance_map)
+                        updated["holes"] = prov_val
+                        geom["provenance"] = updated
+                    else:
+                        geom["provenance"] = dict(provenance_map)
+                else:
+                    geom["provenance"] = {"holes": prov_val}
+
         # Dimensions (inches)
         L_in = _coerce_positive_float(src.get("Plate Length (in)"))
         W_in = _coerce_positive_float(src.get("Plate Width (in)"))

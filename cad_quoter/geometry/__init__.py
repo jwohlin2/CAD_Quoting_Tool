@@ -228,6 +228,7 @@ try:
         detect_units_scale as detect_dxf_units,
         harvest_hole_geometry,
         harvest_hole_table,
+        hole_ops_to_drill_bins,
         harvest_outline_metrics,
         harvest_plate_dimensions,
         harvest_title_notes,
@@ -244,6 +245,7 @@ except Exception:
     harvest_outline_metrics = None  # type: ignore[assignment]
     harvest_plate_dimensions = None  # type: ignore[assignment]
     harvest_title_notes = None  # type: ignore[assignment]
+    hole_ops_to_drill_bins = None  # type: ignore[assignment]
     iter_dxf_spaces = None  # type: ignore[assignment]
     iter_table_entities = None  # type: ignore[assignment]
     iter_table_text = None  # type: ignore[assignment]
@@ -1237,6 +1239,7 @@ __all__ = [
     "harvest_outline_metrics",
     "harvest_hole_geometry",
     "harvest_hole_table",
+    "hole_ops_to_drill_bins",
     "harvest_title_notes",
     "iter_dxf_spaces",
     "iter_table_entities",
