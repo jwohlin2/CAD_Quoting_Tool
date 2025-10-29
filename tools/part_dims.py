@@ -64,63 +64,53 @@ def _read_texts(
     return lines
 
 
-_THK_PATTERN_SUFFIX = r"(?P<num>(?:\d+\s*-\s*)?\d+(?:/\d+)?|\d*\.\d+|\.\d+)"
-_THK_PATTERNS: Sequence[re.Pattern[str]] = (
-    re.compile(rf"(?:THK|T|Thickness)\s*[:=]?\s*{_THK_PATTERN_SUFFIX}", re.IGNORECASE),
-    re.compile(rf"{_THK_PATTERN_SUFFIX}\s*(?:THK|T)\b", re.IGNORECASE),
+_THK_TOKENS = r'(?:THK|T(?:H(?:I(?:C(?:K(?:NESS)?)?)?)?)?)[\s:=]*'
+_NUM = r'(?:\d+(?:\.\d+)?|\d+\s*-\s*\d+\/\d+|\d+\/\d+)'
+
+RE_THICKNESS_LINE = re.compile(
+    rf'\b{_THK_TOKENS}(?P<t>{_NUM})(?:\s*(?P<u>in(?:ch(?:es)?)?|"))?\b',
+    re.IGNORECASE
 )
 
 
-def _parse_fraction(token: str) -> Optional[float]:
-    """Convert decimal, fraction (13/32) or mixed number (1-1/2) to float."""
+def _to_float_in(token: str) -> Optional[float]:
+    """Convert supported numeric token forms to inches."""
 
-    token = token.strip().replace(" ", "")
-    if not token:
+    s = token.strip().lower().replace('"', '')
+    if not s:
         return None
 
+    mixed = re.match(r'^(\d+)\s*-\s*(\d+)\s*/\s*(\d+)$', s)
+    if mixed:
+        whole, num, den = map(int, mixed.groups())
+        if den == 0:
+            return None
+        return whole + (num / den)
+
+    frac = re.match(r'^(\d+)\s*/\s*(\d+)$', s)
+    if frac:
+        num, den = map(int, frac.groups())
+        if den == 0:
+            return None
+        return num / den
+
     try:
-        return float(token)
+        return float(s)
     except ValueError:
-        pass
-
-    if "-" in token:
-        whole, _, frac = token.partition("-")
-        try:
-            whole_val = float(whole)
-        except ValueError:
-            return None
-        frac_val = _parse_fraction(frac)
-        if frac_val is None:
-            return None
-        return whole_val + frac_val
-
-    if "/" in token:
-        num, _, den = token.partition("/")
-        try:
-            return float(int(num)) / float(int(den))
-        except (ValueError, ZeroDivisionError):
-            return None
-
-    return None
+        return None
 
 
 def _parse_thickness_from_text(lines: List[str]) -> Optional[float]:
-    """Extract a stock thickness value from free-form text lines."""
+    """Only accept thickness explicitly labeled (THK, T=, THICKNESS)."""
 
     for raw in lines:
-        text = raw.strip()
-        if not text:
+        s = raw.strip()
+        m = RE_THICKNESS_LINE.search(s)   # require keyword -> prevents 'SHEET 2'
+        if not m:
             continue
-        for pattern in _THK_PATTERNS:
-            for match in pattern.finditer(text):
-                token = match.group("num")
-                if not token:
-                    continue
-                token = token.strip().rstrip(",.;")
-                value = _parse_fraction(token)
-                if value is not None and value > 0:
-                    print(f"[part-dims] thickness from text: {value:.4f} in (line='{text}')")
-                    return value
+        t = _to_float_in(m.group('t'))
+        if t is not None:
+            return t
     return None
 
 
