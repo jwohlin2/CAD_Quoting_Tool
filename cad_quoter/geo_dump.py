@@ -981,20 +981,13 @@ def main() -> int:
                 w.writerows(out_rows)
 # >>> HOLE_TABLE_OPS START
             try:
-                # `text_rows` must be the list of HOLE TABLE text lines (strings) already collected
-                # right before/when you wrote `hole_table_structured.csv`.
-                # If it has a different variable name in this file, use that variable instead.
                 ops_rows = explode_rows_to_operations(text_rows)
-
-                # Write ops CSV next to the structured CSV
-                import csv, pathlib
-                out_dir = pathlib.Path(csv_path).parent if 'csv_path' in globals() else pathlib.Path('.')
+                out_dir = csv_path.parent
                 ops_csv = out_dir / "hole_table_ops.csv"
                 with ops_csv.open("w", newline="", encoding="utf-8") as fh:
                     w = csv.writer(fh)
                     w.writerow(["HOLE", "REF_DIAM", "QTY", "DESCRIPTION/DEPTH"])
                     w.writerows(ops_rows)
-
                 print(f"[HOLE-TABLE][ops] rows={len(ops_rows)} csv={ops_csv}")
             except Exception as e:
                 print(f"[HOLE-TABLE][ops] emit failed: {e}")
