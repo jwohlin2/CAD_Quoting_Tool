@@ -710,6 +710,22 @@ def _parse_clause_to_ops(
         if anyd:
             diam_for_clause = _fmt_diam(_matched_diam_token(anyd))
 
+        # 1) If this is a BACK C'BORE with no explicit Ø, adopt Ø13/32 and (if current hole looks like E) move to H
+        if (
+            _RE_CBORE.search(desc)
+            and re.search(r"\bFROM\s+BACK\b", desc, re.I)
+            and not _RE_DIAM_ANY.search(desc)
+        ):
+            diam_for_clause = _fmt_diam("13/32")
+            try:
+                tgt_h = _snap_to_nearest_index(0.2812, diam_list)
+            except Exception:
+                tgt_h = hole_for_clause
+            hole_for_clause = tgt_h
+
+        # 2) If desc starts with a numeric like ".623∅" followed by C'BORE, drop the duplicate numeric from the text
+        desc = re.sub(r"^[\.\d/]+[Ø∅]\s*", "", desc).strip()
+
         # ---- TAP policy: TAP ops always use the HOLE's REF_DIAM ----
         if _RE_TAP.search(desc):
             ops.append((hole_for_clause, base_diam, qtys[hole_for_clause], desc))
