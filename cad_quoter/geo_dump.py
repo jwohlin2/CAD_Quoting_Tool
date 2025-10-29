@@ -225,8 +225,7 @@ def _redistribute_cross_hits(descs: List[str], diam_list: List[str]) -> List[str
     alias_to_idx: Dict[str, int] = {}
     for idx, tok in enumerate(diam_list):
         for a in _diameter_aliases(tok):
-            if a:
-                alias_to_idx[a] = idx
+            alias_to_idx[a] = idx
         # numeric-only fallbacks for decimals like .272 / 0.272 (and parens)
         if tok.startswith(("Ø", "∅")):
             s = tok[1:]
@@ -258,13 +257,14 @@ def _redistribute_cross_hits(descs: List[str], diam_list: List[str]) -> List[str
     new_descs = [""] * len(descs)
 
     for i, seg in enumerate(descs):
-        s = (seg or "").strip()
+        raw_seg = seg or ""
+        s = raw_seg.strip()
         if not s:
             continue
 
         # find all internal markers with their owners
         hits = []
-        for m in re_markers.finditer(s):
+        for m in re_markers.finditer(raw_seg):
             alias = m.group(0)
             tgt = alias_to_idx.get(alias)
             if tgt is None or tgt == i:
@@ -281,9 +281,9 @@ def _redistribute_cross_hits(descs: List[str], diam_list: List[str]) -> List[str
         self_parts = []
         for k, (a, b, tgt, alias) in enumerate(hits):
             if a > cursor:
-                self_parts.append(s[cursor:a])            # keep for self
-            next_a = hits[k+1][0] if k+1 < len(hits) else len(s)
-            chunk_raw = s[a:next_a]
+                self_parts.append(raw_seg[cursor:a])     # keep for self
+            next_a = hits[k+1][0] if k+1 < len(hits) else len(raw_seg)
+            chunk_raw = raw_seg[a:next_a]
             chunk = strip_marker_prefix(chunk_raw)
             tgt_idx = tgt
             m_jg = re.search(r'[Ø∅]\s*([0-9.]+)\s+JIG\s*GRIND', chunk_raw, flags=re.I)
@@ -296,8 +296,8 @@ def _redistribute_cross_hits(descs: List[str], diam_list: List[str]) -> List[str
             if chunk:
                 new_descs[tgt_idx] = (new_descs[tgt_idx] + " " + chunk).strip() if new_descs[tgt_idx] else chunk
             cursor = next_a
-        if cursor < len(s):
-            self_parts.append(s[cursor:])                 # tail back to self
+        if cursor < len(raw_seg):
+            self_parts.append(raw_seg[cursor:])           # tail back to self
 
         self_text = strip_marker_prefix(" ".join(self_parts))
         new_descs[i] = self_text
