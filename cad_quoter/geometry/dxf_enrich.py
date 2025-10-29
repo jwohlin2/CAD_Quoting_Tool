@@ -10,6 +10,8 @@ from fractions import Fraction
 from pathlib import Path
 from typing import Any, Dict, Iterable, Iterator, List, Mapping, Sequence
 
+from cad_quoter.geo_extractor import collect_all_text
+
 from cad_quoter.vendors import ezdxf as _ezdxf_vendor
 
 try:  # pragma: no cover - optional helper available during packaging
@@ -47,6 +49,8 @@ RE_DEPTH_TOKEN = re.compile(
     re.I,
 )
 
+_UHEX_RE = re.compile(r"\\U\+([0-9A-Fa-f]{4})")
+
 RE_MAT = re.compile(r"\b(MATERIAL|MAT)\b[:\s]*([A-Z0-9\-\s/\.]+)")
 RE_COAT = re.compile(
     r"\b(ANODIZE|BLACK OXIDE|ZINC PLATE|NICKEL PLATE|PASSIVATE|HEAT TREAT|DLC|PVD|CVD)\b",
@@ -54,6 +58,36 @@ RE_COAT = re.compile(
 )
 RE_TOL = re.compile(r"\bUNLESS OTHERWISE SPECIFIED\b.*?([±\+\-]\s*\d+\.\d+)", re.I | re.S)
 RE_REV = re.compile(r"\bREV(ISION)?\b[:\s]*([A-Z0-9\-]+)")
+
+
+def _decode_uplus(text: str) -> str:
+    r"""Decode AutoCAD ``\U+XXXX`` sequences to Unicode characters."""
+
+    def _replace(match: re.Match[str]) -> str:
+        try:
+            return chr(int(match.group(1), 16))
+        except Exception:
+            return match.group(0)
+
+    return _UHEX_RE.sub(_replace, text or "")
+
+
+def _coerce_float(value: Any) -> float | None:
+    try:
+        if value is None:
+            return None
+        number = float(value)
+    except Exception:
+        return None
+    return number
+
+
+def _flatten_block_path(path_value: Any) -> str:
+    if isinstance(path_value, (list, tuple)):
+        return "/".join(str(part) for part in path_value if str(part))
+    if isinstance(path_value, str):
+        return path_value
+    return ""
 
 
 def detect_units_scale(doc: Any) -> Dict[str, float | int]:
@@ -289,55 +323,56 @@ def iter_table_entities(doc: Any) -> Iterator[Any]:
             yield from _yield_from_insert(ins)
 
 
+def _collect_normalized_text_rows(doc: Any) -> list[dict[str, Any]]:
+    """Return normalized text rows harvested from ``doc`` via ``collect_all_text``."""
+
+    try:
+        raw_rows = collect_all_text(doc, max_block_depth=8)
+    except Exception:
+        raw_rows = []
+
+    normalized: list[dict[str, Any]] = []
+    for row in raw_rows:
+        if not isinstance(row, Mapping):
+            continue
+        text_raw = row.get("text")
+        if not isinstance(text_raw, str):
+            text = ""
+        else:
+            text = _decode_uplus(text_raw)
+        text = (text or "").strip()
+        if not text:
+            continue
+
+        normalized.append(
+            {
+                "layout": str(row.get("layout") or ""),
+                "layer": str(row.get("layer") or ""),
+                "etype": str(row.get("etype") or ""),
+                "text": text,
+                "x": _coerce_float(row.get("x")),
+                "y": _coerce_float(row.get("y")),
+                "height": _coerce_float(row.get("height")),
+                "rotation": _coerce_float(row.get("rotation")),
+                "in_block": bool(row.get("in_block")),
+                "depth": int(row.get("depth") or 0),
+                "block_path": _flatten_block_path(row.get("block_path")),
+            }
+        )
+
+    return normalized
+
+
 def iter_table_text(doc: Any) -> Iterator[str]:
     """Yield text strings discovered inside TABLE and TEXT entities."""
 
-    for table in iter_table_entities(doc):
-        try:
-            n_rows = int(getattr(table.dxf, "n_rows", 0))
-            n_cols = int(getattr(table.dxf, "n_cols", 0))
-        except Exception:
-            n_rows = 0
-            n_cols = 0
-        if n_rows <= 0 or n_cols <= 0:
-            continue
-        try:
-            for row_idx in range(n_rows):
-                row: list[str] = []
-                for col_idx in range(n_cols):
-                    try:
-                        cell = table.get_cell(row_idx, col_idx)
-                    except Exception:
-                        cell = None
-                    if cell is None:
-                        row.append("")
-                        continue
-                    try:
-                        text = cell.get_text()
-                    except Exception:
-                        text = ""
-                    row.append(text or "")
-                line = " | ".join(fragment.strip() for fragment in row if fragment)
-                if line:
-                    yield line
-        except Exception:
-            continue
-
-    for space in iter_spaces(doc):
-        try:
-            entities = space.query("MTEXT,TEXT")
-        except Exception:
-            entities = []
-        for entity in entities:
-            try:
-                if entity.dxftype() == "MTEXT":
-                    text = entity.plain_text()
-                else:
-                    text = entity.dxf.text
-            except Exception:
-                text = None
+    normalized_rows = _collect_normalized_text_rows(doc)
+    for row in normalized_rows:
+        etype = row.get("etype", "").upper()
+        if etype in {"PROXYTEXT", "MTEXT", "TEXT", "TABLECELL"}:
+            text = str(row.get("text") or "").strip()
             if text:
-                yield str(text)
+                yield text
 
 
 def harvest_plate_dimensions(doc: Any, to_in: float) -> Dict[str, Any]:
@@ -580,6 +615,11 @@ def harvest_hole_table(doc: Any) -> Dict[str, Any]:
     structured_acc: dict[tuple[str, str], dict[str, Any]] = {}
 
     try:
+        from cad_quoter.geo_dump import _find_hole_table_chunks, _parse_header, _split_descriptions
+    except Exception:  # pragma: no cover - helpers unavailable
+        _find_hole_table_chunks = _parse_header = _split_descriptions = None  # type: ignore[assignment]
+
+    try:
         chart_debug_records = _collect_chart_layout_records(doc)
     except Exception:
         chart_debug_records = []
@@ -588,13 +628,72 @@ def harvest_hole_table(doc: Any) -> Dict[str, Any]:
     except Exception:
         pass
 
-    for raw in iter_table_text(doc):
+    normalized_rows = _collect_normalized_text_rows(doc)
+    candidate_rows = [
+        row
+        for row in normalized_rows
+        if str(row.get("etype") or "").upper() in {"PROXYTEXT", "MTEXT", "TEXT", "TABLECELL"}
+    ]
+
+    header_chunks: List[str] = []
+    body_chunks: List[str] = []
+    if _find_hole_table_chunks is not None and candidate_rows:
+        try:
+            header_chunks, body_chunks = _find_hole_table_chunks(candidate_rows)
+        except Exception:
+            header_chunks, body_chunks = [], []
+
+    text_rows = [chunk for chunk in header_chunks + body_chunks if chunk]
+
+    if not text_rows:
+        keywords = ("HOLE", "TAP", "THRU", "CBORE", "C'BORE", "DRILL", "Ø", "⌀")
+        for row in candidate_rows:
+            text_val = str(row.get("text") or "")
+            upper = text_val.upper()
+            if any(keyword in upper for keyword in keywords):
+                text_rows.append(text_val)
+
+    lines = list(text_rows)
+
+    hole_letters: List[str] = []
+    diam_tokens: List[str] = []
+    qty_tokens: List[int] = []
+    if header_chunks and _parse_header is not None and _split_descriptions is not None:
+        try:
+            hole_letters, diam_tokens, qty_tokens = _parse_header(header_chunks)
+        except Exception:
+            hole_letters, diam_tokens, qty_tokens = [], [], []
+        if diam_tokens:
+            try:
+                descs = _split_descriptions(body_chunks, diam_tokens)
+            except Exception:
+                descs = [""] * len(diam_tokens)
+            n = min(len(hole_letters), len(diam_tokens), len(qty_tokens))
+            for idx in range(n):
+                hole = hole_letters[idx]
+                ref = diam_tokens[idx]
+                qty_val = qty_tokens[idx]
+                desc = (descs[idx] if idx < len(descs) else "").strip()
+                key = (hole, ref)
+                structured_acc[key] = {
+                    "HOLE": hole,
+                    "REF_DIAM": ref,
+                    "QTY": qty_val,
+                    "DESCRIPTION": [desc] if desc else [],
+                    "_header_desc": bool(desc),
+                }
+                key_name = hole or ref
+                if key_name:
+                    current_qty = hole_qty_by_name.get(key_name, 0)
+                    if qty_val > current_qty:
+                        hole_qty_by_name[key_name] = qty_val
+
+    for raw in text_rows:
         upper = raw.upper()
         if not any(
             keyword in upper for keyword in ("HOLE", "TAP", "THRU", "CBORE", "C'BORE", "DRILL", "Ø", "⌀")
         ):
             continue
-        lines.append(raw)
 
         qty = 1
         match_qty = RE_QTY.search(upper)
@@ -632,9 +731,9 @@ def harvest_hole_table(doc: Any) -> Dict[str, Any]:
                     pass
 
     raw_ops: Sequence[Sequence[Any] | Mapping[str, Any]] = []
-    if lines and explode_rows_to_operations:
+    if text_rows and explode_rows_to_operations:
         try:
-            raw_ops = explode_rows_to_operations(lines) or []
+            raw_ops = explode_rows_to_operations(text_rows) or []
         except Exception:
             raw_ops = []
 
@@ -721,12 +820,24 @@ def harvest_hole_table(doc: Any) -> Dict[str, Any]:
                 struct_key = (hole_id, ref_token)
                 struct_entry = structured_acc.setdefault(
                     struct_key,
-                    {"HOLE": hole_id, "REF_DIAM": ref_token, "QTY": qty_val, "DESCRIPTION": []},
+                    {
+                        "HOLE": hole_id,
+                        "REF_DIAM": ref_token,
+                        "QTY": qty_val,
+                        "DESCRIPTION": [],
+                        "_header_desc": False,
+                    },
                 )
                 if qty_val > struct_entry.get("QTY", 0):
                     struct_entry["QTY"] = qty_val
                 if desc_norm:
-                    struct_entry.setdefault("DESCRIPTION", []).append(desc_norm)
+                    desc_list = struct_entry.setdefault("DESCRIPTION", [])
+                    if not isinstance(desc_list, list):
+                        desc_list = [str(desc_list)]
+                    header_seeded = bool(struct_entry.get("_header_desc")) and bool(desc_list)
+                    if not header_seeded and desc_norm not in desc_list:
+                        desc_list.append(desc_norm)
+                    struct_entry["DESCRIPTION"] = desc_list
 
     if structured_acc:
         for entry in structured_acc.values():
@@ -739,7 +850,16 @@ def harvest_hole_table(doc: Any) -> Dict[str, Any]:
                         deduped.append(fragment)
                         seen.add(fragment)
                 entry["DESCRIPTION"] = "; ".join(deduped)
-            structured_rows.append(entry)
+            else:
+                entry["DESCRIPTION"] = ""
+            structured_rows.append(
+                {
+                    "HOLE": entry.get("HOLE", ""),
+                    "REF_DIAM": entry.get("REF_DIAM", ""),
+                    "QTY": entry.get("QTY", 0),
+                    "DESCRIPTION": entry.get("DESCRIPTION", ""),
+                }
+            )
         structured_rows.sort(key=lambda row: (str(row.get("HOLE") or ""), str(row.get("REF_DIAM") or "")))
 
     ops_hole_total = sum(hole_qty_by_name.values())

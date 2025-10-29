@@ -1,4 +1,4 @@
-"""
+r"""
 geo_extractor.py
 ================
 Low-level CAD text extractor.
