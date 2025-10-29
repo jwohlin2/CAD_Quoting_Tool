@@ -4,6 +4,7 @@ from __future__ import annotations
 import argparse
 import csv
 import json
+import math
 import re
 import sys
 from fractions import Fraction
@@ -41,6 +42,78 @@ def _diameter_aliases(token: str) -> List[str]:
         except Exception:
             pass
     return out
+
+# Parse simple thread tokens
+_THREAD_RE = re.compile(r'(?:(#\d+)|([A-Z])|(\d+/\d+)|(\d+(?:\.\d+)?))\s*[-–]\s*(\d+)', re.I)
+
+# Common number drill majors + tap-drill approximations (inches)
+# For routing #10-32 reliably to ~0.1590
+_NUMBER_TAP_DRILL = {
+    "#4-40": 0.0890, "#6-32": 0.1065, "#8-32": 0.1360, "#10-24": 0.1495, "#10-32": 0.1590,
+    "#12-24": 0.1770, "#12-28": 0.1890,
+}
+
+# Major diameters for fractional and number sizes (minimal set; we only need when text lacks Ø)
+_FRACTION_TO_IN = lambda s: (lambda n, d: float(n) / float(d))(*s.split("/"))
+_LETTER_DRILL_DEC = {  # letter drills (subset used in your file)
+    "A": .234, "B": .238, "C": .242, "D": .246, "E": .250, "F": .257, "G": .261,
+    "H": .266, "I": .272, "J": .277, "K": .281, "L": .290, "M": .295, "N": .302,
+    "Q": .332,
+}
+
+
+def _parse_thread_token(s: str) -> Optional[Tuple[float, int]]:
+    """
+    Returns (major_diam_in, tpi) if we can infer it from tokens like:
+      5/8-11, 0.625-11, #10-32, I-24, Q-?? etc.
+    """
+
+    m = _THREAD_RE.search(s)
+    if not m:
+        return None
+    num, letter, frac, decimal, tpi = m.groups()
+    tpi = int(tpi)
+    if num:
+        # e.g., #10-32
+        key = f"{num.upper()}-{tpi}"
+        if key in _NUMBER_TAP_DRILL:
+            # return "tap drill" as the 'major' stand-in (we'll snap to nearest)
+            return (_NUMBER_TAP_DRILL[key], tpi)
+        # unknown number size: approximate major from ANSI table? skip -> None
+        return None
+    if letter:
+        # e.g., I-24
+        L = letter.upper()
+        major = _LETTER_DRILL_DEC.get(L)
+        if major:
+            return (major, tpi)
+        return None
+    if frac:
+        return (_FRACTION_TO_IN(frac), tpi)
+    if decimal:
+        return (float(decimal), tpi)
+    return None
+
+
+def _tap_drill_from(major_in: float, tpi: int) -> float:
+    """Simple UNC/UNF approximation: tap drill ≈ major − (1 / TPI)."""
+
+    return max(0.0, major_in - 1.0 / float(tpi))
+
+
+def _snap_to_nearest(value: float, diam_list: List[str]) -> int:
+    """Return index of closest REF_DIAM in diam_list to value (expects 'Øx.xxx' tokens)."""
+
+    best_i, best_err = 0, math.inf
+    for i, tok in enumerate(diam_list):
+        try:
+            v = float(tok[1:]) if tok.startswith(("Ø", "∅")) else float(tok)
+        except Exception:
+            continue
+        err = abs(v - value)
+        if err < best_err:
+            best_i, best_err = i, err
+    return best_i
 
 def _find_hole_table_chunks(rows: List[dict]):
     """Return (header_chunks, body_chunks) from text rows when a HOLE TABLE is present."""
@@ -224,6 +297,61 @@ def _redistribute_cross_hits(descs: List[str], diam_list: List[str]) -> List[str
     return [re.sub(r"\s*;\s*$", "", x or "").strip() for x in new_descs]
 
 
+def _route_tap_only_chunks(descs: List[str], diam_list: List[str]) -> List[str]:
+    """
+    Find TAP chunks that lack any Ø marker and route them to the nearest REF_DIAM
+    based on estimated tap-drill size. Handles examples:
+      - '5/8-11 TAP THRU (FROM BACK)'  -> ~0.625 - 1/11 ≈ 0.534  -> C (Ø.5313)
+      - '#10-32 TAP X .62 DEEP ...'    -> 0.1590                 -> M (Ø.1590)
+    Also honors letter drills like 'I-24' by using their decimal drill size.
+    """
+
+    moved = [""] * len(descs)
+    keep = [""] * len(descs)
+
+    for i, s in enumerate(descs):
+        txt = (s or "").strip()
+        if not txt:
+            keep[i] = ""
+            continue
+
+        # If segment already contains a hole diameter alias, leave it (handled earlier)
+        if any(sym in txt for sym in ("Ø", "∅")):
+            keep[i] = txt
+            continue
+
+        # Split into clauses so we can route partial pieces
+        clauses = re.split(r'(?<=;)\s+|(?<=\))\s+', txt)  # split on semicolon boundaries or right-paren
+        keep_parts: List[str] = []
+        for cl in clauses:
+            if "TAP" not in cl.upper():
+                keep_parts.append(cl)
+                continue
+            # Try to read thread token and estimate tap drill
+            parsed = _parse_thread_token(cl)
+            if not parsed:
+                keep_parts.append(cl)
+                continue
+            major_in, tpi = parsed
+            tap_in = major_in if "#" in cl or re.search(r'#[0-9]+', cl) else _tap_drill_from(major_in, tpi)
+            tgt_idx = _snap_to_nearest(tap_in, diam_list)
+            # Move this clause to its target hole
+            moved[tgt_idx] = (moved[tgt_idx] + " " + cl).strip() if moved[tgt_idx] else cl
+
+        keep[i] = " ".join(p for p in (p.strip() for p in keep_parts) if p)
+
+    # Merge moved text into destinations
+    out: List[str] = []
+    for i in range(len(descs)):
+        pieces = []
+        if keep[i]:
+            pieces.append(keep[i])
+        if moved[i]:
+            pieces.append(moved[i])
+        out.append(" ".join(pieces).strip())
+    return out
+
+
 def _split_descriptions(body_chunks: List[str], diam_list: List[str]) -> List[str]:
     """
     ORDER-AGNOSTIC splitter + redistribution of cross-hits.
@@ -284,6 +412,9 @@ def _split_descriptions(body_chunks: List[str], diam_list: List[str]) -> List[st
 
     # 5) redistribute any cross-hits (multi-hole bundles) to the right holes
     descs = _redistribute_cross_hits(descs, diam_list)
+
+    # 6) NEW: route TAP-only clauses (no Ø markers) to the nearest hole by tap-drill estimate
+    descs = _route_tap_only_chunks(descs, diam_list)
 
     return descs
 
