@@ -8,7 +8,7 @@ import re
 import sys
 from fractions import Fraction
 from pathlib import Path
-from typing import List, Optional, Tuple
+from typing import Dict, List, Optional, Tuple
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 if str(REPO_ROOT) not in sys.path:
@@ -137,76 +137,176 @@ def _parse_header(header_chunks: List[str]):
     return hole_letters[:n], diam_tokens[:n], qty_list[:n]
 
 
+def _redistribute_cross_hits(descs: List[str], diam_list: List[str]) -> List[str]:
+    """
+    Some segments still contain other hole markers (e.g., row F has '"Q"(Ø.332)...' which belongs to G).
+    This pass finds all other diameter aliases inside each segment, cuts those sub-chunks out,
+    and reassigns them to the correct hole index. The leading chunk (before the first internal marker)
+    stays with the original hole.
+    """
+    # Build alias map: hole_idx -> [aliases...]
+    alias_map: Dict[int, List[str]] = {}
+    for idx, tok in enumerate(diam_list):
+        alias_map[idx] = _diameter_aliases(tok)
+
+        # also allow numeric-only fallbacks for decimals like .272 / 0.272
+        if tok.startswith(("Ø", "∅")):
+            s = tok[1:]
+            try:
+                f = float(s)
+                comp = f"{f:.3f}".rstrip("0").rstrip(".")
+                alias_map[idx] += [comp, f"0{comp}", f"({comp})", f"(0{comp})"]
+            except Exception:
+                pass
+
+    # Precompile a big alternation -> (hole_idx, alias)
+    # Sort aliases by length to prefer longer matches first and avoid partial overlaps
+    alt_pairs: List[Tuple[int, str]] = []
+    for j, alts in alias_map.items():
+        for a in alts:
+            if a:
+                alt_pairs.append((j, re.escape(a)))
+    # if nothing, return as-is
+    if not alt_pairs:
+        return descs
+
+    # Longest-first in the alternation to reduce ambiguous overlaps
+    alt_pairs.sort(key=lambda p: len(p[1]), reverse=True)
+    alt_union = "|".join(a for _, a in alt_pairs)
+    re_markers = re.compile(alt_union)
+
+    def strip_marker_prefix(s: str) -> str:
+        # fractions first (both Ø-leading and Ø-trailing), then decimals, then quoted REF like "Q"(Ø.332)
+        s = re.sub(r'^[\(\s]*[Ø∅]\s*[0-9]+/[0-9]+\)?\s*', '', s)
+        s = re.sub(r'^[\(\s]*[0-9]+/[0-9]+[Ø∅]\)?\s*', '', s)
+        s = re.sub(r'^[\(\s]*[Ø∅]\s*[0-9.]+\)?\s*',        '', s)
+        s = re.sub(r'^\s*"{1,2}[A-Z]"{1,2}\s*\((?:[Ø∅]\s*[0-9.]+)\)\s*', '', s)
+        s = re.sub(r'^\s*"{1,2}[A-Z]"{1,2}\s*', '', s)
+        return s.strip()
+
+    new_descs = [""] * len(descs)
+
+    for i, seg in enumerate(descs):
+        s = (seg or "").strip()
+        if not s:
+            continue
+
+        # Find all internal markers and who they belong to
+        hits = []
+        for m in re_markers.finditer(s):
+            alias = m.group(0)
+            # which hole index is this alias from?
+            target_idx = next((j for j, esc in alt_pairs if re.fullmatch(esc, re.escape(alias))), None)
+            # fallback: O(n) resolve by raw compare
+            if target_idx is None:
+                for j, alts in alias_map.items():
+                    if alias in alts:
+                        target_idx = j
+                        break
+            if target_idx is not None and target_idx != i:
+                hits.append((m.start(), m.end(), target_idx, alias))
+
+        if not hits:
+            # nothing to move; keep as-is
+            new_descs[i] = s
+            continue
+
+        # Order hits left→right and slice the segment
+        hits.sort(key=lambda t: t[0])
+        out_self_parts = []
+        cursor = 0
+        for k, (a, b, tgt, alias) in enumerate(hits):
+            # self-chunk before this foreign marker
+            if a > cursor:
+                out_self_parts.append(s[cursor:a])
+            # foreign chunk: from marker to next marker (or end)
+            next_a = hits[k+1][0] if k+1 < len(hits) else len(s)
+            chunk = s[a:next_a]
+            chunk = strip_marker_prefix(chunk)
+            if chunk:
+                # append to target hole
+                if new_descs[tgt]:
+                    new_descs[tgt] += " "
+                new_descs[tgt] += chunk.strip()
+            cursor = next_a
+        # tail after the last marker belongs to self
+        if cursor < len(s):
+            out_self_parts.append(s[cursor:])
+
+        self_text = strip_marker_prefix(" ".join(out_self_parts).strip())
+        if self_text:
+            new_descs[i] = self_text
+
+    # Merge any original descs that had no edits
+    for i in range(len(descs)):
+        if not new_descs[i] and descs[i]:
+            new_descs[i] = descs[i]
+
+    # tidy punctuation/spacing
+    new_descs = [re.sub(r"\s*;\s*$", "", x or "").strip() for x in new_descs]
+    return new_descs
+
+
 def _split_descriptions(body_chunks: List[str], diam_list: List[str]) -> List[str]:
     """
-    Slice the HOLE TABLE body text into one description per diameter marker.
-    This version is ORDER-AGNOSTIC: it finds all marker positions anywhere,
-    sorts by position, slices by those cut points, then maps the slices back
-    to the original hole order.
+    ORDER-AGNOSTIC splitter + redistribution of cross-hits.
     """
     blob = re.sub(r"\s+", " ", " ".join(body_chunks)).strip()
-
-    # Cut off any coordinate table that follows the hole descriptions
+    # Cut off coordinate table if present
     m = re.search(r"\bLIST OF COORDINATES\b", blob, flags=re.I)
     if m:
         blob = blob[:m.start()].rstrip()
 
-    # Build aliases for each header diameter and locate positions (first hit wins)
-    positions: List[Tuple[int, int, str]] = []  # (pos, hole_idx, chosen_alias)
-
+    # 1) find positions for every diameter alias anywhere in the blob
+    positions: List[Tuple[int, int, str]] = []  # (pos, hole_idx, alias)
     for idx, token in enumerate(diam_list):
         alts = _diameter_aliases(token)
-
-        # last-resort numeric payloads (with & without leading zero)
+        # last-resort numeric payloads
         if token.startswith(("Ø", "∅")):
-            val_str = token[1:]
-            comp = val_str
+            s = token[1:]
             try:
-                f = float(val_str)
+                f = float(s)
                 comp = f"{f:.3f}".rstrip("0").rstrip(".")
             except Exception:
-                pass
+                comp = s
             alts += [comp, f"0{comp}", f"({comp})", f"(0{comp})"]
 
-        found_pos, found_alt = None, ""
+        best_pos, best_alt = None, ""
         for a in alts:
             p = blob.find(a)
-            if p != -1:
-                if found_pos is None or p < found_pos:
-                    found_pos, found_alt = p, a
-        if found_pos is None:
-            # if totally missing, stick it at the very end so it yields an empty segment
-            found_pos, found_alt = len(blob), ""
-        positions.append((found_pos, idx, found_alt))
+            if p != -1 and (best_pos is None or p < best_pos):
+                best_pos, best_alt = p, a
+        if best_pos is None:
+            best_pos, best_alt = len(blob), ""
+        positions.append((best_pos, idx, best_alt))
 
-    # Sort by position in the blob to get true left→right order
+    # 2) slice by sorted positions
     positions.sort(key=lambda t: t[0])
-
-    # Build slices in that order
     cuts = [p for (p, _, _) in positions]
-    segments_in_blob_order: List[str] = []
+    segments_in_order = []
     for i, start in enumerate(cuts):
-        end = cuts[i + 1] if i + 1 < len(cuts) else len(blob)
-        seg = blob[start:end]
+        end = cuts[i+1] if i+1 < len(cuts) else len(blob)
+        segments_in_order.append(blob[start:end])
 
-        # strip leading marker (handle both Ø-leading and Ø-trailing; fractions first)
-        seg = re.sub(r'^[\(\s]*[Ø∅]\s*[0-9]+/[0-9]+\)?\s*', '', seg)   # e.g., (Ø13/32)
-        seg = re.sub(r'^[\(\s]*[0-9]+/[0-9]+[Ø∅]\)?\s*', '', seg)      # e.g., (13/32∅)
-        seg = re.sub(r'^[\(\s]*[Ø∅]\s*[0-9.]+\)?\s*',        '', seg)  # e.g., (Ø.750)
+    # 3) basic strip of leading marker
+    def strip_leading_marker(s: str) -> str:
+        s = s.strip()
+        s = re.sub(r'^[\(\s]*[Ø∅]\s*[0-9]+/[0-9]+\)?\s*', '', s)
+        s = re.sub(r'^[\(\s]*[0-9]+/[0-9]+[Ø∅]\)?\s*', '', s)
+        s = re.sub(r'^[\(\s]*[Ø∅]\s*[0-9.]+\)?\s*',        '', s)
+        s = re.sub(r'^\s*"{1,2}[A-Z]"{1,2}\s*\((?:[Ø∅]\s*[0-9.]+)\)\s*', '', s)
+        s = re.sub(r'^\s*"{1,2}[A-Z]"{1,2}\s*', '', s)
+        return s.strip()
 
-        # strip quoted letter-drill preambles like "Q"(Ø.332)
-        seg = re.sub(r'^\s*"{1,2}[A-Z]"{1,2}\s*\((?:[Ø∅]\s*[0-9.]+)\)\s*', '', seg)
-        seg = re.sub(r'^\s*"{1,2}[A-Z]"{1,2}\s*', '', seg)
-
-        segments_in_blob_order.append(seg.strip())
-
-    # Map segments back to their original hole indices
+    # 4) map to the original hole order
     descs = [""] * len(diam_list)
-    for (pos, hole_idx, _), seg in zip(positions, segments_in_blob_order):
-        # ignore the sentinel 'end' segment
+    for (pos, hole_idx, _), seg in zip(positions, segments_in_order):
         if pos >= len(blob):
             continue
-        descs[hole_idx] = seg
+        descs[hole_idx] = strip_leading_marker(seg)
+
+    # 5) redistribute any cross-hits (multi-hole bundles) to the right holes
+    descs = _redistribute_cross_hits(descs, diam_list)
 
     return descs
 
