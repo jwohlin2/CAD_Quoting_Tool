@@ -164,6 +164,13 @@ from cad_quoter.app.hole_ops import (
     _SPOT_TOKENS,
     summarize_hole_chart_lines,
 )
+try:
+    from tools.hole_ops import explode_rows_to_operations as _explode_rows_to_operations
+except Exception:  # pragma: no cover - runtime fallback when tools package unavailable
+    try:
+        from hole_ops import explode_rows_to_operations as _explode_rows_to_operations  # type: ignore[no-redef]
+    except Exception:  # pragma: no cover - preserve behaviour without optional dependency
+        _explode_rows_to_operations = None  # type: ignore[assignment]
 from cad_quoter.app.container import (
     ServiceContainer,
     SupportsPricingEngine,
@@ -426,6 +433,151 @@ def _clamp_minutes(v: Any, lo: float = 0.0, hi: float = 10000.0) -> float:
     return minutes_val
 
 
+def _normalize_ops_entry(entry: Any) -> dict[str, Any] | None:
+    """Return a normalized ops entry with hole/ref/qty/desc metadata."""
+
+    if isinstance(entry, _MappingABC):
+        hole_raw = (
+            entry.get("hole")
+            or entry.get("HOLE")
+            or entry.get("id")
+            or entry.get("label")
+            or ""
+        )
+        ref_raw = (
+            entry.get("ref")
+            or entry.get("REF_DIAM")
+            or entry.get("REF")
+            or entry.get("diameter")
+            or entry.get("diameter_in")
+            or ""
+        )
+        desc_raw = (
+            entry.get("desc")
+            or entry.get("DESCRIPTION/DEPTH")
+            or entry.get("DESCRIPTION")
+            or entry.get("description")
+            or ""
+        )
+        qty_src = entry.get("qty") if "qty" in entry else entry.get("QTY")
+        qty_val = _ops_qty_from_value(qty_src)
+        normalized: dict[str, Any] = {
+            "hole": str(hole_raw or "").strip(),
+            "ref": str(ref_raw or "").strip(),
+            "qty": qty_val,
+            "desc": " ".join(str(desc_raw or "").split()),
+        }
+        for key_src, key_dst in (
+            ("type", "type"),
+            ("TYPE", "type"),
+            ("side", "side"),
+            ("SIDE", "side"),
+            ("thru", "thru"),
+            ("THRU", "thru"),
+            ("diameter_in", "diameter_in"),
+            ("DIAMETER_IN", "diameter_in"),
+            ("depth_in", "depth_in"),
+            ("DEPTH_IN", "depth_in"),
+        ):
+            if key_src in entry and normalized.get(key_dst) is None:
+                normalized[key_dst] = entry.get(key_src)
+        return normalized if any((normalized["hole"], normalized["ref"], normalized["desc"], normalized["qty"])) else None
+
+    if isinstance(entry, Sequence) and not isinstance(entry, (str, bytes, bytearray)):
+        seq = list(entry)
+        hole = str(seq[0]).strip() if len(seq) > 0 else ""
+        ref = str(seq[1]).strip() if len(seq) > 1 else ""
+        qty_token = seq[2] if len(seq) > 2 else None
+        qty_val = _ops_qty_from_value(qty_token)
+        if len(seq) > 3:
+            desc_parts = [str(part).strip() for part in seq[3:] if str(part or "").strip()]
+            desc = " ".join(desc_parts)
+        else:
+            desc = ""
+        normalized = {
+            "hole": hole,
+            "ref": ref,
+            "qty": qty_val,
+            "desc": desc,
+        }
+        return normalized if any((hole, ref, desc, qty_val)) else None
+
+    return None
+
+
+def _collect_ops_entries_for_display(
+    geo_map: Mapping[str, Any] | None,
+    fallback_rows: Sequence[Mapping[str, Any]] | None = None,
+) -> list[dict[str, Any]]:
+    """Return operations suitable for the HOLE TABLE section display."""
+
+    entries: list[dict[str, Any]] = []
+    seen_keys: set[tuple[str, str, int, str]] = set()
+
+    def _extend(candidate: Iterable[Any] | None) -> None:
+        if not candidate:
+            return
+        for raw in candidate:
+            normalized = _normalize_ops_entry(raw)
+            if not normalized:
+                continue
+            key = (
+                normalized.get("hole", ""),
+                normalized.get("ref", ""),
+                int(normalized.get("qty", 0) or 0),
+                normalized.get("desc", ""),
+            )
+            if key in seen_keys:
+                continue
+            seen_keys.add(key)
+            entries.append(normalized)
+
+    if isinstance(geo_map, _MappingABC):
+        hole_table_ops = geo_map.get("hole_table_ops")
+        if isinstance(hole_table_ops, Sequence):
+            _extend(hole_table_ops)
+
+        hole_table_payload = geo_map.get("hole_table")
+        if isinstance(hole_table_payload, _MappingABC):
+            ops_payload = hole_table_payload.get("ops")
+            if isinstance(ops_payload, Sequence):
+                _extend(ops_payload)
+
+    if not entries and fallback_rows:
+        _extend(fallback_rows)
+
+    if not entries and isinstance(geo_map, _MappingABC):
+        text_rows: list[str] = []
+        hole_table_payload = geo_map.get("hole_table")
+        if isinstance(hole_table_payload, _MappingABC):
+            lines = hole_table_payload.get("lines")
+            if isinstance(lines, Sequence):
+                text_rows.extend(str(s) for s in lines if isinstance(s, str))
+        for key in ("chart_lines", "hole_table_lines", "chart_text_lines", "hole_chart_lines"):
+            value = geo_map.get(key)
+            if isinstance(value, Sequence):
+                text_rows.extend(str(s) for s in value if isinstance(s, str))
+
+        if text_rows and _explode_rows_to_operations:
+            try:
+                exploded = _explode_rows_to_operations(text_rows) or []
+            except Exception:
+                exploded = []
+            _extend(exploded)
+
+    if not entries and isinstance(geo_map, _MappingABC):
+        structured = geo_map.get("hole_table_structured")
+        if isinstance(structured, Sequence):
+            _extend(structured)
+        hole_table_payload = geo_map.get("hole_table")
+        if isinstance(hole_table_payload, _MappingABC):
+            structured_payload = hole_table_payload.get("structured")
+            if isinstance(structured_payload, Sequence):
+                _extend(structured_payload)
+
+    return entries
+
+
 def _format_hole_table_section(
     entries: Sequence[Mapping[str, Any]] | None,
 ) -> list[str]:
@@ -586,13 +738,13 @@ def _emit_hole_table_ops_cards(
         if not tap_rows:
             return
 
-        tap_total_min = _render_ops_card(
-            lambda text: _push(lines, text),
-            title="Material Removal – Tapping",
-            rows=tap_rows,
-        )
+        tap_total_min = 0.0
+        for row in tap_rows:
+            qty = _ops_qty_from_value(row.get("qty"))
+            t_ph = _as_float(row.get("t_per_hole_min"), 0.0)
+            tap_total_min += qty * t_ph
 
-        tap_total_min = float(tap_total_min or 0.0)
+        tap_total_min = round(float(tap_total_min or 0.0), 2)
 
         try:
             if isinstance(ops_summary, (_MutableMappingABC, dict)):
@@ -7764,17 +7916,7 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
                     ops_summary_map["rows"] = built
                 ops_rows = built
 
-        table_entries: list[Mapping[str, Any]] = []
-        if isinstance(geo_map, _MappingABC):
-            hole_table_ops = geo_map.get("hole_table_ops")
-            if isinstance(hole_table_ops, Sequence):
-                for entry in hole_table_ops:
-                    if isinstance(entry, _MappingABC):
-                        table_entries.append(entry)
-        if not table_entries:
-            for entry in ops_rows:
-                if isinstance(entry, _MappingABC):
-                    table_entries.append(entry)
+        table_entries = _collect_ops_entries_for_display(geo_map, ops_rows)
 
         for line in _format_hole_table_section(table_entries):
             _push(lines, line)
