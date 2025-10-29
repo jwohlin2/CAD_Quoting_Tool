@@ -335,7 +335,7 @@ def _route_tap_only_chunks(descs: List[str], diam_list: List[str]) -> List[str]:
             continue
 
         # Split into clauses so we can route partial pieces
-        clauses = re.split(r'(?<=;)\s+|(?<=\))\s+', txt)  # split on semicolon boundaries or right-paren
+        clauses = _smart_clause_split(txt)
         keep_parts: List[str] = []
         for cl in clauses:
             if "TAP" not in cl.upper():
@@ -381,6 +381,25 @@ _RE_DEPTH_PHRASE= re.compile(r'[Xx]\s*([0-9.]+)\s*DEEP(?:\s+FROM\s+(FRONT|BACK))
 _RE_SIDE_PAIR   = re.compile(r'\bFROM\s+FRONT\s*&\s*BACK\b', re.I)
 _RE_SIDE        = re.compile(r'\bFROM\s+(FRONT|BACK)\b', re.I)
 _RE_QREF        = re.compile(r'^\s*"{1,2}[A-Z]"{1,2}\s*', re.I)   # leading "Q", "I", etc.
+
+
+def _smart_clause_split(s: str) -> List[str]:
+    """Split a description into clauses by semicolons and new operation markers."""
+
+    parts: List[str] = []
+    s = (s or "").strip()
+    if not s:
+        return parts
+
+    seeds = [chunk for chunk in s.split(';') if chunk.strip()]
+    for seed in seeds:
+        chunks = re.split(
+            r'(?=(?:"[A-Z]"\s*\(\s?[Ø∅]|\bC[\'’]BORE\b|\bC[\'’]DRILL\b|\bTAP\b|\bTHRU\b))',
+            seed,
+            flags=re.I,
+        )
+        parts.extend(chunk.strip() for chunk in chunks if chunk and chunk.strip())
+    return parts
 
 
 def _fmt_diam(token: str) -> str:
@@ -528,8 +547,8 @@ def _explode_description_into_ops(
     parse each to (diam, qty, desc), and return ready-to-write dicts.
     """
 
-    # split on semicolons, but keep content inside parentheses intact
-    clauses = [c.strip() for c in re.split(r';', description) if c.strip()]
+    # split on semicolons and other op boundaries, but keep decimals intact
+    clauses = _smart_clause_split(description)
     out: List[Dict[str,str]] = []
     for cl in clauses:
         for tgt_idx, diam, q, desc in _parse_clause_to_ops(hole_idx, base_diam, qty, cl, diam_list):
