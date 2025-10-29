@@ -425,17 +425,46 @@ def _smart_clause_split(s: str) -> List[str]:
 
 
 def _fmt_diam(token: str) -> str:
-    """Normalize a numeric token to Ø... (keep fractions as-is)."""
+    """Format a numeric token to an Ø… string:
+       - keep fraction as-is (Ø13/32)
+       - keep decimal precision present in the token (e.g., 0.3750 → Ø.3750)
+       - drop leading zero if value < 1 (0.623 → Ø.623)
+       - for whole inches like '1' or '1.0' render Ø1.00
+    """
     tok = token.strip()
-    if '/' in tok:
+    if "/" in tok:  # fraction
         return f"Ø{tok}"
-    # decimals: keep as entered, drop trailing zeros and dot for secondary ops
+    # decimals/integers
     try:
-        f = float(tok)
-        s = f"{f:.4f}".rstrip('0').rstrip('.')
-        return f"Ø{s}"
+        val = float(tok)
     except Exception:
         return f"Ø{tok}"
+
+    # preserve given precision
+    if "." in tok:
+        _, dec_part = tok.split(".", 1)
+
+        # strip leading zero for <1 while keeping supplied decimals
+        if val < 1.0:
+            sign = ""
+            rest = tok
+            if rest.startswith(("+", "-")):
+                sign = rest[0]
+                rest = rest[1:]
+            if rest.startswith("0."):
+                return f"Ø{sign}." + rest.split(".", 1)[1]
+            if rest.startswith("."):
+                return f"Ø{sign}." + rest.split(".", 1)[1]
+            # fallback if the token was unconventional (e.g., leading zeros elsewhere)
+            return f"Ø{sign}{rest}"
+
+        # >= 1: keep token as entered unless it's effectively an integer
+        if dec_part == "" or set(dec_part) <= {"0"}:
+            return f"Ø{int(val):.2f}"
+        return f"Ø{tok}"
+    else:
+        # integer like 1 → Ø1.00
+        return f"Ø{int(val):.2f}"
 
 
 def _fmt_primary_ref_diam(token: str) -> str:
