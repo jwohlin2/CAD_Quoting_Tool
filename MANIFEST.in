@@ -1,0 +1,2 @@
+recursive-include cad_quoter/resources *.csv *.json *.txt *.yml *.yaml
+recursive-include cad_quoter/pricing/resources *.csv *.json *.txt

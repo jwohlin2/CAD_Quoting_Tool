@@ -21,6 +21,7 @@ from fnmatch import fnmatchcase
 
 from cad_quoter import geometry
 from cad_quoter.geometry import convert_dwg_to_dxf
+from cad_quoter.geometry.mtext_utils import normalize_mtext_plain_text
 from cad_quoter.geometry.dxf_enrich import detect_units_scale
 from cad_quoter.vendors import ezdxf as _ezdxf_vendor
 
@@ -1801,19 +1802,24 @@ def _extract_entity_text_payload(
         }
 
     if canonical_kind == "MTEXT":
-        plain_text = None
+        plain_text: str | None = None
         plain_method = getattr(entity, "plain_text", None)
         if callable(plain_method):
             try:
-                plain_text = plain_method()
+                plain_candidate = plain_method()
             except Exception:
-                plain_text = None
+                plain_candidate = None
+            else:
+                if plain_candidate is not None:
+                    plain_text = str(plain_candidate)
         raw = _first_text_value(
             getattr(entity, "text", None),
             getattr(entity, "raw_text", None),
             getattr(dxf_obj, "text", None),
             getattr(dxf_obj, "content", None),
         )
+        if plain_text is None and raw is not None:
+            plain_text = normalize_mtext_plain_text(raw)
         text_value = plain_text or raw
         if text_value is None:
             return None
@@ -1830,18 +1836,23 @@ def _extract_entity_text_payload(
         mtext = getattr(context, "mtext", None) if context is not None else None
         if mtext is None:
             return None
-        plain_text = None
+        plain_text: str | None = None
         plain_method = getattr(mtext, "plain_text", None)
         if callable(plain_method):
             try:
-                plain_text = plain_method()
+                plain_candidate = plain_method()
             except Exception:
-                plain_text = None
+                plain_candidate = None
+            else:
+                if plain_candidate is not None:
+                    plain_text = str(plain_candidate)
         raw = _first_text_value(
             getattr(mtext, "text", None),
             getattr(getattr(mtext, "dxf", None), "text", None),
             getattr(mtext, "raw_text", None),
         )
+        if plain_text is None and raw is not None:
+            plain_text = normalize_mtext_plain_text(raw)
         text_value = plain_text or raw
         if text_value is None:
             return None
@@ -7843,6 +7854,7 @@ def read_text_table(
                 raise RuntimeError("No text found before layer filtering…")
             layout_counts_pre = _count_layouts(collected_entries)
             anchor_scan_entries: list[dict[str, Any]] = []
+            token_hits: list[tuple[dict[str, Any], float, set[str]]] = []
             for entry in collected_entries:
                 raw_text_value = entry.get("text")
                 try:
@@ -7851,16 +7863,32 @@ def read_text_table(
                     text_value = ""
                 if not text_value.strip():
                     continue
-                anchor_scan_entries.append(
-                    {
-                        "layout": entry.get("layout_name"),
-                        "from_block": bool(entry.get("from_block")),
-                        "x": entry.get("x"),
-                        "y": entry.get("y"),
-                        "text": text_value,
-                        "height": entry.get("height"),
-                    }
-                )
+                x_val = entry.get("x")
+                y_val = entry.get("y")
+                try:
+                    x_float = float(x_val) if x_val is not None else None
+                except Exception:
+                    x_float = None
+                try:
+                    y_float = float(y_val) if y_val is not None else None
+                except Exception:
+                    y_float = None
+                scan_entry = {
+                    "layout": entry.get("layout_name"),
+                    "from_block": bool(entry.get("from_block")),
+                    "x": x_float,
+                    "y": y_float,
+                    "text": text_value,
+                    "height": entry.get("height"),
+                }
+                anchor_scan_entries.append(scan_entry)
+                tokens_here: set[str] = set()
+                if text_value:
+                    for token, pattern in _ANCHOR_HEADER_TOKEN_RES.items():
+                        if pattern.search(text_value):
+                            tokens_here.add(token)
+                if y_float is not None and tokens_here:
+                    token_hits.append((scan_entry, y_float, tokens_here))
             if anchor_scan_entries:
                 height_samples = [
                     float(val)
@@ -7877,11 +7905,75 @@ def read_text_table(
                     anchor_scan_entries,
                     base_height=base_anchor_height,
                 )
-                anchor_height_value = base_anchor_height
+
+                def _cluster_token_hits(
+                    hits: list[tuple[dict[str, Any], float, set[str]]],
+                    *,
+                    tolerance: float,
+                ) -> list[list[tuple[dict[str, Any], float, set[str]]]]:
+                    if not hits:
+                        return []
+                    ordered_hits = sorted(hits, key=lambda item: (-item[1], item[0]["x"] or 0.0))
+                    clusters_local: list[list[tuple[dict[str, Any], float, set[str]]]] = []
+                    current_cluster: list[tuple[dict[str, Any], float, set[str]]] = []
+                    prev_y_local: float | None = None
+                    for hit in ordered_hits:
+                        y_value = hit[1]
+                        if (
+                            current_cluster
+                            and prev_y_local is not None
+                            and abs(y_value - prev_y_local) <= tolerance
+                        ):
+                            current_cluster.append(hit)
+                        else:
+                            if current_cluster:
+                                clusters_local.append(current_cluster)
+                            current_cluster = [hit]
+                        prev_y_local = y_value
+                    if current_cluster:
+                        clusters_local.append(current_cluster)
+                    return clusters_local
+
+                effective_anchor = float(base_anchor_height or 0.0)
+                if effective_anchor <= 0 and height_samples:
+                    effective_anchor = float(statistics.median(height_samples))
+                y_tolerance = max(6.0, effective_anchor * 1.5) if effective_anchor > 0 else 12.0
+
+                best_entries: list[dict[str, Any]] = list(anchor_lines_pre)
+                tokens_set = {token for token in header_tokens_pre if token}
+                if not best_entries:
+                    clusters = _cluster_token_hits(token_hits, tolerance=y_tolerance)
+                    best_cluster: list[tuple[dict[str, Any], float, set[str]]] | None = None
+                    best_token_count = 0
+                    best_size = 0
+                    for cluster in clusters:
+                        cluster_tokens: set[str] = set()
+                        for _, _, token_set in cluster:
+                            cluster_tokens.update(token_set)
+                        token_count = len(cluster_tokens)
+                        if token_count > best_token_count or (
+                            token_count == best_token_count and len(cluster) > best_size
+                        ):
+                            best_cluster = cluster
+                            best_token_count = token_count
+                            best_size = len(cluster)
+                    if best_cluster:
+                        best_entries = [item[0] for item in best_cluster]
+                        tokens_set = set()
+                        for _, _, token_set in best_cluster:
+                            tokens_set.update(token_set)
+                if best_entries and not tokens_set:
+                    for entry in best_entries:
+                        text_candidate = str(entry.get("text") or "")
+                        for token, pattern in _ANCHOR_HEADER_TOKEN_RES.items():
+                            if pattern.search(text_candidate):
+                                tokens_set.add(token)
+                anchor_height_value = float(base_anchor_height or 0.0)
                 anchor_specific_heights = [
                     float(line.get("height"))
-                    for line in anchor_lines_pre
-                    if isinstance(line.get("height"), (int, float)) and float(line.get("height")) > 0
+                    for line in best_entries
+                    if isinstance(line.get("height"), (int, float))
+                    and float(line.get("height")) > 0
                 ]
                 if anchor_specific_heights:
                     try:
@@ -7892,22 +7984,24 @@ def read_text_table(
                     anchor_height_display = "-"
                 else:
                     anchor_height_display = f"{float(anchor_height_value):.3f}"
-                tokens_set = {token for token in header_tokens_pre if token}
-                if tokens_set:
-                    tokens_display = "{" + ",".join(f"'{token}'" for token in sorted(tokens_set)) + "}"
+                ordered_tokens = _ordered_header_tokens(tokens_set)
+                if ordered_tokens:
+                    tokens_display = "{" + ",".join(f"'{token}'" for token in ordered_tokens) + "}"
                 else:
                     tokens_display = "{}"
                 print(
                     "[ANCHOR] tokens={tokens} found={count} anchor_height={height}".format(
                         tokens=tokens_display,
-                        count=len(anchor_lines_pre),
+                        count=len(best_entries),
                         height=anchor_height_display,
                     )
                 )
+                if anchor_height_value > 0:
+                    anchor_height = float(anchor_height_value)
                 if isinstance(_LAST_TEXT_TABLE_DEBUG, dict):
                     _LAST_TEXT_TABLE_DEBUG["anchors_pre_filter"] = {
-                        "count": len(anchor_lines_pre),
-                        "tokens": list(sorted(tokens_set)),
+                        "count": len(best_entries),
+                        "tokens": list(ordered_tokens),
                         "anchor_height": anchor_height_value,
                     }
             if debug_scan_enabled:
@@ -9543,7 +9637,7 @@ def read_text_table(
         header_pattern = re.compile(r"HOLE\s+(TABLE|CHART)", re.IGNORECASE)
         for entry in collected_entries:
             text_value = str(entry.get("text") or "").strip()
-            if not text_value or not _layer_allowed(entry):
+            if not text_value:
                 continue
             record = {
                 "layout_name": entry.get("layout_name"),
@@ -9607,6 +9701,8 @@ def read_text_table(
                     continue
                 y_float = float(y_val)
                 if y_float < band_low or y_float > band_high:
+                    continue
+                if not _layer_allowed(entry):
                     continue
                 height_val = entry.get("height")
                 if isinstance(height_val, (int, float)) and float(height_val) > 0:

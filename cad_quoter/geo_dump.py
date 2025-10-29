@@ -7,7 +7,6 @@ import importlib
 import json
 import math
 import os
-import re
 import statistics
 import sys
 from collections import Counter
@@ -33,10 +32,12 @@ from cad_quoter.geo_extractor import (
     TextScanOpts,
     extract_for_app,
 )
+from cad_quoter.geometry.mtext_utils import normalize_mtext_plain_text
 
 DEFAULT_SAMPLE_PATH = REPO_ROOT / "Cad Files" / "301_redacted.dwg"
 ARTIFACT_DIR = REPO_ROOT / "out"
 DEFAULT_EXCLUDE_PATTERN_TEXT = ", ".join(DEFAULT_TEXT_LAYER_EXCLUDE_REGEX) or "<none>"
+DEFAULT_TEXT_LAYER_INCLUDE_REGEX = (".*",)
 
 _FULL_TEXT_FIELDS = [
     "layout",
@@ -446,36 +447,6 @@ def _resolve_handle(entity: Any) -> str | None:
     if handle in (None, ""):
         return None
     return str(handle)
-
-
-def _compose_block_name(block_path: Iterable[Any]) -> str | None:
-    """Return a display string for a nested ``block_path``."""
-
-    if not block_path:
-        return None
-    parts: list[str] = []
-    for item in block_path:
-        if item is None:
-            continue
-        try:
-            text = str(item).strip()
-        except Exception:
-            continue
-        if text:
-            parts.append(text)
-    if not parts:
-        return None
-    return " > ".join(parts)
-
-
-def _normalize_mtext_plain_text(raw_text: str) -> str:
-    """Return plain text for ``raw_text`` extracted from an MTEXT entity."""
-
-    text = raw_text.replace("\\P", "\n").replace("\\~", "~")
-    text = re.sub(r"\\[AaCcFfHh][^;]*;", "", text)
-    return text
-
-
 def _extract_text_strings(entity: Any, etype: str) -> tuple[str | None, str | None]:
     raw_text: str | None = None
     plain_text: str | None = None
@@ -492,7 +463,7 @@ def _extract_text_strings(entity: Any, etype: str) -> tuple[str | None, str | No
             except Exception:
                 plain_text = None
         if plain_text is None and raw_text is not None:
-            plain_text = _normalize_mtext_plain_text(raw_text)
+            plain_text = normalize_mtext_plain_text(raw_text)
     elif etype in {"TEXT", "ATTRIB", "ATTDEF"}:
         if dxf is not None and hasattr(dxf, "text"):
             try:
@@ -520,7 +491,7 @@ def _extract_text_strings(entity: Any, etype: str) -> tuple[str | None, str | No
                 except Exception:
                     plain_text = None
             if plain_text is None and raw_text is not None:
-                plain_text = _normalize_mtext_plain_text(raw_text)
+                plain_text = normalize_mtext_plain_text(raw_text)
             if hasattr(mtext_obj, "destroy"):
                 try:
                     mtext_obj.destroy()
@@ -532,7 +503,7 @@ def _extract_text_strings(entity: Any, etype: str) -> tuple[str | None, str | No
             except Exception:
                 raw_text = None
         if raw_text is not None and plain_text is None:
-            plain_text = _normalize_mtext_plain_text(raw_text)
+            plain_text = normalize_mtext_plain_text(raw_text)
 
     if plain_text is None and raw_text is not None:
         plain_text = raw_text
@@ -622,7 +593,7 @@ def dump_all_text(doc: Any, out_dir: Path | str, opts: Mapping[str, Any] | None)
     except Exception:
         layout_spaces = []
 
-    records: list[dict[str, Any]] = []
+    raw_lines_all: list[dict[str, Any]] = []
     mleader_total = 0
     mleader_captured = 0
     from_blocks_depth_max = block_depth_limit
@@ -778,22 +749,14 @@ def dump_all_text(doc: Any, out_dir: Path | str, opts: Mapping[str, Any] | None)
                 block_path=block_path,
                 matrix=transform,
             )
-            if record and record_matches_filters(record):
-                records.append(record)
+            if record:
+                raw_lines_all.append(record)
             return
         if etype == "MLEADER":
             mleader_total += 1
-            record = build_record(
-                entity,
-                layout_name,
-                from_block=from_block_flag,
-                block_name=block_name_value,
-                block_path=block_path,
-                matrix=transform,
-            )
-            if record and record.get("plain_text") and record_matches_filters(record):
-                records.append(record)
-                mleader_captured += 1
+            record = build_record(entity, layout_name, from_block=from_block, block_name=block_name)
+            if record and record.get("plain_text"):
+                raw_lines_all.append(record)
             return
         if etype != "INSERT":
             return
@@ -868,8 +831,8 @@ def dump_all_text(doc: Any, out_dir: Path | str, opts: Mapping[str, Any] | None)
             continue
         for table_entry in iter_table_cells((layout_name, layout)):
             table_record = build_tablecell_record(table_entry)
-            if table_record and record_matches_filters(table_record):
-                records.append(table_record)
+            if table_record:
+                raw_lines_all.append(table_record)
         for entity in layout:
             walk_entity(
                 entity,
@@ -886,17 +849,27 @@ def dump_all_text(doc: Any, out_dir: Path | str, opts: Mapping[str, Any] | None)
     with csv_path.open("w", newline="", encoding="utf-8") as handle:
         writer = csv.writer(handle)
         writer.writerow(_FULL_TEXT_FIELDS)
-        for entry in records:
+        for entry in raw_lines_all:
             writer.writerow([entry.get(field) for field in _FULL_TEXT_FIELDS])
 
     with jsonl_path.open("w", encoding="utf-8") as handle:
-        for entry in records:
+        for entry in raw_lines_all:
             json.dump(entry, handle, ensure_ascii=False)
             handle.write("\n")
 
     print(f"[TEXT-DUMP] full csv -> {csv_path}")
     print(f"[TEXT-DUMP] full jsonl -> {jsonl_path}")
+    print(f"[TEXT-DUMP] full count={len(raw_lines_all)}")
     print(f"[TEXT-DUMP] from_blocks_depth_max={from_blocks_depth_max}")
+
+    records: list[dict[str, Any]] = []
+    for entry in raw_lines_all:
+        if entry.get("entity_type") == "MLEADER" and not entry.get("plain_text"):
+            continue
+        if record_matches_filters(entry):
+            records.append(entry)
+
+    mleader_captured = sum(1 for entry in records if entry.get("entity_type") == "MLEADER")
 
     return (records, csv_path, jsonl_path)
 
@@ -1063,6 +1036,12 @@ def _normalize_pattern_args(values: Sequence[str] | None) -> list[str]:
             if candidate:
                 patterns.append(candidate)
     return patterns
+
+
+def _unique_patterns(patterns: Sequence[str]) -> tuple[str, ...]:
+    if not patterns:
+        return ()
+    return tuple(dict.fromkeys(patterns))
 
 
 def _truthy_flag(value: Any) -> bool:
@@ -1242,7 +1221,7 @@ def _print_chart_audit(
         top_layers_display = "-"
 
     tables_count = int(tables_found)
-    print(
+    summary_message = (
         "[AUDIT] CHART text_raw={text_raw} in_blocks={in_blocks} "
         "kept_by_layer={kept} kept_by_height={height} tables={tables}".format(
             text_raw=text_raw,
@@ -1270,6 +1249,8 @@ def _print_chart_audit(
         print(
             "[AUDIT] Recommendation: lower --text-min-height or adjust layer include."
         )
+
+    print(summary_message)
 
 
 def _am_bor_included_from_candidates(*candidates: Mapping[str, Any] | None) -> bool:
@@ -2174,8 +2155,27 @@ def main(argv: Sequence[str] | None = None) -> int:
     text_min_height = args.text_min_height
     text_include_patterns = _normalize_pattern_args(args.text_include_layers)
     text_exclude_patterns = _normalize_pattern_args(args.text_exclude_layers)
-    include_tuple = tuple(text_include_patterns) if text_include_patterns else None
-    exclude_tuple = tuple(text_exclude_patterns) if text_exclude_patterns else None
+    include_tuple: tuple[str, ...] | None = None
+    exclude_tuple: tuple[str, ...] | None = None
+    if text_include_patterns:
+        include_tuple = _unique_patterns(text_include_patterns)
+        if text_exclude_patterns:
+            exclude_tuple = _unique_patterns(text_exclude_patterns)
+        else:
+            exclude_tuple = DEFAULT_TEXT_LAYER_EXCLUDE_REGEX
+    elif text_exclude_patterns:
+        include_tuple = DEFAULT_TEXT_LAYER_INCLUDE_REGEX
+        exclude_tuple = _unique_patterns(text_exclude_patterns)
+    if (
+        include_tuple is None
+        and exclude_tuple is None
+        and (
+            text_anchor_ratio is not None
+            or text_min_height is not None
+        )
+    ):
+        include_tuple = DEFAULT_TEXT_LAYER_INCLUDE_REGEX
+        exclude_tuple = DEFAULT_TEXT_LAYER_EXCLUDE_REGEX
     if (
         text_anchor_ratio is not None
         or text_min_height is not None
@@ -3282,6 +3282,9 @@ def main(argv: Sequence[str] | None = None) -> int:
                 for entry in entities or []:
                     if not isinstance(entry, Mapping):
                         continue
+                    raw_text = entry.get("raw_text")
+                    text_value = entry.get("text")
+                    plain_text = entry.get("plain_text")
                     record = {
                         "type": entry.get("type"),
                         "handle": entry.get("handle"),
@@ -3291,12 +3294,10 @@ def main(argv: Sequence[str] | None = None) -> int:
                         "block_name": entry.get("block_name"),
                         "depth": entry.get("depth"),
                         "height": entry.get("height"),
-                        "rotation": entry.get("rotation"),
                         "x": entry.get("x"),
                         "y": entry.get("y"),
-                        "text": entry.get("text"),
-                        "plain_text": entry.get("plain_text"),
-                        "raw_text": entry.get("raw_text"),
+                        "raw": raw_text if raw_text is not None else text_value,
+                        "plain": plain_text if plain_text is not None else text_value,
                     }
                     json.dump(record, handle, ensure_ascii=False)
                     handle.write("\n")
