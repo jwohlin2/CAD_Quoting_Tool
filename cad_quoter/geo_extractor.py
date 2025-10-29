@@ -1946,6 +1946,10 @@ def _build_text_record(
     layout_label = str(layout_name or "").strip() or "-"
     handle_value = _entity_handle(flattened.entity)
     block_path = [str(name) for name in flattened.block_stack if name]
+    block_name_value = " > ".join(block_path) if block_path else flattened.block_name or None
+    depth_value = int(flattened.depth)
+    from_block_value = 1 if flattened.from_block else 0
+    raw_text_value = raw_value if raw_value is not None else text_value
 
     return {
         "handle": handle_value or None,
@@ -1959,6 +1963,13 @@ def _build_text_record(
         "block_path": block_path,
         "text": text_value,
         "raw": raw_value,
+        "x": insert_x,
+        "y": insert_y,
+        "block_name": block_name_value,
+        "from_block": from_block_value,
+        "depth": depth_value,
+        "plain_text": text_value,
+        "raw_text": raw_text_value,
     }
 
 
@@ -2090,6 +2101,7 @@ def collect_all_text(
     min_height: float | None = None,
     layers_include: Any = None,
     layers_exclude: Any = None,
+    block_depth: int | None = None,
 ) -> list[dict[str, Any]]:
     """Return a list of raw text records from the DXF document.
 
@@ -2110,16 +2122,39 @@ def collect_all_text(
         World rotation in degrees, if available.
     ``insert_x`` / ``insert_y``
         World insertion point coordinates when they can be resolved.
+    ``x`` / ``y``
+        Convenience aliases for ``insert_x`` and ``insert_y`` in world coordinates.
+    ``from_block``
+        ``1`` when the entity originated from a nested INSERT, otherwise ``0``.
+    ``block_name``
+        Display label for the INSERT stack, when available.
+    ``depth``
+        Nesting depth within the INSERT traversal.
     ``block_path``
         A list describing the nested block stack when traversing INSERTs.
     ``text``
         Normalized plain-text content.
     ``raw``
         Original raw content, when exposed by the entity.
+    ``plain_text``
+        Normalized plain-text content (alias of ``text``).
+    ``raw_text``
+        Original raw content (alias of ``raw``).
     """
 
     layouts = _iter_text_layout_spaces(doc, include_paperspace)
-    depth = _MAX_INSERT_DEPTH if include_blocks else 0
+    depth = 0
+    if include_blocks:
+        depth_candidate: int | None = None
+        if block_depth is not None:
+            try:
+                depth_candidate = int(block_depth)
+            except Exception:
+                depth_candidate = None
+        if depth_candidate is None:
+            depth = _MAX_INSERT_DEPTH
+        else:
+            depth = max(depth_candidate, 0)
     records: list[dict[str, Any]] = []
 
     for layout_name, layout in layouts:
