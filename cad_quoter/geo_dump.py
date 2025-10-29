@@ -384,19 +384,19 @@ def _route_tap_only_chunks(descs: List[str], diam_list: List[str]) -> List[str]:
         clauses = _smart_clause_split(txt)
         keep_parts: List[str] = []
         for cl in clauses:
-            if "TAP" not in cl.upper():
+            moved_clause = False
+            if "TAP" in cl.upper():
+                # Try to read thread token and estimate tap drill
+                parsed = _parse_thread_token(cl)
+                if parsed:
+                    major_in, tpi = parsed
+                    tap_in = major_in if "#" in cl or re.search(r'#[0-9]+', cl) else _tap_drill_from(major_in, tpi)
+                    tgt_idx = _snap_to_nearest(tap_in, diam_list)
+                    # Move this clause to its target hole
+                    moved[tgt_idx] = (moved[tgt_idx] + " " + cl).strip() if moved[tgt_idx] else cl
+                    moved_clause = True
+            if not moved_clause:
                 keep_parts.append(cl)
-                continue
-            # Try to read thread token and estimate tap drill
-            parsed = _parse_thread_token(cl)
-            if not parsed:
-                keep_parts.append(cl)
-                continue
-            major_in, tpi = parsed
-            tap_in = major_in if "#" in cl or re.search(r'#[0-9]+', cl) else _tap_drill_from(major_in, tpi)
-            tgt_idx = _snap_to_nearest(tap_in, diam_list)
-            # Move this clause to its target hole
-            moved[tgt_idx] = (moved[tgt_idx] + " " + cl).strip() if moved[tgt_idx] else cl
 
         keep[i] = " ".join(p for p in (p.strip() for p in keep_parts) if p)
 
@@ -484,46 +484,30 @@ def _smart_clause_split(s: str) -> List[str]:
 
 
 def _fmt_diam(token: str) -> str:
-    """Format a numeric token to an Ø… string:
-       - keep fraction as-is (Ø13/32)
-       - keep decimal precision present in the token (e.g., 0.3750 → Ø.3750)
-       - drop leading zero if value < 1 (0.623 → Ø.623)
-       - for whole inches like '1' or '1.0' render Ø1.00
+    """Ø formatter:
+       - fractions: Ø13/32
+       - decimals: keep given precision; drop leading 0 if <1 (0.623 -> Ø.623)
+       - integers: Ø1.00
     """
     tok = token.strip()
-    if "/" in tok:  # fraction
+    if '/' in tok:
         return f"Ø{tok}"
-    # decimals/integers
     try:
         val = float(tok)
     except Exception:
         return f"Ø{tok}"
-
-    # preserve given precision
-    if "." in tok:
-        _, dec_part = tok.split(".", 1)
-
-        # strip leading zero for <1 while keeping supplied decimals
+    if '.' in tok:
+        dec = tok.split('.', 1)[1]
         if val < 1.0:
-            sign = ""
-            rest = tok
-            if rest.startswith(("+", "-")):
-                sign = rest[0]
-                rest = rest[1:]
-            if rest.startswith("0."):
-                return f"Ø{sign}." + rest.split(".", 1)[1]
-            if rest.startswith("."):
-                return f"Ø{sign}." + rest.split(".", 1)[1]
-            # fallback if the token was unconventional (e.g., leading zeros elsewhere)
-            return f"Ø{sign}{rest}"
-
-        # >= 1: keep token as entered unless it's effectively an integer
-        if dec_part == "" or set(dec_part) <= {"0"}:
-            return f"Ø{int(val):.2f}"
-        return f"Ø{tok}"
-    else:
-        # integer like 1 → Ø1.00
-        return f"Ø{int(val):.2f}"
+            # keep original decimals, drop leading zero
+            return f"Ø.{dec}".rstrip()
+        # keep as given unless it's a whole
+        if abs(val - round(val)) < 1e-9:
+            return f"Ø{int(round(val)):.2f}"
+        # preserve user precision without trailing junk
+        s = tok.rstrip('0').rstrip('.')
+        return f"Ø{s}"
+    return f"Ø{int(val):.2f}"
 
 
 def _fmt_primary_ref_diam(token: str) -> str:
@@ -610,14 +594,7 @@ def _parse_clause_to_ops(
     if not s:
         return ops
 
-    def _qty_for(idx: int) -> int:
-        if 0 <= idx < len(qtys):
-            return qtys[idx]
-        if 0 <= hole_idx < len(qtys):
-            return qtys[hole_idx]
-        return 0
-
-    # (Ø.3750 JIG GRIND) → nearest hole (qty of target), own op
+    # (Ø.3750 JIG GRIND) → nearest hole (use that hole's qty)
     for pm in list(_RE_PAREN_JG.finditer(s)):
         val = pm.group(1)
         dstr = _fmt_diam(val)
@@ -625,37 +602,34 @@ def _parse_clause_to_ops(
             tgt = _snap_to_nearest_index(float(val), diam_list)
         except Exception:
             tgt = hole_idx
-        ops.append((tgt, dstr, _qty_for(tgt), "JIG GRIND"))
+        ops.append((tgt, dstr, qtys[tgt], "JIG GRIND"))
         s = s.replace(pm.group(0), " ")
 
-    # Ø override at start or trailing fraction: adopt DIAMETER, but KEEP HOLE (do NOT move the hole)
+    # Leading/trailing Ø override → adopt DIAMETER, but KEEP HOLE
     diam_override, rest = _extract_leading_diam(_clean_clause_text(s))
     hole_for_clause = hole_idx
     diam_for_clause = diam_override or base_diam
     rest = _clean_clause_text(rest)
 
-    # split FRONT & BACK as two ops where present
-    parts = _explode_front_back(rest) if rest else ["THRU"]
+    # Split FRONT/BACK or default to single part with explicit op
+    parts = _explode_front_back(rest) if rest else [rest]
 
     for part in parts:
         desc = _clean_clause_text(part)
 
-        # Any mid-clause naked diameter? adopt it as the op diameter, KEEP HOLE
-        anyd_match = _RE_DIAM_ANY.search(desc)
-        anyd = _matched_diam_token(anyd_match)
+        # If desc contains a Ø/∅ token mid-clause, adopt it as op diameter (KEEP HOLE)
+        anyd = _RE_DIAM_ANY.search(desc)
         if anyd:
             diam_for_clause = _fmt_diam(anyd)
 
         # ---- TAP policy: TAP ops always use the HOLE's REF_DIAM ----
         if _RE_TAP.search(desc):
-            ops.append((hole_for_clause, base_diam, _qty_for(hole_for_clause), desc))
+            ops.append((hole_for_clause, base_diam, qtys[hole_for_clause], desc))
             continue
 
-        # THRU, C'BORE, C'DRILL use diam_for_clause (override if present)
-        if any(rx.search(desc) for rx in (_RE_THRU, _RE_CBORE, _RE_CDRILL)):
-            ops.append((hole_for_clause, diam_for_clause, _qty_for(hole_for_clause), desc))
-        else:
-            ops.append((hole_for_clause, diam_for_clause, _qty_for(hole_for_clause), desc))
+        # Non-TAP ops: THRU / C'BORE / C'DRILL
+        if any(rx.search(desc) for rx in (_RE_THRU, _RE_CBORE, _RE_CDRILL, re.compile(r'JIG\s+GRIND', re.I))):
+            ops.append((hole_for_clause, diam_for_clause, qtys[hole_for_clause], desc))
 
     return ops
 
@@ -674,39 +648,8 @@ def _explode_description_into_ops(
     parse each to (diam, qty, desc), and return ready-to-write dicts.
     """
 
-    # split on semicolons and other op boundaries, but keep decimals intact
-    clauses = _smart_clause_split(description)
-
-    folded_clauses: List[str] = []
-    i = 0
-    while i < len(clauses):
-        cl = clauses[i].strip()
-        if not cl:
-            i += 1
-            continue
-
-        if _RE_TOL.match(cl) and i + 1 < len(clauses):
-            merged = _fold_inline_modifiers(f"{cl} {clauses[i + 1]}")
-            clauses[i + 1] = merged
-            i += 1
-            continue
-
-        if _RE_DIAM_ANY.fullmatch(cl) and i + 1 < len(clauses) and _RE_NEXT_OP.search(clauses[i + 1]):
-            merged = _fold_inline_modifiers(f"{cl} {clauses[i + 1]}")
-            clauses[i + 1] = merged
-            i += 1
-            continue
-
-        folded_clauses.append(_fold_inline_modifiers(cl))
-        i += 1
-
-    if folded_clauses:
-        clauses = folded_clauses
-    else:
-        clauses = [_fold_inline_modifiers(cl.strip()) for cl in clauses if cl.strip()]
-
-    out: List[Dict[str,str]] = []
-    for cl in clauses:
+    out = []
+    for cl in _smart_clause_split(description):
         for tgt_idx, diam, q, desc in _parse_clause_to_ops(
             hole_idx, base_diam, qtys, cl, hole_letters, diam_list
         ):
