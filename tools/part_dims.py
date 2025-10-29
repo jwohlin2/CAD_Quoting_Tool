@@ -64,63 +64,53 @@ def _read_texts(
     return lines
 
 
-_THK_PATTERN_SUFFIX = r"(?P<num>(?:\d+\s*-\s*)?\d+(?:/\d+)?|\d*\.\d+|\.\d+)"
-_THK_PATTERNS: Sequence[re.Pattern[str]] = (
-    re.compile(rf"(?:THK|T|Thickness)\s*[:=]?\s*{_THK_PATTERN_SUFFIX}", re.IGNORECASE),
-    re.compile(rf"{_THK_PATTERN_SUFFIX}\s*(?:THK|T)\b", re.IGNORECASE),
+_THK_TOKENS = r'(?:THK|T(?:H(?:I(?:C(?:K(?:NESS)?)?)?)?)?)[\s:=]*'
+_NUM = r'(?:\d+(?:\.\d+)?|\d+\s*-\s*\d+\/\d+|\d+\/\d+)'
+
+RE_THICKNESS_LINE = re.compile(
+    rf'\b{_THK_TOKENS}(?P<t>{_NUM})(?:\s*(?P<u>in(?:ch(?:es)?)?|"))?\b',
+    re.IGNORECASE
 )
 
 
-def _parse_fraction(token: str) -> Optional[float]:
-    """Convert decimal, fraction (13/32) or mixed number (1-1/2) to float."""
+def _to_float_in(token: str) -> Optional[float]:
+    """Convert supported numeric token forms to inches."""
 
-    token = token.strip().replace(" ", "")
-    if not token:
+    s = token.strip().lower().replace('"', '')
+    if not s:
         return None
 
+    mixed = re.match(r'^(\d+)\s*-\s*(\d+)\s*/\s*(\d+)$', s)
+    if mixed:
+        whole, num, den = map(int, mixed.groups())
+        if den == 0:
+            return None
+        return whole + (num / den)
+
+    frac = re.match(r'^(\d+)\s*/\s*(\d+)$', s)
+    if frac:
+        num, den = map(int, frac.groups())
+        if den == 0:
+            return None
+        return num / den
+
     try:
-        return float(token)
+        return float(s)
     except ValueError:
-        pass
-
-    if "-" in token:
-        whole, _, frac = token.partition("-")
-        try:
-            whole_val = float(whole)
-        except ValueError:
-            return None
-        frac_val = _parse_fraction(frac)
-        if frac_val is None:
-            return None
-        return whole_val + frac_val
-
-    if "/" in token:
-        num, _, den = token.partition("/")
-        try:
-            return float(int(num)) / float(int(den))
-        except (ValueError, ZeroDivisionError):
-            return None
-
-    return None
+        return None
 
 
 def _parse_thickness_from_text(lines: List[str]) -> Optional[float]:
-    """Extract a stock thickness value from free-form text lines."""
+    """Only accept thickness explicitly labeled (THK, T=, THICKNESS)."""
 
     for raw in lines:
-        text = raw.strip()
-        if not text:
+        s = raw.strip()
+        m = RE_THICKNESS_LINE.search(s)   # require keyword -> prevents 'SHEET 2'
+        if not m:
             continue
-        for pattern in _THK_PATTERNS:
-            for match in pattern.finditer(text):
-                token = match.group("num")
-                if not token:
-                    continue
-                token = token.strip().rstrip(",.;")
-                value = _parse_fraction(token)
-                if value is not None and value > 0:
-                    print(f"[part-dims] thickness from text: {value:.4f} in (line='{text}')")
-                    return value
+        t = _to_float_in(m.group('t'))
+        if t is not None:
+            return t
     return None
 
 
@@ -339,73 +329,46 @@ def infer_part_dims(
 
     doc = ezdxf.readfile(dxf_path)
     msp = doc.modelspace()
-    unit_factor = _insunits_to_inch_factor(doc)
+    f = _insunits_to_inch_factor(doc)
 
-    # 1) ordinate dimensions first
-    max_x, max_y = _max_ordinate_xy(msp)
-    length_in: Optional[float] = None
-    width_in: Optional[float] = None
-    length_source: Optional[str] = None
+    # dimensions first
+    ox, oy, _, _ = _max_ordinate_xy(msp)
+    L: Optional[float] = None
+    W: Optional[float] = None
+    source: Optional[str] = None
 
-    if max_x is not None and max_y is not None:
-        dims = sorted([max_x * unit_factor, max_y * unit_factor], reverse=True)
-        length_in, width_in = dims[0], dims[1]
-        length_source = "dimensions"
-        print(
-            f"[part-dims] using ordinate dimensions: L={length_in:.4f} in, W={width_in:.4f} in"
-        )
+    if ox is not None and oy is not None:
+        L, W = sorted([ox * f, oy * f], reverse=True)
+        source = "dimensions"
+        print(f"[part-dims] using ordinate dimensions: L={L:.4f} in, W={W:.4f} in")
 
-    # 2) AABB fallback
-    dz: Optional[float] = None
-    if length_in is None or width_in is None:
-        dx, dy, dz = _aabb_size(
-            msp, include=layer_include, exclude=layer_exclude
-        )
-        if dx is not None and dy is not None:
-            dims = sorted([dx * unit_factor, dy * unit_factor], reverse=True)
-            length_in, width_in = dims[0], dims[1]
-            if length_source is None:
-                length_source = "aabb"
-                print(
-                    f"[part-dims] using AABB dimensions: L={length_in:.4f} in, W={width_in:.4f} in"
-                )
-
-    # 3) thickness
-    thickness_source: Optional[str] = None
-    thickness_in: Optional[float] = None
-    text_lines: List[str] = []
-    if text_csv or text_jsonl:
-        text_lines = _read_texts(text_csv, text_jsonl)
-    if text_lines:
-        thickness_in = _parse_thickness_from_text(text_lines)
-        if thickness_in is not None:
-            thickness_source = "text"
-
-    if thickness_in is None and dz:
-        thickness_val = dz * unit_factor
-        if 0.05 <= thickness_val <= 20.0:
-            thickness_in = thickness_val
-            thickness_source = "aabb"
-            print(f"[part-dims] thickness from geometry: {thickness_in:.4f} in")
-
-    # Determine overall source label
-    source: str
-    if length_source and thickness_source and length_source != thickness_source:
-        source = "mixed"
-    elif thickness_source and not length_source:
-        source = thickness_source
-    elif length_source:
-        source = length_source
-    elif thickness_source:
-        source = thickness_source
+    if L is None or W is None:
+        dx, dy, dz = _aabb_size(msp, include=layer_include, exclude=layer_exclude)
+        if dx and dy:
+            L, W = sorted([dx * f, dy * f], reverse=True)
+            if source is None:
+                source = "aabb"
+                print(f"[part-dims] using AABB dimensions: L={L:.4f} in, W={W:.4f} in")
     else:
-        source = "none"
+        dz = None  # type: ignore[assignment]
+
+    # thickness after text parse (with strict keywords)
+    T: Optional[float] = None
+    lines = _read_texts(text_csv, text_jsonl) if (text_csv or text_jsonl) else []
+    if lines:
+        T = _parse_thickness_from_text(lines)
+        if T is not None:
+            print(f"[part-dims] thickness from text: {T:.4f} in")
+    if T is None and "dz" in locals() and dz:
+        T = dz * f
+        source = source or "aabb"
+        print(f"[part-dims] thickness from geometry: {T:.4f} in")
 
     result = {
-        "length_in": length_in,
-        "width_in": width_in,
-        "thickness_in": thickness_in,
-        "source": source,
+        "length_in": L,
+        "width_in": W,
+        "thickness_in": T,
+        "source": source or "none",
     }
 
     return result
