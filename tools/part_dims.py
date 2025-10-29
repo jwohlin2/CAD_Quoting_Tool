@@ -306,7 +306,13 @@ def infer_part_dims(
     import ezdxf
     from ezdxf.math import BoundingBox  # noqa: F401 - ensure ezdxf dependency available
 
-    doc = ezdxf.readfile(dxf_path)
+    input_path = Path(dxf_path)
+    if not input_path.exists():
+        raise FileNotFoundError(f"DXF file not found: {input_path}")
+    if not input_path.is_file():
+        raise ValueError(f"Expected a DXF file, but got a directory: {input_path}")
+
+    doc = ezdxf.readfile(str(input_path))
     msp = doc.modelspace()
     f = _insunits_to_inch_factor(doc)
 

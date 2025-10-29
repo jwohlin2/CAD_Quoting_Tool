@@ -37,12 +37,18 @@ from typing import List, Tuple
 import sys, pathlib
 sys.path.append(str(pathlib.Path(__file__).resolve().parents[1] / "tools"))
 from hole_ops import explode_rows_to_operations
+from part_dims import infer_part_dims
+from stock_dims import infer_stock_dims_from_lines, read_texts_from_csv
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 from cad_quoter import geo_extractor
+try:
+    from cad_quoter.geometry import convert_dwg_to_dxf as _convert_dwg_to_dxf  # type: ignore
+except Exception:
+    _convert_dwg_to_dxf = None  # type: ignore
 
 # ---------- HOLE TABLE helpers ----------
 _UHEX_RE = re.compile(r"\\U\+([0-9A-Fa-f]{4})")
@@ -303,6 +309,58 @@ def main() -> int:
     with jsonl_path.open("w", encoding="utf-8") as fh:
         for r in rows:
             fh.write(json.dumps(r, ensure_ascii=False) + "\n")
+
+    # ---- Infer stock dimensions from extracted text ----
+    try:
+        stock_texts = read_texts_from_csv(csv_path)
+    except Exception as exc:
+        print(f"[stock-dims] read failed: {exc}")
+    else:
+        dims = infer_stock_dims_from_lines(stock_texts)
+        stock_csv = csv_path.parent / "stock_dims.csv"
+        with stock_csv.open("w", newline="", encoding="utf-8") as fh:
+            writer = csv.writer(fh)
+            writer.writerow(["length_in", "width_in", "thickness_in"])
+            if dims:
+                L, W, T = dims
+                print(f"[stock-dims] L={L:.3f} in, W={W:.3f} in, T={T:.3f} in")
+                writer.writerow([f"{L:.6f}", f"{W:.6f}", f"{T:.6f}"])
+            else:
+                print("[stock-dims] no stock dimensions detected")
+                writer.writerow(["", "", ""])
+        print(f"[stock-dims] csv={stock_csv}")
+
+    # ---- Part dimension inference (geometry + text) ----
+    part_dims_path: Path | None = None
+    suffix = in_path.suffix.lower()
+    if suffix == ".dxf":
+        part_dims_path = in_path
+    elif suffix == ".dwg":
+        if _convert_dwg_to_dxf is None:
+            print("[part-dims] skipped: DWG conversion unavailable")
+        else:
+            try:
+                part_dims_path = Path(_convert_dwg_to_dxf(str(in_path)))
+            except Exception as exc:
+                part_dims_path = None
+                print(f"[part-dims] DWG→DXF conversion failed: {exc}")
+    else:
+        print(f"[part-dims] skipped: unsupported input type '{suffix}'")
+
+    if part_dims_path is not None:
+        if part_dims_path.exists():
+            try:
+                part_dims_result = infer_part_dims(
+                    str(part_dims_path),
+                    str(csv_path),
+                    str(jsonl_path) if jsonl_path.exists() else None,
+                )
+            except Exception as exc:
+                print(f"[part-dims] failed: {exc}")
+            else:
+                print(f"[part-dims] {part_dims_result}")
+        else:
+            print(f"[part-dims] skipped: {part_dims_path} not found")
 
     # ---- Emit structured HOLE TABLE + ops (via hole_ops) ----
     try:

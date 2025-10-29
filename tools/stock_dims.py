@@ -116,7 +116,7 @@ def infer_stock_dims_from_lines(lines: Iterable[str]) -> Optional[Tuple[float, f
 # ---------------------------
 
 def clean_cad_text(s: str) -> str:
-    """Normalize CAD text for parsing: decode \U+XXXX, unify separators, collapse spaces."""
+    """Normalize CAD text for parsing: decode \\U+XXXX, unify separators, collapse spaces."""
     s = _decode_uplus(s)
     s = s.replace('×', 'x').replace('–', '-').replace('—', '-')
     s = re.sub(r'\s+', ' ', s).strip()
