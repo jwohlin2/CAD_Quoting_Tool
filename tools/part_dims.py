@@ -347,6 +347,12 @@ def infer_part_dims(
         "source": source or "none",
     }
 
+    if length_in is not None and width_in is not None:
+        print(f"[part-dims] L/W from {source}: {length_in:.3f} x {width_in:.3f} in")
+    if thickness_in is not None:
+        thickness_label = "text" if thickness_source == "text" else "geometry"
+        print(f"[part-dims] thickness from {thickness_label}: {thickness_in:.4f} in")
+
     return result
 
 
