@@ -669,7 +669,7 @@ def _parse_clause_to_ops(
         # If desc contains a Ø/∅ token mid-clause, adopt it as op diameter (KEEP HOLE)
         anyd = _RE_DIAM_ANY.search(desc)
         if anyd:
-            diam_for_clause = _fmt_diam(anyd)
+            diam_for_clause = _fmt_diam(_matched_diam_token(anyd))
 
         # ---- TAP policy: TAP ops always use the HOLE's REF_DIAM ----
         if _RE_TAP.search(desc):
