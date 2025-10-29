@@ -3415,10 +3415,43 @@ _DEBUG_DEPTH_RE = re.compile(
 )
 _DEBUG_THRU_RE = re.compile(r"\bTHRU\b", re.IGNORECASE)
 _HOLE_TABLE_ANCHOR_RE = re.compile(r"\bHOLE\s+TABLE\b", re.IGNORECASE)
-_ANCHOR_HEADER_TOKENS = ("HOLE", "REF", "QTY", "DESCRIPTION")
-_ANCHOR_HEADER_TOKEN_RES = {
-    token: re.compile(rf"\b{token}\b", re.IGNORECASE)
-    for token in _ANCHOR_HEADER_TOKENS
+_ANCHOR_TOKENS = (
+    "hole table",
+    "hole",
+    "ref",
+    "qty",
+    "description",
+    "dia",
+    "drill",
+    "tap",
+    "c'bore",
+    "cbore",
+    "counterbore",
+    "c'drill",
+    "counterdrill",
+    "npt",
+    "thru",
+    "from back",
+)
+_ANCHOR_HEADER_TOKENS = ("hole", "ref", "qty", "description")
+_ANCHOR_HEADER_TOKEN_SET = set(_ANCHOR_HEADER_TOKENS)
+_ANCHOR_TOKEN_PATTERNS = {
+    "hole table": _HOLE_TABLE_ANCHOR_RE,
+    "hole": re.compile(r"\bHOLES?\b", re.IGNORECASE),
+    "ref": re.compile(r"\bREF(?:ERENCE)?\.?\b", re.IGNORECASE),
+    "qty": re.compile(r"\bQTY\b|\bQUANTITY\b", re.IGNORECASE),
+    "description": re.compile(r"\bDESCRIPTION\b|\bDESC(?:RIPTION)?\.?\b", re.IGNORECASE),
+    "dia": re.compile(r"(Ø|⌀|\bDIA(?:METER)?\b)", re.IGNORECASE),
+    "drill": re.compile(r"\bDRILL\b", re.IGNORECASE),
+    "tap": re.compile(r"\bTAP(?:PED)?\b", re.IGNORECASE),
+    "c'bore": re.compile(r"\bC['’]?BORE\b", re.IGNORECASE),
+    "cbore": re.compile(r"\bCBORE\b", re.IGNORECASE),
+    "counterbore": re.compile(r"\bCOUNTER\s*BORE\b", re.IGNORECASE),
+    "c'drill": re.compile(r"\bC['’]?DRILL\b", re.IGNORECASE),
+    "counterdrill": re.compile(r"\bCOUNTER\s*DRILL\b", re.IGNORECASE),
+    "npt": re.compile(r"\bN\.?P\.?T\b", re.IGNORECASE),
+    "thru": re.compile(r"\bTHRU\b", re.IGNORECASE),
+    "from back": re.compile(r"\bFROM\s+BACK\b", re.IGNORECASE),
 }
 _ANCHOR_TAP_RE = re.compile(r"[#0-9/]+\s*-\s*[0-9]+", re.IGNORECASE)
 _TITLE_AXIS_DROP_RE = re.compile(
@@ -4852,10 +4885,11 @@ def _compute_percentile(values: Sequence[float], fraction: float) -> float:
 def _ordered_header_tokens(tokens: Iterable[str]) -> list[str]:
     seen: set[str] = set()
     ordered: list[str] = []
+    normalized = {str(token).lower() for token in tokens if isinstance(token, str)}
     for token in _ANCHOR_HEADER_TOKENS:
-        if token in tokens and token not in seen:
+        if token in normalized and token not in seen:
             seen.add(token)
-            ordered.append(token)
+            ordered.append(token.upper())
     return ordered
 
 
@@ -4863,11 +4897,18 @@ def _detect_anchor_lines(
     records: Sequence[Mapping[str, Any]],
     *,
     base_height: float,
-) -> tuple[list[Mapping[str, Any]], list[str]]:
+) -> tuple[list[Mapping[str, Any]], list[str], dict[str, Any]]:
     anchor_lines: list[Mapping[str, Any]] = []
     header_tokens_found: list[str] = []
+    metadata: dict[str, Any] = {
+        "tokens_lower": [],
+        "mode": "none",
+        "anchor_height": 0.0,
+        "band_y": None,
+        "band_size": 0,
+    }
     if not isinstance(records, Sequence) or not records:
-        return (anchor_lines, header_tokens_found)
+        return (anchor_lines, header_tokens_found, metadata)
 
     processed_records: list[tuple[Mapping[str, Any], float, float, str]] = []
     height_values: list[float] = []
@@ -4887,13 +4928,51 @@ def _detect_anchor_lines(
                 height_values.append(height_float)
 
     if not processed_records:
-        return (anchor_lines, header_tokens_found)
+        return (anchor_lines, header_tokens_found, metadata)
 
     effective_height = float(base_height or 0.0)
     if (not math.isfinite(effective_height) or effective_height <= 0) and height_values:
         effective_height = float(statistics.median(height_values))
     if not math.isfinite(effective_height) or effective_height < 0:
         effective_height = 0.0
+
+    def _resolve_anchor_height(lines: Sequence[Mapping[str, Any]]) -> float:
+        heights: list[float] = []
+        for rec in lines:
+            height_val = _coerce_float_optional(rec.get("height"))
+            if height_val is not None and height_val > 0:
+                heights.append(height_val)
+        if heights:
+            try:
+                return float(statistics.median(heights))
+            except Exception:
+                return float(heights[0])
+        return float(effective_height if effective_height > 0 else 0.0)
+
+    def _finalize(
+        lines: list[Mapping[str, Any]],
+        tokens_lower: Iterable[str],
+        *,
+        mode: str,
+        extra: Mapping[str, Any] | None = None,
+    ) -> None:
+        metadata["tokens_lower"] = sorted({str(token).lower() for token in tokens_lower})
+        metadata["mode"] = mode
+        metadata["anchor_height"] = _resolve_anchor_height(lines)
+        y_values: list[float] = []
+        for rec in lines:
+            y_val = _coerce_float_optional(rec.get("y"))
+            if y_val is not None:
+                y_values.append(y_val)
+        if y_values:
+            try:
+                metadata["band_y"] = float(statistics.median(y_values))
+            except Exception:
+                metadata["band_y"] = float(y_values[0])
+        metadata["band_size"] = len(lines)
+        if extra:
+            for key, value in extra.items():
+                metadata[key] = value
 
     y_tolerance = max(6.0, effective_height * 1.5) if effective_height > 0 else 12.0
 
@@ -4911,12 +4990,17 @@ def _detect_anchor_lines(
         if _HOLE_TABLE_ANCHOR_RE.search(text)
     ]
     if hole_table_matches:
-        return (hole_table_matches, ["HOLE TABLE"])
+        anchor_lines = list(hole_table_matches)
+        _finalize(anchor_lines, ["hole table"], mode="tokens")
+        header_tokens_found = _ordered_header_tokens(metadata["tokens_lower"])
+        return (anchor_lines, header_tokens_found, metadata)
 
     token_candidates: list[tuple[Mapping[str, Any], float, float, set[str]]] = []
     for record, x_val, y_val, text in processed_records:
         tokens_here = {
-            token for token, pattern in _ANCHOR_HEADER_TOKEN_RES.items() if pattern.search(text)
+            token
+            for token, pattern in _ANCHOR_TOKEN_PATTERNS.items()
+            if pattern.search(text)
         }
         if tokens_here:
             token_candidates.append((record, x_val, y_val, tokens_here))
@@ -4944,12 +5028,16 @@ def _detect_anchor_lines(
         if current_cluster:
             clusters.append(current_cluster)
 
-        header_set = set(_ANCHOR_HEADER_TOKENS)
-        best_full_cluster: list[tuple[Mapping[str, Any], float, float, set[str]]] | None = None
-        best_full_tokens: set[str] = set()
-        best_full_span = float("inf")
-        best_full_size = 0
-        best_right_cluster: list[tuple[Mapping[str, Any], float, float, set[str]]] | None = None
+        best_header_cluster: list[
+            tuple[Mapping[str, Any], float, float, set[str]]
+        ] | None = None
+        best_header_tokens: set[str] = set()
+        best_header_span = float("inf")
+        best_header_size = 0
+        best_header_count = 0
+        best_right_cluster: list[
+            tuple[Mapping[str, Any], float, float, set[str]]
+        ] | None = None
         best_right_tokens: set[str] = set()
         best_right_span = float("inf")
         best_right_size = 0
@@ -4967,24 +5055,33 @@ def _detect_anchor_lines(
             span = max(y_cluster) - min(y_cluster) if len(y_cluster) > 1 else 0.0
             center_x = sum(x_cluster) / len(x_cluster)
 
-            if header_set.issubset(cluster_tokens):
+            header_hits = cluster_tokens & _ANCHOR_HEADER_TOKEN_SET
+            header_count = len(header_hits)
+            if header_count >= 2:
                 if (
-                    best_full_cluster is None
-                    or span < best_full_span
+                    best_header_cluster is None
+                    or header_count > best_header_count
                     or (
-                        math.isclose(span, best_full_span)
-                        and len(cluster_tokens) > len(best_full_tokens)
+                        header_count == best_header_count
+                        and len(cluster_tokens) > len(best_header_tokens)
                     )
                     or (
-                        math.isclose(span, best_full_span)
-                        and len(cluster_tokens) == len(best_full_tokens)
-                        and len(cluster) > best_full_size
+                        header_count == best_header_count
+                        and len(cluster_tokens) == len(best_header_tokens)
+                        and span < best_header_span
+                    )
+                    or (
+                        header_count == best_header_count
+                        and len(cluster_tokens) == len(best_header_tokens)
+                        and math.isclose(span, best_header_span)
+                        and len(cluster) > best_header_size
                     )
                 ):
-                    best_full_cluster = cluster
-                    best_full_tokens = set(cluster_tokens)
-                    best_full_span = span
-                    best_full_size = len(cluster)
+                    best_header_cluster = cluster
+                    best_header_tokens = set(cluster_tokens)
+                    best_header_span = span
+                    best_header_size = len(cluster)
+                    best_header_count = header_count
 
             if len(cluster_tokens) >= 3 and center_x >= right_threshold:
                 if (
@@ -5005,14 +5102,16 @@ def _detect_anchor_lines(
                     best_right_span = span
                     best_right_size = len(cluster)
 
-        if best_full_cluster:
-            anchor_lines = [item[0] for item in best_full_cluster]
-            header_tokens_found = _ordered_header_tokens(best_full_tokens)
-            return (anchor_lines, header_tokens_found)
+        if best_header_cluster:
+            anchor_lines = [item[0] for item in best_header_cluster]
+            _finalize(anchor_lines, best_header_tokens, mode="tokens")
+            header_tokens_found = _ordered_header_tokens(metadata["tokens_lower"])
+            return (anchor_lines, header_tokens_found, metadata)
         if best_right_cluster:
             anchor_lines = [item[0] for item in best_right_cluster]
-            header_tokens_found = _ordered_header_tokens(best_right_tokens)
-            return (anchor_lines, header_tokens_found)
+            _finalize(anchor_lines, best_right_tokens, mode="tokens")
+            header_tokens_found = _ordered_header_tokens(metadata["tokens_lower"])
+            return (anchor_lines, header_tokens_found, metadata)
 
     fallback_candidates: list[tuple[Mapping[str, Any], float, float, str]] = []
     for record, x_val, y_val, text in processed_records:
@@ -5062,13 +5161,65 @@ def _detect_anchor_lines(
             cluster_tokens: set[str] = set()
             for record in anchor_lines:
                 text_value = str(record.get("text") or "")
-                for token, pattern in _ANCHOR_HEADER_TOKEN_RES.items():
+                for token, pattern in _ANCHOR_TOKEN_PATTERNS.items():
                     if pattern.search(text_value):
                         cluster_tokens.add(token)
-            header_tokens_found = _ordered_header_tokens(cluster_tokens)
-            return (anchor_lines, header_tokens_found)
+            _finalize(anchor_lines, cluster_tokens, mode="tokens")
+            header_tokens_found = _ordered_header_tokens(metadata["tokens_lower"])
+            return (anchor_lines, header_tokens_found, metadata)
 
-    return (anchor_lines, header_tokens_found)
+    def _detect_row_letter_mode() -> tuple[list[Mapping[str, Any]], dict[str, Any]]:
+        letter_candidates = [
+            item
+            for item in processed_records
+            if re.fullmatch(r"[A-Z]", item[3].strip())
+        ]
+        if not letter_candidates:
+            return ([], {})
+        sorted_letters = sorted(letter_candidates, key=lambda item: (item[1], -item[2]))
+        y_band_tol = max(3.0, effective_height * 0.75) if effective_height > 0 else 6.0
+        decimal_re = re.compile(r"\d+\.\d+")
+        qty_re = re.compile(r"\b\d+\s*$")
+        for record, x_val, y_val, _ in sorted_letters:
+            band_records: list[tuple[Mapping[str, Any], float, float, str]] = [
+                item
+                for item in processed_records
+                if abs(item[2] - y_val) <= y_band_tol
+            ]
+            if len(band_records) <= 1:
+                continue
+            has_dia = False
+            has_qty = False
+            for _, _, _, text in band_records:
+                text_upper = text.upper()
+                if (
+                    "Ø" in text_upper
+                    or "⌀" in text_upper
+                    or "DIA" in text_upper
+                    or decimal_re.search(text)
+                ):
+                    has_dia = True
+                if qty_re.search(text):
+                    has_qty = True
+            if has_dia and has_qty:
+                records_band = [item[0] for item in band_records]
+                return (
+                    records_band,
+                    {
+                        "mode": "row-letter",
+                        "band_y": y_val,
+                        "band_size": len(records_band),
+                    },
+                )
+        return ([], {})
+
+    band_records, band_meta = _detect_row_letter_mode()
+    if band_records:
+        anchor_lines = band_records
+        _finalize(anchor_lines, [], mode="row-letter", extra=band_meta)
+        return (anchor_lines, header_tokens_found, metadata)
+
+    return (anchor_lines, header_tokens_found, metadata)
 
 
 def _merge_table_lines(lines: Iterable[str]) -> list[str]:
@@ -5175,6 +5326,7 @@ def _build_columnar_table_from_panel_entries(
 
     base_records = list(records)
     records_all = list(base_records)
+    anchor_scan_records = list(base_records)
     roi_bounds: dict[str, float] | None = None
     roi_info: dict[str, Any] | None = None
     roi_median_height = 0.0
@@ -5263,7 +5415,7 @@ def _build_columnar_table_from_panel_entries(
 
     all_height_values = [
         float(rec["height"])
-        for rec in records_all
+        for rec in anchor_scan_records
         if isinstance(rec.get("height"), (int, float)) and float(rec["height"]) > 0
     ]
     median_height_all = (
@@ -5272,8 +5424,8 @@ def _build_columnar_table_from_panel_entries(
     if roi_median_height <= 0:
         roi_median_height = median_height_all
     base_anchor_height = roi_median_height if roi_median_height > 0 else median_height_all
-    anchor_lines, header_tokens_found = _detect_anchor_lines(
-        records_all,
+    anchor_lines, header_tokens_found, anchor_meta = _detect_anchor_lines(
+        anchor_scan_records,
         base_height=base_anchor_height,
     )
     anchor_count = len(anchor_lines)
@@ -7874,7 +8026,7 @@ def read_text_table(
                 anchor_scan_entries.append(scan_entry)
                 tokens_here: set[str] = set()
                 if text_value:
-                    for token, pattern in _ANCHOR_HEADER_TOKEN_RES.items():
+                    for token, pattern in _ANCHOR_TOKEN_PATTERNS.items():
                         if pattern.search(text_value):
                             tokens_here.add(token)
                 if y_float is not None and tokens_here:
@@ -7891,7 +8043,7 @@ def read_text_table(
                     )
                 except Exception:
                     base_anchor_height = float(height_samples[0]) if height_samples else 0.0
-                anchor_lines_pre, header_tokens_pre = _detect_anchor_lines(
+                anchor_lines_pre, header_tokens_pre, anchor_meta = _detect_anchor_lines(
                     anchor_scan_entries,
                     base_height=base_anchor_height,
                 )
@@ -7930,7 +8082,13 @@ def read_text_table(
                 y_tolerance = max(6.0, effective_anchor * 1.5) if effective_anchor > 0 else 12.0
 
                 best_entries: list[dict[str, Any]] = list(anchor_lines_pre)
-                tokens_set = {token for token in header_tokens_pre if token}
+                tokens_set: set[str] = {
+                    str(token).lower()
+                    for token in anchor_meta.get("tokens_lower", [])
+                    if token
+                }
+                if not tokens_set:
+                    tokens_set.update(token.lower() for token in header_tokens_pre if token)
                 if not best_entries:
                     clusters = _cluster_token_hits(token_hits, tolerance=y_tolerance)
                     best_cluster: list[tuple[dict[str, Any], float, set[str]]] | None = None
@@ -7955,10 +8113,14 @@ def read_text_table(
                 if best_entries and not tokens_set:
                     for entry in best_entries:
                         text_candidate = str(entry.get("text") or "")
-                        for token, pattern in _ANCHOR_HEADER_TOKEN_RES.items():
+                        for token, pattern in _ANCHOR_TOKEN_PATTERNS.items():
                             if pattern.search(text_candidate):
                                 tokens_set.add(token)
-                anchor_height_value = float(base_anchor_height or 0.0)
+                anchor_height_value = _coerce_float_optional(
+                    anchor_meta.get("anchor_height")
+                )
+                if anchor_height_value is None:
+                    anchor_height_value = float(base_anchor_height or 0.0)
                 anchor_specific_heights = [
                     float(line.get("height"))
                     for line in best_entries
@@ -7974,25 +8136,51 @@ def read_text_table(
                     anchor_height_display = "-"
                 else:
                     anchor_height_display = f"{float(anchor_height_value):.3f}"
-                ordered_tokens = _ordered_header_tokens(tokens_set)
-                if ordered_tokens:
-                    tokens_display = "{" + ",".join(f"'{token}'" for token in ordered_tokens) + "}"
-                else:
-                    tokens_display = "{}"
-                print(
-                    "[ANCHOR] tokens={tokens} found={count} anchor_height={height}".format(
-                        tokens=tokens_display,
-                        count=len(best_entries),
-                        height=anchor_height_display,
+                detection_mode = str(anchor_meta.get("mode") or "none").lower()
+                if detection_mode == "row-letter" and anchor_lines_pre:
+                    y_display = anchor_meta.get("band_y")
+                    if isinstance(y_display, (int, float)) and math.isfinite(float(y_display)):
+                        y_str = f"{float(y_display):.1f}"
+                    else:
+                        y_str = "-"
+                    rows_display = anchor_meta.get("band_size")
+                    try:
+                        rows_int = int(rows_display)
+                    except Exception:
+                        rows_int = len(best_entries)
+                    print(
+                        "[ANCHOR] fallback 'row-letter' mode engaged (y≈{y}, rows≈{rows})".format(
+                            y=y_str,
+                            rows=rows_int,
+                        )
                     )
-                )
+                else:
+                    header_tokens_ordered = _ordered_header_tokens(tokens_set)
+                    header_tokens_lower = [token.lower() for token in header_tokens_ordered]
+                    remaining_tokens = [
+                        token
+                        for token in sorted(tokens_set)
+                        if token not in _ANCHOR_HEADER_TOKEN_SET
+                    ]
+                    ordered_display_tokens = header_tokens_lower + remaining_tokens
+                    tokens_display = "{" + ",".join(
+                        f"'{token}'" for token in ordered_display_tokens
+                    ) + "}"
+                    print(
+                        "[ANCHOR] tokens={tokens} found={count} anchor_height={height}".format(
+                            tokens=tokens_display,
+                            count=len(best_entries),
+                            height=anchor_height_display,
+                        )
+                    )
                 if anchor_height_value > 0:
                     anchor_height = float(anchor_height_value)
                 if isinstance(_LAST_TEXT_TABLE_DEBUG, dict):
                     _LAST_TEXT_TABLE_DEBUG["anchors_pre_filter"] = {
                         "count": len(best_entries),
-                        "tokens": list(ordered_tokens),
+                        "tokens": list(_ordered_header_tokens(tokens_set)),
                         "anchor_height": anchor_height_value,
+                        "mode": detection_mode,
                     }
             if debug_scan_enabled:
                 layout_display = ", ".join(
@@ -10324,7 +10512,7 @@ def _cluster_panel_entries(
                 )
 
     base_anchor_height = roi_median_height if roi_median_height > 0 else median_height_all
-    anchor_lines, header_tokens_found = _detect_anchor_lines(
+    anchor_lines, header_tokens_found, anchor_meta = _detect_anchor_lines(
         usable_records,
         base_height=base_anchor_height,
     )
