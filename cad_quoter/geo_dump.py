@@ -57,6 +57,9 @@ def _diameter_aliases(token: str) -> List[str]:
                 out += [f"{n}/{d}Ø", f"{n}/{d}∅"]
             comp = f"{val:.3f}".rstrip("0").rstrip(".")
             out += [f"Ø{comp}", f"∅{comp}", f"(Ø{comp})", f"(∅{comp})"]
+            if comp.startswith("0."):
+                bare = comp[1:]
+                out += [f"Ø{bare}", f"∅{bare}", f"(Ø{bare})", f"(∅{bare})"]
         except Exception:
             pass
     return out
@@ -242,18 +245,39 @@ def _redistribute_cross_hits(descs: List[str], diam_list: List[str]) -> List[str
     # 1) Build alias -> hole_idx map (include decimals, fractions, parens, trailing-Ø)
     alias_to_idx: Dict[str, int] = {}
     for idx, tok in enumerate(diam_list):
-        for a in _diameter_aliases(tok):
-            alias_to_idx[a] = idx
-        # numeric-only fallbacks for decimals like .272 / 0.272 (and parens)
-        if tok.startswith(("Ø", "∅")):
-            s = tok[1:]
-            try:
-                f = float(s)
-                comp = f"{f:.3f}".rstrip("0").rstrip(".")
-            except Exception:
-                comp = s
-            for a in (comp, f"0{comp}", f"({comp})", f"(0{comp})"):
+        if not tok:
+            continue
+
+        tok_stripped = tok.strip()
+        variants = [tok_stripped]
+        if tok_stripped.startswith("(") and tok_stripped.endswith(")"):
+            inner = tok_stripped[1:-1].strip()
+            if inner:
+                variants.append(inner)
+
+        seen_variants = set()
+        for variant in variants:
+            if not variant or variant in seen_variants:
+                continue
+            seen_variants.add(variant)
+
+            for a in _diameter_aliases(variant):
                 alias_to_idx[a] = idx
+
+            # numeric-only fallbacks for decimals like .272 / 0.272 (and parens)
+            if variant.startswith(("Ø", "∅")):
+                s = variant[1:]
+                try:
+                    f = float(s)
+                    comp = f"{f:.3f}".rstrip("0").rstrip(".")
+                except Exception:
+                    comp = s
+                bare = comp[1:] if comp.startswith("0.") else comp
+                extras = {comp, f"0{comp}", f"({comp})", f"(0{comp})"}
+                if bare and bare != comp:
+                    extras.update({bare, f"0{bare}", f"({bare})", f"(0{bare})"})
+                for a in extras:
+                    alias_to_idx[a] = idx
 
     if not alias_to_idx:
         return descs
