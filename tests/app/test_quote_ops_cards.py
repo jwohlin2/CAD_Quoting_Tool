@@ -110,7 +110,7 @@ def test_emit_hole_table_ops_cards_updates_bucket_view() -> None:
         assert any(entry.get("name") == "Tapping ops" for entry in tapping_ops)
 
 
-def test_format_hole_table_section_outputs_table() -> None:
+def test_format_hole_table_section_outputs_operations() -> None:
     rows = [
         {"hole": "A", "ref": "Ø1.7500", "qty": 4, "desc": "±.0001 THRU (JIG GRIND)"},
         {"hole": "B", "ref": "Ø.7500", "qty": 2, "desc": "THRU"},
@@ -119,6 +119,28 @@ def test_format_hole_table_section_outputs_table() -> None:
     lines = appV5._format_hole_table_section(rows)
 
     assert lines
-    assert lines[0].startswith("HOLE TABLE")
-    assert any("A" in line and "THRU" in line for line in lines)
-    assert any("REF_DIAM" in line for line in lines)
+    assert lines[0] == "HOLE TABLE OPERATIONS"
+    assert any(line.strip().startswith("A") for line in lines[1:])
+    assert any("THRU" in line for line in lines)
+
+
+def test_format_hole_table_section_includes_metadata() -> None:
+    rows = [
+        {
+            "hole": "C",
+            "ref": "Ø0.3125",
+            "qty": 6,
+            "desc": "1/4-20 TAP X .62 DEEP FROM FRONT",
+            "TYPE": "tap",
+            "SIDE": "FRONT",
+            "DEPTH_IN": 0.62,
+            "THRU": True,
+        }
+    ]
+
+    lines = appV5._format_hole_table_section(rows)
+
+    assert any("tap" in line.lower() for line in lines)
+    assert any("side: FRONT" in line for line in lines)
+    assert any("depth: 0.620\"" in line for line in lines)
+    assert any("thru" in line for line in lines)
