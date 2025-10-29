@@ -114,7 +114,7 @@ def _plain(s: str) -> str:
 # --------------------------- entity flattening ---------------------------
 
 _TEXT_TYPES = {"TEXT", "MTEXT", "ATTRIB", "ATTDEF", "MLEADER"}
-_TABLE_TYPES = {"TABLE"}  # best-effort extraction
+_TABLE_TYPES = {"ACAD_TABLE", "TABLE", "MTABLE"}  # cover modern + legacy tables
 
 def _entity_text_fields(e) -> Tuple[str, float, float, float]:
     """(text, height, x, y). Best effort across TEXT/MTEXT/ATTRIB/MLEADER."""
@@ -185,32 +185,60 @@ def _iter_virtual(e) -> List[Any]:
 
 
 def _collect_table_cells(e) -> List[str]:
-    """Return flattened cell texts for a TABLE entity (best-effort)."""
+    """
+    Return flattened cell texts for a TABLE-like entity, best-effort across
+    ezdxf versions and entity variants (ACAD_TABLE, TABLE, MTABLE).
+    """
     payload: List[str] = []
     try:
-        nrows = int(getattr(e, "nrows", 0) or 0)
-        ncols = int(getattr(e, "ncols", 0) or 0)
+        # Try both naming schemes used by ezdxf over time
+        nrows = int(getattr(e, "nrows", getattr(e, "n_rows", 0)) or 0)
+        ncols = int(getattr(e, "ncols", getattr(e, "n_cols", 0)) or 0)
+
+        # Preferred: explicit row/col scan
         for r in range(nrows):
             for c in range(ncols):
-                try:
-                    cell = e.get_cell((r, c))  # type: ignore[attr-defined]
-                except Exception:
-                    cell = None
+                cell = None
+                # Try the most common getters first
+                for getter in ("get_cell", "cell", "getCell"):
+                    try:
+                        g = getattr(e, getter)
+                        cell = g((r, c)) if getter == "get_cell" else g(r, c)
+                        break
+                    except Exception:
+                        continue
+
                 text = ""
                 if cell is not None:
-                    # try common accessors
+                    # Newer ezdxf: cell.plain_text() or cell.content.plain_text()
                     for attr in ("plain_text", "text", "value"):
                         try:
-                            val = getattr(cell, attr)
-                            if callable(val):
-                                val = val()
-                            if val:
-                                text = str(val)
+                            v = getattr(cell, attr, None)
+                            if v is None and hasattr(cell, "content"):
+                                v = getattr(cell.content, attr, None)
+                            if callable(v):
+                                v = v()
+                            if v:
+                                text = str(v)
                                 break
                         except Exception:
                             continue
                 if text:
                     payload.append(_plain(text))
+
+        # Fallback: some MTABLE exports store a linear list of cell-like items
+        if not payload:
+            try:
+                for cell in getattr(e, "cells", []):
+                    for attr in ("plain_text", "text", "value"):
+                        v = getattr(cell, attr, None)
+                        if callable(v):
+                            v = v()
+                        if v:
+                            payload.append(_plain(str(v)))
+                            break
+            except Exception:
+                pass
     except Exception:
         pass
     return payload
@@ -260,7 +288,7 @@ def iter_text(
                 stack.append((ch, child_path, depth + 1, True))
             continue
 
-        # TABLE → flatten cell texts
+        # TABLE-like → flatten cell texts
         if et in _TABLE_TYPES:
             if layer_allowed(layer):
                 for s in _collect_table_cells(ent):
