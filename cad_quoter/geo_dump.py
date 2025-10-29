@@ -417,10 +417,8 @@ def _route_tap_only_chunks(descs: List[str], diam_list: List[str]) -> List[str]:
 # Regexes we’ll reuse
 _RE_DIAM_LEAD   = re.compile(r'^[\(\s]*[Ø∅]\s*([0-9]+/[0-9]+|[0-9.]+)\)?\s*', re.I)
 _RE_DIAM_TRAIL  = re.compile(r'^[\(\s]*([0-9]+/[0-9]+)\s*[Ø∅]\)?\s*', re.I)  # e.g., 13/32∅
-_RE_DIAM_ANY    = re.compile(
-    r'(?:[Ø∅]\s*([0-9]+/[0-9]+|[0-9.]+))|(?:([0-9]+/[0-9]+)\s*[Ø∅])',
-    re.I,
-)  # ← NO plain decimals
+_RE_DIAM_ANY    = re.compile(r'[Ø∅]\s*([0-9]+/[0-9]+|[0-9.]+)', re.I)  # requires Ø/∅
+_RE_DIAM_TRAIL_ANY = re.compile(r'([0-9]+/[0-9]+|[0-9.]+)\s*[Ø∅]', re.I)
 _RE_PAREN_JG    = re.compile(r'\(\s*[Ø∅]\s*([0-9]+/[0-9]+|[0-9.]+)\s+JIG\s+GRIND\s*\)', re.I)
 _RE_TAP         = re.compile(r'\bTAP\b', re.I)
 _RE_THRU        = re.compile(r'\bTHRU\b', re.I)
@@ -481,6 +479,8 @@ def _fold_inline_modifiers(s: str) -> str:
         return (m.group(0).strip() + " " + rest).strip()
 
     m = _RE_DIAM_ANY.match(s)
+    if not m:
+        m = _RE_DIAM_TRAIL.match(s)
     if m:
         rest = s[m.end():].lstrip(',; ')
         if rest and _RE_NEXT_OP.search(rest):
@@ -492,40 +492,70 @@ def _fold_inline_modifiers(s: str) -> str:
 def _matched_diam_token(m: Optional[re.Match]) -> str:
     if not m:
         return ""
-    return (m.group(1) or m.group(2) or "").strip()
+    for group in m.groups():
+        if group:
+            return group.strip()
+    tok = m.group(0)
+    return tok.replace("Ø", "").replace("∅", "").strip()
+
+
+def _merge_thru_tap(parts: List[str]) -> List[str]:
+    out: List[str] = []
+    i = 0
+    while i < len(parts):
+        cur = parts[i]
+        if (
+            i + 1 < len(parts)
+            and _RE_THRU.search(cur)
+            and parts[i + 1].lstrip().upper().startswith("TAP")
+        ):
+            out.append((cur + " " + parts[i + 1]).strip())
+            i += 2
+        else:
+            out.append(cur)
+            i += 1
+    return out
 
 
 def _smart_clause_split(s: str) -> List[str]:
     s = s.strip()
     if not s:
         return []
-    # primary split on ';'
     seeds = [x for x in s.split(';') if x.strip()]
     parts: List[str] = []
     for seed in seeds:
-        # secondary split at the start of new op tokens or quoted-letter refs
+        # DO NOT split on 'JIG GRIND' (keep it with the preceding op/paren)
         chunks = re.split(
-            r'(?=(?:"[A-Z]"\s*\( ?[Ø∅]|'
-            r'\bC[\'’]BORE\b|'
-            r'\bC[\'’]DRILL\b|'
-            r'\bTAP\b|'
-            r'\bTHRU\b|'
-            r'\bJIG\s+GRIND\b))',
-            seed, flags=re.I
+            (
+                r'(?=(?:"[A-Z]"\s*\( ?[Ø∅]|'
+                r'\bC[\'’]BORE\b|'
+                r'\bC[\'’]DRILL\b|'
+                r'\bTAP\b|'
+                r'\bTHRU\b))'
+            ),
+            seed,
+            flags=re.I,
         )
+        # only keep chunks that actually contain an operation token
         pending = ""
         for c in chunks:
-            c = _fold_inline_modifiers(c)
-            if not c.strip():
+            c = c.strip()
+            if not c:
                 continue
-            if _RE_NEXT_OP.search(c):
-                combined = f"{pending} {c}".strip() if pending else c.strip()
+            if (
+                _RE_THRU.search(c)
+                or _RE_TAP.search(c)
+                or _RE_CBORE.search(c)
+                or _RE_CDRILL.search(c)
+                or _RE_PAREN_JG.search(c)
+            ):
+                combined = f"{pending} {c}".strip() if pending else c
                 if combined:
                     parts.append(combined)
                 pending = ""
             else:
-                pending = f"{pending} {c}".strip() if pending else c.strip()
-    return parts
+                pending = f"{pending} {c}".strip() if pending else c
+    return _merge_thru_tap(parts)
 
 
 def _fmt_diam(token: str) -> str:
@@ -618,12 +648,19 @@ def _explode_front_back(desc: str) -> List[str]:
 
 
 def _clean_clause_text(s: str) -> str:
-    # strip leading quoted refs and tidy spaces/semicolons
-    s = _RE_QREF.sub("", s).strip()
+    # kill leading/standalone quoted letters "Q" "I" etc., with one or two quotes
+    s = re.sub(r'(^|[\s,;])"{1,2}[A-Z]"{1,2}(?=[\s,;)]|$)', r'\1', s)
     s = re.sub(r"\bAS\s+SHOWN\b", "", s, flags=re.I)
+    # collapse whitespace
     s = re.sub(r'\s+', ' ', s)
-    s = re.sub(r'\s*;\s*$', '', s)
-    return s.strip(", ").strip()
+    # tidy spaces before punctuation and parens
+    s = re.sub(r'\s+([),;])', r'\1', s)
+    s = re.sub(r'\(\s+', '(', s)
+    # strip empty parens leftovers
+    s = re.sub(r'\(\s*\)', '', s)
+    # final trim of trailing semicolons/commas
+    s = s.strip().strip(';').strip(',')
+    return s
 
 
 def _parse_clause_to_ops(
@@ -668,6 +705,8 @@ def _parse_clause_to_ops(
 
         # If desc contains a Ø/∅ token mid-clause, adopt it as op diameter (KEEP HOLE)
         anyd = _RE_DIAM_ANY.search(desc)
+        if not anyd:
+            anyd = _RE_DIAM_TRAIL_ANY.search(desc)
         if anyd:
             diam_for_clause = _fmt_diam(_matched_diam_token(anyd))
 
