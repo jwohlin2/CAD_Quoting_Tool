@@ -20,40 +20,44 @@ except Exception:  # fallback if needed
 # If geo_dump helpers are local-private, paste minimal clones here (recommended),
 # or do a safe import if module layout allows it.
 from cad_quoter.geo_dump import (
+    _decode_uplus,
     _find_hole_table_chunks,
     _parse_header,
     _split_descriptions,
 )  # reuse
+from cad_quoter.geo_extractor import collect_all_text
 
 
-def _collect_text_rows_from_doc(doc) -> List[str]:
-    """
-    Collect normalized text lines from the ezdxf document (model space).
-    Reuse your existing extraction logic if it’s in a helper; otherwise do a simple pass.
-    """
-    rows: List[str] = []
-    msp = doc.modelspace()
-    # TEXT + MTEXT + TABLE (strings); proxy text is already lifted by your existing extractor;
-    # if not, you can add a small ACAD_PROXY_ENTITY reader here later.
-    for e in msp:
-        try:
-            if e.dxftype() in ("TEXT", "MTEXT"):
-                s = str(getattr(e, "plain_text", None) or e.dxf.text or "")
-                if s.strip():
-                    rows.append(s)
-            elif e.dxftype() == "TABLE":
-                # naive: any table cells' text; improve later if needed
-                if hasattr(e, "get_cell"):
-                    for row in range(e.nrows):
-                        buf = []
-                        for col in range(e.ncolumns):
-                            c = e.get_cell(row, col)
-                            if c and getattr(c, "value", ""):
-                                buf.append(str(c.value))
-                        if buf:
-                            rows.append(" ".join(buf))
-        except Exception:
+def _collect_text_rows_from_doc(doc) -> List[Dict[str, str]]:
+    """Collect normalized text rows from the ezdxf document via geo_extractor."""
+
+    try:
+        model_name = str(getattr(doc.modelspace(), "name", "Model") or "Model")
+    except Exception:
+        model_name = "Model"
+    model_name_norm = model_name.strip().lower()
+
+    rows: List[Dict[str, str]] = []
+    for rec in collect_all_text(doc):
+        layout = str(rec.get("layout", "") or "")
+        if layout.strip().lower() != model_name_norm:
             continue
+
+        etype = str(rec.get("etype", "") or "")
+        if etype not in {"PROXYTEXT", "MTEXT", "TEXT"}:
+            continue
+
+        text_val = rec.get("text", "")
+        if not isinstance(text_val, str):
+            text_val = str(text_val)
+
+        normalized = " ".join(_decode_uplus(text_val).split()).strip()
+        if not normalized:
+            continue
+
+        row: Dict[str, str] = {"layout": layout, "etype": etype, "text": normalized}
+        rows.append(row)
+
     return rows
 
 
@@ -67,8 +71,8 @@ def extract_hole_table_from_doc(
     Raises:
         RuntimeError if no HOLE TABLE is found (caller may ignore).
     """
-    text_rows = _collect_text_rows_from_doc(doc)
-    header_chunks, body_chunks = _find_hole_table_chunks(text_rows)
+    text_records = _collect_text_rows_from_doc(doc)
+    header_chunks, body_chunks = _find_hole_table_chunks(text_records)
     if not header_chunks:
         raise RuntimeError("No HOLE TABLE found")
 
