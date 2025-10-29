@@ -64,7 +64,7 @@ def _read_texts(
     return lines
 
 
-_THK_TOKENS = r'(?:THK|T(?:H(?:I(?:C(?:K(?:NESS)?)?)?)?)?)[\s:=]*'
+_THK_TOKENS = r'(?:THK|T(?:H(?:I(?:C(?:K(?:NESS)?)?)?)?)?)\s*[:=]?\s*'
 _NUM = r'(?:\d+(?:\.\d+)?|\d+\s*-\s*\d+\/\d+|\d+\/\d+)'
 
 RE_THICKNESS_LINE = re.compile(
@@ -156,62 +156,65 @@ def _float_from_text(s: str) -> Optional[float]:
 
 def _max_ordinate_xy(msp) -> Tuple[Optional[float], Optional[float]]:
     """
-    Try in this order:
-      1) ezdxf's dimension API for ORDinate type (dim.dimension_type == 64 or == 65)
-      2) Parse the displayed text of DIMENSION (dim.dxf.text) if it’s numeric (and not '<>')
-      3) Render the DIMENSION block and read MTEXT/ATTRIB numbers inside
-    Return (max_x_ordinate, max_y_ordinate) in drawing units.
+    Try to read X/Y-ordinate values from DIMENSION entities.
+    Works without ezdxf.addons; if we can't confidently detect axis, we return (None, None)
+    so the caller will fall back to the AABB path.
     """
-    import ezdxf  # noqa: F401
-    from ezdxf.addons.dim import linear_dimension
-
-    _ = linear_dimension  # noqa: F841 - ensure import side-effects if required
-
-    max_x: Optional[float] = None
-    max_y: Optional[float] = None
-
+    max_x = None
+    max_y = None
     for dim in msp.query("DIMENSION"):
+        # Ordinate test: bit 64 set in dimtype
         try:
-            dt = int(dim.dxf.dimtype)
+            dimtype = int(dim.dxf.dimtype)
         except Exception:
-            dt = 0
+            continue
+        is_ordinate = bool(dimtype & 64)
+        if not is_ordinate:
+            continue
 
-        is_ordinate = bool(dt & 64)
-
+        # Try to get the displayed numeric value
+        val = None
         txt = (dim.dxf.text or "").strip()
-        val_from_text: Optional[float] = None
         if txt and txt != "<>":
-            m = re.search(r"([-+]?\d+(?:\.\d+)?)", txt)
+            m = re.search(r'([-+]?\d+(?:\.\d+)?)', txt)
             if m:
-                val_from_text = _float_from_text(m.group(1))
-
-        if is_ordinate:
-            axis = getattr(dim.dxf, "azin", 0)
-            v = val_from_text
-            if v is None:
                 try:
-                    v = float(dim.get_measurement())
+                    val = float(m.group(1))
                 except Exception:
-                    v = None
-            if v is None:
-                try:
-                    for e in dim.virtual_entities():
-                        if e.dxftype() in ("MTEXT", "TEXT"):
-                            raw = e.dxf.text if e.dxftype() == "TEXT" else e.plain_text()
-                            m2 = re.search(r"([-+]?\d+(?:\.\d+)?)", raw)
-                            if m2:
-                                v = _float_from_text(m2.group(1))
-                                if v is not None:
-                                    break
-                except Exception:
-                    pass
+                    val = None
+        if val is None:
+            try:
+                # some ezdxf versions support this for ordinate too
+                val = float(dim.get_measurement())
+            except Exception:
+                pass
+        if val is None:
+            # Last resort: scan virtual entities for TEXT/MTEXT showing the number
+            try:
+                for e in dim.virtual_entities():
+                    if e.dxftype() in ("TEXT", "MTEXT"):
+                        s = e.dxf.text if e.dxftype() == "TEXT" else e.plain_text()
+                        m2 = re.search(r'([-+]?\d+(?:\.\d+)?)', s or "")
+                        if m2:
+                            try:
+                                val = float(m2.group(1))
+                                break
+                            except Exception:
+                                pass
+            except Exception:
+                pass
+        if val is None:
+            continue
 
-            if v is not None:
-                if axis == 0:
-                    max_x = v if max_x is None else max(max_x, v)
-                else:
-                    max_y = v if max_y is None else max(max_y, v)
-
+        # Axis detection without addons: many drawings store 0=X,1=Y in AZIN (AM_ ordinate)
+        axis_flag = getattr(dim.dxf, "azin", None)  # 0 = X-ordinate, 1 = Y-ordinate (if present)
+        if axis_flag == 0:
+            max_x = val if max_x is None else max(max_x, val)
+        elif axis_flag == 1:
+            max_y = val if max_y is None else max(max_y, val)
+        else:
+            # Unknown axis -> give up gracefully; let AABB handle it
+            return None, None
     return max_x, max_y
 
 
@@ -308,7 +311,11 @@ def infer_part_dims(
     f = _insunits_to_inch_factor(doc)
 
     # dimensions first
-    ox, oy, _, _ = _max_ordinate_xy(msp)
+    ox = oy = None
+    try:
+        ox, oy = _max_ordinate_xy(msp)
+    except Exception as e:
+        print(f"[part-dims] ordinate read failed: {e}")
     L: Optional[float] = None
     W: Optional[float] = None
     source: Optional[str] = None
@@ -318,15 +325,14 @@ def infer_part_dims(
         source = "dimensions"
         print(f"[part-dims] using ordinate dimensions: L={L:.4f} in, W={W:.4f} in")
 
+    dx = dy = dz = None
+
     if L is None or W is None:
         dx, dy, dz = _aabb_size(msp, include=layer_include, exclude=layer_exclude)
         if dx and dy:
             L, W = sorted([dx * f, dy * f], reverse=True)
-            if source is None:
-                source = "aabb"
-                print(f"[part-dims] using AABB dimensions: L={L:.4f} in, W={W:.4f} in")
-    else:
-        dz = None  # type: ignore[assignment]
+            source = source or "aabb"
+            print(f"[part-dims] using AABB dimensions: L={L:.4f} in, W={W:.4f} in")
 
     # thickness after text parse (with strict keywords)
     T: Optional[float] = None
@@ -335,7 +341,7 @@ def infer_part_dims(
         T = _parse_thickness_from_text(lines)
         if T is not None:
             print(f"[part-dims] thickness from text: {T:.4f} in")
-    if T is None and "dz" in locals() and dz:
+    if T is None and dz:
         T = dz * f
         source = source or "aabb"
         print(f"[part-dims] thickness from geometry: {T:.4f} in")
@@ -346,13 +352,6 @@ def infer_part_dims(
         "thickness_in": T,
         "source": source or "none",
     }
-
-    if length_in is not None and width_in is not None:
-        print(f"[part-dims] L/W from {source}: {length_in:.3f} x {width_in:.3f} in")
-    if thickness_in is not None:
-        thickness_label = "text" if thickness_source == "text" else "geometry"
-        print(f"[part-dims] thickness from {thickness_label}: {thickness_in:.4f} in")
-
     return result
 
 
