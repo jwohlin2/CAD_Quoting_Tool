@@ -13679,6 +13679,8 @@ def _build_geo_from_ezdxf_doc(doc) -> dict[str, Any]:
             geo["derived"] = derived_entries
 
     # >>> HOLE_TABLE ADAPTER START
+    adapter_ops_present = False
+    adapter_ops_summary_rows: list[dict[str, Any]] = []
     try:
         from cad_quoter.geometry.hole_table_adapter import extract_hole_table_from_doc
     except Exception:
@@ -13699,6 +13701,22 @@ def _build_geo_from_ezdxf_doc(doc) -> dict[str, Any]:
                 }
                 for hole, ref_diam, qty, desc in ops
             ]
+            adapter_ops_summary_rows = [
+                {
+                    "hole": hole,
+                    "ref": ref_diam,
+                    "qty": qty,
+                    "desc": desc,
+                }
+                for hole, ref_diam, qty, desc in ops
+            ]
+            adapter_ops_present = bool(adapter_ops_summary_rows)
+            if adapter_ops_present:
+                ops_summary = aggregate_ops(adapter_ops_summary_rows)
+                ops_rows = list(ops_summary.get("rows") or [])
+                ops_summary = dict(ops_summary)
+                ops_summary.setdefault("ops_rows", ops_rows)
+                geo["ops_summary"] = ops_summary
             hole_count_total = 0
             for row in structured:
                 qty_val = row.get("QTY") if isinstance(row, dict) else None
@@ -14207,7 +14225,7 @@ def extract_2d_features_from_dxf_or_dwg(path: str | Path) -> dict[str, Any]:
     if chart_lines:
         chart_summary = summarize_hole_chart_lines(chart_lines)
     parser = _parse_hole_table_lines or geometry.parse_hole_table_lines
-    if chart_lines and parser:
+    if (not adapter_ops_present) and chart_lines and parser:
         try:
             hole_rows = parser(chart_lines)
         except Exception:
