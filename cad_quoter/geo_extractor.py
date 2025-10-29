@@ -101,6 +101,20 @@ _TABLE_TYPES = {"ACAD_TABLE", "TABLE", "MTABLE"}
 _TEXT_TYPES = {"TEXT", "MTEXT", "ATTRIB", "ATTDEF", "DIMENSION", "MLEADER"}
 
 
+_UHEX_RE = re.compile(r"\\U\+([0-9A-Fa-f]{4})")
+
+
+def _decode_uplus(s: str) -> str:
+    def _sub(m):
+        try:
+            cp = int(m.group(1), 16)
+            return chr(cp)
+        except Exception:
+            return m.group(0)
+
+    return _UHEX_RE.sub(_sub, s)
+
+
 def _plain(s: str) -> str:
     if not s:
         return ""
@@ -113,9 +127,9 @@ def _plain(s: str) -> str:
 def _mtext_to_str(m) -> str:
     raw = getattr(m, "text", "") or ""
     try:
-        return _plain(m.plain_text())  # newer ezdxf
+        return _decode_uplus(_plain(m.plain_text()))  # newer ezdxf
     except Exception:
-        return _plain(raw)
+        return _decode_uplus(_plain(raw))
 
 
 def _collect_table_cells(tbl) -> List[str]:
@@ -148,7 +162,7 @@ def _collect_table_cells(tbl) -> List[str]:
                             txt = str(v)
                             break
                 if txt:
-                    out.append(_plain(txt))
+                    out.append(_decode_uplus(_plain(txt)))
         if not out:
             # Fallback: some MTABLE exports expose .cells
             for cell in getattr(tbl, "cells", []):
@@ -157,7 +171,7 @@ def _collect_table_cells(tbl) -> List[str]:
                     if callable(v):
                         v = v()
                     if v:
-                        out.append(_plain(str(v)))
+                        out.append(_decode_uplus(_plain(str(v))))
                         break
     except Exception:
         pass
@@ -207,7 +221,7 @@ def _proxy_texts(ent) -> List[str]:
                 for v in viter:
                     t = v.dxftype()
                     if t == "TEXT":
-                        s = _plain(getattr(v.dxf, "text", "") or "")
+                        s = _decode_uplus(_plain(getattr(v.dxf, "text", "") or ""))
                         if s:
                             texts.append(s)
                     elif t == "MTEXT":
@@ -331,7 +345,7 @@ def iter_text_records(
             txt = getattr(ent.dxf, "text", "") or ""
 
         if txt:
-            txt = _plain(str(txt))
+            txt = _decode_uplus(_plain(str(txt)))
             if (not min_height) or (h >= float(min_height)) or txt:
                 yield TextRecord(
                     layout_name,
