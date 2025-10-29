@@ -3425,16 +3425,50 @@ _DEBUG_FIELDNAMES = (
     "raw_text",
     *_DEBUG_STRUCTURED_COLUMNS,
 )
+_OPS_TOTAL_KEYS = ("Drill", "Tap", "C'bore", "C'drill", "Jig", "NPT")
 _DEBUG_DEPTH_RE = re.compile(
     r"([x×]\s*)?(\d+(?:\.\d+)?)\s*(?:DEEP|DEPTH|THK|THICK)\b",
     re.IGNORECASE,
 )
 _DEBUG_THRU_RE = re.compile(r"\bTHRU\b", re.IGNORECASE)
 _HOLE_TABLE_ANCHOR_RE = re.compile(r"\bHOLE\s+TABLE\b", re.IGNORECASE)
-_ANCHOR_HEADER_TOKENS = ("HOLE", "REF", "QTY", "DESCRIPTION")
-_ANCHOR_HEADER_TOKEN_RES = {
-    token: re.compile(rf"\b{token}\b", re.IGNORECASE)
-    for token in _ANCHOR_HEADER_TOKENS
+_ANCHOR_TOKENS = (
+    "hole table",
+    "hole",
+    "ref",
+    "qty",
+    "description",
+    "dia",
+    "drill",
+    "tap",
+    "c'bore",
+    "cbore",
+    "counterbore",
+    "c'drill",
+    "counterdrill",
+    "npt",
+    "thru",
+    "from back",
+)
+_ANCHOR_HEADER_TOKENS = ("hole", "ref", "qty", "description")
+_ANCHOR_HEADER_TOKEN_SET = set(_ANCHOR_HEADER_TOKENS)
+_ANCHOR_TOKEN_PATTERNS = {
+    "hole table": _HOLE_TABLE_ANCHOR_RE,
+    "hole": re.compile(r"\bHOLES?\b", re.IGNORECASE),
+    "ref": re.compile(r"\bREF(?:ERENCE)?\.?\b", re.IGNORECASE),
+    "qty": re.compile(r"\bQTY\b|\bQUANTITY\b", re.IGNORECASE),
+    "description": re.compile(r"\bDESCRIPTION\b|\bDESC(?:RIPTION)?\.?\b", re.IGNORECASE),
+    "dia": re.compile(r"(Ø|⌀|\bDIA(?:METER)?\b)", re.IGNORECASE),
+    "drill": re.compile(r"\bDRILL\b", re.IGNORECASE),
+    "tap": re.compile(r"\bTAP(?:PED)?\b", re.IGNORECASE),
+    "c'bore": re.compile(r"\bC['’]?BORE\b", re.IGNORECASE),
+    "cbore": re.compile(r"\bCBORE\b", re.IGNORECASE),
+    "counterbore": re.compile(r"\bCOUNTER\s*BORE\b", re.IGNORECASE),
+    "c'drill": re.compile(r"\bC['’]?DRILL\b", re.IGNORECASE),
+    "counterdrill": re.compile(r"\bCOUNTER\s*DRILL\b", re.IGNORECASE),
+    "npt": re.compile(r"\bN\.?P\.?T\b", re.IGNORECASE),
+    "thru": re.compile(r"\bTHRU\b", re.IGNORECASE),
+    "from back": re.compile(r"\bFROM\s+BACK\b", re.IGNORECASE),
 }
 _ANCHOR_TAP_RE = re.compile(r"[#0-9/]+\s*-\s*[0-9]+", re.IGNORECASE)
 _TITLE_AXIS_DROP_RE = re.compile(
@@ -4369,6 +4403,32 @@ def _is_numeric_ladder_line(text: str) -> bool:
     return bool(_NUMERIC_LADDER_RE.match(text or ""))
 
 
+def _is_monotone_count_sequence(text: str) -> bool:
+    candidate = str(text or "").strip()
+    if not candidate:
+        return False
+    if re.search(r"[A-Za-z]", candidate):
+        return False
+    digits = re.findall(r"\d+", candidate)
+    if len(digits) < 3:
+        return False
+    numbers = [int(token) for token in digits]
+    max_run = 1
+    run_length = 1
+    for prev, current in zip(numbers, numbers[1:]):
+        if current - prev == 1:
+            run_length += 1
+            if run_length > max_run:
+                max_run = run_length
+        else:
+            run_length = 1
+    if max_run >= 4:
+        return True
+    if max_run >= 3 and ("..." in candidate or "…" in candidate):
+        return True
+    return False
+
+
 def _should_drop_candidate_line(text: Any) -> bool:
     normalized = _normalize_candidate_text(text)
     if not normalized:
@@ -4877,10 +4937,11 @@ def _compute_percentile(values: Sequence[float], fraction: float) -> float:
 def _ordered_header_tokens(tokens: Iterable[str]) -> list[str]:
     seen: set[str] = set()
     ordered: list[str] = []
+    normalized = {str(token).lower() for token in tokens if isinstance(token, str)}
     for token in _ANCHOR_HEADER_TOKENS:
-        if token in tokens and token not in seen:
+        if token in normalized and token not in seen:
             seen.add(token)
-            ordered.append(token)
+            ordered.append(token.upper())
     return ordered
 
 
@@ -4888,11 +4949,18 @@ def _detect_anchor_lines(
     records: Sequence[Mapping[str, Any]],
     *,
     base_height: float,
-) -> tuple[list[Mapping[str, Any]], list[str]]:
+) -> tuple[list[Mapping[str, Any]], list[str], dict[str, Any]]:
     anchor_lines: list[Mapping[str, Any]] = []
     header_tokens_found: list[str] = []
+    metadata: dict[str, Any] = {
+        "tokens_lower": [],
+        "mode": "none",
+        "anchor_height": 0.0,
+        "band_y": None,
+        "band_size": 0,
+    }
     if not isinstance(records, Sequence) or not records:
-        return (anchor_lines, header_tokens_found)
+        return (anchor_lines, header_tokens_found, metadata)
 
     processed_records: list[tuple[Mapping[str, Any], float, float, str]] = []
     height_values: list[float] = []
@@ -4912,13 +4980,51 @@ def _detect_anchor_lines(
                 height_values.append(height_float)
 
     if not processed_records:
-        return (anchor_lines, header_tokens_found)
+        return (anchor_lines, header_tokens_found, metadata)
 
     effective_height = float(base_height or 0.0)
     if (not math.isfinite(effective_height) or effective_height <= 0) and height_values:
         effective_height = float(statistics.median(height_values))
     if not math.isfinite(effective_height) or effective_height < 0:
         effective_height = 0.0
+
+    def _resolve_anchor_height(lines: Sequence[Mapping[str, Any]]) -> float:
+        heights: list[float] = []
+        for rec in lines:
+            height_val = _coerce_float_optional(rec.get("height"))
+            if height_val is not None and height_val > 0:
+                heights.append(height_val)
+        if heights:
+            try:
+                return float(statistics.median(heights))
+            except Exception:
+                return float(heights[0])
+        return float(effective_height if effective_height > 0 else 0.0)
+
+    def _finalize(
+        lines: list[Mapping[str, Any]],
+        tokens_lower: Iterable[str],
+        *,
+        mode: str,
+        extra: Mapping[str, Any] | None = None,
+    ) -> None:
+        metadata["tokens_lower"] = sorted({str(token).lower() for token in tokens_lower})
+        metadata["mode"] = mode
+        metadata["anchor_height"] = _resolve_anchor_height(lines)
+        y_values: list[float] = []
+        for rec in lines:
+            y_val = _coerce_float_optional(rec.get("y"))
+            if y_val is not None:
+                y_values.append(y_val)
+        if y_values:
+            try:
+                metadata["band_y"] = float(statistics.median(y_values))
+            except Exception:
+                metadata["band_y"] = float(y_values[0])
+        metadata["band_size"] = len(lines)
+        if extra:
+            for key, value in extra.items():
+                metadata[key] = value
 
     y_tolerance = max(6.0, effective_height * 1.5) if effective_height > 0 else 12.0
 
@@ -4936,12 +5042,17 @@ def _detect_anchor_lines(
         if _HOLE_TABLE_ANCHOR_RE.search(text)
     ]
     if hole_table_matches:
-        return (hole_table_matches, ["HOLE TABLE"])
+        anchor_lines = list(hole_table_matches)
+        _finalize(anchor_lines, ["hole table"], mode="tokens")
+        header_tokens_found = _ordered_header_tokens(metadata["tokens_lower"])
+        return (anchor_lines, header_tokens_found, metadata)
 
     token_candidates: list[tuple[Mapping[str, Any], float, float, set[str]]] = []
     for record, x_val, y_val, text in processed_records:
         tokens_here = {
-            token for token, pattern in _ANCHOR_HEADER_TOKEN_RES.items() if pattern.search(text)
+            token
+            for token, pattern in _ANCHOR_TOKEN_PATTERNS.items()
+            if pattern.search(text)
         }
         if tokens_here:
             token_candidates.append((record, x_val, y_val, tokens_here))
@@ -4969,12 +5080,16 @@ def _detect_anchor_lines(
         if current_cluster:
             clusters.append(current_cluster)
 
-        header_set = set(_ANCHOR_HEADER_TOKENS)
-        best_full_cluster: list[tuple[Mapping[str, Any], float, float, set[str]]] | None = None
-        best_full_tokens: set[str] = set()
-        best_full_span = float("inf")
-        best_full_size = 0
-        best_right_cluster: list[tuple[Mapping[str, Any], float, float, set[str]]] | None = None
+        best_header_cluster: list[
+            tuple[Mapping[str, Any], float, float, set[str]]
+        ] | None = None
+        best_header_tokens: set[str] = set()
+        best_header_span = float("inf")
+        best_header_size = 0
+        best_header_count = 0
+        best_right_cluster: list[
+            tuple[Mapping[str, Any], float, float, set[str]]
+        ] | None = None
         best_right_tokens: set[str] = set()
         best_right_span = float("inf")
         best_right_size = 0
@@ -4992,24 +5107,33 @@ def _detect_anchor_lines(
             span = max(y_cluster) - min(y_cluster) if len(y_cluster) > 1 else 0.0
             center_x = sum(x_cluster) / len(x_cluster)
 
-            if header_set.issubset(cluster_tokens):
+            header_hits = cluster_tokens & _ANCHOR_HEADER_TOKEN_SET
+            header_count = len(header_hits)
+            if header_count >= 2:
                 if (
-                    best_full_cluster is None
-                    or span < best_full_span
+                    best_header_cluster is None
+                    or header_count > best_header_count
                     or (
-                        math.isclose(span, best_full_span)
-                        and len(cluster_tokens) > len(best_full_tokens)
+                        header_count == best_header_count
+                        and len(cluster_tokens) > len(best_header_tokens)
                     )
                     or (
-                        math.isclose(span, best_full_span)
-                        and len(cluster_tokens) == len(best_full_tokens)
-                        and len(cluster) > best_full_size
+                        header_count == best_header_count
+                        and len(cluster_tokens) == len(best_header_tokens)
+                        and span < best_header_span
+                    )
+                    or (
+                        header_count == best_header_count
+                        and len(cluster_tokens) == len(best_header_tokens)
+                        and math.isclose(span, best_header_span)
+                        and len(cluster) > best_header_size
                     )
                 ):
-                    best_full_cluster = cluster
-                    best_full_tokens = set(cluster_tokens)
-                    best_full_span = span
-                    best_full_size = len(cluster)
+                    best_header_cluster = cluster
+                    best_header_tokens = set(cluster_tokens)
+                    best_header_span = span
+                    best_header_size = len(cluster)
+                    best_header_count = header_count
 
             if len(cluster_tokens) >= 3 and center_x >= right_threshold:
                 if (
@@ -5030,14 +5154,16 @@ def _detect_anchor_lines(
                     best_right_span = span
                     best_right_size = len(cluster)
 
-        if best_full_cluster:
-            anchor_lines = [item[0] for item in best_full_cluster]
-            header_tokens_found = _ordered_header_tokens(best_full_tokens)
-            return (anchor_lines, header_tokens_found)
+        if best_header_cluster:
+            anchor_lines = [item[0] for item in best_header_cluster]
+            _finalize(anchor_lines, best_header_tokens, mode="tokens")
+            header_tokens_found = _ordered_header_tokens(metadata["tokens_lower"])
+            return (anchor_lines, header_tokens_found, metadata)
         if best_right_cluster:
             anchor_lines = [item[0] for item in best_right_cluster]
-            header_tokens_found = _ordered_header_tokens(best_right_tokens)
-            return (anchor_lines, header_tokens_found)
+            _finalize(anchor_lines, best_right_tokens, mode="tokens")
+            header_tokens_found = _ordered_header_tokens(metadata["tokens_lower"])
+            return (anchor_lines, header_tokens_found, metadata)
 
     fallback_candidates: list[tuple[Mapping[str, Any], float, float, str]] = []
     for record, x_val, y_val, text in processed_records:
@@ -5087,13 +5213,65 @@ def _detect_anchor_lines(
             cluster_tokens: set[str] = set()
             for record in anchor_lines:
                 text_value = str(record.get("text") or "")
-                for token, pattern in _ANCHOR_HEADER_TOKEN_RES.items():
+                for token, pattern in _ANCHOR_TOKEN_PATTERNS.items():
                     if pattern.search(text_value):
                         cluster_tokens.add(token)
-            header_tokens_found = _ordered_header_tokens(cluster_tokens)
-            return (anchor_lines, header_tokens_found)
+            _finalize(anchor_lines, cluster_tokens, mode="tokens")
+            header_tokens_found = _ordered_header_tokens(metadata["tokens_lower"])
+            return (anchor_lines, header_tokens_found, metadata)
 
-    return (anchor_lines, header_tokens_found)
+    def _detect_row_letter_mode() -> tuple[list[Mapping[str, Any]], dict[str, Any]]:
+        letter_candidates = [
+            item
+            for item in processed_records
+            if re.fullmatch(r"[A-Z]", item[3].strip())
+        ]
+        if not letter_candidates:
+            return ([], {})
+        sorted_letters = sorted(letter_candidates, key=lambda item: (item[1], -item[2]))
+        y_band_tol = max(3.0, effective_height * 0.75) if effective_height > 0 else 6.0
+        decimal_re = re.compile(r"\d+\.\d+")
+        qty_re = re.compile(r"\b\d+\s*$")
+        for record, x_val, y_val, _ in sorted_letters:
+            band_records: list[tuple[Mapping[str, Any], float, float, str]] = [
+                item
+                for item in processed_records
+                if abs(item[2] - y_val) <= y_band_tol
+            ]
+            if len(band_records) <= 1:
+                continue
+            has_dia = False
+            has_qty = False
+            for _, _, _, text in band_records:
+                text_upper = text.upper()
+                if (
+                    "Ø" in text_upper
+                    or "⌀" in text_upper
+                    or "DIA" in text_upper
+                    or decimal_re.search(text)
+                ):
+                    has_dia = True
+                if qty_re.search(text):
+                    has_qty = True
+            if has_dia and has_qty:
+                records_band = [item[0] for item in band_records]
+                return (
+                    records_band,
+                    {
+                        "mode": "row-letter",
+                        "band_y": y_val,
+                        "band_size": len(records_band),
+                    },
+                )
+        return ([], {})
+
+    band_records, band_meta = _detect_row_letter_mode()
+    if band_records:
+        anchor_lines = band_records
+        _finalize(anchor_lines, [], mode="row-letter", extra=band_meta)
+        return (anchor_lines, header_tokens_found, metadata)
+
+    return (anchor_lines, header_tokens_found, metadata)
 
 
 def _merge_table_lines(lines: Iterable[str]) -> list[str]:
@@ -5201,6 +5379,7 @@ def _build_columnar_table_from_panel_entries(
 
     base_records = list(records)
     records_all = list(base_records)
+    anchor_scan_records = list(base_records)
     roi_bounds: dict[str, float] | None = None
     roi_info: dict[str, Any] | None = None
     roi_median_height = 0.0
@@ -5289,7 +5468,7 @@ def _build_columnar_table_from_panel_entries(
 
     all_height_values = [
         float(rec["height"])
-        for rec in records_all
+        for rec in anchor_scan_records
         if isinstance(rec.get("height"), (int, float)) and float(rec["height"]) > 0
     ]
     median_height_all = (
@@ -5298,8 +5477,8 @@ def _build_columnar_table_from_panel_entries(
     if roi_median_height <= 0:
         roi_median_height = median_height_all
     base_anchor_height = roi_median_height if roi_median_height > 0 else median_height_all
-    anchor_lines, header_tokens_found = _detect_anchor_lines(
-        records_all,
+    anchor_lines, header_tokens_found, anchor_meta = _detect_anchor_lines(
+        anchor_scan_records,
         base_height=base_anchor_height,
     )
     anchor_count = len(anchor_lines)
@@ -5613,14 +5792,36 @@ def _build_columnar_table_from_panel_entries(
         if not cell_texts and buffer.cells:
             cell_texts = [" ".join(part[3] for part in sorted(buffer.cells, key=lambda item: item[0])).strip()]
         row_center_y = sum(buffer.y_values) / len(buffer.y_values)
+        plain_text_parts: list[str] = []
+        for value in cell_texts:
+            cleaned_value = " ".join(str(value or "").split())
+            if cleaned_value:
+                plain_text_parts.append(cleaned_value)
+        plain_text_norm = " ".join(plain_text_parts)
         snapped_rows.append(
             {
                 "index": row_index,
                 "y": row_center_y,
                 "cells": cell_texts,
                 "assignments": assignments,
+                "plain_text_norm": plain_text_norm,
+                "row_kind": "data",
             }
         )
+
+    grid_header_indices: set[int] = set()
+    for row in snapped_rows:
+        plain_text_norm = str(row.get("plain_text_norm") or "").strip()
+        if not plain_text_norm:
+            continue
+        row_index = row.get("index")
+        try:
+            row_index_int = int(row_index)
+        except Exception:
+            continue
+        if _is_monotone_count_sequence(plain_text_norm):
+            grid_header_indices.add(row_index_int)
+            row["row_kind"] = "grid_header"
 
     if not snapped_rows:
         debug_info = {
@@ -5759,11 +5960,20 @@ def _build_columnar_table_from_panel_entries(
             ),
         )
 
+    for row in snapped_rows:
+        if (
+            row.get("row_kind") != "grid_header"
+            and row.get("index") in header_row_indices
+        ):
+            row["row_kind"] = "header"
+
     row_debug_entries = [
         {
             "index": row["index"],
             "y": row["y"],
             "cells": row.get("cells", []),
+            "plain_text_norm": row.get("plain_text_norm", ""),
+            "row_kind": row.get("row_kind"),
         }
         for row in snapped_rows
     ]
@@ -5773,6 +5983,13 @@ def _build_columnar_table_from_panel_entries(
 
     for row in snapped_rows:
         row_index = row["index"]
+        if row_index in grid_header_indices:
+            plain_text_norm = str(row.get("plain_text_norm") or "").strip()
+            if plain_text_norm:
+                print(f'[TABLE-R] suppressed grid row: "{plain_text_norm}"')
+            else:
+                print("[TABLE-R] suppressed grid row: \"\"")
+            continue
         if row_index in header_row_indices:
             continue
         cells = [cell.strip() for cell in row.get("cells", [])]
@@ -6797,6 +7014,78 @@ def _detect_depth_token(text: str) -> str:
     return ""
 
 
+def _normalize_side_token(value: Any) -> str:
+    text = str(value or "").strip()
+    if not text:
+        return ""
+    upper = text.upper()
+    if upper.startswith("BACK"):
+        return "BACK"
+    if upper.startswith("FRONT"):
+        return "FRONT"
+    if upper.startswith("BOTH"):
+        return "BOTH"
+    return upper
+
+
+def _operation_bucket(record: Mapping[str, Any]) -> str | None:
+    kind = str(record.get("kind") or "").strip().lower()
+    if not kind:
+        return None
+
+    raw_text = str(record.get("raw_text") or "")
+    tool_text = str(record.get("tool") or "")
+    thread_text = str(record.get("thread") or "")
+    tap_type = str(record.get("tap_type") or "").strip().lower()
+    combined = " ".join(part for part in (raw_text, tool_text, thread_text) if part)
+
+    if tap_type == "pipe" or _NPT_TOKEN_RE.search(combined):
+        return "NPT"
+
+    if kind == "tap":
+        return "Tap"
+    if kind in {"counterbore", "cbore"}:
+        return "C'bore"
+    if kind in {"counterdrill", "cdrill"}:
+        return "C'drill"
+    if kind in {"jig", "jig_grind", "jig grind"}:
+        return "Jig"
+
+    if kind == "drill":
+        upper_text = combined.upper()
+        if "TAP" in upper_text or _NPT_TOKEN_RE.search(upper_text):
+            return None
+        return "Drill"
+
+    return None
+
+
+def _operation_totals(records: Iterable[Mapping[str, Any]]) -> dict[str, int]:
+    totals = {key: 0 for key in _OPS_TOTAL_KEYS}
+    for record in records:
+        bucket = _operation_bucket(record)
+        if not bucket:
+            continue
+        try:
+            qty_val = int(record.get("qty") or 0)
+        except Exception:
+            qty_val = 0
+        totals[bucket] += qty_val
+    return totals
+
+
+def _format_ops_totals_line(totals: Mapping[str, int]) -> str:
+    parts: list[str] = []
+    for label in _OPS_TOTAL_KEYS:
+        try:
+            value = int(totals.get(label, 0))
+        except Exception:
+            value = 0
+        if value:
+            parts.append(f"{label} {value}")
+    return " | ".join(parts) if parts else "—"
+
+
 def _fallback_debug_records(rows: Sequence[Mapping[str, Any]]) -> tuple[list[dict[str, Any]], int]:
     records: list[dict[str, Any]] = []
     qty_sum = 0
@@ -6824,7 +7113,7 @@ def _fallback_debug_records(rows: Sequence[Mapping[str, Any]]) -> tuple[list[dic
         record = {
             "qty": qty,
             "kind": kind.lower(),
-            "side": str(row.get("side") or ""),
+            "side": _normalize_side_token(row.get("side")),
             "tool": "",
             "diam_token": _detect_diameter_token(desc_text),
             "depth_token": _detect_depth_token(desc_text),
@@ -6836,6 +7125,12 @@ def _fallback_debug_records(rows: Sequence[Mapping[str, Any]]) -> tuple[list[dic
             record["tool"] = record["diam_token"] or _detect_thread_token(desc_text)
         else:
             record["tool"] = record["diam_token"] or _detect_thread_token(desc_text) or record["kind"]
+        tap_type_val = row.get("tap_type")
+        if tap_type_val:
+            record["tap_type"] = str(tap_type_val)
+        thread_val = row.get("thread")
+        if thread_val:
+            record["thread"] = str(thread_val)
         structured_columns = row.get("structured_columns")
         if isinstance(structured_columns, Mapping):
             for column_label in _DEBUG_STRUCTURED_COLUMNS:
@@ -6850,21 +7145,7 @@ def _fallback_debug_records(rows: Sequence[Mapping[str, Any]]) -> tuple[list[dic
 def _write_fallback_debug(records: list[dict[str, Any]], qty_sum: int) -> None:
     if not records:
         return
-    totals = {key: 0 for key in ("drill", "tap", "counterbore", "counterdrill", "jig_grind")}
-    for record in records:
-        raw_kind = str(record.get("kind") or "").lower()
-        kind = {
-            "cbore": "counterbore",
-            "counterbore": "counterbore",
-            "cdrill": "counterdrill",
-            "counterdrill": "counterdrill",
-        }.get(raw_kind, raw_kind)
-        if kind in totals:
-            try:
-                qty_val = int(record.get("qty") or 0)
-            except Exception:
-                qty_val = 0
-            totals[kind] += qty_val
+    totals = _operation_totals(records)
     try:
         _DEBUG_DIR.mkdir(parents=True, exist_ok=True)
         with _DEBUG_ROWS_PATH.open("w", newline="", encoding="utf-8") as handle:
@@ -6877,6 +7158,7 @@ def _write_fallback_debug(records: list[dict[str, Any]], qty_sum: int) -> None:
         print(
             f"[TABLE-DUMP] rows={len(records)} qty_sum={qty_sum} -> {_DEBUG_ROWS_PATH.as_posix()}"
         )
+        print(f"[OPS] table: {_format_ops_totals_line(totals)}")
         print(f"[OPS] table totals -> {_DEBUG_TOTALS_PATH.as_posix()}")
     except Exception:
         pass
@@ -7895,7 +8177,7 @@ def read_text_table(
                 anchor_scan_entries.append(scan_entry)
                 tokens_here: set[str] = set()
                 if text_value:
-                    for token, pattern in _ANCHOR_HEADER_TOKEN_RES.items():
+                    for token, pattern in _ANCHOR_TOKEN_PATTERNS.items():
                         if pattern.search(text_value):
                             tokens_here.add(token)
                 if y_float is not None and tokens_here:
@@ -7912,7 +8194,7 @@ def read_text_table(
                     )
                 except Exception:
                     base_anchor_height = float(height_samples[0]) if height_samples else 0.0
-                anchor_lines_pre, header_tokens_pre = _detect_anchor_lines(
+                anchor_lines_pre, header_tokens_pre, anchor_meta = _detect_anchor_lines(
                     anchor_scan_entries,
                     base_height=base_anchor_height,
                 )
@@ -7951,7 +8233,13 @@ def read_text_table(
                 y_tolerance = max(6.0, effective_anchor * 1.5) if effective_anchor > 0 else 12.0
 
                 best_entries: list[dict[str, Any]] = list(anchor_lines_pre)
-                tokens_set = {token for token in header_tokens_pre if token}
+                tokens_set: set[str] = {
+                    str(token).lower()
+                    for token in anchor_meta.get("tokens_lower", [])
+                    if token
+                }
+                if not tokens_set:
+                    tokens_set.update(token.lower() for token in header_tokens_pre if token)
                 if not best_entries:
                     clusters = _cluster_token_hits(token_hits, tolerance=y_tolerance)
                     best_cluster: list[tuple[dict[str, Any], float, set[str]]] | None = None
@@ -7976,10 +8264,14 @@ def read_text_table(
                 if best_entries and not tokens_set:
                     for entry in best_entries:
                         text_candidate = str(entry.get("text") or "")
-                        for token, pattern in _ANCHOR_HEADER_TOKEN_RES.items():
+                        for token, pattern in _ANCHOR_TOKEN_PATTERNS.items():
                             if pattern.search(text_candidate):
                                 tokens_set.add(token)
-                anchor_height_value = float(base_anchor_height or 0.0)
+                anchor_height_value = _coerce_float_optional(
+                    anchor_meta.get("anchor_height")
+                )
+                if anchor_height_value is None:
+                    anchor_height_value = float(base_anchor_height or 0.0)
                 anchor_specific_heights = [
                     float(line.get("height"))
                     for line in best_entries
@@ -7995,25 +8287,51 @@ def read_text_table(
                     anchor_height_display = "-"
                 else:
                     anchor_height_display = f"{float(anchor_height_value):.3f}"
-                ordered_tokens = _ordered_header_tokens(tokens_set)
-                if ordered_tokens:
-                    tokens_display = "{" + ",".join(f"'{token}'" for token in ordered_tokens) + "}"
-                else:
-                    tokens_display = "{}"
-                print(
-                    "[ANCHOR] tokens={tokens} found={count} anchor_height={height}".format(
-                        tokens=tokens_display,
-                        count=len(best_entries),
-                        height=anchor_height_display,
+                detection_mode = str(anchor_meta.get("mode") or "none").lower()
+                if detection_mode == "row-letter" and anchor_lines_pre:
+                    y_display = anchor_meta.get("band_y")
+                    if isinstance(y_display, (int, float)) and math.isfinite(float(y_display)):
+                        y_str = f"{float(y_display):.1f}"
+                    else:
+                        y_str = "-"
+                    rows_display = anchor_meta.get("band_size")
+                    try:
+                        rows_int = int(rows_display)
+                    except Exception:
+                        rows_int = len(best_entries)
+                    print(
+                        "[ANCHOR] fallback 'row-letter' mode engaged (y≈{y}, rows≈{rows})".format(
+                            y=y_str,
+                            rows=rows_int,
+                        )
                     )
-                )
+                else:
+                    header_tokens_ordered = _ordered_header_tokens(tokens_set)
+                    header_tokens_lower = [token.lower() for token in header_tokens_ordered]
+                    remaining_tokens = [
+                        token
+                        for token in sorted(tokens_set)
+                        if token not in _ANCHOR_HEADER_TOKEN_SET
+                    ]
+                    ordered_display_tokens = header_tokens_lower + remaining_tokens
+                    tokens_display = "{" + ",".join(
+                        f"'{token}'" for token in ordered_display_tokens
+                    ) + "}"
+                    print(
+                        "[ANCHOR] tokens={tokens} found={count} anchor_height={height}".format(
+                            tokens=tokens_display,
+                            count=len(best_entries),
+                            height=anchor_height_display,
+                        )
+                    )
                 if anchor_height_value > 0:
                     anchor_height = float(anchor_height_value)
                 if isinstance(_LAST_TEXT_TABLE_DEBUG, dict):
                     _LAST_TEXT_TABLE_DEBUG["anchors_pre_filter"] = {
                         "count": len(best_entries),
-                        "tokens": list(ordered_tokens),
+                        "tokens": list(_ordered_header_tokens(tokens_set)),
                         "anchor_height": anchor_height_value,
+                        "mode": detection_mode,
                     }
             if debug_scan_enabled:
                 layout_display = ", ".join(
@@ -9252,6 +9570,367 @@ def read_text_table(
                 rows.append(row_text)
             return rows
 
+        def _build_robust_columnar_rows(
+            entries: list[dict[str, Any]]
+        ) -> tuple[list[str], list[dict[str, Any]], dict[str, Any]]:
+            strong_boundary_patterns = (
+                re.compile(r"^[a-z]$", re.IGNORECASE),
+                re.compile(r"^dia\b", re.IGNORECASE),
+                re.compile(r"^\d+(?:\.\d+)?$"),
+                re.compile(r"^#?\d{1,2}-\d{1,2}$"),
+                re.compile(r"^tap$", re.IGNORECASE),
+                re.compile(r"^thru$", re.IGNORECASE),
+                re.compile(r"^npt$", re.IGNORECASE),
+                re.compile(r"^c['’]?bore$", re.IGNORECASE),
+            )
+
+            filtered: list[dict[str, Any]] = []
+            heights: list[float] = []
+            char_width_samples: list[float] = []
+            entries_by_layout: defaultdict[int, list[dict[str, Any]]] = defaultdict(list)
+
+            for entry in entries:
+                text_value = str(entry.get("normalized_text") or entry.get("text") or "").strip()
+                if not text_value:
+                    continue
+                x_val = _coerce_float_optional(entry.get("x"))
+                y_val = _coerce_float_optional(entry.get("y"))
+                if x_val is None or y_val is None:
+                    continue
+                record = dict(entry)
+                record["x"] = x_val
+                record["y"] = y_val
+                record["text"] = text_value
+                filtered.append(record)
+                layout_idx = _coerce_layout_index(entry.get("layout_index"))
+                entries_by_layout[layout_idx].append(record)
+                height_val = _coerce_float_optional(entry.get("height"))
+                if height_val is not None and height_val > 0:
+                    heights.append(height_val)
+                width_val = _coerce_float_optional(entry.get("width"))
+                if width_val is not None and width_val > 0:
+                    char_count = max(len(text_value), 1)
+                    char_width = width_val / char_count
+                    if char_width > 0:
+                        char_width_samples.append(char_width)
+
+            debug_payload: dict[str, Any] = {
+                "rows": [],
+                "y_tolerance": None,
+                "median_char_width": None,
+            }
+
+            if not filtered:
+                return [], [], debug_payload
+
+            median_height = statistics.median(heights) if heights else 0.0
+            if not math.isfinite(median_height) or median_height <= 0:
+                median_height = 0.0
+
+            median_char_width = (
+                statistics.median(char_width_samples)
+                if char_width_samples
+                else (median_height * 0.6 if median_height > 0 else 1.0)
+            )
+            if not math.isfinite(median_char_width) or median_char_width <= 0:
+                median_char_width = 1.0
+            debug_payload["median_char_width"] = median_char_width
+
+            def _token_is_boundary(token: str) -> bool:
+                for pattern in strong_boundary_patterns:
+                    if pattern.search(token):
+                        return True
+                return False
+
+            def _estimate_width(token: dict[str, Any]) -> float:
+                width_val = _coerce_float_optional(token.get("width"))
+                if width_val is not None and width_val > 0:
+                    return width_val
+                text_val = str(token.get("text") or "")
+                char_count = max(len(text_val), 1)
+                return median_char_width * char_count
+
+            row_candidates: list[dict[str, Any]] = []
+
+            for layout_idx, layout_entries in entries_by_layout.items():
+                layout_heights = [
+                    _coerce_float_optional(item.get("height"))
+                    for item in layout_entries
+                    if _coerce_float_optional(item.get("height"))
+                ]
+                layout_median_height = (
+                    statistics.median(layout_heights)
+                    if layout_heights
+                    else (median_height if median_height > 0 else None)
+                )
+                if layout_median_height is None or layout_median_height <= 0:
+                    layout_median_height = median_char_width * 1.5
+                y_tolerance = max(layout_median_height * 1.5, median_char_width * 1.5)
+                if debug_payload.get("y_tolerance") is None:
+                    debug_payload["y_tolerance"] = y_tolerance
+                else:
+                    debug_payload["y_tolerance"] = max(
+                        float(debug_payload["y_tolerance"]), y_tolerance
+                    )
+                sorted_layout = sorted(
+                    layout_entries,
+                    key=lambda item: (-float(item.get("y")), float(item.get("x"))),
+                )
+                clusters: list[dict[str, Any]] = []
+                for token in sorted_layout:
+                    token_y = float(token.get("y"))
+                    if not clusters:
+                        clusters.append({"tokens": [token], "y_values": [token_y]})
+                        continue
+                    last_cluster = clusters[-1]
+                    center_y = sum(last_cluster["y_values"]) / len(last_cluster["y_values"])
+                    if abs(token_y - center_y) <= y_tolerance:
+                        last_cluster["tokens"].append(token)
+                        last_cluster["y_values"].append(token_y)
+                    else:
+                        clusters.append({"tokens": [token], "y_values": [token_y]})
+                for cluster in clusters:
+                    tokens = sorted(
+                        cluster["tokens"],
+                        key=lambda item: (float(item.get("x")), int(item.get("order", 0))),
+                    )
+                    cells: list[dict[str, Any]] = []
+                    current_tokens: list[dict[str, Any]] = []
+                    prev_end: float | None = None
+                    gap_threshold = median_char_width * 2.5
+                    for token in tokens:
+                        text_val = str(token.get("text") or "").strip()
+                        if not text_val:
+                            continue
+                        width_est = _estimate_width(token)
+                        token_start = float(token.get("x"))
+                        token_center = token_start + width_est / 2.0
+                        if prev_end is not None:
+                            gap = token_start - prev_end
+                        else:
+                            gap = 0.0
+                        if (
+                            current_tokens
+                            and (
+                                gap > gap_threshold
+                                or _token_is_boundary(text_val)
+                            )
+                        ):
+                            cell_text = " ".join(
+                                str(part.get("text") or "").strip()
+                                for part in current_tokens
+                                if str(part.get("text") or "").strip()
+                            )
+                            if cell_text:
+                                cell_center = sum(
+                                    float(item.get("x")) + _estimate_width(item) / 2.0
+                                    for item in current_tokens
+                                ) / len(current_tokens)
+                                cells.append(
+                                    {
+                                        "text": cell_text,
+                                        "center": cell_center,
+                                    }
+                                )
+                            current_tokens = []
+                        current_tokens.append(token)
+                        if prev_end is None:
+                            prev_end = token_start + width_est
+                        else:
+                            prev_end = max(prev_end, token_start + width_est)
+                    if current_tokens:
+                        cell_text = " ".join(
+                            str(part.get("text") or "").strip()
+                            for part in current_tokens
+                            if str(part.get("text") or "").strip()
+                        )
+                        if cell_text:
+                            cell_center = sum(
+                                float(item.get("x")) + _estimate_width(item) / 2.0
+                                for item in current_tokens
+                            ) / len(current_tokens)
+                            cells.append({"text": cell_text, "center": cell_center})
+                    if not cells:
+                        continue
+                    row_candidates.append(
+                        {
+                            "layout": layout_idx,
+                            "cells": cells,
+                            "y": sum(cluster["y_values"]) / len(cluster["y_values"]),
+                        }
+                    )
+
+            if not row_candidates:
+                return [], [], debug_payload
+
+            row_candidates.sort(key=lambda item: -float(item.get("y", 0.0)))
+
+            column_labels = ["hole_ref", "dia", "q", "qty", "description"]
+            structured_rows: list[dict[str, Any]] = []
+
+            def _assign_columns(cells: list[dict[str, Any]]) -> tuple[
+                dict[str, list[str]],
+                float,
+                str,
+            ]:
+                x_centers = [float(cell.get("center", 0.0)) for cell in cells]
+                assignments: dict[str, list[str]] = {label: [] for label in column_labels}
+                if len(cells) >= len(column_labels):
+                    centers = _kmeans_1d(x_centers, len(column_labels))
+                    if len(centers) == len(column_labels):
+                        cluster_counts = [0] * len(column_labels)
+                        cell_clusters: list[int] = []
+                        for center in x_centers:
+                            cluster_idx = min(
+                                range(len(centers)),
+                                key=lambda index: (
+                                    abs(center - centers[index]),
+                                    index,
+                                ),
+                            )
+                            cluster_counts[cluster_idx] += 1
+                            cell_clusters.append(cluster_idx)
+                        range_x = max(x_centers) - min(x_centers) if x_centers else 0.0
+                        inertia = sum(
+                            (x_centers[idx] - centers[cell_clusters[idx]]) ** 2
+                            for idx in range(len(cells))
+                        )
+                        norm_denominator = max(range_x ** 2 * max(len(cells), 1), 1.0)
+                        normalized_inertia = inertia / norm_denominator
+                        if all(count > 0 for count in cluster_counts) and normalized_inertia <= 0.2:
+                            cluster_order = sorted(
+                                range(len(centers)), key=lambda index: centers[index]
+                            )
+                            index_to_label = {
+                                cluster_index: column_labels[pos]
+                                for pos, cluster_index in enumerate(cluster_order)
+                            }
+                            for idx, cell in enumerate(cells):
+                                label = index_to_label[cell_clusters[idx]]
+                                text_val = str(cell.get("text") or "").strip()
+                                if text_val:
+                                    assignments[label].append(text_val)
+                            return assignments, 0.9, "kmeans"
+
+                integer_re = re.compile(r"^\d+$")
+                dia_prefix_re = re.compile(r"^(?:dia|\.|ø|⌀|0\.)", re.IGNORECASE)
+                hole_ref_re = re.compile(r"^[A-Z](?:\)|)$")
+                used_indices: set[int] = set()
+
+                for idx, cell in enumerate(cells):
+                    text_val = str(cell.get("text") or "").strip()
+                    if not text_val:
+                        continue
+                    if hole_ref_re.match(text_val):
+                        assignments["hole_ref"].append(text_val)
+                        used_indices.add(idx)
+                        continue
+                    if dia_prefix_re.match(text_val):
+                        assignments["dia"].append(text_val)
+                        used_indices.add(idx)
+
+                integer_cells = [
+                    (idx, cell)
+                    for idx, cell in enumerate(cells)
+                    if idx not in used_indices
+                    and integer_re.match(str(cell.get("text") or "").strip())
+                ]
+                if integer_cells:
+                    integer_cells.sort(key=lambda item: cells[item[0]]["center"])
+                    qty_idx, qty_cell = integer_cells[-1]
+                    assignments["qty"].append(str(qty_cell.get("text") or "").strip())
+                    used_indices.add(qty_idx)
+                    for idx, cell in integer_cells[:-1]:
+                        assignments["q"].append(str(cell.get("text") or "").strip())
+                        used_indices.add(idx)
+
+                for idx, cell in enumerate(cells):
+                    if idx in used_indices:
+                        continue
+                    text_val = str(cell.get("text") or "").strip()
+                    if not text_val:
+                        continue
+                    assignments["description"].append(text_val)
+
+                confidence = 0.45
+                if assignments["qty"]:
+                    confidence += 0.25
+                if assignments["dia"]:
+                    confidence += 0.15
+                if assignments["hole_ref"]:
+                    confidence += 0.1
+                if assignments["description"]:
+                    confidence += 0.05
+                confidence = min(confidence, 0.75)
+                return assignments, confidence, "heuristic"
+
+            for candidate in row_candidates:
+                cells = candidate.get("cells", [])
+                if not cells:
+                    continue
+                assignments, confidence, assignment_kind = _assign_columns(cells)
+                qty_text = " ".join(assignments.get("qty") or [])
+                qty_match = re.match(r"\s*(\d+)\s*$", qty_text)
+                if not qty_match:
+                    continue
+                qty_token = qty_match.group(1)
+                hole_text = " ".join(assignments.get("hole_ref") or []).strip()
+                dia_text = " ".join(assignments.get("dia") or []).strip()
+                q_text = " ".join(assignments.get("q") or []).strip()
+                qty_tail = " ".join(assignments.get("qty") or []).strip()
+                desc_text = " ".join(assignments.get("description") or []).strip()
+                detail_parts = [
+                    part for part in (hole_text, dia_text, q_text, qty_tail, desc_text) if part
+                ]
+                if not detail_parts:
+                    continue
+                row_text = f"({qty_token}) {' | '.join(detail_parts)}"
+                structured_map = {label: "" for label in _DEBUG_STRUCTURED_COLUMNS}
+                structured_map["A"] = hole_text
+                structured_map["B"] = dia_text
+                structured_map["C"] = q_text
+                structured_map["D"] = qty_tail
+                structured_map["E"] = desc_text
+                structured_rows.append(
+                    {
+                        "row_text": row_text,
+                        "structured": structured_map,
+                        "assignments": assignments,
+                        "confidence": float(confidence),
+                        "assignment_kind": assignment_kind,
+                        "y": float(candidate.get("y", 0.0)),
+                    }
+                )
+
+            if not structured_rows:
+                return [], [], debug_payload
+
+            structured_rows.sort(key=lambda item: -item.get("y", 0.0))
+            deduped = _filter_and_dedupe_row_texts([row["row_text"] for row in structured_rows])
+            if not deduped:
+                return [], [], debug_payload
+
+            lookup: dict[str, dict[str, Any]] = {}
+            ordered_rows: list[dict[str, Any]] = []
+            for row in structured_rows:
+                row_text = row["row_text"]
+                if row_text not in lookup:
+                    lookup[row_text] = row
+            for row_text in deduped:
+                info = lookup.get(row_text)
+                if info:
+                    ordered_rows.append(info)
+
+            debug_payload["rows"] = [
+                {
+                    "text": row["row_text"],
+                    "confidence": row.get("confidence"),
+                    "assignment": row.get("assignment_kind"),
+                }
+                for row in ordered_rows
+            ]
+            return deduped, ordered_rows, debug_payload
+
         def _extract_roi_bounds(
             mapping: Mapping[str, Any] | None,
         ) -> tuple[float, float, float, float] | None:
@@ -9529,6 +10208,12 @@ def read_text_table(
                             key: list(value) for key, value in assignments.items()
                         }
                     row_entry["structured_row_text"] = structured_rows_info[idx].get("row_text")
+                    confidence_val = structured_rows_info[idx].get("confidence")
+                    if isinstance(confidence_val, (int, float)):
+                        row_entry["structured_confidence"] = float(confidence_val)
+                    assignment_kind = structured_rows_info[idx].get("assignment_kind")
+                    if isinstance(assignment_kind, str):
+                        row_entry["structured_assignment_kind"] = assignment_kind
                 if isinstance(_LAST_TEXT_TABLE_DEBUG, dict):
                     if structured_debug.get("rows"):
                         _LAST_TEXT_TABLE_DEBUG["band_structured_rows"] = structured_debug["rows"]
@@ -9549,15 +10234,39 @@ def read_text_table(
                     scan_totals["families"] = fallback_families
                     scan_totals["qty"] = fallback_qty
             else:
-                clusters = _legacy_cluster_entries_by_y(candidate_entries)
-                fallback_rows = _legacy_clusters_to_rows(clusters)
-                fallback_rows = [row for row in fallback_rows if row]
-                fallback_rows = _filter_and_dedupe_row_texts(fallback_rows)
+                fallback_rows, structured_rows_info, structured_debug = _build_robust_columnar_rows(
+                    candidate_entries
+                )
                 fallback_parsed, fallback_families, fallback_qty = _parse_rows(fallback_rows)
                 print(
-                    f"[TEXT-SCAN] fallback clusters={len(clusters)} "
+                    f"[TEXT-SCAN] fallback clusters={len(structured_rows_info)} "
                     f"chosen_rows={len(fallback_parsed)} qty_sum={fallback_qty}"
                 )
+                if isinstance(_LAST_TEXT_TABLE_DEBUG, dict) and structured_debug:
+                    _LAST_TEXT_TABLE_DEBUG["band_structured_rows"] = structured_debug.get("rows", [])
+                    if structured_debug.get("median_char_width") is not None:
+                        _LAST_TEXT_TABLE_DEBUG["band_median_char_width"] = structured_debug[
+                            "median_char_width"
+                        ]
+                if fallback_parsed and structured_rows_info:
+                    for idx, row_entry in enumerate(fallback_parsed):
+                        if idx >= len(structured_rows_info):
+                            break
+                        structured_map = structured_rows_info[idx].get("structured")
+                        if isinstance(structured_map, Mapping):
+                            row_entry["structured_columns"] = dict(structured_map)
+                        assignments = structured_rows_info[idx].get("assignments")
+                        if isinstance(assignments, Mapping):
+                            row_entry["structured_assignments"] = {
+                                key: list(value) for key, value in assignments.items()
+                            }
+                        row_entry["structured_row_text"] = structured_rows_info[idx].get("row_text")
+                        confidence_val = structured_rows_info[idx].get("confidence")
+                        if isinstance(confidence_val, (int, float)):
+                            row_entry["structured_confidence"] = float(confidence_val)
+                        assignment_kind = structured_rows_info[idx].get("assignment_kind")
+                        if isinstance(assignment_kind, str):
+                            row_entry["structured_assignment_kind"] = assignment_kind
                 if fallback_parsed and (
                     (fallback_qty, len(fallback_parsed))
                     > (scan_totals.get("qty", 0), len(parsed_rows))
@@ -9836,7 +10545,19 @@ def read_text_table(
             print(f"  [{idx:02d}] {row_text}")
 
         _LAST_TEXT_TABLE_DEBUG["text_row_count"] = len(parsed_rows)
-        print(f"[TEXT-SCAN] parsed rows: {len(parsed_rows)}")
+        high_conf_count = sum(
+            1
+            for row in parsed_rows
+            if isinstance(row.get("structured_confidence"), (int, float))
+            and float(row.get("structured_confidence") or 0.0) >= 0.7
+        )
+        if high_conf_count:
+            print(
+                f"[TEXT-SCAN] parsed rows: {len(parsed_rows)} "
+                f"(confidence≥0.7: {high_conf_count})"
+            )
+        else:
+            print(f"[TEXT-SCAN] parsed rows: {len(parsed_rows)}")
         for idx, row in enumerate(parsed_rows[:3]):
             ref_val = row.get("ref") or ""
             side_val = row.get("side") or ""
@@ -9900,8 +10621,25 @@ def read_text_table(
         return False
 
     candidate_lines = merged_rows if merged_rows else lines
-    confidence_high = any(_line_confident(line) for line in candidate_lines)
+    confidence_hits = 0
+    confidence_total = 0
+    for line in candidate_lines:
+        confidence_total += 1
+        if _line_confident(line):
+            confidence_hits += 1
+    confidence_high = confidence_hits > 0
+    try:
+        confidence_avg = (
+            float(confidence_hits) / float(confidence_total)
+            if confidence_total
+            else 0.0
+        )
+    except Exception:
+        confidence_avg = 0.0
     _LAST_TEXT_TABLE_DEBUG["confidence_high"] = bool(confidence_high)
+    _LAST_TEXT_TABLE_DEBUG["confidence_avg"] = confidence_avg
+    if isinstance(text_rows_info, Mapping):
+        text_rows_info["confidence_avg"] = confidence_avg
     force_columnar = False
 
     if isinstance(text_rows_info, Mapping):
@@ -10132,6 +10870,8 @@ def read_text_table(
         _LAST_TEXT_TABLE_DEBUG.setdefault("columns", [])
         _LAST_TEXT_TABLE_DEBUG.setdefault("bands", [])
     rows_materialized = list(primary_result.get("rows", []))
+    if isinstance(primary_result, Mapping):
+        primary_result["confidence_avg"] = confidence_avg
     if confidence_high and rows_materialized:
         primary_result["confidence_high"] = True
         if len(rows_materialized) >= 3 and not primary_result.get("header_validated"):
@@ -10364,7 +11104,7 @@ def _cluster_panel_entries(
                 )
 
     base_anchor_height = roi_median_height if roi_median_height > 0 else median_height_all
-    anchor_lines, header_tokens_found = _detect_anchor_lines(
+    anchor_lines, header_tokens_found, anchor_meta = _detect_anchor_lines(
         usable_records,
         base_height=base_anchor_height,
     )
@@ -12581,6 +13321,11 @@ def read_geo(
     if pipeline_normalized not in {"auto", "acad", "text", "geom"}:
         pipeline_normalized = "auto"
     allow_geom_rows = bool(allow_geom or pipeline_normalized == "geom")
+    _, layout_filter_patterns = _parse_layout_filter(layout_filters)
+    chart_layout_requested = any(
+        "CHART" in str(pattern or "").upper()
+        for pattern in layout_filter_patterns
+    )
     geo = extract_geometry(doc)
     if not isinstance(geo, dict):
         geo = {}
@@ -12712,6 +13457,18 @@ def read_geo(
     else:
         text_info = {}
     text_rows = len(text_rows_list)
+    try:
+        text_confidence_avg = float(text_info.get("confidence_avg") or 0.0)
+    except Exception:
+        text_confidence_avg = 0.0
+    chart_rows_confident = bool(
+        chart_layout_requested
+        and text_rows >= 8
+        and text_confidence_avg >= 0.6
+    )
+    chart_rows_insufficient = bool(chart_layout_requested and text_rows < 3)
+    if chart_rows_confident:
+        text_info["provenance_holes"] = "HOLE TABLE (chart)"
     debug_snapshot = get_last_text_table_debug() or {}
     rows_txt_debug = 0
     if isinstance(debug_snapshot, Mapping):
@@ -12750,7 +13507,10 @@ def read_geo(
     fallback_info: dict[str, Any] | None = None
     fallback_rows_list: list[dict[str, Any]] = []
     fallback_qty_sum = 0
-    if rows_txt_lines:
+    allow_text_fallback = True
+    if chart_layout_requested:
+        allow_text_fallback = text_rows < 3
+    if rows_txt_lines and allow_text_fallback:
         fallback_candidate = _publish_fallback_from_rows_txt(rows_txt_lines)
         if isinstance(fallback_candidate, Mapping) and fallback_candidate.get("rows"):
             fallback_info = dict(fallback_candidate)
@@ -12792,10 +13552,12 @@ def read_geo(
     elif run_acad and acad_rows_list:
         publish_info = acad_info
         publish_source_tag = "acad_table"
-    elif run_text and text_rows_list:
+    elif run_text and text_rows_list and not chart_rows_insufficient:
         publish_info = text_info
         publish_source_tag = "text_table"
-    elif run_text and fallback_info and fallback_rows_list:
+    elif run_text and fallback_info and fallback_rows_list and (
+        not chart_layout_requested or chart_rows_insufficient
+    ):
         publish_info = fallback_info
         publish_source_tag = "text_table"
         fallback_selected = True
