@@ -97,210 +97,255 @@ def iter_layouts(doc, names: Optional[Iterable[str]] = None) -> Iterator[Tuple[s
         yield layout.name, layout
 
 
-# --------------------------- text normalization ---------------------------
+_TABLE_TYPES = {"ACAD_TABLE", "TABLE", "MTABLE"}
+_TEXT_TYPES = {"TEXT", "MTEXT", "ATTRIB", "ATTDEF", "DIMENSION", "MLEADER"}
 
-_PLAIN_REPLACERS = [
-    (r"\\P", "\n"),   # MTEXT paragraph
-    (r"\\~", " "),    # NBSP-ish
-    (r"\\[Xx][\\;]", ""),  # strikeout on/off, etc. (best effort)
-]
 
 def _plain(s: str) -> str:
     if not s:
         return ""
-    out = s
-    for pat, rep in _PLAIN_REPLACERS:
-        out = re.sub(pat, rep, out)
-    out = out.replace("\r", "\n")
-    out = re.sub(r"[ \t]+", " ", out)
-    out = re.sub(r" *\n *", "\n", out)
-    return out.strip()
+    # Strip MTEXT control codes: \P newlines, %%c diameter symbol, etc.
+    s = s.replace("\\P", "\n").replace("\\p", "\n")
+    s = s.replace("%%c", "Ø").replace("%%d", "°").replace("%%p", "±")
+    return re.sub(r"\s+", " ", s).strip()
 
 
-# --------------------------- entity flattening ---------------------------
-
-_TEXT_TYPES = {"TEXT", "MTEXT", "ATTRIB", "ATTDEF", "MLEADER"}
-_TABLE_TYPES = {"ACAD_TABLE", "TABLE", "MTABLE"}  # cover modern + legacy tables
-
-
-def _yield_proxy_texts(ent):
-    """Extract MTEXT/TEXT from ACAD_PROXY_ENTITY via proxy graphics."""
-    results = []
+def _mtext_to_str(m) -> str:
+    raw = getattr(m, "text", "") or ""
     try:
-        # ezdxf exposes proxy graphics a few different ways across versions.
-        # Try multiple strategies for compatibility:
+        return _plain(m.plain_text())  # newer ezdxf
+    except Exception:
+        return _plain(raw)
+
+
+def _collect_table_cells(tbl) -> List[str]:
+    out: List[str] = []
+    try:
+        nrows = int(getattr(tbl, "nrows", getattr(tbl, "n_rows", 0)) or 0)
+        ncols = int(getattr(tbl, "ncols", getattr(tbl, "n_cols", 0)) or 0)
+        for r in range(nrows):
+            for c in range(ncols):
+                cell = None
+                for getter in ("get_cell", "cell", "getCell"):
+                    try:
+                        g = getattr(tbl, getter)
+                        cell = g((r, c)) if getter == "get_cell" else g(r, c)
+                        break
+                    except Exception:
+                        continue
+                txt = ""
+                if cell is not None:
+                    for attr in ("plain_text", "text", "value"):
+                        v = getattr(cell, attr, None)
+                        if v is None and hasattr(cell, "content"):
+                            v = getattr(cell.content, attr, None)
+                        if callable(v):
+                            try:
+                                v = v()
+                            except Exception:
+                                v = None
+                        if v:
+                            txt = str(v)
+                            break
+                if txt:
+                    out.append(_plain(txt))
+        if not out:
+            # Fallback: some MTABLE exports expose .cells
+            for cell in getattr(tbl, "cells", []):
+                for attr in ("plain_text", "text", "value"):
+                    v = getattr(cell, attr, None)
+                    if callable(v):
+                        v = v()
+                    if v:
+                        out.append(_plain(str(v)))
+                        break
+    except Exception:
+        pass
+    return out
+
+
+def _proxy_texts(ent) -> List[str]:
+    """
+    Extract TEXT/MTEXT rendered inside ACAD_PROXY_ENTITY via proxy graphics.
+    Tries multiple ezdxf APIs to stay compatible across versions.
+    """
+
+    texts: List[str] = []
+    try:
         loaders = []
         try:
-            # ezdxf ≥ 1.0
+            # ezdxf 1.0+ common path
             from ezdxf.proxygraphic import load_proxy_graphic as _load_pg
 
             loaders.append(lambda e: _load_pg(e))
         except Exception:
             pass
         try:
-            # Older layout—entity has a .proxy_graphic attribute (bytes)
+            # older shape
             from ezdxf.proxygraphic import ProxyGraphic as _PG
 
             loaders.append(lambda e: _PG.load(e))
         except Exception:
             pass
+        # last-ditch: some builds expose raw bytes at e.proxy_graphic
+        loaders.append(lambda e: getattr(e, "proxy_graphic", None))
 
         for load in loaders:
             try:
                 pg = load(ent)
-                for v in pg.virtual_entities():  # LINE, MTEXT, TEXT, etc.
-                    dxft = v.dxftype()
-                    if dxft == "TEXT":
-                        t = (v.dxf.text or "").strip()
-                        if t:
-                            results.append(t)
-                    elif dxft == "MTEXT":
-                        # across versions: .plain_text() or .text
-                        txt = ""
-                        if hasattr(v, "plain_text"):
-                            try:
-                                txt = v.plain_text()
-                            except Exception:
-                                pass
-                        if not txt:
-                            txt = getattr(v, "text", "") or ""
-                        txt = txt.strip()
-                        if txt:
-                            results.append(txt)
-                if results:
-                    break  # success with this loader
+                if pg is None:
+                    continue
+                # Normalize to an object with .virtual_entities()
+                if hasattr(pg, "virtual_entities"):
+                    viter = pg.virtual_entities()
+                else:
+                    # If we only got raw bytes, see if a ProxyGraphic class can parse them
+                    from ezdxf.proxygraphic import ProxyGraphic as _PG
+
+                    pg2 = _PG(bytes(pg))
+                    viter = pg2.virtual_entities()
+                for v in viter:
+                    t = v.dxftype()
+                    if t == "TEXT":
+                        s = _plain(getattr(v.dxf, "text", "") or "")
+                        if s:
+                            texts.append(s)
+                    elif t == "MTEXT":
+                        s = _mtext_to_str(v)
+                        if s:
+                            texts.append(s)
+                if texts:
+                    break
             except Exception:
                 continue
     except Exception:
         pass
-    return results
+    return texts
 
-def _entity_text_fields(e) -> Tuple[str, float, float, float]:
-    """(text, height, x, y). Best effort across TEXT/MTEXT/ATTRIB/MLEADER."""
-    et = e.dxftype()
-    txt = ""
-    h = 0.0
-    x = y = 0.0
 
-    try:
-        if et == "TEXT":
-            txt = getattr(e.dxf, "text", "") or ""
-            h = float(getattr(e.dxf, "height", 0.0) or 0.0)
-            ins = getattr(e.dxf, "insert", None)
-            if ins is not None:
-                x, y = float(ins.x), float(ins.y)
+def iter_text_records(
+    layout_name: str,
+    layout_obj,
+    include_layers=None,
+    exclude_layers=None,
+    max_block_depth: int = 8,
+    min_height: float = 0.0,
+) -> Iterator[TextRecord]:
 
-        elif et == "ATTRIB" or et == "ATTDEF":
-            txt = getattr(e.dxf, "text", "") or ""
-            h = float(getattr(e.dxf, "height", 0.0) or 0.0)
-            ins = getattr(e.dxf, "insert", None)
-            if ins is not None:
-                x, y = float(ins.x), float(ins.y)
+    include_layers = include_layers or []
+    exclude_layers = exclude_layers or []
 
-        elif et == "MTEXT":
-            # ezdxf MTEXT has .text (raw) and .plain_text() helpers in newer versions
-            raw = getattr(e, "text", "") or ""
+    def layer_ok(layer: str) -> bool:
+        if any(re.search(p, layer, flags=re.I) for p in exclude_layers):
+            return False
+        if include_layers and not any(re.search(p, layer, flags=re.I) for p in include_layers):
+            return False
+        return True
+
+    stack: List[Tuple[Any, Tuple[str, ...], int, bool]] = [(e, tuple(), 0, False) for e in layout_obj]
+
+    while stack:
+        ent, block_path, depth, from_block = stack.pop()
+        et = ent.dxftype()
+        layer = str(getattr(ent.dxf, "layer", "") or "")
+
+        # Recurse into blocks
+        if et == "INSERT" and depth < max_block_depth:
             try:
-                txt = e.plain_text()  # type: ignore[attr-defined]
-            except Exception:
-                txt = raw
-            txt = _plain(txt or raw)
-            h = float(getattr(e.dxf, "char_height", 0.0) or 0.0)
-            ins = getattr(e.dxf, "insert", None)
-            if ins is not None:
-                x, y = float(ins.x), float(ins.y)
-
-        elif et == "MLEADER":
-            # best-effort: some ezdxf versions expose context.mtext
-            ctx = getattr(e, "context", None)
-            mt = getattr(ctx, "mtext", None)
-            if mt is not None:
-                raw = getattr(mt, "text", "") or ""
-                try:
-                    txt = mt.plain_text()  # type: ignore[attr-defined]
-                except Exception:
-                    txt = raw
-                txt = _plain(txt or raw)
-            else:
-                # fallback: description
-                txt = _plain(str(getattr(e.dxf, "text", "") or ""))
-            # position is fuzzy; grab the MLEADER’s insertion if present
-            ins = getattr(e.dxf, "insert", None)
-            if ins is not None:
-                x, y = float(ins.x), float(ins.y)
-
-    except Exception:
-        pass
-
-    return str(txt or ""), float(h or 0.0), float(x or 0.0), float(y or 0.0)
-
-
-def _iter_virtual(e) -> List[Any]:
-    """Return virtual children for INSERT, else []."""
-    try:
-        return list(e.virtual_entities())
-    except Exception:
-        return []
-
-
-def _collect_table_cells(e) -> List[str]:
-    """
-    Return flattened cell texts for a TABLE-like entity, best-effort across
-    ezdxf versions and entity variants (ACAD_TABLE, TABLE, MTABLE).
-    """
-    payload: List[str] = []
-    try:
-        # Try both naming schemes used by ezdxf over time
-        nrows = int(getattr(e, "nrows", getattr(e, "n_rows", 0)) or 0)
-        ncols = int(getattr(e, "ncols", getattr(e, "n_cols", 0)) or 0)
-
-        # Preferred: explicit row/col scan
-        for r in range(nrows):
-            for c in range(ncols):
-                cell = None
-                # Try the most common getters first
-                for getter in ("get_cell", "cell", "getCell"):
-                    try:
-                        g = getattr(e, getter)
-                        cell = g((r, c)) if getter == "get_cell" else g(r, c)
-                        break
-                    except Exception:
-                        continue
-
-                text = ""
-                if cell is not None:
-                    # Newer ezdxf: cell.plain_text() or cell.content.plain_text()
-                    for attr in ("plain_text", "text", "value"):
-                        try:
-                            v = getattr(cell, attr, None)
-                            if v is None and hasattr(cell, "content"):
-                                v = getattr(cell.content, attr, None)
-                            if callable(v):
-                                v = v()
-                            if v:
-                                text = str(v)
-                                break
-                        except Exception:
-                            continue
-                if text:
-                    payload.append(_plain(text))
-
-        # Fallback: some MTABLE exports store a linear list of cell-like items
-        if not payload:
-            try:
-                for cell in getattr(e, "cells", []):
-                    for attr in ("plain_text", "text", "value"):
-                        v = getattr(cell, attr, None)
-                        if callable(v):
-                            v = v()
-                        if v:
-                            payload.append(_plain(str(v)))
-                            break
+                for v in ent.virtual_entities():
+                    stack.append((v, block_path + (ent.dxf.name,), depth + 1, True))
             except Exception:
                 pass
-    except Exception:
-        pass
-    return payload
+            continue
+
+        # Tables
+        if et in _TABLE_TYPES:
+            if layer_ok(layer):
+                for s in _collect_table_cells(ent):
+                    yield TextRecord(
+                        layout_name,
+                        layer,
+                        "TABLECELL",
+                        s,
+                        0.0,
+                        0.0,
+                        0.0,
+                        float(getattr(ent.dxf, "rotation", 0.0) or 0.0),
+                        from_block,
+                        depth,
+                        block_path,
+                    )
+            continue
+
+        # AutoCAD Mechanical (and other) custom objects as proxies
+        if et == "ACAD_PROXY_ENTITY":
+            # Optional filter: many AM hole charts have class names w/ HOLECHART
+            cla = str(getattr(ent.dxf, "proxy_entity_class", "") or "")
+            if (not cla) or ("HOLE" in cla.upper() or "CHART" in cla.upper()):
+                for s in _proxy_texts(ent):
+                    yield TextRecord(
+                        layout_name,
+                        layer,
+                        "PROXYTEXT",
+                        s,
+                        0.0,
+                        0.0,
+                        0.0,
+                        float(getattr(ent.dxf, "rotation", 0.0) or 0.0),
+                        from_block,
+                        depth,
+                        block_path,
+                    )
+            continue
+
+        # Plain text-ish
+        if et not in _TEXT_TYPES or not layer_ok(layer):
+            continue
+
+        txt, h, x, y = None, 0.0, 0.0, 0.0
+        if et == "TEXT":
+            txt = getattr(ent.dxf, "text", "") or ""
+            h = float(getattr(ent.dxf, "height", 0.0) or 0.0)
+            ins = getattr(ent.dxf, "insert", None)
+            if ins is not None:
+                x, y = float(ins.x), float(ins.y)
+        elif et == "MTEXT":
+            txt = _mtext_to_str(ent)
+            h = float(getattr(ent.dxf, "char_height", 0.0) or 0.0)
+            ins = getattr(ent.dxf, "insert", None)
+            if ins is not None:
+                x, y = float(ins.x), float(ins.y)
+        elif et in {"ATTRIB", "ATTDEF"}:
+            txt = getattr(ent.dxf, "text", "") or ""
+            h = float(getattr(ent.dxf, "height", 0.0) or 0.0)
+            ins = getattr(ent.dxf, "insert", None)
+            if ins is not None:
+                x, y = float(ins.x), float(ins.y)
+        elif et == "MLEADER":
+            ctx = getattr(ent, "context", None)
+            mt = getattr(ctx, "mtext", None)
+            if mt is not None:
+                txt = _mtext_to_str(mt)
+        elif et == "DIMENSION":
+            # Some variants carry measurement text at .dxf.text
+            txt = getattr(ent.dxf, "text", "") or ""
+
+        if txt:
+            txt = _plain(str(txt))
+            if (not min_height) or (h >= float(min_height)) or txt:
+                yield TextRecord(
+                    layout_name,
+                    layer,
+                    et,
+                    txt,
+                    x,
+                    y,
+                    h,
+                    float(getattr(ent.dxf, "rotation", 0.0) or 0.0),
+                    from_block,
+                    depth,
+                    block_path,
+                )
 
 
 def iter_text(
@@ -312,120 +357,14 @@ def iter_text(
     exclude_layers: Optional[List[str]] = None,
     min_height: float = 0.0,
 ) -> Iterator[TextRecord]:
-    """
-    Yield TextRecord for TEXT/MTEXT/ATTRIB/MLEADER and TABLE cell strings.
-    - Follows INSERTs recursively via virtual_entities() up to max_block_depth.
-    - No “anchor” or HOLE parsing. Just a raw dump.
-    """
-
-    include_layers = include_layers or []  # regex allowlist (any match)
-    exclude_layers = exclude_layers or []  # regex blocklist (any match)
-
-    def layer_allowed(layer: str) -> bool:
-        if any(re.search(p, layer, flags=re.I) for p in exclude_layers):
-            return False
-        if include_layers and not any(re.search(p, layer, flags=re.I) for p in include_layers):
-            return False
-        return True
-
-    stack: List[Tuple[Any, Tuple[str, ...], int, bool]] = []
-    # seed with top-level entities
-    for ent in layout_obj:
-        stack.append((ent, tuple(), 0, False))
-
-    while stack:
-        ent, block_path, depth, from_block = stack.pop()
-        et = ent.dxftype()
-        layer = str(getattr(ent.dxf, "layer", "") or "")
-
-        if et == "INSERT" and depth < max_block_depth:
-            # Recurse into the virtualized children (already transformed by ezdxf).
-            children = _iter_virtual(ent)
-            child_block_name = str(getattr(ent.dxf, "name", "") or "")
-            child_path = block_path + ((child_block_name or "INSERT"),)
-            for ch in children:
-                stack.append((ch, child_path, depth + 1, True))
-            continue
-
-        # TABLE-like → flatten cell texts
-        if et in _TABLE_TYPES:
-            if layer_allowed(layer):
-                for s in _collect_table_cells(ent):
-                    if s:
-                        yield TextRecord(
-                            layout=layout_name,
-                            layer=layer,
-                            etype="TABLECELL",
-                            text=s,
-                            x=float(getattr(getattr(ent.dxf, "insert", None) or 0, "x", 0.0) or 0.0),
-                            y=float(getattr(getattr(ent.dxf, "insert", None) or 0, "y", 0.0) or 0.0),
-                            height=0.0,
-                            rotation=float(getattr(ent.dxf, "rotation", 0.0) or 0.0),
-                            in_block=from_block,
-                            depth=depth,
-                            block_path=block_path,
-                        )
-            continue
-
-        if et not in _TEXT_TYPES:
-            if et == "ACAD_PROXY_ENTITY":
-                try:
-                    orig = getattr(ent.dxf, "proxy_entity_class", "") or ""
-                    is_hole_chart = "HOLECHART" in str(orig).upper()
-                except Exception:
-                    is_hole_chart = True
-
-                if is_hole_chart and layer_allowed(layer):
-                    base = (
-                        getattr(ent.dxf, "base_point", None)
-                        or getattr(ent.dxf, "insert", None)
-                        or getattr(ent.dxf, "location", None)
-                    )
-                    bx = float(getattr(base, "x", 0.0) or 0.0) if base is not None else 0.0
-                    by = float(getattr(base, "y", 0.0) or 0.0) if base is not None else 0.0
-                    for s in _yield_proxy_texts(ent):
-                        if not s:
-                            continue
-                        yield TextRecord(
-                            layout=layout_name,
-                            layer=layer,
-                            etype="PROXYTEXT",
-                            text=_plain(str(s)),
-                            x=bx,
-                            y=by,
-                            height=0.0,
-                            rotation=float(getattr(ent.dxf, "rotation", 0.0) or 0.0),
-                            in_block=from_block,
-                            depth=depth,
-                            block_path=block_path,
-                        )
-            continue
-
-        if not layer_allowed(layer):
-            continue
-
-        text, height, x, y = _entity_text_fields(ent)
-        if min_height and height < float(min_height):
-            # keep SEE SHEET etc. anyway if height unknown
-            if not text:
-                continue
-
-        if text is None or str(text).strip() == "":
-            continue
-
-        yield TextRecord(
-            layout=layout_name,
-            layer=layer,
-            etype=et,
-            text=_plain(str(text)),
-            x=float(x or 0.0),
-            y=float(y or 0.0),
-            height=float(height or 0.0),
-            rotation=float(getattr(ent.dxf, "rotation", 0.0) or 0.0),
-            in_block=from_block,
-            depth=depth,
-            block_path=block_path,
-        )
+    yield from iter_text_records(
+        layout_name,
+        layout_obj,
+        include_layers=include_layers,
+        exclude_layers=exclude_layers,
+        max_block_depth=max_block_depth,
+        min_height=min_height,
+    )
 
 
 def collect_all_text(
