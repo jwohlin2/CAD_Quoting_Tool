@@ -4833,16 +4833,6 @@ def _line_is_table_row_start(text: str) -> bool:
     return False
 
 
-def _coerce_float(value: Any) -> float | None:
-    try:
-        number = float(value)
-    except Exception:
-        return None
-    if not math.isfinite(number):
-        return None
-    return float(number)
-
-
 def _compute_percentile(values: Sequence[float], fraction: float) -> float:
     if not values:
         return 0.0
@@ -4884,8 +4874,8 @@ def _detect_anchor_lines(
     for record in records:
         if not isinstance(record, Mapping):
             continue
-        x_val = _coerce_float(record.get("x"))
-        y_val = _coerce_float(record.get("y"))
+        x_val = _coerce_float_optional(record.get("x"))
+        y_val = _coerce_float_optional(record.get("y"))
         if x_val is None or y_val is None:
             continue
         text = str(record.get("text") or "")

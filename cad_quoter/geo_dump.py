@@ -402,6 +402,96 @@ def _resolve_point_vec(dxf: Any) -> Vec3 | None:
     return None
 
 
+def _compose_block_name(block_path: Sequence[str] | tuple[str, ...]) -> str | None:
+    if not block_path:
+        return None
+    parts: list[str] = []
+    for segment in block_path:
+        try:
+            text = str(segment or "").strip()
+        except Exception:
+            text = ""
+        if text:
+            parts.append(text)
+    if not parts:
+        return None
+    return " > ".join(parts)
+
+
+def _resolve_xy_from_entity(entity: Any) -> tuple[float | None, float | None]:
+    if entity is None:
+        return (None, None)
+    for attr in _INSERT_ATTRS:
+        if not hasattr(entity, attr):
+            continue
+        try:
+            point = getattr(entity, attr)
+        except Exception:
+            continue
+        x_val, y_val = _vector_xy(point)
+        if x_val is not None or y_val is not None:
+            return (x_val, y_val)
+    return (None, None)
+
+
+def _world_point(entity: Any, dxf: Any, matrix: Matrix44 | None) -> tuple[float | None, float | None]:
+    x_val, y_val = _resolve_xy_from_dxf(dxf)
+    if x_val is None and y_val is None:
+        x_val, y_val = _resolve_xy_from_entity(entity)
+    if Matrix44 is None or Vec3 is None or matrix is None:
+        return (x_val, y_val)
+    point_vec = _resolve_point_vec(dxf)
+    if point_vec is None and (x_val is not None or y_val is not None):
+        point_vec = Vec3(x_val or 0.0, y_val or 0.0, 0.0)
+    if point_vec is None:
+        return (x_val, y_val)
+    try:
+        transformed = matrix.transform(point_vec)
+    except Exception:
+        return (x_val, y_val)
+    return (_safe_float(transformed.x), _safe_float(transformed.y))
+
+
+def _world_rotation(entity: Any, rotation_local: float | None, matrix: Matrix44 | None) -> float | None:
+    rotation_value = _safe_float(rotation_local)
+    if rotation_value is None:
+        try:
+            rotation_value = _safe_float(getattr(entity, "rotation", None))
+        except Exception:
+            rotation_value = None
+    if rotation_value is None:
+        return None
+    if Matrix44 is None or Vec3 is None or matrix is None:
+        return rotation_value
+    try:
+        rad = math.radians(rotation_value)
+        direction = Vec3(math.cos(rad), math.sin(rad), 0.0)
+        transformed = _transform_direction(matrix, direction)
+        angle = math.degrees(math.atan2(transformed.y, transformed.x))
+        if not math.isfinite(angle):
+            return rotation_value
+        return angle
+    except Exception:
+        return rotation_value
+
+
+def _world_height(entity: Any, height_local: float | None, matrix: Matrix44 | None) -> float | None:
+    height_value = _safe_float(height_local)
+    if height_value is None or height_value == 0:
+        return height_value
+    if Matrix44 is None or Vec3 is None or matrix is None:
+        return height_value
+    try:
+        direction = Vec3(0.0, height_value, 0.0)
+        transformed = _transform_direction(matrix, direction)
+        scale = math.hypot(_safe_float(transformed.x) or 0.0, _safe_float(transformed.y) or 0.0)
+        if not scale:
+            return height_value
+        return scale
+    except Exception:
+        return height_value
+
+
 def _transform_direction(matrix: Matrix44 | None, vector: Vec3) -> Vec3:
     if Matrix44 is None or matrix is None:
         return vector
@@ -2125,7 +2215,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             print("[geo_dump] exclude_layer=<none> (defaults disabled)")
         active_layer_exclude = list(exclude_layer_patterns)
     elif exclude_layer_patterns:
-        combined_patterns = list(DEFAULT_TEXT_LAYER_EXCLUDE_REGEX) + list(
+        combined_patterns = list(TEXT_LAYER_EXCLUDE_DEFAULT) + list(
             exclude_layer_patterns
         )
         read_kwargs["layer_exclude_regex"] = combined_patterns
@@ -2136,7 +2226,10 @@ def main(argv: Sequence[str] | None = None) -> int:
         )
         active_layer_exclude = list(combined_patterns)
     if active_layer_exclude is None:
-        active_layer_exclude = list(DEFAULT_TEXT_LAYER_EXCLUDE_REGEX)
+        active_layer_exclude = list(TEXT_LAYER_EXCLUDE_DEFAULT)
+        read_kwargs["layer_exclude_regex"] = list(active_layer_exclude)
+    elif not args.no_exclude_layer:
+        read_kwargs["layer_exclude_regex"] = list(active_layer_exclude)
     if args.debug_layouts:
         read_kwargs["debug_layouts"] = True
     if args.debug_scan:
