@@ -480,14 +480,46 @@ def _format_hole_table_section(
         if not any((hole, ref, desc, qty)):
             continue
 
-        normalized.append((hole, ref, qty, desc))
+        meta_parts: list[str] = []
+
+        type_raw = entry.get("TYPE") if "TYPE" in entry else entry.get("type")
+        type_txt = _sanitize_render_text(type_raw).strip()
+        if type_txt:
+            meta_parts.append(type_txt)
+
+        side_raw = entry.get("SIDE") if "SIDE" in entry else entry.get("side")
+        side_txt = _sanitize_render_text(side_raw).strip()
+        if side_txt:
+            meta_parts.append(f"side: {side_txt}")
+
+        depth_raw = entry.get("DEPTH_IN") if "DEPTH_IN" in entry else entry.get("depth_in")
+        if depth_raw not in (None, ""):
+            try:
+                depth_val = float(depth_raw)
+            except Exception:
+                depth_val = None
+            if depth_val is not None and math.isfinite(depth_val):
+                meta_parts.append(f"depth: {depth_val:.3f}\"")
+
+        thru_value = entry.get("THRU") if "THRU" in entry else entry.get("thru")
+        if isinstance(thru_value, bool):
+            if thru_value:
+                meta_parts.append("thru")
+        else:
+            thru_txt = _sanitize_render_text(thru_value).strip()
+            if thru_txt.upper() == "TRUE":
+                meta_parts.append("thru")
+
+        meta_text = f"[{'; '.join(meta_parts)}]" if meta_parts else ""
+
+        normalized.append((hole, ref, qty, desc, meta_text))
 
     if not normalized:
         return []
 
     widths = [0, 0, 0, 0]
     for row in normalized:
-        for idx, cell in enumerate(row):
+        for idx, cell in enumerate(row[:4]):
             widths[idx] = max(widths[idx], len(cell))
 
     align = ("left", "left", "right", "left")
