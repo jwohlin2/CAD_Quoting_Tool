@@ -426,6 +426,94 @@ def _clamp_minutes(v: Any, lo: float = 0.0, hi: float = 10000.0) -> float:
     return minutes_val
 
 
+def _format_hole_table_section(
+    entries: Sequence[Mapping[str, Any]] | None,
+) -> list[str]:
+    """Return formatted HOLE TABLE lines for the rendered quote."""
+
+    if not entries:
+        return []
+
+    header = ("HOLE", "REF_DIAM", "QTY", "DESCRIPTION/DEPTH")
+    normalized: list[tuple[str, str, str, str]] = []
+
+    for entry in entries:
+        if not isinstance(entry, _MappingABC):
+            continue
+
+        hole_raw = (
+            entry.get("hole")
+            or entry.get("HOLE")
+            or entry.get("id")
+            or entry.get("label")
+            or ""
+        )
+        ref_raw = (
+            entry.get("ref")
+            or entry.get("REF_DIAM")
+            or entry.get("REF")
+            or entry.get("diameter")
+            or entry.get("diameter_in")
+            or ""
+        )
+        desc_raw = (
+            entry.get("desc")
+            or entry.get("DESCRIPTION/DEPTH")
+            or entry.get("DESCRIPTION")
+            or entry.get("description")
+            or ""
+        )
+
+        qty_source = entry.get("qty") if "qty" in entry else entry.get("QTY")
+        qty_text = ""
+        if qty_source not in (None, ""):
+            qty_int = _ops_qty_from_value(qty_source)
+            if qty_int or str(qty_source).strip() in {"0", "0.0"}:
+                qty_text = str(qty_int)
+            else:
+                qty_text = str(qty_source).strip()
+
+        hole = _sanitize_render_text(hole_raw).strip()
+        ref = _sanitize_render_text(ref_raw).strip()
+        desc = _sanitize_render_text(desc_raw).strip()
+        qty = _sanitize_render_text(qty_text).strip()
+
+        if not any((hole, ref, desc, qty)):
+            continue
+
+        normalized.append((hole, ref, qty, desc))
+
+    if not normalized:
+        return []
+
+    widths = [len(value) for value in header]
+    for row in normalized:
+        for idx, cell in enumerate(row):
+            widths[idx] = max(widths[idx], len(cell))
+
+    align = ("left", "left", "right", "left")
+
+    def _fmt_row(cells: Sequence[str]) -> str:
+        padded: list[str] = []
+        for idx, cell in enumerate(cells):
+            width = widths[idx] if idx < len(widths) else len(cell)
+            alignment = align[idx] if idx < len(align) else "left"
+            if alignment == "right":
+                padded.append(cell.rjust(width))
+            else:
+                padded.append(cell.ljust(width))
+        return "  ".join(padded)
+
+    header_line = _fmt_row(header)
+    divider = "-" * len(header_line)
+
+    lines = ["HOLE TABLE (from chart)", divider, header_line, divider]
+    for row in normalized:
+        lines.append(_fmt_row(row))
+    lines.append("")
+    return lines
+
+
 def _pick_drill_minutes(
     process_plan_summary: Mapping[str, Any] | None,
     extras: Mapping[str, Any] | None,
@@ -553,9 +641,9 @@ def _emit_hole_table_ops_cards(
                 dbg_entry = (bucket_view_obj.get("buckets") or {}).get("tapping")  # type: ignore[assignment]
         except Exception:
             dbg_entry = None
-        _push(lines, f"[DEBUG] tapping_bucket={dbg_entry or {}}")
+        logging.debug("tapping_bucket=%s", dbg_entry or {})
     except Exception as exc:
-        _push(lines, f"[DEBUG] tapping_emit_skipped={exc.__class__.__name__}: {exc}")
+        logging.exception("tapping_emit_skipped=%s", exc.__class__.__name__)
         return
 if TYPE_CHECKING:
     from cad_quoter.estimators import drilling_legacy as _drilling_legacy
@@ -7650,13 +7738,17 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
         else:
             ops_summary_map = None
         ops_rows = (((ops_summary_map or {}).get("rows") or []) if isinstance(ops_summary_map, _MappingABC) else [])
-        _push(lines, f"[DEBUG] ops_rows_pre={len(ops_rows)}")
+        logging.debug("ops_rows_pre=%s", len(ops_rows))
 
         if not ops_rows:
             # collect chart text wherever it lives
             chart_lines_all = _collect_chart_lines_context(ctx, geo_map, ctx_a, ctx_b)
             built = _build_ops_rows_from_lines_fallback(chart_lines_all)
-            _push(lines, f"[DEBUG] chart_lines_found={len(chart_lines_all)} built_rows={len(built)}")
+            logging.debug(
+                "chart_lines_found=%s built_rows=%s",
+                len(chart_lines_all),
+                len(built),
+            )
             if built:
                 plate_thickness = _resolve_part_thickness_in(
                     geo_map,
@@ -7672,6 +7764,21 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
                     ops_summary_map["rows"] = built
                 ops_rows = built
 
+        table_entries: list[Mapping[str, Any]] = []
+        if isinstance(geo_map, _MappingABC):
+            hole_table_ops = geo_map.get("hole_table_ops")
+            if isinstance(hole_table_ops, Sequence):
+                for entry in hole_table_ops:
+                    if isinstance(entry, _MappingABC):
+                        table_entries.append(entry)
+        if not table_entries:
+            for entry in ops_rows:
+                if isinstance(entry, _MappingABC):
+                    table_entries.append(entry)
+
+        for line in _format_hole_table_section(table_entries):
+            _push(lines, line)
+
         # Emit the cards (will no-op if no TAP/CBore/Spot rows)
         _emit_hole_table_ops_cards(
             lines,
@@ -7684,7 +7791,7 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
         )
 
     except Exception as e:
-        _push(lines, f"[DEBUG] material_removal_emit_skipped={e.__class__.__name__}: {e}")
+        logging.exception("material_removal_emit_skipped=%s", e.__class__.__name__)
     # ========================================================================
 
     # ---- Pricing ladder ------------------------------------------------------
