@@ -32,29 +32,26 @@ from cad_quoter.geo_extractor import (
     TextScanOpts,
     extract_for_app,
 )
+from cad_quoter.geometry.hole_table_parser import parse_drill_token
 from cad_quoter.geometry.mtext_utils import normalize_mtext_plain_text
 
 DEFAULT_SAMPLE_PATH = REPO_ROOT / "Cad Files" / "301_redacted.dwg"
 ARTIFACT_DIR = REPO_ROOT / "out"
 DEFAULT_EXCLUDE_PATTERN_TEXT = ", ".join(DEFAULT_TEXT_LAYER_EXCLUDE_REGEX) or "<none>"
 DEFAULT_TEXT_LAYER_INCLUDE_REGEX = (".*",)
+MM_PER_INCH = 25.4
 
 _FULL_TEXT_FIELDS = [
     "layout",
-    "entity_type",
     "layer",
-    "height",
-    "width",
-    "rotation",
+    "from_block",
+    "block_name",
+    "depth",
     "x",
     "y",
+    "height",
     "raw_text",
-    "plain_text",
-    "style",
-    "handle",
-    "block_name",
-    "from_block",
-    "depth",
+    "plain_text_norm",
 ]
 
 _HEIGHT_ATTRS = tuple(
@@ -82,6 +79,17 @@ _INSERT_ATTRS = tuple(
         ),
     )
 )
+
+
+def _normalized_plain_text(raw_text: str | None, plain_text: str | None) -> str:
+    candidate = plain_text or raw_text or ""
+    if not candidate:
+        return ""
+    try:
+        return normalize_mtext_plain_text(candidate)
+    except Exception:
+        return candidate
+
 
 TABLE_EXTRACT_ALLOWED_KEYS = {
     "layer_allowlist",
@@ -751,6 +759,7 @@ def dump_all_text(doc: Any, out_dir: Path | str, opts: Mapping[str, Any] | None)
             "y": _safe_float(entry.get("insert_y")),
             "raw_text": raw_text or plain_text,
             "plain_text": plain_text or raw_text,
+            "plain_text_norm": _normalized_plain_text(raw_text, plain_text),
             "style": str(entry.get("style") or ""),
             "handle": handle_text,
             "block_name": block_name,
@@ -805,6 +814,7 @@ def dump_all_text(doc: Any, out_dir: Path | str, opts: Mapping[str, Any] | None)
             "y": y_val,
             "raw_text": raw_text or "",
             "plain_text": plain_text or "",
+            "plain_text_norm": _normalized_plain_text(raw_text, plain_text),
             "style": style_value,
             "handle": handle_value,
             "block_name": block_value,
@@ -964,34 +974,179 @@ def dump_all_text(doc: Any, out_dir: Path | str, opts: Mapping[str, Any] | None)
     return (records, csv_path, jsonl_path)
 
 
+def _row_confidence(
+    row: Mapping[str, Any], confidence_hint: bool | str | None
+) -> str:
+    value = row.get("confidence")
+    if isinstance(value, str):
+        candidate = value.strip()
+        if candidate:
+            return candidate
+    if isinstance(value, (int, float)):
+        return f"{float(value):.2f}".rstrip("0").rstrip(".")
+    if isinstance(value, bool):
+        return "high" if value else "low"
+    if isinstance(row.get("confidence_high"), bool):
+        return "high" if row.get("confidence_high") else "low"
+    if isinstance(confidence_hint, str):
+        return confidence_hint
+    if isinstance(confidence_hint, bool):
+        return "high" if confidence_hint else "low"
+    return ""
+
+
+def _row_diameter_in(row: Mapping[str, Any]) -> str:
+    for key in ("dia_in", "diam_in", "diameter_in", "diameter"):
+        value = _coerce_float(row.get(key))
+        if value is not None and value > 0:
+            return f"{value:.4f}".rstrip("0").rstrip(".")
+    for key in ("dia_mm", "diameter_mm"):
+        value = _coerce_float(row.get(key))
+        if value is not None and value > 0:
+            inches = value / MM_PER_INCH
+            return f"{inches:.4f}".rstrip("0").rstrip(".")
+    detect_token = getattr(geo_extractor, "_detect_diameter_token", None)
+    for field in ("hole", "ref", "desc", "description", "text"):
+        raw = row.get(field)
+        if not raw:
+            continue
+        token = None
+        if callable(detect_token):
+            try:
+                token = detect_token(str(raw))
+            except Exception:
+                token = None
+        if not token:
+            parts = str(raw).replace(",", " ").split()
+            candidates = parts
+        else:
+            candidates = [token]
+        for candidate in candidates:
+            try:
+                value_mm = parse_drill_token(candidate)
+            except Exception:
+                value_mm = None
+            if value_mm:
+                inches = value_mm / MM_PER_INCH
+                return f"{inches:.4f}".rstrip("0").rstrip(".")
+    return ""
+
+
 def _write_rows_csv(
     rows: Sequence[Mapping[str, Any]] | None,
-    path: Path | str = Path("debug/hole_table_rows.csv"),
+    path: Path | str = Path("debug/hole_table_rows_parsed.csv"),
+    *,
+    confidence_hint: bool | str | None = None,
 ) -> Path | None:
     csv_path = Path(path)
+    written = 0
     try:
         csv_path.parent.mkdir(parents=True, exist_ok=True)
         with csv_path.open("w", newline="", encoding="utf-8") as handle:
             writer = csv.writer(handle)
-            writer.writerow(["qty", "ref", "side", "desc", "hole"])
+            writer.writerow(
+                ["qty", "ref", "side", "desc", "hole", "dia_in", "confidence"]
+            )
             for row in rows or []:
                 if not isinstance(row, Mapping):
                     continue
                 qty_val = row.get("qty")
+                qty_text = "" if qty_val in (None, "") else str(qty_val)
                 writer.writerow(
                     [
-                        "" if qty_val in (None, "") else str(qty_val),
+                        qty_text,
                         str(row.get("ref") or ""),
                         str(row.get("side") or ""),
                         str(row.get("desc") or ""),
                         str(row.get("hole") or ""),
+                        _row_diameter_in(row),
+                        _row_confidence(row, confidence_hint),
                     ]
                 )
+                written += 1
     except OSError as exc:
         print(f"[geo_dump] failed to write hole table CSV: {exc}")
         return None
     else:
-        print(f"[geo_dump] wrote hole table CSV to {csv_path}")
+        print(f"[TABLE-DUMP] parsed rows -> {csv_path} (n={written})")
+        return csv_path
+
+
+def _iter_row_tokens(entry: Mapping[str, Any]) -> Iterable[dict[str, Any]]:
+    tokens = entry.get("tokens")
+    if isinstance(tokens, list):
+        for token in tokens:
+            if not isinstance(token, Mapping):
+                continue
+            yield token
+        return
+    assignments = entry.get("assignments")
+    if isinstance(assignments, list):
+        for col_idx, bucket in enumerate(assignments):
+            if not isinstance(bucket, list):
+                continue
+            for token_idx, token in enumerate(bucket):
+                if (
+                    isinstance(token, (list, tuple))
+                    and len(token) == 4
+                ):
+                    x_val, y_val, height_val, text_val = token
+                    yield {
+                        "col": col_idx,
+                        "token_index": token_idx,
+                        "x": x_val,
+                        "y": y_val,
+                        "height": height_val,
+                        "text": text_val,
+                    }
+
+
+def _write_row_tokens_csv(
+    debug_info: Mapping[str, Any] | None,
+    path: Path | str = Path("debug/hole_table_rows_raw.csv"),
+) -> Path | None:
+    if not isinstance(debug_info, Mapping):
+        return None
+    row_debug = debug_info.get("row_debug")
+    if not isinstance(row_debug, Iterable):
+        return None
+    csv_path = Path(path)
+    rows: list[list[str]] = []
+    for entry in row_debug:
+        if not isinstance(entry, Mapping):
+            continue
+        row_index = entry.get("index")
+        row_y = entry.get("y")
+        for token in _iter_row_tokens(entry):
+            col_idx = token.get("col")
+            token_index = token.get("token_index")
+            rows.append(
+                [
+                    str(row_index if row_index not in (None, "") else ""),
+                    str(col_idx if col_idx not in (None, "") else ""),
+                    str(token_index if token_index not in (None, "") else ""),
+                    _format_float_str(token.get("x")),
+                    _format_float_str(token.get("y")),
+                    _format_float_str(token.get("height")),
+                    str(token.get("text") or ""),
+                    _format_float_str(row_y),
+                ]
+            )
+    if not rows:
+        return None
+    try:
+        csv_path.parent.mkdir(parents=True, exist_ok=True)
+        with csv_path.open("w", newline="", encoding="utf-8") as handle:
+            writer = csv.writer(handle)
+            writer.writerow(
+                ["row", "col", "token_index", "x", "y", "height", "text", "row_y"]
+            )
+            writer.writerows(rows)
+    except OSError as exc:
+        print(f"[geo_dump] failed to write row token CSV: {exc}")
+        return None
+    else:
+        print(f"[TABLE-DUMP] raw tokens -> {csv_path} (n={len(rows)})")
         return csv_path
 
 
@@ -2995,7 +3150,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     if not rebuilt_rows:
         rebuilt_rows = [row for row in rows if isinstance(row, Mapping)]
 
-    table_csv_path = _write_rows_csv(rebuilt_rows)
+    table_csv_path: Path | None = None
 
     if args.dump_table:
         if rebuilt_rows:
@@ -3271,59 +3426,6 @@ def main(argv: Sequence[str] | None = None) -> int:
             print(f"[geo_dump] wrote debug dumps to {lines_path} and {bands_path}")
 
     rows_csv_path: Path | None = None
-    if args.dump_rows_csv:
-        if args.dump_rows_csv == "__AUTO__":
-            csv_target = dump_dir_path / "hole_table_rows.csv"
-        else:
-            csv_target = Path(args.dump_rows_csv).expanduser()
-        try:
-            csv_target.parent.mkdir(parents=True, exist_ok=True)
-            with csv_target.open("w", newline="", encoding="utf-8") as handle:
-                writer = csv.writer(handle)
-                writer.writerow(["qty", "ref", "side", "desc", "hole"])
-                for row in rows:
-                    if not isinstance(row, Mapping):
-                        continue
-                    qty_val = row.get("qty")
-                    writer.writerow(
-                        [
-                            "" if qty_val in (None, "") else str(qty_val),
-                            str(row.get("ref") or ""),
-                            str(row.get("side") or ""),
-                            str(row.get("desc") or ""),
-                            str(row.get("hole") or ""),
-                        ]
-                    )
-        except OSError as exc:  # pragma: no cover - filesystem issues
-            print(f"[geo_dump] failed to write rows CSV: {exc}")
-        else:
-            rows_csv_path = csv_target
-            print(f"[geo_dump] wrote rows CSV to {csv_target}")
-
-    if args.save_geo_path:
-        geom_summary_payload: dict[str, Any] = {
-            "circle_total": geom_total,
-            "unique_diameter_count": geom_groups,
-        }
-        if geom_layer_counts:
-            geom_summary_payload["layer_counts"] = geom_layer_counts
-        if guard_drop_summary:
-            geom_summary_payload["guard_drop_counts"] = guard_drop_summary
-        artifact_map = {
-            "text_csv": None if text_csv_path == "-" else Path(text_csv_path),
-            "text_jsonl": None if text_jsonl_path == "-" else Path(text_jsonl_path),
-            "table_csv": table_csv_path,
-            "geom_json": geom_json_path,
-            "ops_json": ops_totals_debug_path,
-            "rows_csv": rows_csv_path,
-        }
-        _write_geo_summary(
-            args.save_geo_path,
-            rows=rebuilt_rows,
-            ops_totals=ops_totals_payload,
-            geom_summary=geom_summary_payload,
-            artifact_paths=artifact_map,
-        )
 
     debug_info = geo_extractor.get_last_text_table_debug() or {}
 
@@ -3332,6 +3434,30 @@ def main(argv: Sequence[str] | None = None) -> int:
         tables_found=tables_found,
         text_min_height=args.text_min_height,
     )
+
+    confidence_hint_value: bool | str | None = None
+    if isinstance(debug_info, Mapping):
+        confidence_label = debug_info.get("confidence_label")
+        if isinstance(confidence_label, str) and confidence_label.strip():
+            confidence_hint_value = confidence_label.strip()
+        elif isinstance(debug_info.get("confidence_high"), bool):
+            confidence_hint_value = bool(debug_info.get("confidence_high"))
+
+    table_csv_path = _write_rows_csv(
+        rebuilt_rows, confidence_hint=confidence_hint_value
+    )
+    _write_row_tokens_csv(debug_info)
+
+    if args.dump_rows_csv:
+        if args.dump_rows_csv == "__AUTO__":
+            csv_target = dump_dir_path / "hole_table_rows_parsed.csv"
+        else:
+            csv_target = Path(args.dump_rows_csv).expanduser()
+        rows_csv_path = _write_rows_csv(
+            rows,
+            path=csv_target,
+            confidence_hint=confidence_hint_value,
+        )
 
     if text_csv_path == "-" and debug_info:
         fallback_entities = debug_info.get("collected_entities")
@@ -3398,6 +3524,31 @@ def main(argv: Sequence[str] | None = None) -> int:
             print(f"[geo_dump] failed to write entity dump: {exc}")
         else:
             print(f"[ENT-DUMP] -> {target_path}")
+
+    if args.save_geo_path:
+        geom_summary_payload: dict[str, Any] = {
+            "circle_total": geom_total,
+            "unique_diameter_count": geom_groups,
+        }
+        if geom_layer_counts:
+            geom_summary_payload["layer_counts"] = geom_layer_counts
+        if guard_drop_summary:
+            geom_summary_payload["guard_drop_counts"] = guard_drop_summary
+        artifact_map = {
+            "text_csv": None if text_csv_path == "-" else Path(text_csv_path),
+            "text_jsonl": None if text_jsonl_path == "-" else Path(text_jsonl_path),
+            "table_csv": table_csv_path,
+            "geom_json": geom_json_path,
+            "ops_json": ops_totals_debug_path,
+            "rows_csv": rows_csv_path,
+        }
+        _write_geo_summary(
+            args.save_geo_path,
+            rows=rebuilt_rows,
+            ops_totals=ops_totals_payload,
+            geom_summary=geom_summary_payload,
+            artifact_paths=artifact_map,
+        )
 
     def _format_counts(counts: Mapping[str, int] | None) -> str:
         if not counts:
