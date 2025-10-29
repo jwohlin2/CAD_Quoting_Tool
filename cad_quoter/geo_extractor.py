@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import re
+import fractions
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterable, Iterator, Optional, Dict, Any, List, Tuple
@@ -475,3 +476,158 @@ def collect_all_text(
                 }
             )
     return rows
+
+
+# --------------------------- hole row parsing helpers ---------------------------
+
+RE_REF = re.compile(r'^\s*(?:REF\s*)?["\']?([A-Z])["\']?\b')
+RE_DIAM = re.compile(r'[Ø⌀\u00D8]\s*([0-9./]+)')
+RE_TAP = re.compile(r'([0-9./#]+)\s*[-–]\s*([0-9]+)\s*TAP', re.IGNORECASE)
+RE_DEPTH = re.compile(r'[Xx]\s*([0-9.]+)\s*DEEP')
+RE_SIDE = re.compile(r'FROM\s+(FRONT|BACK)', re.IGNORECASE)
+
+_QTY_PATTERNS = (
+    re.compile(r'\bQTY\s+["\']?([A-Z])["\']?\s*[:=]?\s*(\d+)', re.IGNORECASE),
+    re.compile(r'\((\d+)\)\s*["\']?([A-Z])["\']?', re.IGNORECASE),
+    re.compile(r'["\']?([A-Z])["\']?\s*(?:-|=)?\s*(\d+)\s*(?:X|EA|EACH|PL)', re.IGNORECASE),
+)
+
+
+def _to_float(token: str) -> Optional[float]:
+    token = (token or "").strip()
+    if not token:
+        return None
+    token = token.replace("O/", "Ø")  # guard against mis-read Ø tokens
+    if "/" in token:
+        try:
+            return float(fractions.Fraction(token))
+        except Exception:
+            pass
+    try:
+        return float(token)
+    except Exception:
+        return None
+
+
+def parse_hole_row(text: str) -> Dict[str, Any]:
+    """Extract structured details from a textual HOLE TABLE row."""
+
+    raw = text or ""
+    normalized = raw.strip()
+
+    result: Dict[str, Any] = {
+        "ref": None,
+        "diam": None,
+        "tap_thread": None,
+        "op": None,
+        "ops": [],
+        "depth": None,
+        "side": None,
+        "raw": raw,
+    }
+
+    match = RE_REF.search(normalized)
+    if match:
+        result["ref"] = match.group(1).upper()
+
+    match = RE_DIAM.search(normalized)
+    if match:
+        result["diam"] = _to_float(match.group(1))
+
+    match = RE_TAP.search(normalized)
+    if match:
+        result["tap_thread"] = f"{match.group(1)}-{match.group(2)}"
+
+    upper = normalized.upper()
+    ops: List[str] = []
+    if "C'BORE" in upper or "COUNTERBORE" in upper:
+        ops.append("CBORE")
+    if "C'DRILL" in upper or "COUNTERDRILL" in upper or "CTR DRILL" in upper:
+        ops.append("CDRILL")
+    if "TAP" in upper:
+        ops.append("TAP")
+    if "THRU" in upper:
+        ops.append("THRU")
+
+    if ops:
+        result["ops"] = ops
+        result["op"] = ops[0]
+
+    match = RE_DEPTH.search(normalized)
+    if match:
+        result["depth"] = _to_float(match.group(1))
+
+    match = RE_SIDE.search(normalized)
+    if match:
+        result["side"] = match.group(1).upper()
+
+    return result
+
+
+def _collect_qty_hints(lines: Iterable[str]) -> Dict[str, int]:
+    qty: Dict[str, int] = {}
+    for line in lines:
+        if not line:
+            continue
+        for pattern in _QTY_PATTERNS:
+            for match in pattern.finditer(line):
+                ref = match.group(1)
+                count_token = match.group(2)
+                if not ref or not count_token:
+                    continue
+                try:
+                    qty[ref.upper()] = int(count_token)
+                except Exception:
+                    continue
+    return qty
+
+
+def rebuild_structured_rows(lines: Iterable[str]) -> List[Dict[str, Any]]:
+    """Derive structured HOLE TABLE style rows from free-form text fragments."""
+
+    cache: Dict[str, Dict[str, Any]] = {}
+    qty_map = _collect_qty_hints(lines)
+
+    for line in lines:
+        parsed = parse_hole_row(line)
+        ref = parsed.get("ref")
+        if not ref:
+            continue
+        ref = str(ref)
+        existing = cache.get(ref)
+        if existing is None:
+            parsed["qty"] = qty_map.get(ref)
+            parsed["raw_fragments"] = [parsed.get("raw")]
+            cache[ref] = parsed
+            continue
+
+        existing_raw = existing.setdefault("raw_fragments", [])
+        existing_raw.append(parsed.get("raw"))
+
+        for key in ("diam", "tap_thread", "depth", "side"):
+            value = parsed.get(key)
+            if value and existing.get(key) in {None, ""}:
+                existing[key] = value
+
+        new_ops = [op for op in parsed.get("ops", []) if op]
+        if new_ops:
+            old_ops = existing.setdefault("ops", [])
+            for op in new_ops:
+                if op not in old_ops:
+                    old_ops.append(op)
+            if not existing.get("op"):
+                existing["op"] = old_ops[0]
+
+        if existing.get("qty") in {None, 0}:
+            existing["qty"] = qty_map.get(ref)
+
+    rows = list(cache.values())
+    for row in rows:
+        if "raw_fragments" not in row:
+            row["raw_fragments"] = [row.get("raw")]
+        if row.get("qty") in {None, 0}:
+            ref = str(row.get("ref") or "")
+            if ref:
+                row["qty"] = qty_map.get(ref)
+    return rows
+
