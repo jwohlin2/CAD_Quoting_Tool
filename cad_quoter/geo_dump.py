@@ -139,50 +139,42 @@ def _parse_header(header_chunks: List[str]):
 
 def _redistribute_cross_hits(descs: List[str], diam_list: List[str]) -> List[str]:
     """
-    Some segments still contain other hole markers (e.g., row F has '"Q"(Ø.332)...' which belongs to G).
-    This pass finds all other diameter aliases inside each segment, cuts those sub-chunks out,
-    and reassigns them to the correct hole index. The leading chunk (before the first internal marker)
-    stays with the original hole.
+    Reassign sub-chunks inside each segment that actually belong to other hole diameters.
+    Keeps the leading chunk with the original hole; moves each internal chunk to its diameter's hole.
     """
-    # Build alias map: hole_idx -> [aliases...]
-    alias_map: Dict[int, List[str]] = {}
+    # 1) Build alias -> hole_idx map (include decimals, fractions, parens, trailing-Ø)
+    alias_to_idx: Dict[str, int] = {}
     for idx, tok in enumerate(diam_list):
-        alias_map[idx] = _diameter_aliases(tok)
-
-        # also allow numeric-only fallbacks for decimals like .272 / 0.272
+        for a in _diameter_aliases(tok):
+            if a:
+                alias_to_idx[a] = idx
+        # numeric-only fallbacks for decimals like .272 / 0.272 (and parens)
         if tok.startswith(("Ø", "∅")):
             s = tok[1:]
             try:
                 f = float(s)
                 comp = f"{f:.3f}".rstrip("0").rstrip(".")
-                alias_map[idx] += [comp, f"0{comp}", f"({comp})", f"(0{comp})"]
             except Exception:
-                pass
+                comp = s
+            for a in (comp, f"0{comp}", f"({comp})", f"(0{comp})"):
+                alias_to_idx[a] = idx
 
-    # Precompile a big alternation -> (hole_idx, alias)
-    # Sort aliases by length to prefer longer matches first and avoid partial overlaps
-    alt_pairs: List[Tuple[int, str]] = []
-    for j, alts in alias_map.items():
-        for a in alts:
-            if a:
-                alt_pairs.append((j, re.escape(a)))
-    # if nothing, return as-is
-    if not alt_pairs:
+    if not alias_to_idx:
         return descs
 
-    # Longest-first in the alternation to reduce ambiguous overlaps
-    alt_pairs.sort(key=lambda p: len(p[1]), reverse=True)
-    alt_union = "|".join(a for _, a in alt_pairs)
+    # 2) Build a single regex alternation (longest-first to avoid partial overlaps)
+    aliases_sorted = sorted(alias_to_idx.keys(), key=len, reverse=True)
+    alt_union = "|".join(map(re.escape, aliases_sorted))
     re_markers = re.compile(alt_union)
 
     def strip_marker_prefix(s: str) -> str:
-        # fractions first (both Ø-leading and Ø-trailing), then decimals, then quoted REF like "Q"(Ø.332)
+        # fractions first (Ø-leading and Ø-trailing), then decimals, then quoted REF like "Q"(Ø.332)
         s = re.sub(r'^[\(\s]*[Ø∅]\s*[0-9]+/[0-9]+\)?\s*', '', s)
         s = re.sub(r'^[\(\s]*[0-9]+/[0-9]+[Ø∅]\)?\s*', '', s)
         s = re.sub(r'^[\(\s]*[Ø∅]\s*[0-9.]+\)?\s*',        '', s)
         s = re.sub(r'^\s*"{1,2}[A-Z]"{1,2}\s*\((?:[Ø∅]\s*[0-9.]+)\)\s*', '', s)
         s = re.sub(r'^\s*"{1,2}[A-Z]"{1,2}\s*', '', s)
-        return s.strip()
+        return re.sub(r'\s+', ' ', s).strip()
 
     new_descs = [""] * len(descs)
 
@@ -191,60 +183,45 @@ def _redistribute_cross_hits(descs: List[str], diam_list: List[str]) -> List[str
         if not s:
             continue
 
-        # Find all internal markers and who they belong to
+        # find all internal markers with their owners
         hits = []
         for m in re_markers.finditer(s):
             alias = m.group(0)
-            # which hole index is this alias from?
-            target_idx = next((j for j, esc in alt_pairs if re.fullmatch(esc, re.escape(alias))), None)
-            # fallback: O(n) resolve by raw compare
-            if target_idx is None:
-                for j, alts in alias_map.items():
-                    if alias in alts:
-                        target_idx = j
-                        break
-            if target_idx is not None and target_idx != i:
-                hits.append((m.start(), m.end(), target_idx, alias))
+            tgt = alias_to_idx.get(alias)
+            if tgt is None or tgt == i:
+                continue
+            hits.append((m.start(), m.end(), tgt, alias))
 
         if not hits:
-            # nothing to move; keep as-is
             new_descs[i] = s
             continue
 
-        # Order hits left→right and slice the segment
+        # slice: self text between foreign markers; move foreign chunks
         hits.sort(key=lambda t: t[0])
-        out_self_parts = []
         cursor = 0
+        self_parts = []
         for k, (a, b, tgt, alias) in enumerate(hits):
-            # self-chunk before this foreign marker
             if a > cursor:
-                out_self_parts.append(s[cursor:a])
-            # foreign chunk: from marker to next marker (or end)
+                self_parts.append(s[cursor:a])            # keep for self
             next_a = hits[k+1][0] if k+1 < len(hits) else len(s)
             chunk = s[a:next_a]
             chunk = strip_marker_prefix(chunk)
             if chunk:
-                # append to target hole
-                if new_descs[tgt]:
-                    new_descs[tgt] += " "
-                new_descs[tgt] += chunk.strip()
+                new_descs[tgt] = (new_descs[tgt] + " " + chunk).strip() if new_descs[tgt] else chunk
             cursor = next_a
-        # tail after the last marker belongs to self
         if cursor < len(s):
-            out_self_parts.append(s[cursor:])
+            self_parts.append(s[cursor:])                 # tail back to self
 
-        self_text = strip_marker_prefix(" ".join(out_self_parts).strip())
-        if self_text:
-            new_descs[i] = self_text
+        self_text = strip_marker_prefix(" ".join(self_parts))
+        new_descs[i] = self_text
 
-    # Merge any original descs that had no edits
+    # merge any untouched originals
     for i in range(len(descs)):
         if not new_descs[i] and descs[i]:
             new_descs[i] = descs[i]
 
-    # tidy punctuation/spacing
-    new_descs = [re.sub(r"\s*;\s*$", "", x or "").strip() for x in new_descs]
-    return new_descs
+    # tidy trailing semicolons/space
+    return [re.sub(r"\s*;\s*$", "", x or "").strip() for x in new_descs]
 
 
 def _split_descriptions(body_chunks: List[str], diam_list: List[str]) -> List[str]:
