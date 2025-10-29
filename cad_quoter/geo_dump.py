@@ -393,7 +393,7 @@ def _route_tap_only_chunks(descs: List[str], diam_list: List[str]) -> List[str]:
 # Regexes we’ll reuse
 _RE_DIAM_LEAD   = re.compile(r'^[\(\s]*[Ø∅]\s*([0-9]+/[0-9]+|[0-9.]+)\)?\s*', re.I)
 _RE_DIAM_TRAIL  = re.compile(r'^[\(\s]*([0-9]+/[0-9]+)\s*[Ø∅]\)?\s*', re.I)  # e.g., 13/32∅
-_RE_DIAM_ANY    = re.compile(r'[Ø∅]\s*([0-9]+/[0-9]+|[0-9.]+)', re.I)
+_RE_DIAM_ANY    = re.compile(r'(?:[Ø∅]\s*)?([0-9]+/[0-9]+|[0-9.]+)(?:\s*[Ø∅])?', re.I)
 _RE_PAREN_JG    = re.compile(r'\(\s*[Ø∅]\s*([0-9]+/[0-9]+|[0-9.]+)\s+JIG\s+GRIND\s*\)', re.I)
 _RE_TAP         = re.compile(r'\bTAP\b', re.I)
 _RE_THRU        = re.compile(r'\bTHRU\b', re.I)
@@ -480,48 +480,66 @@ def _clean_clause_text(s: str) -> str:
     return s.strip(", ").strip()
 
 
+def _smart_clause_split(description: str) -> List[str]:
+    """Split description into clauses on semicolons while respecting parentheses."""
+
+    if not description:
+        return []
+
+    parts: List[str] = []
+    buf: List[str] = []
+    depth = 0
+    for ch in description:
+        if ch == ';' and depth == 0:
+            part = "".join(buf).strip()
+            if part:
+                parts.append(part)
+            buf = []
+            continue
+        buf.append(ch)
+        if ch == '(':
+            depth += 1
+        elif ch == ')' and depth > 0:
+            depth -= 1
+    tail = "".join(buf).strip()
+    if tail:
+        parts.append(tail)
+    return parts
+
+
 def _parse_clause_to_ops(
     hole_idx: int,
     base_diam: str,
-    qty: int,
+    qtys: List[int],
     text: str,
+    hole_letters: List[str],
     diam_list: List[str],
 ) -> List[Tuple[int, str, int, str]]:
-    """
-    Turn one clause into 1+ (hole_idx, diam, qty, 'DESCRIPTION/DEPTH') ops.
-    - pulls out parenthetical (Ø.3750 JIG GRIND) as its own op (snapped to nearest hole)
-    - honors leading/trailing Ø diam overrides (reassigning hole by nearest REF_DIAM)
-    - splits FRONT & BACK into two ops
-    - keeps TAP+THRU glued together when both appear
-    """
-
-    ops: List[Tuple[int, str, int, str]] = []
-
+    ops: List[Tuple[int,str,int,str]] = []
     s = text.strip()
     if not s:
         return ops
 
-    # Parenthetical Jig Grind like (Ø.3750 JIG GRIND)
+    # 4a) parenthetical JIG GRIND → nearest hole, use that hole’s qty
     for pm in list(_RE_PAREN_JG.finditer(s)):
         val = pm.group(1)
         dstr = _fmt_diam(val)
         try:
-            tgt = _snap_to_nearest_index(float(val.replace('/', '0')), diam_list)
+            tgt = _snap_to_nearest_index(float(val), diam_list)
         except Exception:
             tgt = hole_idx
         qty_for_tgt = _header_qty_for(tgt, qty)
         ops.append((tgt, dstr, qty_for_tgt, "JIG GRIND"))
         s = s.replace(pm.group(0), " ")  # remove from main text
 
-    # Diameter override at start (or fraction with trailing Ø)
+    # 4b) leading/trailing diameter override → snap to nearest hole
     diam_override, rest = _extract_leading_diam(_clean_clause_text(s))
     if diam_override:
         try:
-            v = diam_override[1:]
-            tgt = _snap_to_nearest_index(float(v), diam_list)
+            v = float(diam_override[1:])
+            hole_for_clause = _snap_to_nearest_index(v, diam_list)
         except Exception:
-            tgt = hole_idx
-        hole_for_clause = tgt
+            hole_for_clause = hole_idx
         diam_for_clause = diam_override
     else:
         hole_for_clause = hole_idx
@@ -538,10 +556,9 @@ def _parse_clause_to_ops(
     # Split explicit FRONT & BACK pair into two
     parts = _explode_front_back(rest)
 
+    # 4d) Inside each part, if BOTH C’DRILL and TAP exist, split so L gets the C’DRILL and M gets TAP
     for part in parts:
         desc = _clean_clause_text(part)
-        if not desc:
-            continue
 
         # --- GLUE: keep TAP+THRU combined if both appear in same clause ---
         qty_for_clause = _header_qty_for(hole_for_clause, qty)
@@ -563,9 +580,8 @@ def _explode_description_into_ops(
     hole_idx: int,
     hole: str,
     base_diam: str,
-    qty: int,
+    qtys: List[int],
     description: str,
-    diam_list: List[str],
     hole_letters: List[str],
 ) -> List[Dict[str, str]]:
     """
@@ -576,11 +592,10 @@ def _explode_description_into_ops(
     # split on semicolons and other op boundaries, but keep decimals intact
     clauses = _smart_clause_split(description)
     out: List[Dict[str,str]] = []
-    for cl in clauses:
-        for tgt_idx, diam, q, desc in _parse_clause_to_ops(hole_idx, base_diam, qty, cl, diam_list):
-            hole_tok = hole_letters[tgt_idx] if 0 <= tgt_idx < len(hole_letters) else hole
+    for cl in _smart_clause_split(description):
+        for tgt_idx, diam, q, desc in _parse_clause_to_ops(hole_idx, base_diam, qtys, cl, hole_letters, diam_list):
             out.append({
-                "HOLE": hole_tok,
+                "HOLE": hole_letters[tgt_idx],
                 "REF_DIAM": diam,
                 "QTY": str(q),
                 "DESCRIPTION/DEPTH": desc,
@@ -783,11 +798,10 @@ def main() -> int:
             ops_rows: List[Dict[str,str]] = []
             for i, hole in enumerate(hole_letters):
                 base_d = diam_tokens[i]
-                q      = qtys[i]
                 desc   = (descriptions[i] if i < len(descriptions) else "").strip()
                 if not desc:
                     continue
-                ops_rows += _explode_description_into_ops(i, hole, base_d, q, desc, diam_tokens, hole_letters)
+                ops_rows += _explode_description_into_ops(i, hole, base_d, qtys, desc, hole_letters, diam_tokens)
 
             ops_csv = csv_path.parent / "hole_table_ops.csv"
             with ops_csv.open("w", newline="", encoding="utf-8") as fh:
