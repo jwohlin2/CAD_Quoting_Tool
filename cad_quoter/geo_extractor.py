@@ -6,6 +6,12 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterable, Iterator, Optional, Dict, Any, List, Tuple
 
+try:
+    # ezdxf ≥ 1.0 style
+    from ezdxf.entities import ProxyGraphic  # fallback name in some versions  # noqa: F401
+except Exception:
+    ProxyGraphic = None
+
 # ezdxf import (prefer your vendored copy if present)
 try:
     from cad_quoter.vendors import ezdxf as ezdxf  # type: ignore
@@ -115,6 +121,59 @@ def _plain(s: str) -> str:
 
 _TEXT_TYPES = {"TEXT", "MTEXT", "ATTRIB", "ATTDEF", "MLEADER"}
 _TABLE_TYPES = {"ACAD_TABLE", "TABLE", "MTABLE"}  # cover modern + legacy tables
+
+
+def _yield_proxy_texts(ent):
+    """Extract MTEXT/TEXT from ACAD_PROXY_ENTITY via proxy graphics."""
+    results = []
+    try:
+        # ezdxf exposes proxy graphics a few different ways across versions.
+        # Try multiple strategies for compatibility:
+        loaders = []
+        try:
+            # ezdxf ≥ 1.0
+            from ezdxf.proxygraphic import load_proxy_graphic as _load_pg
+
+            loaders.append(lambda e: _load_pg(e))
+        except Exception:
+            pass
+        try:
+            # Older layout—entity has a .proxy_graphic attribute (bytes)
+            from ezdxf.proxygraphic import ProxyGraphic as _PG
+
+            loaders.append(lambda e: _PG.load(e))
+        except Exception:
+            pass
+
+        for load in loaders:
+            try:
+                pg = load(ent)
+                for v in pg.virtual_entities():  # LINE, MTEXT, TEXT, etc.
+                    dxft = v.dxftype()
+                    if dxft == "TEXT":
+                        t = (v.dxf.text or "").strip()
+                        if t:
+                            results.append(t)
+                    elif dxft == "MTEXT":
+                        # across versions: .plain_text() or .text
+                        txt = ""
+                        if hasattr(v, "plain_text"):
+                            try:
+                                txt = v.plain_text()
+                            except Exception:
+                                pass
+                        if not txt:
+                            txt = getattr(v, "text", "") or ""
+                        txt = txt.strip()
+                        if txt:
+                            results.append(txt)
+                if results:
+                    break  # success with this loader
+            except Exception:
+                continue
+    except Exception:
+        pass
+    return results
 
 def _entity_text_fields(e) -> Tuple[str, float, float, float]:
     """(text, height, x, y). Best effort across TEXT/MTEXT/ATTRIB/MLEADER."""
@@ -309,6 +368,37 @@ def iter_text(
             continue
 
         if et not in _TEXT_TYPES:
+            if et == "ACAD_PROXY_ENTITY":
+                try:
+                    orig = getattr(ent.dxf, "proxy_entity_class", "") or ""
+                    is_hole_chart = "HOLECHART" in str(orig).upper()
+                except Exception:
+                    is_hole_chart = True
+
+                if is_hole_chart and layer_allowed(layer):
+                    base = (
+                        getattr(ent.dxf, "base_point", None)
+                        or getattr(ent.dxf, "insert", None)
+                        or getattr(ent.dxf, "location", None)
+                    )
+                    bx = float(getattr(base, "x", 0.0) or 0.0) if base is not None else 0.0
+                    by = float(getattr(base, "y", 0.0) or 0.0) if base is not None else 0.0
+                    for s in _yield_proxy_texts(ent):
+                        if not s:
+                            continue
+                        yield TextRecord(
+                            layout=layout_name,
+                            layer=layer,
+                            etype="PROXYTEXT",
+                            text=_plain(str(s)),
+                            x=bx,
+                            y=by,
+                            height=0.0,
+                            rotation=float(getattr(ent.dxf, "rotation", 0.0) or 0.0),
+                            in_block=from_block,
+                            depth=depth,
+                            block_path=block_path,
+                        )
             continue
 
         if not layer_allowed(layer):
