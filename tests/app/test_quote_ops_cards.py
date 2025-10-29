@@ -5,7 +5,7 @@ import pytest
 import appV5
 
 
-def test_emit_hole_table_ops_cards_renders_sections() -> None:
+def test_emit_hole_table_ops_cards_updates_summary() -> None:
     lines: list[str] = []
     geo = {
         "ops_summary": {
@@ -36,12 +36,10 @@ def test_emit_hole_table_ops_cards_renders_sections() -> None:
 
     appV5._emit_hole_table_ops_cards(lines, geo=geo, material_group="aluminum", speeds_csv=None)
 
-    joined = "\n".join(lines)
-
-    assert "MATERIAL REMOVAL – TAPPING" in joined
-    tap_line = next(line for line in lines if "TAP 1/4-20" in line)
-    assert "0.05" in tap_line or "0.0500" in tap_line
-    assert "rpm" in tap_line and "ipm" in tap_line
+    assert lines == []
+    summary = geo["ops_summary"]
+    assert summary.get("tap_minutes_total") is not None
+    assert summary.get("tap_minutes_total", 0.0) > 0
 
 
 def test_aggregate_ops_sets_built_rows() -> None:
@@ -108,6 +106,20 @@ def test_emit_hole_table_ops_cards_updates_bucket_view() -> None:
     tapping_ops = ops.get("tapping") or []
     if tapping_ops:
         assert any(entry.get("name") == "Tapping ops" for entry in tapping_ops)
+
+
+def test_collect_ops_entries_uses_explode(monkeypatch: pytest.MonkeyPatch) -> None:
+    entries = [["A", "Ø0.257", 4, "1/4-20 TAP FROM FRONT"]]
+
+    monkeypatch.setattr(appV5, "_explode_rows_to_operations", lambda rows: entries)
+
+    geo_map = {"hole_table": {"lines": ["HOLE TABLE", "A Ø0.257 4 1/4-20 TAP FROM FRONT"]}}
+
+    result = appV5._collect_ops_entries_for_display(geo_map)
+
+    assert result == [
+        {"hole": "A", "ref": "Ø0.257", "qty": 4, "desc": "1/4-20 TAP FROM FRONT"}
+    ]
 
 
 def test_format_hole_table_section_outputs_operations() -> None:
