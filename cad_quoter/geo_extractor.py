@@ -4343,6 +4343,32 @@ def _is_numeric_ladder_line(text: str) -> bool:
     return bool(_NUMERIC_LADDER_RE.match(text or ""))
 
 
+def _is_monotone_count_sequence(text: str) -> bool:
+    candidate = str(text or "").strip()
+    if not candidate:
+        return False
+    if re.search(r"[A-Za-z]", candidate):
+        return False
+    digits = re.findall(r"\d+", candidate)
+    if len(digits) < 3:
+        return False
+    numbers = [int(token) for token in digits]
+    max_run = 1
+    run_length = 1
+    for prev, current in zip(numbers, numbers[1:]):
+        if current - prev == 1:
+            run_length += 1
+            if run_length > max_run:
+                max_run = run_length
+        else:
+            run_length = 1
+    if max_run >= 4:
+        return True
+    if max_run >= 3 and ("..." in candidate or "…" in candidate):
+        return True
+    return False
+
+
 def _should_drop_candidate_line(text: Any) -> bool:
     normalized = _normalize_candidate_text(text)
     if not normalized:
@@ -5587,14 +5613,36 @@ def _build_columnar_table_from_panel_entries(
         if not cell_texts and buffer.cells:
             cell_texts = [" ".join(part[3] for part in sorted(buffer.cells, key=lambda item: item[0])).strip()]
         row_center_y = sum(buffer.y_values) / len(buffer.y_values)
+        plain_text_parts: list[str] = []
+        for value in cell_texts:
+            cleaned_value = " ".join(str(value or "").split())
+            if cleaned_value:
+                plain_text_parts.append(cleaned_value)
+        plain_text_norm = " ".join(plain_text_parts)
         snapped_rows.append(
             {
                 "index": row_index,
                 "y": row_center_y,
                 "cells": cell_texts,
                 "assignments": assignments,
+                "plain_text_norm": plain_text_norm,
+                "row_kind": "data",
             }
         )
+
+    grid_header_indices: set[int] = set()
+    for row in snapped_rows:
+        plain_text_norm = str(row.get("plain_text_norm") or "").strip()
+        if not plain_text_norm:
+            continue
+        row_index = row.get("index")
+        try:
+            row_index_int = int(row_index)
+        except Exception:
+            continue
+        if _is_monotone_count_sequence(plain_text_norm):
+            grid_header_indices.add(row_index_int)
+            row["row_kind"] = "grid_header"
 
     if not snapped_rows:
         debug_info = {
@@ -5733,11 +5781,20 @@ def _build_columnar_table_from_panel_entries(
             ),
         )
 
+    for row in snapped_rows:
+        if (
+            row.get("row_kind") != "grid_header"
+            and row.get("index") in header_row_indices
+        ):
+            row["row_kind"] = "header"
+
     row_debug_entries = [
         {
             "index": row["index"],
             "y": row["y"],
             "cells": row.get("cells", []),
+            "plain_text_norm": row.get("plain_text_norm", ""),
+            "row_kind": row.get("row_kind"),
         }
         for row in snapped_rows
     ]
@@ -5747,6 +5804,13 @@ def _build_columnar_table_from_panel_entries(
 
     for row in snapped_rows:
         row_index = row["index"]
+        if row_index in grid_header_indices:
+            plain_text_norm = str(row.get("plain_text_norm") or "").strip()
+            if plain_text_norm:
+                print(f'[TABLE-R] suppressed grid row: "{plain_text_norm}"')
+            else:
+                print("[TABLE-R] suppressed grid row: \"\"")
+            continue
         if row_index in header_row_indices:
             continue
         cells = [cell.strip() for cell in row.get("cells", [])]

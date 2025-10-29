@@ -621,6 +621,87 @@ def test_normalize_layer_allowlist_respects_explicit_default() -> None:
     assert tuple(allowlist) == ("BALLOON",)
 
 
+def test_columnar_table_suppresses_grid_labels(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    ellipsis = "\u2026"
+    entries = [
+        {
+            "layout_name": "CHART",
+            "x": 0.0,
+            "y": 30.0,
+            "text": "HOLE",
+            "normalized_text": "HOLE",
+            "height": 1.0,
+        },
+        {
+            "layout_name": "CHART",
+            "x": 10.0,
+            "y": 30.0,
+            "text": "QTY",
+            "normalized_text": "QTY",
+            "height": 1.0,
+        },
+        {
+            "layout_name": "CHART",
+            "x": 20.0,
+            "y": 30.0,
+            "text": "DESC",
+            "normalized_text": "DESC",
+            "height": 1.0,
+        },
+        {
+            "layout_name": "CHART",
+            "x": 20.0,
+            "y": 20.0,
+            "text": f"1 2 3 {ellipsis} 16",
+            "normalized_text": f"1 2 3 {ellipsis} 16",
+            "height": 1.0,
+        },
+        {
+            "layout_name": "CHART",
+            "x": 0.0,
+            "y": 10.0,
+            "text": "A",
+            "normalized_text": "A",
+            "height": 1.0,
+        },
+        {
+            "layout_name": "CHART",
+            "x": 10.0,
+            "y": 10.0,
+            "text": "4",
+            "normalized_text": "4",
+            "height": 1.0,
+        },
+        {
+            "layout_name": "CHART",
+            "x": 20.0,
+            "y": 10.0,
+            "text": "(4) DRILL THRU",
+            "normalized_text": "(4) DRILL THRU",
+            "height": 1.0,
+        },
+    ]
+
+    table_info, debug_info = geo_extractor._build_columnar_table_from_panel_entries(entries)
+
+    assert table_info is not None
+    rows = table_info.get("rows") or []
+    assert len(rows) == 1
+    assert rows[0]["qty"] == 4
+    assert "DRILL" in rows[0]["desc"].upper()
+
+    captured = capsys.readouterr()
+    assert f'[TABLE-R] suppressed grid row: "1 2 3 {ellipsis} 16"' in captured.out
+
+    grid_debug = [
+        row for row in debug_info["row_debug"] if row.get("row_kind") == "grid_header"
+    ]
+    assert grid_debug
+    assert grid_debug[0]["plain_text_norm"] == f"1 2 3 {ellipsis} 16"
+
+
 def test_read_geo_prefers_text_rows(monkeypatch: pytest.MonkeyPatch, fallback_doc: _DummyDoc) -> None:
     families = {"0.375": 3, "0.5": 2}
     text_rows = [
