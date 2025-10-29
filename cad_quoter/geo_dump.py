@@ -11,6 +11,10 @@ from fractions import Fraction
 from pathlib import Path
 from typing import Dict, List, Match, Optional, Tuple
 
+import sys, pathlib
+sys.path.append(str(pathlib.Path(__file__).resolve().parents[1] / "tools"))
+from hole_ops import explode_rows_to_operations
+
 REPO_ROOT = Path(__file__).resolve().parent.parent
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
@@ -929,6 +933,7 @@ def main() -> int:
     try:
         header_chunks, body_chunks = _find_hole_table_chunks(rows)
         if header_chunks:
+            text_rows = header_chunks + body_chunks
             hole_letters, diam_tokens, qtys = _parse_header(header_chunks)
             _set_header_qtys(qtys)
             descs = _split_descriptions(body_chunks, diam_tokens)
@@ -974,6 +979,26 @@ def main() -> int:
                 w = csv.DictWriter(fh, fieldnames=["HOLE", "REF_DIAM", "QTY", "DESCRIPTION"])
                 w.writeheader()
                 w.writerows(out_rows)
+# >>> HOLE_TABLE_OPS START
+            try:
+                # `text_rows` must be the list of HOLE TABLE text lines (strings) already collected
+                # right before/when you wrote `hole_table_structured.csv`.
+                # If it has a different variable name in this file, use that variable instead.
+                ops_rows = explode_rows_to_operations(text_rows)
+
+                # Write ops CSV next to the structured CSV
+                import csv, pathlib
+                out_dir = pathlib.Path(csv_path).parent if 'csv_path' in globals() else pathlib.Path('.')
+                ops_csv = out_dir / "hole_table_ops.csv"
+                with ops_csv.open("w", newline="", encoding="utf-8") as fh:
+                    w = csv.writer(fh)
+                    w.writerow(["HOLE", "REF_DIAM", "QTY", "DESCRIPTION/DEPTH"])
+                    w.writerows(ops_rows)
+
+                print(f"[HOLE-TABLE][ops] rows={len(ops_rows)} csv={ops_csv}")
+            except Exception as e:
+                print(f"[HOLE-TABLE][ops] emit failed: {e}")
+# <<< HOLE_TABLE_OPS END
             print(f"[HOLE-TABLE] rows={len(out_rows)} csv={hole_csv}")
         else:
             print("[HOLE-TABLE] none detected")
