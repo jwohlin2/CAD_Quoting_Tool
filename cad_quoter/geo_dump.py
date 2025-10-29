@@ -77,34 +77,58 @@ def _find_hole_table_chunks(rows: List[dict]):
 
 
 def _parse_header(header_chunks: List[str]):
-    """Return (hole_letters, diam_tokens, qty_list). Raises if header is malformed."""
+    """
+    Return (hole_letters, diam_tokens, qty_list).
+    Handles: 'HOLE TABLE HOLE A B ... REF Ø Ø1.7500 ... QTY 4 2 ... DESCRIPTION'
+    - Picks the LAST 'HOLE' before REF (not the one in 'HOLE TABLE')
+    - Drops stray standalone Ø right after REF
+    """
     header_text = re.sub(r"\s+", " ", " ".join(header_chunks)).strip().replace(",", " ")
     toks = header_text.split()
 
-    def find_tok(name: str) -> int:
-        name = name.upper()
-        for idx, t in enumerate(toks):
-            if t.upper() == name:
-                return idx
-        return -1
+    def all_idx(name: str) -> List[int]:
+        u = name.upper()
+        return [i for i, t in enumerate(toks) if t.upper() == u]
 
-    i_hole = find_tok("HOLE")
-    i_ref = find_tok("REF")
-    i_qty = find_tok("QTY")
-    i_desc = find_tok("DESCRIPTION") if find_tok("DESCRIPTION") != -1 else find_tok("DESC")
+    def find_one(name: str) -> int:
+        u = name.upper()
+        return next((i for i, t in enumerate(toks) if t.upper() == u), -1)
+
+    idx_holes = all_idx("HOLE")
+    i_ref = find_one("REF")
+    i_qty = find_one("QTY")
+    i_desc = find_one("DESCRIPTION")
+    if i_desc == -1:
+        i_desc = find_one("DESC")
     if i_ref == -1:
-        i_ref = find_tok("Ø")  # some drawings collapse REF column to a diameter symbol
+        # some drawings collapse REF header to a diameter symbol
+        i_ref = find_one("Ø")
+
+    # choose the HOLE that is actually the column header:
+    # the last 'HOLE' occurring BEFORE REF
+    i_hole = -1
+    for i in idx_holes:
+        if i < i_ref:
+            i_hole = i
     if min(i_hole, i_ref, i_qty, i_desc) == -1:
         raise ValueError(f"Unexpected HOLE TABLE header: {header_text}")
+
+    # slice ranges
     hole_letters = toks[i_hole + 1 : i_ref]
     diam_tokens = toks[i_ref + 1 : i_qty]
-    # only ints for QTY
+    qty_tokens = toks[i_qty + 1 : i_desc]
+
+    # drop stray symbols that aren't real diameters
+    diam_tokens = [d for d in diam_tokens if d not in ("Ø", "∅")]
+
+    # parse quantities
     qty_list = []
-    for q in toks[i_qty + 1 : i_desc]:
+    for q in qty_tokens:
         try:
             qty_list.append(int(q))
         except Exception:
             pass
+
     n = min(len(hole_letters), len(diam_tokens), len(qty_list))
     return hole_letters[:n], diam_tokens[:n], qty_list[:n]
 
@@ -112,9 +136,12 @@ def _parse_header(header_chunks: List[str]):
 def _split_descriptions(body_chunks: List[str], diam_list: List[str]) -> List[str]:
     """Slice the big body text into one description per diameter marker."""
     blob = re.sub(r"\s+", " ", " ".join(body_chunks)).strip()
+
+    # build aliases for each diameter from the header
     needles = [_diameter_aliases(d) for d in diam_list]
-    positions: List[int] = []
-    cursor = 0
+
+    # find ordered positions
+    positions, cursor = [], 0
     for alts in needles:
         found = None
         for a in alts:
@@ -123,18 +150,25 @@ def _split_descriptions(body_chunks: List[str], diam_list: List[str]) -> List[st
                 found = p
                 break
         if found is None:
-            # last resort: just look for numeric payload of the first alias
+            # numeric last resort
             num = re.sub(r"^[Ø∅]\s*", "", alts[0])
             p = blob.find(num, cursor)
             found = p if p != -1 else len(blob)
         positions.append(found)
         cursor = max(found + 1, cursor)
-    segs: List[str] = []
+
+    # strip leading diameter marker (fraction FIRST, then decimal)
+    def strip_leading_marker(s: str) -> str:
+        s = s.strip()
+        # allow optional spaces after Ø/∅
+        s = re.sub(r"^[\(\s]*[Ø∅]\s*[0-9]+/[0-9]+\)?\s*", "", s)  # fractions first
+        s = re.sub(r"^[\(\s]*[Ø∅]\s*[0-9.]+\)?\s*", "", s)  # then decimals
+        return s.strip()
+
+    segs = []
     for k, start in enumerate(positions):
         end = positions[k + 1] if k + 1 < len(positions) else len(blob)
-        seg = blob[start:end].strip()
-        seg = re.sub(r"^[\(\s]*[Ø∅][0-9.]+[\)]?\s*", "", seg)
-        seg = re.sub(r"^[\(\s]*[Ø∅][0-9]+/[0-9]+[\)]?\s*", "", seg)
+        seg = strip_leading_marker(blob[start:end])
         segs.append(seg)
     return segs
 
