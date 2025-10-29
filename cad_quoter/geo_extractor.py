@@ -24,6 +24,12 @@ from cad_quoter.geometry import convert_dwg_to_dxf
 from cad_quoter.geometry.mtext_utils import normalize_mtext_plain_text
 from cad_quoter.geometry.dxf_enrich import detect_units_scale
 from cad_quoter.vendors import ezdxf as _ezdxf_vendor
+from cad_quoter.utils.dia_parser import (
+    capture_diameter_normalizations,
+    first_diameter_token,
+    iter_diameter_tokens,
+    register_diameter_normalization,
+)
 
 
 NO_TEXT_ROWS_MESSAGE = "No text found before filtering; use --dump-ents to inspect."
@@ -4754,58 +4760,82 @@ def _extract_band_quantity(text: str) -> tuple[int | None, str]:
     return (None, candidate)
 
 
-def _extract_row_reference(desc: str) -> tuple[str, float | None]:
+def _extract_row_reference_details(desc: str) -> tuple[str, float | None, str | None]:
     search_space = desc or ""
-    diameter = _extract_diameter(search_space)
+
+    raw_dia, diameter = first_diameter_token(search_space)
     if diameter is not None and 0 < diameter <= 10:
-        return (_format_ref_value(diameter), diameter)
+        formatted = _format_ref_value(diameter)
+        raw_text = raw_dia.strip() if raw_dia else formatted
+        register_diameter_normalization(raw_text, float(diameter))
+        return (formatted, float(diameter), raw_text)
 
     thread_match = _THREAD_CALL_OUT_RE.search(search_space)
     if thread_match:
-        return (thread_match.group(0).upper(), None)
+        token = thread_match.group(0).upper()
+        return (token, None, token)
 
     pipe_match = _PIPE_NPT_REF_RE.search(search_space)
     if pipe_match:
         numeric_part = pipe_match.group(1)
         suffix = pipe_match.group(2)
         compact = f"{numeric_part}-{suffix}".upper().replace(" ", "")
-        return (compact, None)
+        return (compact, None, compact)
 
     numbered_thread = _NUMBERED_THREAD_REF_RE.search(search_space)
     if numbered_thread:
         raw_value = numbered_thread.group(0)
         normalized = raw_value.upper().replace(" ", "")
-        return (normalized, None)
+        return (normalized, None, normalized)
 
     number_drill = _NUMBER_DRILL_REF_RE.search(search_space)
     if number_drill:
-        return (number_drill.group(0).upper(), None)
+        token = number_drill.group(0).upper()
+        return (token, None, token)
 
     letter_drill = _LETTER_DRILL_REF_RE.search(search_space)
     if letter_drill:
-        return (letter_drill.group(1).upper(), None)
+        token = letter_drill.group(1).upper()
+        return (token, None, token)
 
     inch_match = _INCH_MARK_REF_RE.search(search_space)
     if inch_match:
         value = _parse_number_token(inch_match.group(1))
         if value is not None and 0 < value <= 10:
-            return (_format_ref_value(value), value)
+            formatted = _format_ref_value(value)
+            raw_text = inch_match.group(0).strip()
+            register_diameter_normalization(raw_text, value)
+            return (formatted, value, raw_text)
 
     dia_inline = _DIA_SYMBOL_INLINE_RE.search(search_space)
     if dia_inline:
         value = _parse_number_token(dia_inline.group(1))
         if value is not None and 0 < value <= 10:
-            return (_format_ref_value(value), value)
+            formatted = _format_ref_value(value)
+            raw_text = dia_inline.group(0).strip()
+            register_diameter_normalization(raw_text, value)
+            return (formatted, value, raw_text)
 
     for match in _FRACTION_RE.finditer(search_space):
         value = _parse_number_token(match.group(0))
         if value is not None and 0 < value <= 10:
-            return (_format_ref_value(value), value)
+            formatted = _format_ref_value(value)
+            raw_text = match.group(0).strip()
+            register_diameter_normalization(raw_text, value)
+            return (formatted, value, raw_text)
     for match in _DECIMAL_RE.finditer(search_space):
         value = _parse_number_token(match.group(0))
         if value is not None and 0 < value <= 10:
-            return (_format_ref_value(value), value)
-    return ("", None)
+            formatted = _format_ref_value(value)
+            raw_text = match.group(0).strip()
+            register_diameter_normalization(raw_text, value)
+            return (formatted, value, raw_text)
+    return ("", None, None)
+
+
+def _extract_row_reference(desc: str) -> tuple[str, float | None]:
+    ref_text, ref_value, _ = _extract_row_reference_details(desc)
+    return (ref_text, ref_value)
 
 
 def _detect_row_side(desc: str) -> str:
@@ -5101,12 +5131,10 @@ def _merge_table_lines(lines: Iterable[str]) -> list[str]:
 
 def _extract_diameter(text: str) -> float | None:
     search_space = text or ""
-    match = _DIAMETER_PREFIX_RE.search(search_space)
-    if not match:
-        match = _DIAMETER_SUFFIX_RE.search(search_space)
-    if not match:
+    _, value = first_diameter_token(search_space)
+    if value is None or not value > 0:
         return None
-    return _parse_number_token(match.group(1))
+    return float(value)
 
 
 
@@ -6602,118 +6630,128 @@ def _extract_anchor_band_lines(
     return band_lines
 
 
-def _build_fallback_rows_from_lines(lines: Iterable[str]) -> tuple[list[dict[str, Any]], dict[str, int], int]:
-    rows: list[dict[str, Any]] = []
-    families: dict[str, int] = {}
-    total_qty = 0
-    seen_keys: set[tuple[int, str, str, str]] = set()
+def _build_fallback_rows_from_lines(
+    lines: Iterable[str],
+) -> tuple[list[dict[str, Any]], dict[str, int], int, list[tuple[str, float]]]:
+    with capture_diameter_normalizations() as captured_events:
+        rows: list[dict[str, Any]] = []
+        families: dict[str, int] = {}
+        total_qty = 0
+        seen_keys: set[tuple[int, str, str, str]] = set()
 
-    for entry in lines:
-        normalized_desc = " ".join(str(entry or "").split())
-        if not normalized_desc:
-            continue
-        qty_val, remainder = _extract_row_quantity_and_remainder(normalized_desc)
-        if qty_val is None or qty_val <= 0:
-            continue
-        try:
-            qty_int = int(qty_val)
-        except Exception:
-            continue
-        if qty_int <= 0:
-            continue
-        remainder_clean = " ".join(remainder.split())
-        desc_text = remainder_clean or normalized_desc
-        desc_text = _FALLBACK_LEADING_QTY_RE.sub("", desc_text)
-        desc_text = _FALLBACK_JJ_NOISE_RE.sub("", desc_text)
-        desc_text = _FALLBACK_ETCH_NOISE_RE.sub("", desc_text)
-        desc_text = " ".join(desc_text.split()).strip()
-        desc_text = _FALLBACK_TRAILING_LADDER_RE.sub("", desc_text).strip()
-        if not desc_text:
-            continue
-
-        operations = classify_op_row(desc_text)
-        op_kinds = {str(op.get("kind") or "").strip().lower() for op in operations}
-        fragments = split_actions(desc_text) or [desc_text]
-        candidate_fragments: list[tuple[str, dict[str, Any]]] = []
-        for fragment in fragments:
-            cleaned_fragment = " ".join(str(fragment or "").split()).strip()
-            cleaned_fragment = _FALLBACK_TRAILING_LADDER_RE.sub("", cleaned_fragment).strip()
-            if not cleaned_fragment:
+        for entry in lines:
+            normalized_desc = " ".join(str(entry or "").split())
+            if not normalized_desc:
                 continue
-            if _roi_is_admin_noise(cleaned_fragment) or _roi_is_numeric_ladder(cleaned_fragment):
+            qty_val, remainder = _extract_row_quantity_and_remainder(normalized_desc)
+            if qty_val is None or qty_val <= 0:
                 continue
-            action = classify_action(cleaned_fragment)
-            fragment_ops = classify_op_row(cleaned_fragment)
-            kind = str(action.get("kind") or "").strip().lower()
-            for op in fragment_ops:
-                op_kind = str(op.get("kind") or "").strip().lower()
-                if op_kind == "npt":
-                    action["npt"] = True
-                    action["kind"] = "tap"
-                    action["tap_type"] = "pipe"
-                    kind = "tap"
-                    break
-                if op_kind in _FALLBACK_ACTION_KINDS:
-                    action["kind"] = op_kind
-                    kind = op_kind
-                    size_token = op.get("size")
-                    if size_token and op_kind == "drill" and not action.get("size"):
-                        action["size"] = size_token
-                    break
-            is_relevant = kind in _FALLBACK_ACTION_KINDS or action.get("npt")
-            if not is_relevant and len(fragments) > 1 and (op_kinds & _FALLBACK_ACTION_KINDS):
-                # Skip unrelated fragments when we have explicit action rows.
+            try:
+                qty_int = int(qty_val)
+            except Exception:
                 continue
-            candidate_fragments.append((cleaned_fragment, action))
+            if qty_int <= 0:
+                continue
+            remainder_clean = " ".join(remainder.split())
+            desc_text = remainder_clean or normalized_desc
+            desc_text = _FALLBACK_LEADING_QTY_RE.sub("", desc_text)
+            desc_text = _FALLBACK_JJ_NOISE_RE.sub("", desc_text)
+            desc_text = _FALLBACK_ETCH_NOISE_RE.sub("", desc_text)
+            desc_text = " ".join(desc_text.split()).strip()
+            desc_text = _FALLBACK_TRAILING_LADDER_RE.sub("", desc_text).strip()
+            if not desc_text:
+                continue
 
-        if not candidate_fragments:
-            continue
-
-        base_ref_text, base_ref_value = _extract_row_reference(desc_text)
-        side_hint = _detect_row_side(desc_text) or _detect_row_side(normalized_desc)
-
-        for fragment_text, action in candidate_fragments:
-            ref_text, ref_value = _extract_row_reference(fragment_text)
-            side_value = action.get("side") or _detect_row_side(fragment_text) or side_hint
-            if side_value == "both":
-                sides_to_emit = ["front", "back"]
-            else:
-                fallback_side = side_value or "front"
-                sides_to_emit = [fallback_side]
-
-            for side_option in sides_to_emit:
-                normalized_key = (
-                    qty_int,
-                    fragment_text.upper(),
-                    (side_option or "").upper(),
-                    (ref_text or base_ref_text or "").upper(),
-                )
-                if normalized_key in seen_keys:
+            operations = classify_op_row(desc_text)
+            op_kinds = {str(op.get("kind") or "").strip().lower() for op in operations}
+            fragments = split_actions(desc_text) or [desc_text]
+            candidate_fragments: list[tuple[str, dict[str, Any]]] = []
+            for fragment in fragments:
+                cleaned_fragment = " ".join(str(fragment or "").split()).strip()
+                cleaned_fragment = _FALLBACK_TRAILING_LADDER_RE.sub("", cleaned_fragment).strip()
+                if not cleaned_fragment:
                     continue
-                seen_keys.add(normalized_key)
+                if _roi_is_admin_noise(cleaned_fragment) or _roi_is_numeric_ladder(cleaned_fragment):
+                    continue
+                action = classify_action(cleaned_fragment)
+                fragment_ops = classify_op_row(cleaned_fragment)
+                kind = str(action.get("kind") or "").strip().lower()
+                for op in fragment_ops:
+                    op_kind = str(op.get("kind") or "").strip().lower()
+                    if op_kind == "npt":
+                        action["npt"] = True
+                        action["kind"] = "tap"
+                        action["tap_type"] = "pipe"
+                        kind = "tap"
+                        break
+                    if op_kind in _FALLBACK_ACTION_KINDS:
+                        action["kind"] = op_kind
+                        kind = op_kind
+                        size_token = op.get("size")
+                        if size_token and op_kind == "drill" and not action.get("size"):
+                            action["size"] = size_token
+                        break
+                is_relevant = kind in _FALLBACK_ACTION_KINDS or action.get("npt")
+                if not is_relevant and len(fragments) > 1 and (op_kinds & _FALLBACK_ACTION_KINDS):
+                    # Skip unrelated fragments when we have explicit action rows.
+                    continue
+                candidate_fragments.append((cleaned_fragment, action))
 
-                row: dict[str, Any] = {
-                    "hole": "",
-                    "ref": ref_text or base_ref_text or "",
-                    "qty": qty_int,
-                    "desc": fragment_text,
-                }
-                if side_option:
-                    row["side"] = side_option
-                if action.get("npt"):
-                    row["npt"] = True
-                tap_type = action.get("tap_type")
-                if tap_type:
-                    row["tap_type"] = tap_type
-                rows.append(row)
-                total_qty += qty_int
+            if not candidate_fragments:
+                continue
 
-                value_for_family = ref_value if ref_value is not None else base_ref_value
-                if value_for_family is not None:
-                    key = f"{float(value_for_family):.4f}".rstrip("0").rstrip(".")
-                    families[key] = families.get(key, 0) + qty_int
+            base_ref_text, base_ref_value, base_ref_raw = _extract_row_reference_details(desc_text)
+            side_hint = _detect_row_side(desc_text) or _detect_row_side(normalized_desc)
 
-    return rows, families, total_qty
+            for fragment_text, action in candidate_fragments:
+                ref_text, ref_value, ref_raw = _extract_row_reference_details(fragment_text)
+                side_value = action.get("side") or _detect_row_side(fragment_text) or side_hint
+                if side_value == "both":
+                    sides_to_emit = ["front", "back"]
+                else:
+                    fallback_side = side_value or "front"
+                    sides_to_emit = [fallback_side]
+
+                for side_option in sides_to_emit:
+                    normalized_key = (
+                        qty_int,
+                        fragment_text.upper(),
+                        (side_option or "").upper(),
+                        (ref_text or base_ref_text or "").upper(),
+                    )
+                    if normalized_key in seen_keys:
+                        continue
+                    seen_keys.add(normalized_key)
+
+                    row: dict[str, Any] = {
+                        "hole": "",
+                        "ref": ref_text or base_ref_text or "",
+                        "qty": qty_int,
+                        "desc": fragment_text,
+                    }
+                    raw_token = ref_raw or base_ref_raw
+                    if ref_value is not None and ref_value > 0:
+                        row["dia_in"] = float(ref_value)
+                    elif base_ref_value is not None and base_ref_value > 0:
+                        row.setdefault("dia_in", float(base_ref_value))
+                    if raw_token:
+                        row["dia_raw"] = raw_token
+                    if side_option:
+                        row["side"] = side_option
+                    if action.get("npt"):
+                        row["npt"] = True
+                    tap_type = action.get("tap_type")
+                    if tap_type:
+                        row["tap_type"] = tap_type
+                    rows.append(row)
+                    total_qty += qty_int
+
+                    value_for_family = ref_value if ref_value is not None else base_ref_value
+                    if value_for_family is not None:
+                        key = f"{float(value_for_family):.4f}".rstrip("0").rstrip(".")
+                        families[key] = families.get(key, 0) + qty_int
+
+    return rows, families, total_qty, sorted(captured_events)
 
 
 def _fallback_rows_sample(rows: Sequence[Mapping[str, Any]] | None, limit: int = 3) -> str:
@@ -6761,10 +6799,11 @@ def _detect_thread_token(text: str) -> str:
 
 def _detect_diameter_token(text: str) -> str:
     search_space = text or ""
-    for pattern in (_DIAMETER_PREFIX_RE, _DIAMETER_SUFFIX_RE):
-        match = pattern.search(search_space)
-        if match:
-            return match.group(0).strip()
+    for raw, value in iter_diameter_tokens(search_space):
+        if raw:
+            return raw.strip()
+        if value is not None:
+            return _format_ref_value(value)
     size = _extract_drill_size(search_space)
     return size.strip() if size else ""
 
@@ -6867,7 +6906,7 @@ def _write_fallback_debug(records: list[dict[str, Any]], qty_sum: int) -> None:
 
 def _fallback_text_table(lines: Iterable[str]) -> dict[str, Any]:
     merged = _prepare_fallback_lines(lines)
-    rows, families, total_qty = _build_fallback_rows_from_lines(merged)
+    rows, families, total_qty, dia_events = _build_fallback_rows_from_lines(merged)
 
     if not rows:
         return {}
@@ -6886,6 +6925,11 @@ def _fallback_text_table(lines: Iterable[str]) -> dict[str, Any]:
     result: dict[str, Any] = {"rows": rows, "hole_count": total_qty}
     if families:
         result["hole_diam_families_in"] = families
+    if dia_events:
+        result["dia_normalizations"] = [
+            {"raw": raw, "dia_in": value}
+            for raw, value in dia_events
+        ]
     result["provenance_holes"] = "HOLE TABLE"
     result["source"] = "text_fallback"
     return result
@@ -6893,7 +6937,7 @@ def _fallback_text_table(lines: Iterable[str]) -> dict[str, Any]:
 
 def _publish_fallback_from_rows_txt(rows_txt: Iterable[Any]) -> dict[str, Any]:
     merged = _prepare_fallback_lines(rows_txt)
-    rows, families, total_qty = _build_fallback_rows_from_lines(merged)
+    rows, families, total_qty, dia_events = _build_fallback_rows_from_lines(merged)
 
     if not rows:
         return {}
@@ -6911,6 +6955,11 @@ def _publish_fallback_from_rows_txt(rows_txt: Iterable[Any]) -> dict[str, Any]:
     }
     if families:
         result["hole_diam_families_in"] = families
+    if dia_events:
+        result["dia_normalizations"] = [
+            {"raw": raw, "dia_in": value}
+            for raw, value in dia_events
+        ]
 
     try:
         records, qty_sum = _fallback_debug_records(rows)
@@ -6999,6 +7048,11 @@ def extract_hole_table_from_text(
     families = fallback.get("hole_diam_families_in")
     if isinstance(families, Mapping):
         result["hole_diam_families_in"] = dict(families)
+    dia_norms = fallback.get("dia_normalizations")
+    if isinstance(dia_norms, Iterable) and not isinstance(
+        dia_norms, (str, bytes, bytearray)
+    ):
+        result["dia_normalizations"] = [dict(item) if isinstance(item, Mapping) else item for item in dia_norms]
     return result
 
 

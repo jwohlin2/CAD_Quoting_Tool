@@ -29,6 +29,7 @@ from appV5 import (  # noqa: E402  # pylint: disable=wrong-import-position
     _dedupe_hole_entries,
     _density_for_material,
     _material_family,
+    _parse_ref_to_inch,
     _parse_hole_line,
     classify_concentric,
     hole_count_from_geometry,
@@ -214,6 +215,24 @@ def test_parse_hole_line_extracts_side_information(hole_line: str, source: str, 
     assert entry is not None
     for key, value in expected.items():
         assert entry.get(key) == value
+
+
+@pytest.mark.parametrize(
+    "value, expected",
+    [
+        (".5312", 0.5312),
+        ("0.5312", 0.5312),
+        ("1.7500", 1.75),
+        ("Ø.5312", 0.5312),
+        ("DIA .5312", 0.5312),
+        ("1/8", 0.125),
+        ('.339 "R"', 0.339),
+    ],
+)
+def test_parse_ref_to_inch_handles_common_formats(value: str, expected: float) -> None:
+    parsed = _parse_ref_to_inch(value)
+    assert parsed is not None
+    assert parsed == pytest.approx(expected)
 
 
 def test_leader_entries_duplicate_table_rows_are_ignored() -> None:

@@ -15,6 +15,8 @@ from .chart_lines import (
     collect_chart_lines_context as _collect_chart_lines_context,
 )
 
+from cad_quoter.utils.dia_parser import first_diameter_token, register_diameter_normalization
+
 
 RE_TAP = re.compile(
     r"(\(\d+\)\s*)?("
@@ -31,7 +33,10 @@ RE_CBORE = re.compile(r"C[’']?BORE|CBORE|COUNTERBORE", re.I)
 RE_CSK = re.compile(r"CSK|C'SINK|COUNTERSINK", re.I)
 _RE_DEPTH_OR_THICK = re.compile(r"(\d+(?:\.\d+)?)\s*DEEP(?:\s+FROM\s+(FRONT|BACK))?", re.I)
 RE_DEPTH = _RE_DEPTH_OR_THICK
-RE_DIA = re.compile(r"[Ø⌀\u00D8]?\s*(\d+(?:\.\d+)?)", re.I)
+RE_DIA = re.compile(
+    r"(?:Ø|⌀|\u00D8|\bDIA\b\.?)?\s*((?:\d+\s*/\s*\d+)|(?:\d*\.\d+)|(?:\.\d+)|(?:\d+))",
+    re.I,
+)
 RE_FRONT_BACK = re.compile(
     r"FRONT\s*&\s*BACK|FRONT\s+AND\s+BACK|BOTH\s+SIDES|TWO\s+SIDES|2\s+SIDES|OPPOSITE\s+SIDE",
     re.I,
@@ -81,7 +86,7 @@ _SIDE_BACK = re.compile(r"\b(?:FROM\s+)?BACK\b", re.I)
 _SIDE_FRONT = re.compile(r"\b(?:FROM\s+)?FRONT\b", re.I)
 _DEPTH_TOKEN = re.compile(r"[×xX]\s*([0-9.]+)\b")
 _DIA_TOKEN = re.compile(
-    r"(?:Ø|⌀|REF|DIA)[^0-9]*((?:\d+\s*/\s*\d+)|(?:\d+)?\.\d+|\d+(?:\.\d+)?)",
+    r"(?:Ø|⌀|REF|DIA)[^0-9/]*((?:\d+\s*/\s*\d+)|(?:\d*\.\d+)|(?:\.\d+)|(?:\d+))",
     re.I,
 )
 
@@ -98,23 +103,34 @@ def _parse_ref_to_inch(value: Any) -> float | None:
     text = str(value).strip()
     if not text:
         return None
+    _, parsed_value = first_diameter_token(text)
+    if parsed_value is not None and parsed_value > 0:
+        return float(parsed_value)
+    cleaned = re.sub(r"(?i)\bDIA\b\.?", " ", text)
     cleaned = (
-        text.replace("\u00D8", "")
+        cleaned.replace("\u00D8", "")
         .replace("Ø", "")
         .replace("⌀", "")
         .replace("IN", "")
         .replace("in", "")
-        .strip("\"' ")
     )
+    cleaned = cleaned.strip().strip("\"' ")
+    cleaned = re.sub(r"(?i)[A-Z]+$", "", cleaned).strip()
+    cleaned = re.sub(r"\s+", "", cleaned)
     if not cleaned:
         return None
     try:
         if "/" in cleaned:
-            return float(Fraction(cleaned))
-        return float(cleaned)
+            parsed = float(Fraction(cleaned))
+        else:
+            parsed = float(cleaned)
+        register_diameter_normalization(text, parsed)
+        return parsed
     except Exception:
         try:
-            return float(Fraction(cleaned))
+            parsed = float(Fraction(cleaned))
+            register_diameter_normalization(text, parsed)
+            return parsed
         except Exception:
             return None
 
@@ -502,18 +518,23 @@ def _parse_hole_line(line: str, to_in: float, *, source: str | None = None) -> d
     if re.search(r"\b(FRONT\s*&\s*BACK|BOTH\s+SIDES)\b", U):
         entry["double_sided"] = True
 
-    mref = re.search(r"REF\s*[Ø⌀]\s*(\d+(?:\.\d+)?)", U)
+    mref = re.search(r"REF\s*[Ø⌀\u00D8DIA\.\s]*((?:\d+\s*/\s*\d+)|(?:\d*\.\d+)|(?:\.\d+)|(?:\d+))", line, re.I)
     if mref:
         try:
-            entry["ref_dia_in"] = float(mref.group(1)) * float(to_in)
+            entry["ref_dia_in"] = float(Fraction(mref.group(1))) * float(to_in) if "/" in mref.group(1) else float(mref.group(1)) * float(to_in)
         except Exception:
             entry["ref_dia_in"] = None
 
     if entry.get("ref_dia_in") is None:
-        mdia = RE_DIA.search(U)
-        if mdia and ("Ø" in U or "⌀" in U or " REF" in U):
+        raw_dia, dia_val = first_diameter_token(line)
+        if dia_val is not None and dia_val > 0 and (
+            "Ø" in U
+            or "⌀" in U
+            or " REF" in U
+            or re.search(r"\bDIA\b", U)
+        ):
             try:
-                entry["ref_dia_in"] = float(mdia.group(1)) * float(to_in)
+                entry["ref_dia_in"] = float(dia_val) * float(to_in)
             except Exception:
                 entry["ref_dia_in"] = None
 

@@ -106,6 +106,21 @@ _QUICK_CHECK_BREAKDOWN = {
 }
 
 
+_DUMMY_DIA_NORMALIZATIONS = [
+    {"raw": "Ø.5312", "dia_in": 0.5312},
+    {"raw": ".250", "dia_in": 0.25},
+    {"raw": "DIA .750", "dia_in": 0.75},
+    {"raw": "0.312", "dia_in": 0.312},
+    {"raw": "Ø1.000", "dia_in": 1.0},
+    {"raw": "DIA .1875", "dia_in": 0.1875},
+    {"raw": ".339 \"R\"", "dia_in": 0.339},
+    {"raw": "0.5312", "dia_in": 0.5312},
+    {"raw": "Ø.406", "dia_in": 0.406},
+    {"raw": "DIA .625", "dia_in": 0.625},
+    {"raw": "1/8", "dia_in": 0.125},
+]
+
+
 DUMMY_QUOTE_RESULT = {
     "price": 1414.875,
     "qty": 12,
@@ -116,7 +131,8 @@ DUMMY_QUOTE_RESULT = {
             "SFM=280–320, IPR=0.0030–0.0040; RPM 3400–3900 IPM 10.2–13.3; "
             "Ø 0.500\"; depth/hole 1.50 in; holes 48; index 8.0 s/hole; "
             "peck 0.08 min/hole; toolchange 0.50 min; total hr 1.50."
-        )
+        ),
+        '[DIA] normalized 11 values (e.g., "Ø.5312"→0.5312)',
     ],
     "ui_vars": {"Material": "Aluminum MIC6"},
     "decision_state": {
@@ -363,9 +379,13 @@ DUMMY_QUOTE_RESULT = {
         "labor_cost_details_input": {},
         "drill_debug": [
             "Planner drill analysis: material Aluminum MIC6 with matched feeds",
+            '[DIA] normalized 11 values (e.g., "Ø.5312"→0.5312)',
         ],
         "direct_cost_details": {},
         "app_meta": {"used_planner": True},
+    },
+    "geo": {
+        "dia_normalizations": list(_DUMMY_DIA_NORMALIZATIONS),
     },
 }
 
@@ -596,6 +616,16 @@ def test_dummy_quote_drill_debug_material_alignment() -> None:
 
     assert debug_key == breakdown_key == drilling_meta_key
     assert breakdown["drilling_meta"].get("material_display") == material_block
+
+
+def test_dummy_quote_includes_dia_normalization_debug() -> None:
+    payload = _dummy_quote_payload(debug_enabled=True)
+
+    debug_lines = payload.get("drill_debug", [])
+    assert any(line.startswith("[DIA] normalized") for line in debug_lines)
+
+    breakdown_debug = payload["breakdown"].get("drill_debug", [])
+    assert any(line.startswith("[DIA] normalized") for line in breakdown_debug)
 
 
 def test_dummy_quote_drill_debug_ranges_and_index() -> None:

@@ -550,6 +550,23 @@ def test_fallback_semicolon_row_splits_actions() -> None:
     assert buckets.get("drill") == 4
 
 
+def test_fallback_rows_capture_dia_metadata() -> None:
+    rows, families, total_qty, dia_events = geo_extractor._build_fallback_rows_from_lines([
+        "(3) DIA .5312 DRILL THRU",
+    ])
+
+    assert total_qty == 3
+    assert families
+    assert rows
+    row = rows[0]
+    assert row.get("dia_in") == pytest.approx(0.5312)
+    assert row.get("dia_raw") == "DIA .5312"
+    assert len(dia_events) == 1
+    dia_raw, dia_value = dia_events[0]
+    assert dia_raw == "DIA .5312"
+    assert dia_value == pytest.approx(0.5312)
+
+
 def test_anchor_height_filter_drops_small_text() -> None:
     entries = [
         {"normalized_text": "(2) Ø0.250 DRILL", "height": 0.20},

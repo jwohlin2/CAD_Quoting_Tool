@@ -77,6 +77,7 @@ from fractions import Fraction
 from cad_quoter.app._value_utils import (
     _format_value,
 )
+from cad_quoter.utils.dia_parser import iter_diameter_tokens
 from typing import Any as _AnyForCoerce
 
 
@@ -156,7 +157,6 @@ from cad_quoter.app.hole_ops import (
     _aggregate_hole_entries,
     _classify_thread_spec,
     _dedupe_hole_entries,
-    _DIA_TOKEN,
     _major_diameter_from_thread,
     _normalize_hole_text,
     _parse_hole_line,
@@ -1496,10 +1496,9 @@ def _diameter_from_ops_row(entry: Mapping[str, Any]) -> float | None:
         return ref_val
     desc = entry.get("desc")
     if isinstance(desc, str):
-        for match in _DIA_TOKEN.finditer(desc):
-            candidate = _parse_ref_to_inch(match.group(1))
+        for _, candidate in iter_diameter_tokens(desc):
             if candidate is not None and candidate > 0:
-                return candidate
+                return float(candidate)
     return None
 
 
@@ -9987,6 +9986,70 @@ def compute_quote_from_df(  # type: ignore[reportGeneralTypeIssues]
                             if entry.get("depth_in") is not None
                         ]
 
+    dia_normalization_entries: list[tuple[str, float]] = []
+    _dia_seen: set[tuple[str, float]] = set()
+
+    def _ingest_dia_norms(candidate: Any) -> None:
+        if candidate is None:
+            return
+        if isinstance(candidate, Mapping):
+            raw_val = candidate.get("raw") or candidate.get("token") or candidate.get("text")
+            value_val = (
+                candidate.get("dia_in")
+                or candidate.get("value")
+                or candidate.get("diameter_in")
+                or candidate.get("dia")
+            )
+            if raw_val is None or value_val is None:
+                return
+            raw_text = str(raw_val).strip()
+            if not raw_text:
+                return
+            try:
+                value_float = float(value_val)
+            except Exception:
+                return
+            if not math.isfinite(value_float) or value_float <= 0.0:
+                return
+            key = (raw_text, float(value_float))
+            if key not in _dia_seen:
+                _dia_seen.add(key)
+                dia_normalization_entries.append(key)
+            return
+        if isinstance(candidate, tuple) and len(candidate) == 2:
+            _ingest_dia_norms({"raw": candidate[0], "dia_in": candidate[1]})
+            return
+        if isinstance(candidate, (list, set, tuple)) and not isinstance(
+            candidate, (str, bytes, bytearray)
+        ):
+            for item in candidate:
+                _ingest_dia_norms(item)
+
+    if isinstance(geo_payload, _MappingABC):
+        _ingest_dia_norms(geo_payload.get("dia_normalizations"))
+        ops_summary_obj = geo_payload.get("ops_summary")
+        if isinstance(ops_summary_obj, _MappingABC):
+            _ingest_dia_norms(ops_summary_obj.get("dia_normalizations"))
+    if isinstance(result, _MappingABC):
+        _ingest_dia_norms(result.get("dia_normalizations"))
+
+    if dia_normalization_entries:
+        dia_count = len(dia_normalization_entries)
+        sample_raw, sample_value = dia_normalization_entries[0]
+        sample_display = f"{float(sample_value):.4f}".rstrip("0").rstrip(".")
+        if not sample_display:
+            sample_display = "0"
+        dia_message = (
+            f"[DIA] normalized {dia_count} values (e.g., "
+            f'"{sample_raw}"→{sample_display})'
+        )
+        if dia_message not in drill_debug_lines:
+            drill_debug_lines.append(dia_message)
+        if isinstance(breakdown_mutable, _MutableMappingABC):
+            debug_list = breakdown_mutable.setdefault("drill_debug", [])
+            if isinstance(debug_list, list) and dia_message not in debug_list:
+                debug_list.append(dia_message)
+
     drilling_summary_raw = process_plan_summary.get("drilling")
     if isinstance(drilling_summary_raw, dict):
         drilling_summary = drilling_summary_raw
@@ -14121,6 +14184,12 @@ def extract_2d_features_from_dxf_or_dwg(path: str | Path) -> dict[str, Any]:
             geo["hole_family_count"] = sum(
                 int(v or 0) for v in fam.values()
             )
+        dia_norms = table_info.get("dia_normalizations")
+        if dia_norms:
+            try:
+                geo["dia_normalizations"] = list(dia_norms)
+            except Exception:
+                geo["dia_normalizations"] = dia_norms
         prov = (
             table_info.get("provenance")
             or table_info.get("provenance_holes")

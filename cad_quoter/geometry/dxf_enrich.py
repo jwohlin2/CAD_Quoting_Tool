@@ -23,7 +23,7 @@ RE_TAP = re.compile(
 RE_CBORE = re.compile(r"C[’']?BORE|CBORE|COUNTERBORE", re.I)
 RE_CSK = re.compile(r"CSK|C['’]SINK|COUNTERSINK", re.I)
 RE_THRU = re.compile(r"\bTHRU\b", re.I)
-NUM_PATTERN = r"(?:\d*\.\d+|\d+)"
+NUM_PATTERN = r"(?:\d+\s*/\s*\d+|\d*\.\d+|\.\d+|\d+)"
 
 RE_DEPTH = re.compile(rf"({NUM_PATTERN})\s*DEEP(?:\s+FROM\s+(FRONT|BACK))?", re.I)
 RE_QTY = re.compile(r"\((\d+)\)")
