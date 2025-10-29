@@ -550,6 +550,21 @@ def test_fallback_semicolon_row_splits_actions() -> None:
     assert buckets.get("drill") == 4
 
 
+def test_merge_proxy_fragments_merges_split_hole_rows() -> None:
+    fragments = [
+        "17/32Ø THRU; 1.00Ø C'BORE FROM FRONT &",
+        "BACK AS SHOWN",
+        "NEXT ROW DONE.",
+    ]
+
+    merged = geo_extractor._merge_proxy_fragments(fragments)
+
+    assert merged == [
+        "17/32Ø THRU; 1.00Ø C'BORE FROM FRONT & BACK AS SHOWN",
+        "NEXT ROW DONE.",
+    ]
+
+
 def test_anchor_height_filter_drops_small_text() -> None:
     entries = [
         {"normalized_text": "(2) Ø0.250 DRILL", "height": 0.20},
