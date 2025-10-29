@@ -19,6 +19,24 @@ from cad_quoter import geo_extractor
 
 # ---------- HOLE TABLE helpers ----------
 _UHEX_RE = re.compile(r"\\U\+([0-9A-Fa-f]{4})")
+
+# header-level quantities list must be visible where we write ops; we’ll pass it through
+_HEADER_QTY_BY_INDEX: List[int] = []
+
+
+def _set_header_qtys(qtys: List[int]) -> None:
+    """Stash the HOLE TABLE qty list for downstream helpers."""
+
+    global _HEADER_QTY_BY_INDEX
+    _HEADER_QTY_BY_INDEX = list(qtys or [])
+
+
+def _header_qty_for(idx: int, default: int = 0) -> int:
+    """Return the header quantity for the hole index, or ``default`` when unknown."""
+
+    if 0 <= idx < len(_HEADER_QTY_BY_INDEX):
+        return _HEADER_QTY_BY_INDEX[idx]
+    return default
 def _decode_uplus(s: str) -> str:
     """Turn \\U+2205 into Ø etc., keep original if malformed."""
     return _UHEX_RE.sub(lambda m: chr(int(m.group(1), 16)), s or "")
@@ -286,7 +304,7 @@ def _redistribute_cross_hits(descs: List[str], diam_list: List[str]) -> List[str
             chunk_raw = s[a:next_a]
             chunk = strip_marker_prefix(chunk_raw)
             tgt_idx = tgt
-            m_jg = re.search(r'[Ø∅]\s*([0-9.]+)\s+JIG\s*GRIND', chunk_raw, flags=re.I)
+            m_jg = re.search(r'[Ø∅]\s*([0-9.]+)\s+JIG\s*GRIND', chunk, flags=re.I)
             if m_jg:
                 try:
                     val = float(m_jg.group(1))
@@ -294,7 +312,11 @@ def _redistribute_cross_hits(descs: List[str], diam_list: List[str]) -> List[str
                 except Exception:
                     pass
             if chunk:
-                new_descs[tgt_idx] = (new_descs[tgt_idx] + " " + chunk).strip() if new_descs[tgt_idx] else chunk
+                chunk_clean = chunk.strip()
+                if new_descs[tgt_idx]:
+                    new_descs[tgt_idx] += " " + chunk_clean
+                else:
+                    new_descs[tgt_idx] = chunk_clean
             cursor = next_a
         if cursor < len(s):
             self_parts.append(s[cursor:])                 # tail back to self
@@ -468,7 +490,8 @@ def _parse_clause_to_ops(
             tgt = _snap_to_nearest_index(float(val.replace('/', '0')), diam_list)
         except Exception:
             tgt = hole_idx
-        ops.append((tgt, dstr, qty, "JIG GRIND"))
+        qty_for_tgt = _header_qty_for(tgt, qty)
+        ops.append((tgt, dstr, qty_for_tgt, "JIG GRIND"))
         s = s.replace(pm.group(0), " ")  # remove from main text
 
     # Diameter override at start (or fraction with trailing Ø)
@@ -489,7 +512,8 @@ def _parse_clause_to_ops(
 
     if not rest:
         # Bare diameter line => treat as THRU
-        ops.append((hole_for_clause, diam_for_clause, qty, "THRU"))
+        qty_for_clause = _header_qty_for(hole_for_clause, qty)
+        ops.append((hole_for_clause, diam_for_clause, qty_for_clause, "THRU"))
         return ops
 
     # Split explicit FRONT & BACK pair into two
@@ -501,15 +525,17 @@ def _parse_clause_to_ops(
             continue
 
         # --- GLUE: keep TAP+THRU combined if both appear in same clause ---
+        qty_for_clause = _header_qty_for(hole_for_clause, qty)
+
         if _RE_TAP.search(desc) and _RE_THRU.search(desc):
-            ops.append((hole_for_clause, diam_for_clause, qty, desc))
+            ops.append((hole_for_clause, diam_for_clause, qty_for_clause, desc))
             continue
 
         if any(rx.search(desc) for rx in (_RE_CBORE, _RE_CDRILL, _RE_TAP, _RE_THRU)):
-            ops.append((hole_for_clause, diam_for_clause, qty, desc))
+            ops.append((hole_for_clause, diam_for_clause, qty_for_clause, desc))
         else:
             # generic fallback
-            ops.append((hole_for_clause, diam_for_clause, qty, desc))
+            ops.append((hole_for_clause, diam_for_clause, qty_for_clause, desc))
 
     return ops
 
@@ -717,6 +743,7 @@ def main() -> int:
         header_chunks, body_chunks = _find_hole_table_chunks(rows)
         if header_chunks:
             hole_letters, diam_tokens, qtys = _parse_header(header_chunks)
+            _set_header_qtys(qtys)
             descriptions = _split_descriptions(body_chunks, diam_tokens)
             out_rows = []
             if len(hole_letters) != len(diam_tokens) or len(hole_letters) != len(qtys):
@@ -759,6 +786,8 @@ def main() -> int:
             print("[HOLE-TABLE] none detected")
     except Exception as e:
         print(f"[HOLE-TABLE] parse failed: {e}")
+    finally:
+        _set_header_qtys([])
 
     print(
         "[TEXT-DUMP] layouts={layouts} include_layers={inc} exclude_layers={exc} "
