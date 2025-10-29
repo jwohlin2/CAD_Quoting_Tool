@@ -793,7 +793,7 @@ def dump_all_text(doc: Any, out_dir: Path | str, opts: Mapping[str, Any] | None)
 
         virtual_entities: list[Any] = []
         try:
-            virtual_entities = list(entity.virtual_entities(deep=True))
+            virtual_entities = list(entity.virtual_entities())
         except Exception:
             virtual_entities = []
         for child in virtual_entities:
