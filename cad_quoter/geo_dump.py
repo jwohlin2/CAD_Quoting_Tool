@@ -417,16 +417,55 @@ def _route_tap_only_chunks(descs: List[str], diam_list: List[str]) -> List[str]:
 # Regexes we’ll reuse
 _RE_DIAM_LEAD   = re.compile(r'^[\(\s]*[Ø∅]\s*([0-9]+/[0-9]+|[0-9.]+)\)?\s*', re.I)
 _RE_DIAM_TRAIL  = re.compile(r'^[\(\s]*([0-9]+/[0-9]+)\s*[Ø∅]\)?\s*', re.I)  # e.g., 13/32∅
-_RE_DIAM_ANY    = re.compile(r'(?:[Ø∅]\s*)?([0-9]+/[0-9]+|[0-9.]+)(?:\s*[Ø∅])?', re.I)
+_RE_DIAM_ANY    = re.compile(
+    r'(?:[Ø∅]\s*([0-9]+/[0-9]+|[0-9.]+))|(?:([0-9]+/[0-9]+)\s*[Ø∅])',
+    re.I,
+)  # ← NO plain decimals
 _RE_PAREN_JG    = re.compile(r'\(\s*[Ø∅]\s*([0-9]+/[0-9]+|[0-9.]+)\s+JIG\s+GRIND\s*\)', re.I)
 _RE_TAP         = re.compile(r'\bTAP\b', re.I)
 _RE_THRU        = re.compile(r'\bTHRU\b', re.I)
 _RE_CBORE       = re.compile(r"C['’]BORE", re.I)
 _RE_CDRILL      = re.compile(r"C['’]DRILL", re.I)
+_RE_TOL         = re.compile(r'^\s*[±]\s*\d*(?:\.\d+)\s*', re.I)
+_RE_NEXT_OP     = re.compile(r"\b(C['’]BORE|C['’]DRILL|TAP|THRU|JIG\s+GRIND)\b", re.I)
 _RE_DEPTH_PHRASE= re.compile(r'[Xx]\s*([0-9.]+)\s*DEEP(?:\s+FROM\s+(FRONT|BACK))?', re.I)
 _RE_SIDE_PAIR   = re.compile(r'\bFROM\s+FRONT\s*&\s*BACK\b', re.I)
 _RE_SIDE        = re.compile(r'\bFROM\s+(FRONT|BACK)\b', re.I)
 _RE_QREF        = re.compile(r'^\s*"{1,2}[A-Z]"{1,2}\s*', re.I)   # leading "Q", "I", etc.
+
+
+def _fold_inline_modifiers(s: str) -> str:
+    """
+    - If clause starts with a tolerance like '±.0001', attach it to the next op.
+    - If clause has a naked diameter token immediately followed later by an op,
+      keep the diameter as modifier for that op; don't emit a separate row.
+    We just normalize spacing here; the exploder will attach modifiers to ops.
+    """
+
+    s = s.strip()
+    if not s:
+        return s
+
+    m = _RE_TOL.match(s)
+    if m:
+        rest = s[m.end():].lstrip()
+        if not rest:
+            return m.group(0).strip()
+        return (m.group(0).strip() + " " + rest).strip()
+
+    m = _RE_DIAM_ANY.match(s)
+    if m:
+        rest = s[m.end():].lstrip(',; ')
+        if rest and _RE_NEXT_OP.search(rest):
+            return (s[:m.end()].strip() + " " + rest).strip()
+
+    return s
+
+
+def _matched_diam_token(m: Optional[re.Match]) -> str:
+    if not m:
+        return ""
+    return (m.group(1) or m.group(2) or "").strip()
 
 
 def _smart_clause_split(s: str) -> List[str]:
@@ -602,9 +641,10 @@ def _parse_clause_to_ops(
         desc = _clean_clause_text(part)
 
         # Any mid-clause naked diameter? adopt it as the op diameter, KEEP HOLE
-        anyd = _RE_DIAM_ANY.search(desc)
+        anyd_match = _RE_DIAM_ANY.search(desc)
+        anyd = _matched_diam_token(anyd_match)
         if anyd:
-            diam_for_clause = _fmt_diam(anyd.group(1))
+            diam_for_clause = _fmt_diam(anyd)
 
         # ---- TAP policy: TAP ops always use the HOLE's REF_DIAM ----
         if _RE_TAP.search(desc):
@@ -636,6 +676,35 @@ def _explode_description_into_ops(
 
     # split on semicolons and other op boundaries, but keep decimals intact
     clauses = _smart_clause_split(description)
+
+    folded_clauses: List[str] = []
+    i = 0
+    while i < len(clauses):
+        cl = clauses[i].strip()
+        if not cl:
+            i += 1
+            continue
+
+        if _RE_TOL.match(cl) and i + 1 < len(clauses):
+            merged = _fold_inline_modifiers(f"{cl} {clauses[i + 1]}")
+            clauses[i + 1] = merged
+            i += 1
+            continue
+
+        if _RE_DIAM_ANY.fullmatch(cl) and i + 1 < len(clauses) and _RE_NEXT_OP.search(clauses[i + 1]):
+            merged = _fold_inline_modifiers(f"{cl} {clauses[i + 1]}")
+            clauses[i + 1] = merged
+            i += 1
+            continue
+
+        folded_clauses.append(_fold_inline_modifiers(cl))
+        i += 1
+
+    if folded_clauses:
+        clauses = folded_clauses
+    else:
+        clauses = [_fold_inline_modifiers(cl.strip()) for cl in clauses if cl.strip()]
+
     out: List[Dict[str,str]] = []
     for cl in clauses:
         for tgt_idx, diam, q, desc in _parse_clause_to_ops(
