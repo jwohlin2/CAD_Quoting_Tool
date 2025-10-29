@@ -19,6 +19,24 @@ from cad_quoter import geo_extractor
 
 # ---------- HOLE TABLE helpers ----------
 _UHEX_RE = re.compile(r"\\U\+([0-9A-Fa-f]{4})")
+
+# header-level quantities list must be visible where we write ops; we’ll pass it through
+_HEADER_QTY_BY_INDEX: List[int] = []
+
+
+def _set_header_qtys(qtys: List[int]) -> None:
+    """Stash the HOLE TABLE qty list for downstream helpers."""
+
+    global _HEADER_QTY_BY_INDEX
+    _HEADER_QTY_BY_INDEX = list(qtys or [])
+
+
+def _header_qty_for(idx: int, default: int = 0) -> int:
+    """Return the header quantity for the hole index, or ``default`` when unknown."""
+
+    if 0 <= idx < len(_HEADER_QTY_BY_INDEX):
+        return _HEADER_QTY_BY_INDEX[idx]
+    return default
 def _decode_uplus(s: str) -> str:
     """Turn \\U+2205 into Ø etc., keep original if malformed."""
     return _UHEX_RE.sub(lambda m: chr(int(m.group(1), 16)), s or "")
@@ -225,8 +243,7 @@ def _redistribute_cross_hits(descs: List[str], diam_list: List[str]) -> List[str
     alias_to_idx: Dict[str, int] = {}
     for idx, tok in enumerate(diam_list):
         for a in _diameter_aliases(tok):
-            if a:
-                alias_to_idx[a] = idx
+            alias_to_idx[a] = idx
         # numeric-only fallbacks for decimals like .272 / 0.272 (and parens)
         if tok.startswith(("Ø", "∅")):
             s = tok[1:]
@@ -258,13 +275,14 @@ def _redistribute_cross_hits(descs: List[str], diam_list: List[str]) -> List[str
     new_descs = [""] * len(descs)
 
     for i, seg in enumerate(descs):
-        s = (seg or "").strip()
+        raw_seg = seg or ""
+        s = raw_seg.strip()
         if not s:
             continue
 
         # find all internal markers with their owners
         hits = []
-        for m in re_markers.finditer(s):
+        for m in re_markers.finditer(raw_seg):
             alias = m.group(0)
             tgt = alias_to_idx.get(alias)
             if tgt is None or tgt == i:
@@ -281,12 +299,12 @@ def _redistribute_cross_hits(descs: List[str], diam_list: List[str]) -> List[str
         self_parts = []
         for k, (a, b, tgt, alias) in enumerate(hits):
             if a > cursor:
-                self_parts.append(s[cursor:a])            # keep for self
-            next_a = hits[k+1][0] if k+1 < len(hits) else len(s)
-            chunk_raw = s[a:next_a]
+                self_parts.append(raw_seg[cursor:a])     # keep for self
+            next_a = hits[k+1][0] if k+1 < len(hits) else len(raw_seg)
+            chunk_raw = raw_seg[a:next_a]
             chunk = strip_marker_prefix(chunk_raw)
             tgt_idx = tgt
-            m_jg = re.search(r'[Ø∅]\s*([0-9.]+)\s+JIG\s*GRIND', chunk_raw, flags=re.I)
+            m_jg = re.search(r'[Ø∅]\s*([0-9.]+)\s+JIG\s*GRIND', chunk, flags=re.I)
             if m_jg:
                 try:
                     val = float(m_jg.group(1))
@@ -294,10 +312,14 @@ def _redistribute_cross_hits(descs: List[str], diam_list: List[str]) -> List[str
                 except Exception:
                     pass
             if chunk:
-                new_descs[tgt_idx] = (new_descs[tgt_idx] + " " + chunk).strip() if new_descs[tgt_idx] else chunk
+                chunk_clean = chunk.strip()
+                if new_descs[tgt_idx]:
+                    new_descs[tgt_idx] += " " + chunk_clean
+                else:
+                    new_descs[tgt_idx] = chunk_clean
             cursor = next_a
-        if cursor < len(s):
-            self_parts.append(s[cursor:])                 # tail back to self
+        if cursor < len(raw_seg):
+            self_parts.append(raw_seg[cursor:])           # tail back to self
 
         self_text = strip_marker_prefix(" ".join(self_parts))
         new_descs[i] = self_text
@@ -335,7 +357,7 @@ def _route_tap_only_chunks(descs: List[str], diam_list: List[str]) -> List[str]:
             continue
 
         # Split into clauses so we can route partial pieces
-        clauses = re.split(r'(?<=;)\s+|(?<=\))\s+', txt)  # split on semicolon boundaries or right-paren
+        clauses = _smart_clause_split(txt)
         keep_parts: List[str] = []
         for cl in clauses:
             if "TAP" not in cl.upper():
@@ -381,6 +403,25 @@ _RE_DEPTH_PHRASE= re.compile(r'[Xx]\s*([0-9.]+)\s*DEEP(?:\s+FROM\s+(FRONT|BACK))
 _RE_SIDE_PAIR   = re.compile(r'\bFROM\s+FRONT\s*&\s*BACK\b', re.I)
 _RE_SIDE        = re.compile(r'\bFROM\s+(FRONT|BACK)\b', re.I)
 _RE_QREF        = re.compile(r'^\s*"{1,2}[A-Z]"{1,2}\s*', re.I)   # leading "Q", "I", etc.
+
+
+def _smart_clause_split(s: str) -> List[str]:
+    """Split a description into clauses by semicolons and new operation markers."""
+
+    parts: List[str] = []
+    s = (s or "").strip()
+    if not s:
+        return parts
+
+    seeds = [chunk for chunk in s.split(';') if chunk.strip()]
+    for seed in seeds:
+        chunks = re.split(
+            r'(?=(?:"[A-Z]"\s*\(\s?[Ø∅]|\bC[\'’]BORE\b|\bC[\'’]DRILL\b|\bTAP\b|\bTHRU\b))',
+            seed,
+            flags=re.I,
+        )
+        parts.extend(chunk.strip() for chunk in chunks if chunk and chunk.strip())
+    return parts
 
 
 def _fmt_diam(token: str) -> str:
@@ -487,8 +528,9 @@ def _parse_clause_to_ops(
             tgt = _snap_to_nearest_index(float(val), diam_list)
         except Exception:
             tgt = hole_idx
-        ops.append((tgt, dstr, qtys[tgt], "JIG GRIND"))
-        s = s.replace(pm.group(0), " ")
+        qty_for_tgt = _header_qty_for(tgt, qty)
+        ops.append((tgt, dstr, qty_for_tgt, "JIG GRIND"))
+        s = s.replace(pm.group(0), " ")  # remove from main text
 
     # 4b) leading/trailing diameter override → snap to nearest hole
     diam_override, rest = _extract_leading_diam(_clean_clause_text(s))
@@ -505,37 +547,31 @@ def _parse_clause_to_ops(
 
     rest = _clean_clause_text(rest)
 
-    # 4c) FRONT & BACK split
+    if not rest:
+        # Bare diameter line => treat as THRU
+        qty_for_clause = _header_qty_for(hole_for_clause, qty)
+        ops.append((hole_for_clause, diam_for_clause, qty_for_clause, "THRU"))
+        return ops
+
+    # Split explicit FRONT & BACK pair into two
     parts = _explode_front_back(rest)
 
     # 4d) Inside each part, if BOTH C’DRILL and TAP exist, split so L gets the C’DRILL and M gets TAP
     for part in parts:
         desc = _clean_clause_text(part)
 
-        # If we see a naked fraction diameter anywhere (like 13/32) → turn into override, keep current hole
-        anyd = _RE_DIAM_ANY.search(desc)
-        if anyd and "Ø" not in desc and "∅" not in desc:
-            diam_for_clause = _fmt_diam(anyd.group(1))
+        # --- GLUE: keep TAP+THRU combined if both appear in same clause ---
+        qty_for_clause = _header_qty_for(hole_for_clause, qty)
 
-        # Special: if desc contains C'DRILL and '#10-32 TAP' both, break into two ops
-        if _RE_CDRILL.search(desc) and re.search(r'#\s*10\s*-\s*32', desc, re.I):
-            # send C'DRILL to the nearest small hole (usually L Ø.1876)
-            tgt_cd = _snap_to_nearest_index(0.1876, diam_list)
-            ops.append((tgt_cd, _fmt_diam("0.1876"), qtys[tgt_cd], re.search(r"C[\'’]DRILL.*?(?=$|#)", desc, flags=re.I).group(0).strip()))
-            # TAP part to M via map/nearness (0.1590)
-            tgt_m = _snap_to_nearest_index(0.1590, diam_list)
-            tap_part = re.search(r'#\s*10\s*-\s*32.*$', desc, flags=re.I)
-            if tap_part:
-                ops.append((tgt_m, _fmt_diam("0.1590"), qtys[tgt_m], tap_part.group(0).strip()))
+        if _RE_TAP.search(desc) and _RE_THRU.search(desc):
+            ops.append((hole_for_clause, diam_for_clause, qty_for_clause, desc))
             continue
 
-        # Glue TAP+THRU if both appear
-        if _RE_TAP.search(desc) and _RE_THRU.search(desc):
-            ops.append((hole_for_clause, diam_for_clause, qtys[hole_for_clause], desc))
-        elif any(rx.search(desc) for rx in (_RE_CBORE, _RE_CDRILL, _RE_TAP, _RE_THRU)):
-            ops.append((hole_for_clause, diam_for_clause, qtys[hole_for_clause], desc))
+        if any(rx.search(desc) for rx in (_RE_CBORE, _RE_CDRILL, _RE_TAP, _RE_THRU)):
+            ops.append((hole_for_clause, diam_for_clause, qty_for_clause, desc))
         else:
-            ops.append((hole_for_clause, diam_for_clause, qtys[hole_for_clause], desc))
+            # generic fallback
+            ops.append((hole_for_clause, diam_for_clause, qty_for_clause, desc))
 
     return ops
 
@@ -547,8 +583,14 @@ def _explode_description_into_ops(
     qtys: List[int],
     description: str,
     hole_letters: List[str],
-    diam_list: List[str],
-) -> List[Dict[str,str]]:
+) -> List[Dict[str, str]]:
+    """
+    Split a row's DESCRIPTION into multiple atomic ops by ';' boundaries,
+    parse each to (diam, qty, desc), and return ready-to-write dicts.
+    """
+
+    # split on semicolons and other op boundaries, but keep decimals intact
+    clauses = _smart_clause_split(description)
     out: List[Dict[str,str]] = []
     for cl in _smart_clause_split(description):
         for tgt_idx, diam, q, desc in _parse_clause_to_ops(hole_idx, base_diam, qtys, cl, hole_letters, diam_list):
@@ -735,6 +777,7 @@ def main() -> int:
         header_chunks, body_chunks = _find_hole_table_chunks(rows)
         if header_chunks:
             hole_letters, diam_tokens, qtys = _parse_header(header_chunks)
+            _set_header_qtys(qtys)
             descriptions = _split_descriptions(body_chunks, diam_tokens)
             out_rows = []
             if len(hole_letters) != len(diam_tokens) or len(hole_letters) != len(qtys):
@@ -776,6 +819,8 @@ def main() -> int:
             print("[HOLE-TABLE] none detected")
     except Exception as e:
         print(f"[HOLE-TABLE] parse failed: {e}")
+    finally:
+        _set_header_qtys([])
 
     print(
         "[TEXT-DUMP] layouts={layouts} include_layers={inc} exclude_layers={exc} "
