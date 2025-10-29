@@ -662,6 +662,10 @@ def _parse_clause_to_ops(
     for part in parts:
         desc = _clean_clause_text(part)
 
+        if not desc:
+            ops.append((hole_for_clause, diam_for_clause, qtys[hole_for_clause], "THRU"))
+            continue
+
         # If desc contains a Ø/∅ token mid-clause, adopt it as op diameter (KEEP HOLE)
         anyd = _RE_DIAM_ANY.search(desc)
         if anyd:
@@ -675,6 +679,9 @@ def _parse_clause_to_ops(
         # Non-TAP ops: THRU / C'BORE / C'DRILL
         if any(rx.search(desc) for rx in (_RE_THRU, _RE_CBORE, _RE_CDRILL, re.compile(r'JIG\s+GRIND', re.I))):
             ops.append((hole_for_clause, diam_for_clause, qtys[hole_for_clause], desc))
+            continue
+
+        ops.append((hole_for_clause, diam_for_clause, qtys[hole_for_clause], desc))
 
     return ops
 
