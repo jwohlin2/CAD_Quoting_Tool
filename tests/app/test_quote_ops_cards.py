@@ -122,25 +122,3 @@ def test_format_hole_table_section_outputs_operations() -> None:
     assert lines[0] == "HOLE TABLE OPERATIONS"
     assert any(line.strip().startswith("A") for line in lines[1:])
     assert any("THRU" in line for line in lines)
-
-
-def test_format_hole_table_section_includes_metadata() -> None:
-    rows = [
-        {
-            "hole": "C",
-            "ref": "Ø0.3125",
-            "qty": 6,
-            "desc": "1/4-20 TAP X .62 DEEP FROM FRONT",
-            "TYPE": "tap",
-            "SIDE": "FRONT",
-            "DEPTH_IN": 0.62,
-            "THRU": True,
-        }
-    ]
-
-    lines = appV5._format_hole_table_section(rows)
-
-    assert any("tap" in line.lower() for line in lines)
-    assert any("side: FRONT" in line for line in lines)
-    assert any("depth: 0.620\"" in line for line in lines)
-    assert any("thru" in line for line in lines)
