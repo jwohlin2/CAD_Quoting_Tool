@@ -14,7 +14,7 @@ What it emits:
 
 Key behaviors:
     - Reassembles proxy-entity fragments (HOLE TABLEs often live here).
-    - Decodes odd encodings (e.g., "\U+2205" → "∅"), normalizes quotes.
+    - Decodes odd encodings (e.g., "\\U+2205" → "∅"), normalizes quotes.
     - Leaves layout/geometry to higher layers; this module is a “CAD → plain text” vacuum.
 
 Typical pipeline:
