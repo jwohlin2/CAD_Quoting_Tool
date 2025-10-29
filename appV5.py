@@ -13677,6 +13677,51 @@ def _build_geo_from_ezdxf_doc(doc) -> dict[str, Any]:
             geo["derived"] = merged
         else:
             geo["derived"] = derived_entries
+
+    # >>> HOLE_TABLE ADAPTER START
+    try:
+        from cad_quoter.geometry.hole_table_adapter import extract_hole_table_from_doc
+    except Exception:
+        extract_hole_table_from_doc = None  # type: ignore[assignment]
+    if extract_hole_table_from_doc is not None:
+        try:
+            structured, ops = extract_hole_table_from_doc(doc)
+        except Exception:
+            pass
+        else:
+            geo["hole_table_structured"] = structured
+            geo["hole_table_ops"] = [
+                {
+                    "HOLE": hole,
+                    "REF_DIAM": ref_diam,
+                    "QTY": qty,
+                    "DESCRIPTION/DEPTH": desc,
+                }
+                for hole, ref_diam, qty, desc in ops
+            ]
+            hole_count_total = 0
+            for row in structured:
+                qty_val = row.get("QTY") if isinstance(row, dict) else None
+                try:
+                    hole_count_total += int(qty_val) if qty_val not in (None, "") else 0
+                except Exception:
+                    continue
+            geo["hole_count"] = hole_count_total
+            geo["hole_count_provenance"] = "text"
+            if not geo.get("bins_list"):
+                try:
+                    from cad_quoter.utils.geo_ctx import build_drill_bins_from_ops
+                except Exception:
+                    build_drill_bins_from_ops = None  # type: ignore[assignment]
+                if build_drill_bins_from_ops:
+                    try:
+                        bins_from_ops = build_drill_bins_from_ops(ops)
+                    except Exception:
+                        bins_from_ops = None
+                    if bins_from_ops:
+                        geo["bins_list"] = bins_from_ops
+    # <<< HOLE_TABLE ADAPTER END
+
     if flags:
         geo["flags"] = flags
     return geo
