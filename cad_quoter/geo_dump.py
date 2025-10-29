@@ -23,7 +23,7 @@ def _decode_uplus(s: str) -> str:
     return _UHEX_RE.sub(lambda m: chr(int(m.group(1), 16)), s or "")
 
 def _diameter_aliases(token: str) -> List[str]:
-    """Given a header diameter like 'Ø1.7500', build search aliases found in body text."""
+    """Given 'Ø1.7500', build aliases found in body text, including trailing-Ø fraction forms like '17/32∅'."""
     out = [token]
     if token.startswith(("Ø", "∅")):
         val_str = token[1:]
@@ -31,7 +31,11 @@ def _diameter_aliases(token: str) -> List[str]:
             val = float(val_str)
             frac = Fraction(val).limit_denominator(64)
             if abs(float(frac) - val) < 1e-4:
-                out += [f"Ø{frac.numerator}/{frac.denominator}", f"∅{frac.numerator}/{frac.denominator}"]
+                n, d = frac.numerator, frac.denominator
+                # Ø leading
+                out += [f"Ø{n}/{d}", f"∅{n}/{d}"]
+                # Ø trailing
+                out += [f"{n}/{d}Ø", f"{n}/{d}∅"]
             comp = f"{val:.3f}".rstrip("0").rstrip(".")
             out += [f"Ø{comp}", f"∅{comp}", f"(Ø{comp})", f"(∅{comp})"]
         except Exception:
@@ -136,6 +140,10 @@ def _parse_header(header_chunks: List[str]):
 def _split_descriptions(body_chunks: List[str], diam_list: List[str]) -> List[str]:
     """Slice the big body text into one description per diameter marker."""
     blob = re.sub(r"\s+", " ", " ".join(body_chunks)).strip()
+    # Cut off any coordinate table that follows the hole descriptions
+    m = re.search(r"\bLIST OF COORDINATES\b", blob, flags=re.I)
+    if m:
+        blob = blob[: m.start()].rstrip()
 
     # build aliases for each diameter from the header
     needles = [_diameter_aliases(d) for d in diam_list]
@@ -157,12 +165,19 @@ def _split_descriptions(body_chunks: List[str], diam_list: List[str]) -> List[st
         positions.append(found)
         cursor = max(found + 1, cursor)
 
-    # strip leading diameter marker (fraction FIRST, then decimal)
+    # strip leading diameter marker (fraction FIRST, then decimal) and optional quoted REF like "Q"
     def strip_leading_marker(s: str) -> str:
         s = s.strip()
-        # allow optional spaces after Ø/∅
-        s = re.sub(r"^[\(\s]*[Ø∅]\s*[0-9]+/[0-9]+\)?\s*", "", s)  # fractions first
-        s = re.sub(r"^[\(\s]*[Ø∅]\s*[0-9.]+\)?\s*", "", s)  # then decimals
+        # 1) remove quoted REF letter(s) like "Q", then optional parenthetical Ødecimal: ("Q"(Ø.332))
+        s = re.sub(r'^\s*"{1,2}[A-Z]"{1,2}\s*\((?:[Ø∅]\s*[0-9.]+)\)\s*', '', s)
+        s = re.sub(r'^\s*"{1,2}[A-Z]"{1,2}\s*', '', s)
+
+        # 2) fractions first — both Ø-leading and Ø-trailing
+        s = re.sub(r'^[\(\s]*[Ø∅]\s*[0-9]+/[0-9]+\)?\s*', '', s)   # e.g., (Ø13/32)
+        s = re.sub(r'^[\(\s]*[0-9]+/[0-9]+[Ø∅]\)?\s*', '', s)      # e.g., (13/32∅)
+
+        # 3) then decimals — Ø-leading and parenthetical
+        s = re.sub(r'^[\(\s]*[Ø∅]\s*[0-9.]+\)?\s*', '', s)         # e.g., (Ø.750)
         return s.strip()
 
     segs = []
