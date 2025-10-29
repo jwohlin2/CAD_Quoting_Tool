@@ -10518,8 +10518,25 @@ def read_text_table(
         return False
 
     candidate_lines = merged_rows if merged_rows else lines
-    confidence_high = any(_line_confident(line) for line in candidate_lines)
+    confidence_hits = 0
+    confidence_total = 0
+    for line in candidate_lines:
+        confidence_total += 1
+        if _line_confident(line):
+            confidence_hits += 1
+    confidence_high = confidence_hits > 0
+    try:
+        confidence_avg = (
+            float(confidence_hits) / float(confidence_total)
+            if confidence_total
+            else 0.0
+        )
+    except Exception:
+        confidence_avg = 0.0
     _LAST_TEXT_TABLE_DEBUG["confidence_high"] = bool(confidence_high)
+    _LAST_TEXT_TABLE_DEBUG["confidence_avg"] = confidence_avg
+    if isinstance(text_rows_info, Mapping):
+        text_rows_info["confidence_avg"] = confidence_avg
     force_columnar = False
 
     if isinstance(text_rows_info, Mapping):
@@ -10750,6 +10767,8 @@ def read_text_table(
         _LAST_TEXT_TABLE_DEBUG.setdefault("columns", [])
         _LAST_TEXT_TABLE_DEBUG.setdefault("bands", [])
     rows_materialized = list(primary_result.get("rows", []))
+    if isinstance(primary_result, Mapping):
+        primary_result["confidence_avg"] = confidence_avg
     if confidence_high and rows_materialized:
         primary_result["confidence_high"] = True
         if len(rows_materialized) >= 3 and not primary_result.get("header_validated"):
@@ -13198,6 +13217,11 @@ def read_geo(
     if pipeline_normalized not in {"auto", "acad", "text", "geom"}:
         pipeline_normalized = "auto"
     allow_geom_rows = bool(allow_geom or pipeline_normalized == "geom")
+    _, layout_filter_patterns = _parse_layout_filter(layout_filters)
+    chart_layout_requested = any(
+        "CHART" in str(pattern or "").upper()
+        for pattern in layout_filter_patterns
+    )
     geo = extract_geometry(doc)
     if not isinstance(geo, dict):
         geo = {}
@@ -13329,6 +13353,18 @@ def read_geo(
     else:
         text_info = {}
     text_rows = len(text_rows_list)
+    try:
+        text_confidence_avg = float(text_info.get("confidence_avg") or 0.0)
+    except Exception:
+        text_confidence_avg = 0.0
+    chart_rows_confident = bool(
+        chart_layout_requested
+        and text_rows >= 8
+        and text_confidence_avg >= 0.6
+    )
+    chart_rows_insufficient = bool(chart_layout_requested and text_rows < 3)
+    if chart_rows_confident:
+        text_info["provenance_holes"] = "HOLE TABLE (chart)"
     debug_snapshot = get_last_text_table_debug() or {}
     rows_txt_debug = 0
     if isinstance(debug_snapshot, Mapping):
@@ -13367,7 +13403,10 @@ def read_geo(
     fallback_info: dict[str, Any] | None = None
     fallback_rows_list: list[dict[str, Any]] = []
     fallback_qty_sum = 0
-    if rows_txt_lines:
+    allow_text_fallback = True
+    if chart_layout_requested:
+        allow_text_fallback = text_rows < 3
+    if rows_txt_lines and allow_text_fallback:
         fallback_candidate = _publish_fallback_from_rows_txt(rows_txt_lines)
         if isinstance(fallback_candidate, Mapping) and fallback_candidate.get("rows"):
             fallback_info = dict(fallback_candidate)
@@ -13409,10 +13448,12 @@ def read_geo(
     elif run_acad and acad_rows_list:
         publish_info = acad_info
         publish_source_tag = "acad_table"
-    elif run_text and text_rows_list:
+    elif run_text and text_rows_list and not chart_rows_insufficient:
         publish_info = text_info
         publish_source_tag = "text_table"
-    elif run_text and fallback_info and fallback_rows_list:
+    elif run_text and fallback_info and fallback_rows_list and (
+        not chart_layout_requested or chart_rows_insufficient
+    ):
         publish_info = fallback_info
         publish_source_tag = "text_table"
         fallback_selected = True
