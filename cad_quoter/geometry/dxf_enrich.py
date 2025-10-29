@@ -6,10 +6,19 @@ import csv
 import math
 import re
 from collections import Counter
+from fractions import Fraction
 from pathlib import Path
-from typing import Any, Dict, Iterable, Iterator, List
+from typing import Any, Dict, Iterable, Iterator, List, Mapping, Sequence
 
 from cad_quoter.vendors import ezdxf as _ezdxf_vendor
+
+try:  # pragma: no cover - optional helper available during packaging
+    from tools.hole_ops import explode_rows_to_operations
+except Exception:  # pragma: no cover - import fallback when tools/ is not a package
+    try:
+        from hole_ops import explode_rows_to_operations  # type: ignore
+    except Exception:  # pragma: no cover - optional dependency unavailable
+        explode_rows_to_operations = None  # type: ignore[assignment]
 
 try:  # pragma: no cover - optional dependency
     _EZDXF = _ezdxf_vendor.require_ezdxf()
@@ -30,6 +39,13 @@ RE_QTY = re.compile(r"\((\d+)\)")
 RE_REF_D = re.compile(rf"\bREF\s*[Ø⌀]?\s*({NUM_PATTERN})", re.I)
 RE_DIA = re.compile(rf"[Ø⌀\u00D8]?\s*({NUM_PATTERN})", re.I)
 RE_FROMBK = re.compile(r"\bFROM\s+BACK\b", re.I)
+
+RE_DIAM_TOKEN = re.compile(r"[Ø⌀\u00D8]\s*(\d+\s*/\s*\d+|\d+(?:\.\d+)?|\.\d+)", re.I)
+RE_GENERIC_NUM = re.compile(r"(\d+\s*/\s*\d+|\d+(?:\.\d+)?|\.\d+)")
+RE_DEPTH_TOKEN = re.compile(
+    r"(?:X|×|DEEP|DEPTH)\s*(?:TO\s*)?(?:Ø|⌀)?\s*(\d+\s*/\s*\d+|\d+(?:\.\d+)?|\.\d+)",
+    re.I,
+)
 
 RE_MAT = re.compile(r"\b(MATERIAL|MAT)\b[:\s]*([A-Z0-9\-\s/\.]+)")
 RE_COAT = re.compile(
@@ -440,12 +456,128 @@ def harvest_hole_geometry(doc: Any, to_in: float) -> Dict[str, Any]:
     }
 
 
+def _fractional_to_float(token: str) -> float | None:
+    try:
+        return float(Fraction(token))
+    except (ValueError, ZeroDivisionError):
+        return None
+
+
+def _numeric_from_token(token: str) -> float | None:
+    stripped = token.strip().strip(" \"'()")
+    stripped = stripped.replace("∅", "Ø").replace("⌀", "Ø")
+    stripped = stripped.strip()
+    if not stripped:
+        return None
+    if "/" in stripped:
+        return _fractional_to_float(stripped)
+    if stripped.startswith("."):
+        stripped = f"0{stripped}"
+    try:
+        return float(stripped)
+    except Exception:
+        return None
+
+
+def _diameter_from_fields(*tokens: Any) -> float | None:
+    for raw in tokens:
+        if raw in (None, ""):
+            continue
+        text = str(raw)
+        match = RE_DIAM_TOKEN.search(text)
+        if match:
+            value = _numeric_from_token(match.group(1))
+            if value is not None:
+                return value
+        match_generic = RE_GENERIC_NUM.search(text)
+        if match_generic:
+            value = _numeric_from_token(match_generic.group(1))
+            if value is not None and value > 0:
+                return value
+    return None
+
+
+def _depth_from_description(desc: str) -> float | None:
+    if not desc:
+        return None
+    match = RE_DEPTH_TOKEN.search(desc)
+    if match:
+        return _numeric_from_token(match.group(1))
+    return None
+
+
+def _coerce_positive_int(value: Any) -> int:
+    if isinstance(value, (int, float)):
+        try:
+            ivalue = int(round(float(value)))
+        except Exception:
+            return 0
+        return ivalue if ivalue > 0 else 0
+    text = str(value or "").strip()
+    if not text:
+        return 0
+    match = re.search(r"-?\d+", text)
+    if not match:
+        return 0
+    try:
+        ivalue = int(match.group(0))
+    except Exception:
+        return 0
+    return abs(ivalue)
+
+
+def _normalize_description(desc: str, qty: int) -> str:
+    text = str(desc or "").strip()
+    if not text:
+        return ""
+    if qty > 0:
+        pattern = re.compile(rf"^[\(\[]?{qty}[\)\]]?\s*(?:X|×)?\s*", re.I)
+        text = pattern.sub("", text, count=1)
+    leading_qty = re.match(r"^[\(\[]?(\d+)[\)\]]?\s*(?:X|×)?\s*", text)
+    if leading_qty:
+        text = text[leading_qty.end() :]
+    return text.strip()
+
+
+def _classify_operation(desc: str) -> str:
+    upper = desc.upper()
+    if "JIG" in upper:
+        return "jig"
+    if "COUNTERDRILL" in upper or "C'DRILL" in upper or "C DRILL" in upper or "SPOT DRILL" in upper:
+        return "cdrill"
+    if "COUNTERBORE" in upper or "C'BORE" in upper or "CBORE" in upper:
+        return "cbore"
+    if "COUNTERSINK" in upper or "C'SINK" in upper or "CSK" in upper:
+        return "csk"
+    if "TAP" in upper:
+        return "tap"
+    if "REAM" in upper or "DRILL" in upper:
+        return "drill"
+    return "other"
+
+
+def _side_from_description(desc: str) -> str | None:
+    upper = desc.upper()
+    if "FRONT" in upper and "BACK" in upper:
+        return "BOTH"
+    if "BACK" in upper:
+        return "BACK"
+    if "FRONT" in upper:
+        return "FRONT"
+    return None
+
+
 def harvest_hole_table(doc: Any) -> Dict[str, Any]:
     taps = cbore = csk = 0
     deepest = 0.0
     from_back = False
     lines: List[str] = []
     family_guess: Counter[float] = Counter()
+    structured_rows: list[dict[str, Any]] = []
+    ops_rows: list[dict[str, Any]] = []
+    totals_by_type: Counter[str] = Counter()
+    hole_qty_by_name: dict[str, int] = {}
+    structured_acc: dict[tuple[str, str], dict[str, Any]] = {}
 
     try:
         chart_debug_records = _collect_chart_layout_records(doc)
@@ -458,7 +590,9 @@ def harvest_hole_table(doc: Any) -> Dict[str, Any]:
 
     for raw in iter_table_text(doc):
         upper = raw.upper()
-        if not any(keyword in upper for keyword in ("HOLE", "TAP", "THRU", "CBORE", "C'BORE", "DRILL", "Ø", "⌀")):
+        if not any(
+            keyword in upper for keyword in ("HOLE", "TAP", "THRU", "CBORE", "C'BORE", "DRILL", "Ø", "⌀")
+        ):
             continue
         lines.append(raw)
 
@@ -497,6 +631,119 @@ def harvest_hole_table(doc: Any) -> Dict[str, Any]:
                 except Exception:
                     pass
 
+    raw_ops: Sequence[Sequence[Any] | Mapping[str, Any]] = []
+    if lines and explode_rows_to_operations:
+        try:
+            raw_ops = explode_rows_to_operations(lines) or []
+        except Exception:
+            raw_ops = []
+
+    if raw_ops:
+        for entry in raw_ops:
+            if isinstance(entry, Mapping):
+                hole_id = str(entry.get("HOLE") or entry.get("hole") or "").strip()
+                ref_token = str(entry.get("REF_DIAM") or entry.get("ref") or "").strip()
+                qty_token: Any = entry.get("QTY") or entry.get("qty")
+                desc_raw = entry.get("DESCRIPTION/DEPTH") or entry.get("desc") or ""
+                desc_text = str(desc_raw)
+            else:
+                seq = [str(part) for part in entry]
+                hole_id = seq[0].strip() if seq else ""
+                ref_token = seq[1].strip() if len(seq) > 1 else ""
+                qty_token = seq[2] if len(seq) > 2 else ""
+                if len(seq) > 3:
+                    desc_text = " ".join(part for part in seq[3:] if part)
+                else:
+                    desc_text = seq[3] if len(seq) > 3 else ""
+
+            qty_val = _coerce_positive_int(qty_token)
+            desc_norm = _normalize_description(desc_text, qty_val)
+            if qty_val <= 0:
+                leading = re.match(r"^[\(\[]?(\d+)[\)\]]?", desc_norm)
+                if leading:
+                    qty_val = _coerce_positive_int(leading.group(1))
+                    desc_norm = _normalize_description(desc_norm, qty_val)
+            if qty_val <= 0 and not desc_norm:
+                continue
+
+            op_type = _classify_operation(desc_norm)
+            totals_by_type[op_type] += qty_val
+            if op_type == "tap":
+                taps = max(taps, totals_by_type[op_type])
+            elif op_type == "cbore":
+                cbore = max(cbore, totals_by_type[op_type])
+            elif op_type == "csk":
+                csk = max(csk, totals_by_type[op_type])
+
+            diameter_in = _diameter_from_fields(ref_token, desc_norm)
+            if diameter_in is not None:
+                rounded = round(float(diameter_in), 4)
+                existing_qty = family_guess.get(rounded, 0)
+                family_guess[rounded] = max(existing_qty, qty_val if qty_val > 0 else existing_qty)
+
+            depth_in = _depth_from_description(desc_norm)
+            if depth_in is not None:
+                try:
+                    deepest = max(deepest, float(depth_in))
+                except Exception:
+                    pass
+
+            side = _side_from_description(desc_norm)
+            thru = "THRU" in desc_norm.upper()
+            if side in {"BACK", "BOTH"}:
+                from_back = True
+
+            op_entry: dict[str, Any] = {
+                "hole": hole_id,
+                "ref": ref_token,
+                "qty": qty_val,
+                "desc": desc_norm,
+                "type": op_type,
+            }
+            if diameter_in is not None:
+                op_entry["diameter_in"] = float(round(diameter_in, 4))
+            if depth_in is not None:
+                op_entry["depth_in"] = float(round(depth_in, 4))
+            if thru:
+                op_entry["thru"] = True
+            if side:
+                op_entry["side"] = side
+
+            ops_rows.append(op_entry)
+
+            key = hole_id or ref_token
+            if key:
+                current = hole_qty_by_name.get(key, 0)
+                if qty_val > current:
+                    hole_qty_by_name[key] = qty_val
+
+            if hole_id or ref_token:
+                struct_key = (hole_id, ref_token)
+                struct_entry = structured_acc.setdefault(
+                    struct_key,
+                    {"HOLE": hole_id, "REF_DIAM": ref_token, "QTY": qty_val, "DESCRIPTION": []},
+                )
+                if qty_val > struct_entry.get("QTY", 0):
+                    struct_entry["QTY"] = qty_val
+                if desc_norm:
+                    struct_entry.setdefault("DESCRIPTION", []).append(desc_norm)
+
+    if structured_acc:
+        for entry in structured_acc.values():
+            desc_list = entry.get("DESCRIPTION") or []
+            if desc_list:
+                deduped: list[str] = []
+                seen: set[str] = set()
+                for fragment in desc_list:
+                    if fragment not in seen:
+                        deduped.append(fragment)
+                        seen.add(fragment)
+                entry["DESCRIPTION"] = "; ".join(deduped)
+            structured_rows.append(entry)
+        structured_rows.sort(key=lambda row: (str(row.get("HOLE") or ""), str(row.get("REF_DIAM") or "")))
+
+    ops_hole_total = sum(hole_qty_by_name.values())
+
     return {
         "tap_qty": taps,
         "cbore_qty": cbore,
@@ -506,7 +753,99 @@ def harvest_hole_table(doc: Any) -> Dict[str, Any]:
         "hole_table_families_in": dict(family_guess.most_common()) if family_guess else None,
         "chart_lines": lines,
         "prov": "HOLE TABLE / TEXT",
+        "provenance": "table_ops" if ops_rows else "HOLE TABLE / TEXT",
+        "structured": structured_rows,
+        "ops": ops_rows,
+        "ops_totals": dict(totals_by_type) if totals_by_type else None,
+        "hole_count_ops": ops_hole_total or None,
+        "cdrill_qty": totals_by_type.get("cdrill", 0),
+        "jig_qty": totals_by_type.get("jig", 0),
+        "drill_qty": totals_by_type.get("drill", 0),
     }
+
+
+def hole_ops_to_drill_bins(
+    ops_rows: Sequence[Mapping[str, Any]] | None, plate_thk_in: Any | None
+) -> tuple[list[dict[str, Any]], int, int]:
+    """Convert HOLE TABLE operations into drill bins and deep/std counts."""
+
+    if not isinstance(ops_rows, Sequence):
+        return ([], 0, 0)
+
+    try:
+        thickness = float(plate_thk_in) if plate_thk_in is not None else None
+    except Exception:
+        thickness = None
+    if thickness is not None and (not math.isfinite(thickness) or thickness <= 0):
+        thickness = None
+
+    bins: dict[float, dict[str, Any]] = {}
+    deep_qty = 0
+    std_qty = 0
+
+    for row in ops_rows:
+        if not isinstance(row, Mapping):
+            continue
+        op_type = str(row.get("type") or "").lower()
+        if op_type != "drill":
+            continue
+        qty_val = _coerce_positive_int(row.get("qty"))
+        if qty_val <= 0:
+            continue
+
+        diameter_in = row.get("diameter_in")
+        if diameter_in is None:
+            diameter_in = _diameter_from_fields(row.get("ref"), row.get("desc"))
+        try:
+            dia_val = float(diameter_in)
+        except Exception:
+            continue
+        if not math.isfinite(dia_val) or dia_val <= 0:
+            continue
+
+        depth_raw = row.get("depth_in")
+        try:
+            depth_val = float(depth_raw) if depth_raw is not None else None
+        except Exception:
+            depth_val = None
+        if depth_val is not None and (not math.isfinite(depth_val) or depth_val <= 0):
+            depth_val = None
+        if depth_val is None:
+            if bool(row.get("thru")) and thickness is not None:
+                depth_val = thickness
+            elif thickness is not None:
+                depth_val = thickness
+
+        is_deep = False
+        if depth_val is not None and dia_val > 0:
+            try:
+                is_deep = float(depth_val) >= 3.0 * float(dia_val) - 1e-6
+            except Exception:
+                is_deep = False
+
+        if is_deep:
+            deep_qty += qty_val
+        else:
+            std_qty += qty_val
+
+        key = round(float(dia_val), 4)
+        bucket = bins.setdefault(
+            key,
+            {
+                "diameter_in": float(round(dia_val, 4)),
+                "qty": 0,
+                "op": "drill",
+                "source": "table_ops",
+            },
+        )
+        bucket["qty"] += qty_val
+        if depth_val is not None:
+            bucket["depth_in"] = float(round(depth_val, 4))
+        if is_deep:
+            bucket["op"] = "deep_drill"
+
+    ordered = [bins[key] for key in sorted(bins.keys())]
+    return (ordered, deep_qty, std_qty)
 
 
 def harvest_title_notes(doc: Any) -> Dict[str, Any]:
@@ -612,54 +951,107 @@ def build_geo_from_doc(doc: Any) -> Dict[str, Any]:
             "plate_size": dims.get("prov"),
             "edge_len": outline.get("prov"),
             "holes_geom": holes.get("prov"),
-            "hole_table": hole_table.get("prov"),
+            "hole_table": hole_table.get("provenance") or hole_table.get("prov"),
             "material": title.get("prov"),
         },
     }
 
-    # >>> HOLE_TABLE ADAPTER START
+    # Normalise hole table data with structured/ops outputs
+    hole_table_structured = []
+    raw_structured = hole_table.get("structured")
+    if isinstance(raw_structured, Sequence):
+        for row in raw_structured:
+            if isinstance(row, Mapping):
+                hole_table_structured.append(dict(row))
+
+    hole_table_ops = []
+    raw_ops = hole_table.get("ops")
+    if isinstance(raw_ops, Sequence):
+        for op in raw_ops:
+            if isinstance(op, Mapping):
+                hole_table_ops.append(dict(op))
+
+    if hole_table_structured:
+        geo["hole_table_structured"] = hole_table_structured
+
+    if hole_table_ops:
+        formatted_ops: list[dict[str, Any]] = []
+        for op in hole_table_ops:
+            formatted = {
+                "HOLE": op.get("hole"),
+                "REF_DIAM": op.get("ref"),
+                "QTY": op.get("qty"),
+                "DESCRIPTION/DEPTH": op.get("desc"),
+            }
+            if op.get("type"):
+                formatted["TYPE"] = op.get("type")
+            if op.get("diameter_in") is not None:
+                formatted["DIAMETER_IN"] = op.get("diameter_in")
+            if op.get("depth_in") is not None:
+                formatted["DEPTH_IN"] = op.get("depth_in")
+            if op.get("side"):
+                formatted["SIDE"] = op.get("side")
+            if op.get("thru") is not None:
+                formatted["THRU"] = bool(op.get("thru"))
+            formatted_ops.append(formatted)
+        geo["hole_table_ops"] = formatted_ops
+
+    hole_table_provenance = hole_table.get("provenance") or hole_table.get("prov")
+    hole_table_summary = {
+        "tap_qty": geo.get("tap_qty", 0),
+        "cbore_qty": geo.get("cbore_qty", 0),
+        "csk_qty": geo.get("csk_qty", 0),
+        "cdrill_qty": hole_table.get("cdrill_qty", 0),
+        "jig_qty": hole_table.get("jig_qty", 0),
+        "drill_qty": hole_table.get("drill_qty", 0),
+        "hole_count_ops": hole_table.get("hole_count_ops") or 0,
+    }
+    ops_totals = hole_table.get("ops_totals")
+    if isinstance(ops_totals, Mapping):
+        hole_table_summary["ops_totals"] = dict(ops_totals)
+
+    hole_table_payload = {
+        "structured": hole_table_structured,
+        "ops": hole_table_ops,
+        "lines": list(hole_table.get("chart_lines") or []),
+        "summary": hole_table_summary,
+        "provenance": hole_table_provenance,
+    }
+    geo["hole_table"] = hole_table_payload
+
+    geo["cdrill_qty"] = hole_table.get("cdrill_qty", 0)
+    geo["jig_qty"] = hole_table.get("jig_qty", 0)
+    geo["drill_qty_table"] = hole_table.get("drill_qty", 0)
+
+    bins_list, deep_qty, std_qty = hole_ops_to_drill_bins(
+        hole_table_ops,
+        geo.get("deepest_hole_in"),
+    )
+    if bins_list or deep_qty or std_qty:
+        geo["drill"] = {
+            "bins_list": bins_list,
+            "deep_qty": deep_qty,
+            "std_qty": std_qty,
+            "source": "table_ops",
+        }
+        if bins_list and not geo.get("bins_list"):
+            geo["bins_list"] = bins_list
+
+    hole_total = hole_table.get("hole_count_ops")
     try:
-        from cad_quoter.geometry.hole_table_adapter import extract_hole_table_from_doc
+        hole_total_int = int(round(float(hole_total))) if hole_total not in (None, "") else 0
     except Exception:
-        extract_hole_table_from_doc = None  # type: ignore[assignment]
-    if extract_hole_table_from_doc is not None:
-        try:
-            structured, ops = extract_hole_table_from_doc(doc)
-        except Exception:
-            pass
+        hole_total_int = 0
+    if hole_total_int > 0:
+        geo["hole_count"] = hole_total_int
+        geo["hole_count_provenance"] = "table_ops"
+        prov_map = geo.get("provenance")
+        if isinstance(prov_map, dict):
+            prov_map["holes"] = "table_ops"
         else:
-            geo["hole_table_structured"] = structured
-            geo["hole_table_ops"] = [
-                {
-                    "HOLE": hole,
-                    "REF_DIAM": ref_diam,
-                    "QTY": qty,
-                    "DESCRIPTION/DEPTH": desc,
-                }
-                for hole, ref_diam, qty, desc in ops
-            ]
-            hole_count_total = 0
-            for row in structured:
-                qty_val = row.get("QTY") if isinstance(row, dict) else None
-                try:
-                    hole_count_total += int(qty_val) if qty_val not in (None, "") else 0
-                except Exception:
-                    continue
-            geo["hole_count"] = hole_count_total
-            geo["hole_count_provenance"] = "text"
-            if not geo.get("bins_list"):
-                try:
-                    from cad_quoter.utils.geo_ctx import build_drill_bins_from_ops
-                except Exception:
-                    build_drill_bins_from_ops = None  # type: ignore[assignment]
-                if build_drill_bins_from_ops:
-                    try:
-                        bins_from_ops = build_drill_bins_from_ops(ops)
-                    except Exception:
-                        bins_from_ops = None
-                    if bins_from_ops:
-                        geo["bins_list"] = bins_from_ops
-    # <<< HOLE_TABLE ADAPTER END
+            geo["provenance"] = {"holes": "table_ops"}
+    elif hole_table_ops:
+        geo.setdefault("hole_count_provenance", "table_ops")
 
     return geo
 
@@ -686,6 +1078,7 @@ __all__ = [
     "harvest_outline_metrics",
     "harvest_hole_geometry",
     "harvest_hole_table",
+    "hole_ops_to_drill_bins",
     "harvest_title_notes",
     "iter_table_entities",
     "build_geo_from_doc",
