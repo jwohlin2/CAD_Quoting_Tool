@@ -571,14 +571,7 @@ def _parse_clause_to_ops(
     if not s:
         return ops
 
-    def _qty_for(idx: int) -> int:
-        if 0 <= idx < len(qtys):
-            return qtys[idx]
-        if 0 <= hole_idx < len(qtys):
-            return qtys[hole_idx]
-        return 0
-
-    # (Ø.3750 JIG GRIND) → nearest hole (qty of target), own op
+    # (Ø.3750 JIG GRIND) → nearest hole (use that hole's qty)
     for pm in list(_RE_PAREN_JG.finditer(s)):
         val = pm.group(1)
         dstr = _fmt_diam(val)
@@ -586,36 +579,34 @@ def _parse_clause_to_ops(
             tgt = _snap_to_nearest_index(float(val), diam_list)
         except Exception:
             tgt = hole_idx
-        ops.append((tgt, dstr, _qty_for(tgt), "JIG GRIND"))
+        ops.append((tgt, dstr, qtys[tgt], "JIG GRIND"))
         s = s.replace(pm.group(0), " ")
 
-    # Ø override at start or trailing fraction: adopt DIAMETER, but KEEP HOLE (do NOT move the hole)
+    # Leading/trailing Ø override → adopt DIAMETER, but KEEP HOLE
     diam_override, rest = _extract_leading_diam(_clean_clause_text(s))
     hole_for_clause = hole_idx
     diam_for_clause = diam_override or base_diam
     rest = _clean_clause_text(rest)
 
-    # split FRONT & BACK as two ops where present
-    parts = _explode_front_back(rest) if rest else ["THRU"]
+    # Split FRONT/BACK or default to single part with explicit op
+    parts = _explode_front_back(rest) if rest else [rest]
 
     for part in parts:
         desc = _clean_clause_text(part)
 
-        # Any mid-clause naked diameter? adopt it as the op diameter, KEEP HOLE
+        # If desc contains a Ø/∅ token mid-clause, adopt it as op diameter (KEEP HOLE)
         anyd = _RE_DIAM_ANY.search(desc)
         if anyd:
             diam_for_clause = _fmt_diam(anyd.group(1))
 
         # ---- TAP policy: TAP ops always use the HOLE's REF_DIAM ----
         if _RE_TAP.search(desc):
-            ops.append((hole_for_clause, base_diam, _qty_for(hole_for_clause), desc))
+            ops.append((hole_for_clause, base_diam, qtys[hole_for_clause], desc))
             continue
 
-        # THRU, C'BORE, C'DRILL use diam_for_clause (override if present)
-        if any(rx.search(desc) for rx in (_RE_THRU, _RE_CBORE, _RE_CDRILL)):
-            ops.append((hole_for_clause, diam_for_clause, _qty_for(hole_for_clause), desc))
-        else:
-            ops.append((hole_for_clause, diam_for_clause, _qty_for(hole_for_clause), desc))
+        # Non-TAP ops: THRU / C'BORE / C'DRILL
+        if any(rx.search(desc) for rx in (_RE_THRU, _RE_CBORE, _RE_CDRILL, re.compile(r'JIG\s+GRIND', re.I))):
+            ops.append((hole_for_clause, diam_for_clause, qtys[hole_for_clause], desc))
 
     return ops
 
@@ -634,10 +625,8 @@ def _explode_description_into_ops(
     parse each to (diam, qty, desc), and return ready-to-write dicts.
     """
 
-    # split on semicolons and other op boundaries, but keep decimals intact
-    clauses = _smart_clause_split(description)
-    out: List[Dict[str,str]] = []
-    for cl in clauses:
+    out = []
+    for cl in _smart_clause_split(description):
         for tgt_idx, diam, q, desc in _parse_clause_to_ops(
             hole_idx, base_diam, qtys, cl, hole_letters, diam_list
         ):
