@@ -8,7 +8,7 @@ import re
 import sys
 from fractions import Fraction
 from pathlib import Path
-from typing import List, Optional
+from typing import List, Optional, Tuple
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 if str(REPO_ROOT) not in sys.path:
@@ -138,54 +138,77 @@ def _parse_header(header_chunks: List[str]):
 
 
 def _split_descriptions(body_chunks: List[str], diam_list: List[str]) -> List[str]:
-    """Slice the big body text into one description per diameter marker."""
+    """
+    Slice the HOLE TABLE body text into one description per diameter marker.
+    This version is ORDER-AGNOSTIC: it finds all marker positions anywhere,
+    sorts by position, slices by those cut points, then maps the slices back
+    to the original hole order.
+    """
     blob = re.sub(r"\s+", " ", " ".join(body_chunks)).strip()
+
     # Cut off any coordinate table that follows the hole descriptions
     m = re.search(r"\bLIST OF COORDINATES\b", blob, flags=re.I)
     if m:
-        blob = blob[: m.start()].rstrip()
+        blob = blob[:m.start()].rstrip()
 
-    # build aliases for each diameter from the header
-    needles = [_diameter_aliases(d) for d in diam_list]
+    # Build aliases for each header diameter and locate positions (first hit wins)
+    positions: List[Tuple[int, int, str]] = []  # (pos, hole_idx, chosen_alias)
 
-    # find ordered positions
-    positions, cursor = [], 0
-    for alts in needles:
-        found = None
+    for idx, token in enumerate(diam_list):
+        alts = _diameter_aliases(token)
+
+        # last-resort numeric payloads (with & without leading zero)
+        if token.startswith(("Ø", "∅")):
+            val_str = token[1:]
+            comp = val_str
+            try:
+                f = float(val_str)
+                comp = f"{f:.3f}".rstrip("0").rstrip(".")
+            except Exception:
+                pass
+            alts += [comp, f"0{comp}", f"({comp})", f"(0{comp})"]
+
+        found_pos, found_alt = None, ""
         for a in alts:
-            p = blob.find(a, cursor)
+            p = blob.find(a)
             if p != -1:
-                found = p
-                break
-        if found is None:
-            # numeric last resort
-            num = re.sub(r"^[Ø∅]\s*", "", alts[0])
-            p = blob.find(num, cursor)
-            found = p if p != -1 else len(blob)
-        positions.append(found)
-        cursor = max(found + 1, cursor)
+                if found_pos is None or p < found_pos:
+                    found_pos, found_alt = p, a
+        if found_pos is None:
+            # if totally missing, stick it at the very end so it yields an empty segment
+            found_pos, found_alt = len(blob), ""
+        positions.append((found_pos, idx, found_alt))
 
-    # strip leading diameter marker (fraction FIRST, then decimal) and optional quoted REF like "Q"
-    def strip_leading_marker(s: str) -> str:
-        s = s.strip()
-        # 1) remove quoted REF letter(s) like "Q", then optional parenthetical Ødecimal: ("Q"(Ø.332))
-        s = re.sub(r'^\s*"{1,2}[A-Z]"{1,2}\s*\((?:[Ø∅]\s*[0-9.]+)\)\s*', '', s)
-        s = re.sub(r'^\s*"{1,2}[A-Z]"{1,2}\s*', '', s)
+    # Sort by position in the blob to get true left→right order
+    positions.sort(key=lambda t: t[0])
 
-        # 2) fractions first — both Ø-leading and Ø-trailing
-        s = re.sub(r'^[\(\s]*[Ø∅]\s*[0-9]+/[0-9]+\)?\s*', '', s)   # e.g., (Ø13/32)
-        s = re.sub(r'^[\(\s]*[0-9]+/[0-9]+[Ø∅]\)?\s*', '', s)      # e.g., (13/32∅)
+    # Build slices in that order
+    cuts = [p for (p, _, _) in positions]
+    segments_in_blob_order: List[str] = []
+    for i, start in enumerate(cuts):
+        end = cuts[i + 1] if i + 1 < len(cuts) else len(blob)
+        seg = blob[start:end]
 
-        # 3) then decimals — Ø-leading and parenthetical
-        s = re.sub(r'^[\(\s]*[Ø∅]\s*[0-9.]+\)?\s*', '', s)         # e.g., (Ø.750)
-        return s.strip()
+        # strip leading marker (handle both Ø-leading and Ø-trailing; fractions first)
+        seg = re.sub(r'^[\(\s]*[Ø∅]\s*[0-9]+/[0-9]+\)?\s*', '', seg)   # e.g., (Ø13/32)
+        seg = re.sub(r'^[\(\s]*[0-9]+/[0-9]+[Ø∅]\)?\s*', '', seg)      # e.g., (13/32∅)
+        seg = re.sub(r'^[\(\s]*[Ø∅]\s*[0-9.]+\)?\s*',        '', seg)  # e.g., (Ø.750)
 
-    segs = []
-    for k, start in enumerate(positions):
-        end = positions[k + 1] if k + 1 < len(positions) else len(blob)
-        seg = strip_leading_marker(blob[start:end])
-        segs.append(seg)
-    return segs
+        # strip quoted letter-drill preambles like "Q"(Ø.332)
+        seg = re.sub(r'^\s*"{1,2}[A-Z]"{1,2}\s*\((?:[Ø∅]\s*[0-9.]+)\)\s*', '', seg)
+        seg = re.sub(r'^\s*"{1,2}[A-Z]"{1,2}\s*', '', seg)
+
+        segments_in_blob_order.append(seg.strip())
+
+    # Map segments back to their original hole indices
+    descs = [""] * len(diam_list)
+    for (pos, hole_idx, _), seg in zip(positions, segments_in_blob_order):
+        # ignore the sentinel 'end' segment
+        if pos >= len(blob):
+            continue
+        descs[hole_idx] = seg
+
+    return descs
 
 DEFAULT_SAMPLE_PATH = REPO_ROOT / "Cad Files" / "301_redacted.dxf"
 
