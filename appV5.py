@@ -13935,6 +13935,7 @@ def extract_2d_features_from_dxf_or_dwg(path: str | Path) -> dict[str, Any]:
     geo = _build_geo_from_ezdxf_doc(doc)
     if table_info.get("ops_summary"):
         geo["ops_summary"] = table_info["ops_summary"]
+    adapter_ops_present = bool(geo.get("hole_table_ops"))
 
     hole_source: str | None = None
     provenance_entry = geo.get("provenance")
