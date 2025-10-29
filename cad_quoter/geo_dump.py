@@ -9,7 +9,7 @@ import re
 import sys
 from fractions import Fraction
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Match, Optional, Tuple
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 if str(REPO_ROOT) not in sys.path:
@@ -432,6 +432,33 @@ _RE_DEPTH_PHRASE= re.compile(r'[Xx]\s*([0-9.]+)\s*DEEP(?:\s+FROM\s+(FRONT|BACK))
 _RE_SIDE_PAIR   = re.compile(r'\bFROM\s+FRONT\s*&\s*BACK\b', re.I)
 _RE_SIDE        = re.compile(r'\bFROM\s+(FRONT|BACK)\b', re.I)
 _RE_QREF        = re.compile(r'^\s*"{1,2}[A-Z]"{1,2}\s*', re.I)   # leading "Q", "I", etc.
+_RE_INLINE_MOD  = re.compile(r'\(([^()]*?)\)')
+_RE_NEXT_OP     = re.compile(
+    r"""
+        \b(
+            C['’]BORE|COUNTERBORE|
+            C['’]DRILL|COUNTERDRILL|
+            SPOT\s+DRILL|CENTER\s+DRILL|
+            DRILL|TAP|THRU|
+            JIG\s+GRIND|
+            CSK|C['’]SINK|COUNTERSINK|
+            REAM|SPOTFACE
+        )\b
+    """,
+    re.I | re.VERBOSE,
+)
+
+
+def _fold_inline_modifiers(s: str) -> str:
+    """Flatten inline parenthetical operations into the surrounding clause."""
+
+    def _maybe_unwrap(match: Match[str]) -> str:
+        inner = match.group(1).strip()
+        if _RE_NEXT_OP.search(inner):
+            return f" {inner} "
+        return match.group(0)
+
+    return _RE_INLINE_MOD.sub(_maybe_unwrap, s)
 
 
 def _fold_inline_modifiers(s: str) -> str:
@@ -472,14 +499,32 @@ def _smart_clause_split(s: str) -> List[str]:
     s = s.strip()
     if not s:
         return []
+    # primary split on ';'
     seeds = [x for x in s.split(';') if x.strip()]
     parts: List[str] = []
     for seed in seeds:
+        # secondary split at the start of new op tokens or quoted-letter refs
         chunks = re.split(
-            r'(?=(?:"[A-Z]"\s*\( ?[Ø∅]|\bC[\'’]BORE\b|\bC[\'’]DRILL\b|\bTAP\b|\bTHRU\b))',
+            r'(?=(?:"[A-Z]"\s*\( ?[Ø∅]|'
+            r'\bC[\'’]BORE\b|'
+            r'\bC[\'’]DRILL\b|'
+            r'\bTAP\b|'
+            r'\bTHRU\b|'
+            r'\bJIG\s+GRIND\b))',
             seed, flags=re.I
         )
-        parts += [c.strip() for c in chunks if c.strip()]
+        pending = ""
+        for c in chunks:
+            c = _fold_inline_modifiers(c)
+            if not c.strip():
+                continue
+            if _RE_NEXT_OP.search(c):
+                combined = f"{pending} {c}".strip() if pending else c.strip()
+                if combined:
+                    parts.append(combined)
+                pending = ""
+            else:
+                pending = f"{pending} {c}".strip() if pending else c.strip()
     return parts
 
 
