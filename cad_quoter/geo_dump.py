@@ -438,6 +438,34 @@ def _fmt_diam(token: str) -> str:
         return f"Ø{tok}"
 
 
+def _fmt_primary_ref_diam(token: str) -> str:
+    """Normalize primary REF_DIAM values to fixed four decimals when numeric."""
+
+    tok = (token or "").strip()
+    if not tok:
+        return tok
+
+    sym = ""
+    rest = tok
+    if tok[0] in ("Ø", "∅"):
+        sym = tok[0]
+        rest = tok[1:].strip()
+
+    if '/' in rest:
+        return f"{sym}{rest}" if sym else tok
+
+    try:
+        val = float(rest)
+    except Exception:
+        return tok
+
+    formatted = f"{val:.4f}"
+    if rest.startswith('.') and formatted.startswith('0'):
+        formatted = formatted[1:]
+
+    return f"{sym}{formatted}" if sym else formatted
+
+
 def _extract_leading_diam(clause: str) -> Tuple[str, str]:
     """
     Return (diam_override, remainder). Supports:
@@ -475,6 +503,7 @@ def _explode_front_back(desc: str) -> List[str]:
 def _clean_clause_text(s: str) -> str:
     # strip leading quoted refs and tidy spaces/semicolons
     s = _RE_QREF.sub("", s).strip()
+    s = re.sub(r"\bAS\s+SHOWN\b", "", s, flags=re.I)
     s = re.sub(r'\s+', ' ', s)
     s = re.sub(r'\s*;\s*$', '', s)
     return s.strip(", ").strip()
