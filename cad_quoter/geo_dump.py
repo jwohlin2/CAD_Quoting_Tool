@@ -101,19 +101,25 @@ def _tap_drill_from(major_in: float, tpi: int) -> float:
     return max(0.0, major_in - 1.0 / float(tpi))
 
 
-def _snap_to_nearest(value: float, diam_list: List[str]) -> int:
-    """Return index of closest REF_DIAM in diam_list to value (expects 'Øx.xxx' tokens)."""
+def _snap_to_nearest_index(value_in: float, diam_list: List[str]) -> int:
+    """Return index of the REF_DIAM closest to the supplied numeric value."""
 
-    best_i, best_err = 0, math.inf
+    best, err = 0, float("inf")
     for i, tok in enumerate(diam_list):
         try:
             v = float(tok[1:]) if tok.startswith(("Ø", "∅")) else float(tok)
         except Exception:
             continue
-        err = abs(v - value)
-        if err < best_err:
-            best_i, best_err = i, err
-    return best_i
+        delta = abs(v - value_in)
+        if delta < err:
+            best, err = i, delta
+    return best
+
+
+def _snap_to_nearest(value: float, diam_list: List[str]) -> int:
+    """Backward-compatible wrapper that returns the nearest REF_DIAM index."""
+
+    return _snap_to_nearest_index(value, diam_list)
 
 def _find_hole_table_chunks(rows: List[dict]):
     """Return (header_chunks, body_chunks) from text rows when a HOLE TABLE is present."""
@@ -277,10 +283,18 @@ def _redistribute_cross_hits(descs: List[str], diam_list: List[str]) -> List[str
             if a > cursor:
                 self_parts.append(s[cursor:a])            # keep for self
             next_a = hits[k+1][0] if k+1 < len(hits) else len(s)
-            chunk = s[a:next_a]
-            chunk = strip_marker_prefix(chunk)
+            chunk_raw = s[a:next_a]
+            chunk = strip_marker_prefix(chunk_raw)
+            tgt_idx = tgt
+            m_jg = re.search(r'[Ø∅]\s*([0-9.]+)\s+JIG\s*GRIND', chunk_raw, flags=re.I)
+            if m_jg:
+                try:
+                    val = float(m_jg.group(1))
+                    tgt_idx = _snap_to_nearest_index(val, diam_list)
+                except Exception:
+                    pass
             if chunk:
-                new_descs[tgt] = (new_descs[tgt] + " " + chunk).strip() if new_descs[tgt] else chunk
+                new_descs[tgt_idx] = (new_descs[tgt_idx] + " " + chunk).strip() if new_descs[tgt_idx] else chunk
             cursor = next_a
         if cursor < len(s):
             self_parts.append(s[cursor:])                 # tail back to self
@@ -425,15 +439,22 @@ def _clean_clause_text(s: str) -> str:
     return s.strip(", ").strip()
 
 
-def _parse_clause_to_ops(base_diam: str, qty: int, text: str) -> List[Tuple[str, int, str]]:
+def _parse_clause_to_ops(
+    hole_idx: int,
+    base_diam: str,
+    qty: int,
+    text: str,
+    diam_list: List[str],
+) -> List[Tuple[int, str, int, str]]:
     """
-    Turn one clause into 1+ (diam, qty, 'DESCRIPTION/DEPTH') ops.
-    - pulls out parenthetical (Ø.3750 JIG GRIND) as its own op
-    - honors leading/trailing Ø diam overrides
+    Turn one clause into 1+ (hole_idx, diam, qty, 'DESCRIPTION/DEPTH') ops.
+    - pulls out parenthetical (Ø.3750 JIG GRIND) as its own op (snapped to nearest hole)
+    - honors leading/trailing Ø diam overrides (reassigning hole by nearest REF_DIAM)
     - splits FRONT & BACK into two ops
+    - keeps TAP+THRU glued together when both appear
     """
 
-    ops: List[Tuple[str,int,str]] = []
+    ops: List[Tuple[int, str, int, str]] = []
 
     s = text.strip()
     if not s:
@@ -441,45 +462,67 @@ def _parse_clause_to_ops(base_diam: str, qty: int, text: str) -> List[Tuple[str,
 
     # Parenthetical Jig Grind like (Ø.3750 JIG GRIND)
     for pm in list(_RE_PAREN_JG.finditer(s)):
-        d = _fmt_diam(pm.group(1))
-        ops.append((d, qty, "JIG GRIND"))
+        val = pm.group(1)
+        dstr = _fmt_diam(val)
+        try:
+            tgt = _snap_to_nearest_index(float(val.replace('/', '0')), diam_list)
+        except Exception:
+            tgt = hole_idx
+        ops.append((tgt, dstr, qty, "JIG GRIND"))
         s = s.replace(pm.group(0), " ")  # remove from main text
 
     # Diameter override at start (or fraction with trailing Ø)
     diam_override, rest = _extract_leading_diam(_clean_clause_text(s))
-    diam = diam_override or base_diam
+    if diam_override:
+        try:
+            v = diam_override[1:]
+            tgt = _snap_to_nearest_index(float(v), diam_list)
+        except Exception:
+            tgt = hole_idx
+        hole_for_clause = tgt
+        diam_for_clause = diam_override
+    else:
+        hole_for_clause = hole_idx
+        diam_for_clause = base_diam
+
     rest = _clean_clause_text(rest)
 
     if not rest:
         # Bare diameter line => treat as THRU
-        return [(diam, qty, "THRU")]
+        ops.append((hole_for_clause, diam_for_clause, qty, "THRU"))
+        return ops
 
     # Split explicit FRONT & BACK pair into two
     parts = _explode_front_back(rest)
 
     for part in parts:
         desc = _clean_clause_text(part)
-        # capture depth phrase if present
-        mdepth = _RE_DEPTH_PHRASE.search(desc)
-        # leave depth inline in the description; just ensure consistent 'X d.dd DEEP [FROM SIDE]'
-        if _RE_CBORE.search(desc):
-            # Normalize C'BORE phrasing
-            # keep whatever depth phrase exists
-            ops.append((diam, qty, desc))
-        elif _RE_CDRILL.search(desc):
-            ops.append((diam, qty, desc))
-        elif _RE_TAP.search(desc):
-            ops.append((diam, qty, desc))
-        elif _RE_THRU.search(desc):
-            ops.append((diam, qty, desc))
+        if not desc:
+            continue
+
+        # --- GLUE: keep TAP+THRU combined if both appear in same clause ---
+        if _RE_TAP.search(desc) and _RE_THRU.search(desc):
+            ops.append((hole_for_clause, diam_for_clause, qty, desc))
+            continue
+
+        if any(rx.search(desc) for rx in (_RE_CBORE, _RE_CDRILL, _RE_TAP, _RE_THRU)):
+            ops.append((hole_for_clause, diam_for_clause, qty, desc))
         else:
             # generic fallback
-            ops.append((diam, qty, desc))
+            ops.append((hole_for_clause, diam_for_clause, qty, desc))
 
     return ops
 
 
-def _explode_description_into_ops(hole: str, base_diam: str, qty: int, description: str) -> List[Dict[str, str]]:
+def _explode_description_into_ops(
+    hole_idx: int,
+    hole: str,
+    base_diam: str,
+    qty: int,
+    description: str,
+    diam_list: List[str],
+    hole_letters: List[str],
+) -> List[Dict[str, str]]:
     """
     Split a row's DESCRIPTION into multiple atomic ops by ';' boundaries,
     parse each to (diam, qty, desc), and return ready-to-write dicts.
@@ -489,9 +532,10 @@ def _explode_description_into_ops(hole: str, base_diam: str, qty: int, descripti
     clauses = [c.strip() for c in re.split(r';', description) if c.strip()]
     out: List[Dict[str,str]] = []
     for cl in clauses:
-        for diam, q, desc in _parse_clause_to_ops(base_diam, qty, cl):
+        for tgt_idx, diam, q, desc in _parse_clause_to_ops(hole_idx, base_diam, qty, cl, diam_list):
+            hole_tok = hole_letters[tgt_idx] if 0 <= tgt_idx < len(hole_letters) else hole
             out.append({
-                "HOLE": hole,
+                "HOLE": hole_tok,
                 "REF_DIAM": diam,
                 "QTY": str(q),
                 "DESCRIPTION/DEPTH": desc,
@@ -697,7 +741,7 @@ def main() -> int:
                 desc   = (descriptions[i] if i < len(descriptions) else "").strip()
                 if not desc:
                     continue
-                ops_rows += _explode_description_into_ops(hole, base_d, q, desc)
+                ops_rows += _explode_description_into_ops(i, hole, base_d, q, desc, diam_tokens, hole_letters)
 
             ops_csv = csv_path.parent / "hole_table_ops.csv"
             with ops_csv.open("w", newline="", encoding="utf-8") as fh:
