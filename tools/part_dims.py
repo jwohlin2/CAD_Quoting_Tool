@@ -157,69 +157,72 @@ def _insunits_to_inch_factor(doc) -> float:
     return float(factor)
 
 
-def _max_ordinate_xy(msp) -> Tuple[Optional[float], Optional[float], int, int]:
+def _float_from_text(s: str) -> Optional[float]:
     try:
-        import ezdxf
-        from ezdxf import EzdxfError  # type: ignore[attr-defined]
-    except Exception:  # pragma: no cover - ezdxf missing at runtime
-        return None, None, 0, 0
+        return float(s.strip().replace(",", ""))
+    except Exception:
+        return None
+
+
+def _max_ordinate_xy(msp) -> Tuple[Optional[float], Optional[float]]:
+    """
+    Try in this order:
+      1) ezdxf's dimension API for ORDinate type (dim.dimension_type == 64 or == 65)
+      2) Parse the displayed text of DIMENSION (dim.dxf.text) if it’s numeric (and not '<>')
+      3) Render the DIMENSION block and read MTEXT/ATTRIB numbers inside
+    Return (max_x_ordinate, max_y_ordinate) in drawing units.
+    """
+    import ezdxf  # noqa: F401
+    from ezdxf.addons.dim import linear_dimension
+
+    _ = linear_dimension  # noqa: F841 - ensure import side-effects if required
 
     max_x: Optional[float] = None
     max_y: Optional[float] = None
-    count_x = 0
-    count_y = 0
 
     for dim in msp.query("DIMENSION"):
         try:
-            is_ordinate = bool(getattr(dim, "is_ordinate", False))
-            if not is_ordinate:
-                dimtype = getattr(dim.dxf, "dimtype", 0)
-                is_ordinate = (dimtype & 0x07) == 6
-            if not is_ordinate:
-                continue
+            dt = int(dim.dxf.dimtype)
+        except Exception:
+            dt = 0
 
-            ord_type = getattr(dim.dxf, "ordtype", None)
-            if ord_type not in (0, 1):
-                # try alternate helpers if provided by ezdxf
-                if hasattr(dim, "is_x_ordinate") and dim.is_x_ordinate:  # type: ignore[attr-defined]
-                    ord_type = 0
-                elif hasattr(dim, "is_y_ordinate") and dim.is_y_ordinate:  # type: ignore[attr-defined]
-                    ord_type = 1
-                else:
-                    continue
+        is_ordinate = bool(dt & 64)
 
-            try:
-                measurement = dim.get_measurement()
-            except Exception:
-                measurement = None
+        txt = (dim.dxf.text or "").strip()
+        val_from_text: Optional[float] = None
+        if txt and txt != "<>":
+            m = re.search(r"([-+]?\d+(?:\.\d+)?)", txt)
+            if m:
+                val_from_text = _float_from_text(m.group(1))
 
-            if measurement is None:
-                # fall back to rendered text
+        if is_ordinate:
+            axis = getattr(dim.dxf, "azin", 0)
+            v = val_from_text
+            if v is None:
                 try:
-                    text = dim.plain_text()
+                    v = float(dim.get_measurement())
                 except Exception:
-                    text = ""
-                match = re.search(r"[-+]?(?:\d*\.\d+|\d+)", text)
-                measurement = float(match.group()) if match else None
+                    v = None
+            if v is None:
+                try:
+                    for e in dim.virtual_entities():
+                        if e.dxftype() in ("MTEXT", "TEXT"):
+                            raw = e.dxf.text if e.dxftype() == "TEXT" else e.plain_text()
+                            m2 = re.search(r"([-+]?\d+(?:\.\d+)?)", raw)
+                            if m2:
+                                v = _float_from_text(m2.group(1))
+                                if v is not None:
+                                    break
+                except Exception:
+                    pass
 
-            if measurement is None:
-                continue
+            if v is not None:
+                if axis == 0:
+                    max_x = v if max_x is None else max(max_x, v)
+                else:
+                    max_y = v if max_y is None else max(max_y, v)
 
-            measurement = float(measurement)
-            if measurement < 0:
-                measurement = abs(measurement)
-
-            if ord_type == 0:
-                count_x += 1
-                max_x = measurement if max_x is None else max(max_x, measurement)
-            else:
-                count_y += 1
-                max_y = measurement if max_y is None else max(max_y, measurement)
-        except Exception:  # pragma: no cover - ignore malformed entities
-            continue
-
-    print(f"[part-dims] ordinate dimensions: X={count_x}, Y={count_y}")
-    return max_x, max_y, count_x, count_y
+    return max_x, max_y
 
 
 def _should_include_layer(layer: str, include: Optional[Iterable[str]], exclude: Optional[Iterable[str]]) -> bool:
@@ -339,7 +342,7 @@ def infer_part_dims(
     unit_factor = _insunits_to_inch_factor(doc)
 
     # 1) ordinate dimensions first
-    max_x, max_y, count_x, count_y = _max_ordinate_xy(msp)
+    max_x, max_y = _max_ordinate_xy(msp)
     length_in: Optional[float] = None
     width_in: Optional[float] = None
     length_source: Optional[str] = None
