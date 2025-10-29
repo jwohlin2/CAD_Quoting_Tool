@@ -655,7 +655,7 @@ def _explode_description_into_ops(
 
 def _split_descriptions(body_chunks: List[str], diam_list: List[str]) -> List[str]:
     """
-    ORDER-AGNOSTIC splitter + redistribution of cross-hits.
+    ORDER-AGNOSTIC splitter. Redistribution happens separately.
     """
     blob = re.sub(r"\s+", " ", " ".join(body_chunks)).strip()
     # Cut off coordinate table if present
@@ -710,12 +710,6 @@ def _split_descriptions(body_chunks: List[str], diam_list: List[str]) -> List[st
         if pos >= len(blob):
             continue
         descs[hole_idx] = strip_leading_marker(seg)
-
-    # 5) redistribute any cross-hits (multi-hole bundles) to the right holes
-    descs = _redistribute_cross_hits(descs, diam_list)
-
-    # 6) NEW: route TAP-only clauses (no Ø markers) to the nearest hole by tap-drill estimate
-    descs = _route_tap_only_chunks(descs, diam_list)
 
     return descs
 
@@ -828,7 +822,10 @@ def main() -> int:
         if header_chunks:
             hole_letters, diam_tokens, qtys = _parse_header(header_chunks)
             _set_header_qtys(qtys)
-            descriptions = _split_descriptions(body_chunks, diam_tokens)
+            descs = _split_descriptions(body_chunks, diam_tokens)
+            # Ensure redistribution precedes tap-only routing before exploding into ops
+            descs = _redistribute_cross_hits(descs, diam_tokens)
+            descs = _route_tap_only_chunks(descs, diam_tokens)
             out_rows = []
             if len(hole_letters) != len(diam_tokens) or len(hole_letters) != len(qtys):
                 print(
@@ -842,13 +839,13 @@ def main() -> int:
                     "HOLE": hole,
                     "REF_DIAM": diam_tokens[i],
                     "QTY": qtys[i],
-                    "DESCRIPTION": (descriptions[i] if i < len(descriptions) else "").strip(),
+                    "DESCRIPTION": (descs[i] if i < len(descs) else "").strip(),
                 })
             # ---- Emit exploded ops file (ideal for machine-time calc) ----
             ops_rows: List[Dict[str,str]] = []
             for i, hole in enumerate(hole_letters):
                 base_d = diam_tokens[i]
-                desc   = (descriptions[i] if i < len(descriptions) else "").strip()
+                desc   = (descs[i] if i < len(descs) else "").strip()
                 if not desc:
                     continue
                 ops_rows += _explode_description_into_ops(i, hole, base_d, qtys, desc, hole_letters, diam_tokens)
