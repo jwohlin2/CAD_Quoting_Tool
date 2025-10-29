@@ -352,6 +352,153 @@ def _route_tap_only_chunks(descs: List[str], diam_list: List[str]) -> List[str]:
     return out
 
 
+# ---------- Operation explosion helpers ----------
+
+# Regexes we’ll reuse
+_RE_DIAM_LEAD   = re.compile(r'^[\(\s]*[Ø∅]\s*([0-9]+/[0-9]+|[0-9.]+)\)?\s*', re.I)
+_RE_DIAM_TRAIL  = re.compile(r'^[\(\s]*([0-9]+/[0-9]+)\s*[Ø∅]\)?\s*', re.I)  # e.g., 13/32∅
+_RE_DIAM_ANY    = re.compile(r'[Ø∅]\s*([0-9]+/[0-9]+|[0-9.]+)', re.I)
+_RE_PAREN_JG    = re.compile(r'\(\s*[Ø∅]\s*([0-9]+/[0-9]+|[0-9.]+)\s+JIG\s+GRIND\s*\)', re.I)
+_RE_TAP         = re.compile(r'\bTAP\b', re.I)
+_RE_THRU        = re.compile(r'\bTHRU\b', re.I)
+_RE_CBORE       = re.compile(r"C['’]BORE", re.I)
+_RE_CDRILL      = re.compile(r"C['’]DRILL", re.I)
+_RE_DEPTH_PHRASE= re.compile(r'[Xx]\s*([0-9.]+)\s*DEEP(?:\s+FROM\s+(FRONT|BACK))?', re.I)
+_RE_SIDE_PAIR   = re.compile(r'\bFROM\s+FRONT\s*&\s*BACK\b', re.I)
+_RE_SIDE        = re.compile(r'\bFROM\s+(FRONT|BACK)\b', re.I)
+_RE_QREF        = re.compile(r'^\s*"{1,2}[A-Z]"{1,2}\s*', re.I)   # leading "Q", "I", etc.
+
+
+def _fmt_diam(token: str) -> str:
+    """Normalize a numeric token to Ø... (keep fractions as-is)."""
+    tok = token.strip()
+    if '/' in tok:
+        return f"Ø{tok}"
+    # decimals: keep as entered, drop trailing zeros and dot for secondary ops
+    try:
+        f = float(tok)
+        s = f"{f:.4f}".rstrip('0').rstrip('.')
+        return f"Ø{s}"
+    except Exception:
+        return f"Ø{tok}"
+
+
+def _extract_leading_diam(clause: str) -> Tuple[str, str]:
+    """
+    Return (diam_override, remainder). Supports:
+      - Ø.623 ...   (leading symbol)
+      - 13/32Ø ...  (trailing symbol on a fraction)
+    """
+
+    s = clause.lstrip()
+    m = _RE_DIAM_LEAD.match(s)
+    if m:
+        return _fmt_diam(m.group(1)), s[m.end():].lstrip()
+    m = _RE_DIAM_TRAIL.match(s)
+    if m:
+        return _fmt_diam(m.group(1)), s[m.end():].lstrip()
+    return "", clause.strip()
+
+
+def _explode_front_back(desc: str) -> List[str]:
+    """
+    Split '... FROM FRONT & BACK ...' into two descs with explicit sides.
+    If only one side present, return as-is.
+    """
+
+    if _RE_SIDE_PAIR.search(desc):
+        base = _RE_SIDE_PAIR.sub("", desc).strip(",; ").strip()
+        left  = _RE_SIDE.sub("FROM FRONT", base)
+        right = _RE_SIDE.sub("FROM BACK",  base)
+        # ensure side text present
+        if "FROM FRONT" not in left:  left  = (left + " FROM FRONT").strip()
+        if "FROM BACK"  not in right: right = (right + " FROM BACK").strip()
+        return [left, right]
+    return [desc]
+
+
+def _clean_clause_text(s: str) -> str:
+    # strip leading quoted refs and tidy spaces/semicolons
+    s = _RE_QREF.sub("", s).strip()
+    s = re.sub(r'\s+', ' ', s)
+    s = re.sub(r'\s*;\s*$', '', s)
+    return s.strip(", ").strip()
+
+
+def _parse_clause_to_ops(base_diam: str, qty: int, text: str) -> List[Tuple[str, int, str]]:
+    """
+    Turn one clause into 1+ (diam, qty, 'DESCRIPTION/DEPTH') ops.
+    - pulls out parenthetical (Ø.3750 JIG GRIND) as its own op
+    - honors leading/trailing Ø diam overrides
+    - splits FRONT & BACK into two ops
+    """
+
+    ops: List[Tuple[str,int,str]] = []
+
+    s = text.strip()
+    if not s:
+        return ops
+
+    # Parenthetical Jig Grind like (Ø.3750 JIG GRIND)
+    for pm in list(_RE_PAREN_JG.finditer(s)):
+        d = _fmt_diam(pm.group(1))
+        ops.append((d, qty, "JIG GRIND"))
+        s = s.replace(pm.group(0), " ")  # remove from main text
+
+    # Diameter override at start (or fraction with trailing Ø)
+    diam_override, rest = _extract_leading_diam(_clean_clause_text(s))
+    diam = diam_override or base_diam
+    rest = _clean_clause_text(rest)
+
+    if not rest:
+        # Bare diameter line => treat as THRU
+        return [(diam, qty, "THRU")]
+
+    # Split explicit FRONT & BACK pair into two
+    parts = _explode_front_back(rest)
+
+    for part in parts:
+        desc = _clean_clause_text(part)
+        # capture depth phrase if present
+        mdepth = _RE_DEPTH_PHRASE.search(desc)
+        # leave depth inline in the description; just ensure consistent 'X d.dd DEEP [FROM SIDE]'
+        if _RE_CBORE.search(desc):
+            # Normalize C'BORE phrasing
+            # keep whatever depth phrase exists
+            ops.append((diam, qty, desc))
+        elif _RE_CDRILL.search(desc):
+            ops.append((diam, qty, desc))
+        elif _RE_TAP.search(desc):
+            ops.append((diam, qty, desc))
+        elif _RE_THRU.search(desc):
+            ops.append((diam, qty, desc))
+        else:
+            # generic fallback
+            ops.append((diam, qty, desc))
+
+    return ops
+
+
+def _explode_description_into_ops(hole: str, base_diam: str, qty: int, description: str) -> List[Dict[str, str]]:
+    """
+    Split a row's DESCRIPTION into multiple atomic ops by ';' boundaries,
+    parse each to (diam, qty, desc), and return ready-to-write dicts.
+    """
+
+    # split on semicolons, but keep content inside parentheses intact
+    clauses = [c.strip() for c in re.split(r';', description) if c.strip()]
+    out: List[Dict[str,str]] = []
+    for cl in clauses:
+        for diam, q, desc in _parse_clause_to_ops(base_diam, qty, cl):
+            out.append({
+                "HOLE": hole,
+                "REF_DIAM": diam,
+                "QTY": str(q),
+                "DESCRIPTION/DEPTH": desc,
+            })
+    return out
+
+
 def _split_descriptions(body_chunks: List[str], diam_list: List[str]) -> List[str]:
     """
     ORDER-AGNOSTIC splitter + redistribution of cross-hits.
@@ -542,6 +689,22 @@ def main() -> int:
                     "QTY": qtys[i],
                     "DESCRIPTION": (descriptions[i] if i < len(descriptions) else "").strip(),
                 })
+            # ---- Emit exploded ops file (ideal for machine-time calc) ----
+            ops_rows: List[Dict[str,str]] = []
+            for i, hole in enumerate(hole_letters):
+                base_d = diam_tokens[i]
+                q      = qtys[i]
+                desc   = (descriptions[i] if i < len(descriptions) else "").strip()
+                if not desc:
+                    continue
+                ops_rows += _explode_description_into_ops(hole, base_d, q, desc)
+
+            ops_csv = csv_path.parent / "hole_table_ops.csv"
+            with ops_csv.open("w", newline="", encoding="utf-8") as fh:
+                w = csv.DictWriter(fh, fieldnames=["HOLE","REF_DIAM","QTY","DESCRIPTION/DEPTH"])
+                w.writeheader()
+                w.writerows(ops_rows)
+            print(f"[HOLE-TABLE][ops] rows={len(ops_rows)} csv={ops_csv}")
             hole_csv = csv_path.parent / "hole_table_structured.csv"
             with hole_csv.open("w", newline="", encoding="utf-8") as fh:
                 w = csv.DictWriter(fh, fieldnames=["HOLE", "REF_DIAM", "QTY", "DESCRIPTION"])
