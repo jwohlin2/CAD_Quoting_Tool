@@ -14259,6 +14259,7 @@ def extract_2d_features_from_dxf_or_dwg(path: str | Path) -> dict[str, Any]:
                         prior_cards = list(ops_summary.get("ops_rows") or [])
                         merged_cards = prior_cards + (agg.get("simple_rows") or [])
                         ops_summary["ops_rows"] = merged_cards
+                        # Make the renderer see them (it reads ops_summary["rows"])
                         ops_summary["rows"] = merged_cards
 
                         # 3) Update built_rows count
