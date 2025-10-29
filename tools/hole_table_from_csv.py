@@ -7,15 +7,23 @@ import csv
 from pathlib import Path
 from typing import Iterable, List
 
+try:  # pragma: no cover - runtime fallback for direct execution
+    from tools.hole_ops import explode_rows_to_operations
+except ModuleNotFoundError:  # pragma: no cover
+    import sys
+    from pathlib import Path
+
+    sys.path.append(str(Path(__file__).resolve().parent))
+    from hole_ops import explode_rows_to_operations  # type: ignore[no-redef]
+
 
 OPS_FIELDNAMES = ("HOLE", "REF_DIAM", "QTY", "DESCRIPTION/DEPTH")
 
 
 def explode_hole_table(text_rows: Iterable[str]) -> List[List[str]]:
-    """Placeholder implementation that returns no operations yet."""
+    """Explode raw DXF text rows into HOLE TABLE operations."""
 
-    # TODO: implement in PR-2
-    return []
+    return explode_rows_to_operations(text_rows)
 
 
 def _read_text_rows(dxf_csv: Path) -> list[str]:
