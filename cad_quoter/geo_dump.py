@@ -499,21 +499,36 @@ def _matched_diam_token(m: Optional[re.Match]) -> str:
     return tok.replace("Ø", "").replace("∅", "").strip()
 
 
-def _merge_thru_tap(parts: List[str]) -> List[str]:
-    out: List[str] = []
-    i = 0
-    while i < len(parts):
-        cur = parts[i]
-        if (
-            i + 1 < len(parts)
-            and _RE_THRU.search(cur)
-            and parts[i + 1].lstrip().upper().startswith("TAP")
-        ):
-            out.append((cur + " " + parts[i + 1]).strip())
-            i += 2
+def _merge_or_split_thru_tap(parts: List[str]) -> List[str]:
+    """
+    If a clause starts with TAP and later has THRU -> KEEP combined (e.g., '5/8-11 TAP THRU (FROM BACK)').
+    If a clause starts with THRU and later has TAP -> SPLIT into 'THRU' and 'TAP ...' (G/J/K cases).
+    Otherwise leave as-is.
+    """
+
+    out = []
+    for p in parts:
+        s = p.strip()
+        has_thru = bool(_RE_THRU.search(s))
+        has_tap = bool(_RE_TAP.search(s))
+        if not (has_thru and has_tap):
+            out.append(s)
+            continue
+        # Decide based on which appears first
+        first = min(
+            (_RE_THRU.search(s).start(), "THRU") if has_thru else (1e9, ""),
+            (_RE_TAP.search(s).start(), "TAP") if has_tap else (1e9, ""),
+            key=lambda x: x[0],
+        )[1]
+        if first == "TAP":
+            # keep combined (C case)
+            out.append(s)
         else:
-            out.append(cur)
-            i += 1
+            # split (G/J/K case)
+            # THRU ... (cut before TAP)
+            m = _RE_TAP.search(s)
+            out.append(s[: m.start()].strip())
+            out.append(s[m.start() :].strip())
     return out
 
 
@@ -524,38 +539,22 @@ def _smart_clause_split(s: str) -> List[str]:
     seeds = [x for x in s.split(';') if x.strip()]
     parts: List[str] = []
     for seed in seeds:
-        # DO NOT split on 'JIG GRIND' (keep it with the preceding op/paren)
         chunks = re.split(
-            (
-                r'(?=(?:"[A-Z]"\s*\( ?[Ø∅]|'
-                r'\bC[\'’]BORE\b|'
-                r'\bC[\'’]DRILL\b|'
-                r'\bTAP\b|'
-                r'\bTHRU\b))'
-            ),
+            r'(?=(?:"[A-Z]"\s*\( ?[Ø∅]|'
+            r'\bC[\'’]BORE\b|'
+            r'\bC[\'’]DRILL\b|'
+            r'\bTAP\b|'
+            r'\bTHRU\b))',
             seed,
-            flags=re.I,
+            flags=re.I
         )
-        # only keep chunks that actually contain an operation token
-        pending = ""
         for c in chunks:
-            c = c.strip()
-            if not c:
-                continue
-            if (
-                _RE_THRU.search(c)
-                or _RE_TAP.search(c)
-                or _RE_CBORE.search(c)
-                or _RE_CDRILL.search(c)
-                or _RE_PAREN_JG.search(c)
-            ):
-                combined = f"{pending} {c}".strip() if pending else c
-                if combined:
-                    parts.append(combined)
-                pending = ""
-            else:
-                pending = f"{pending} {c}".strip() if pending else c
-    return _merge_thru_tap(parts)
+            c = _clean_clause_text(c)
+            if _RE_THRU.search(c) or _RE_TAP.search(c) or _RE_CBORE.search(c) or _RE_CDRILL.search(c) or _RE_PAREN_JG.search(c):
+                parts.append(c)
+    # Apply THRU/TAP glue-or-split rule
+    parts = _merge_or_split_thru_tap(parts)
+    return parts
 
 
 def _fmt_diam(token: str) -> str:
@@ -926,6 +925,10 @@ def main() -> int:
             # Ensure redistribution precedes tap-only routing before exploding into ops
             descs = _redistribute_cross_hits(descs, diam_tokens)
             descs = _route_tap_only_chunks(descs, diam_tokens)
+            for i in range(len(descs)):
+                # if a segment is just 'THRU (FROM FRONT|BACK)', normalize to 'THRU'
+                if re.fullmatch(r"\s*THRU\s+\(FROM\s+(FRONT|BACK)\)\s*", descs[i], flags=re.I):
+                    descs[i] = "THRU"
             out_rows = []
             if len(hole_letters) != len(diam_tokens) or len(hole_letters) != len(qtys):
                 print(
