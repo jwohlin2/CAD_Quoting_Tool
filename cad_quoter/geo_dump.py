@@ -54,6 +54,7 @@ _FULL_TEXT_FIELDS = [
     "handle",
     "block_name",
     "from_block",
+    "depth",
 ]
 
 _HEIGHT_ATTRS = tuple(
@@ -550,6 +551,15 @@ def _iter_insert_attribs(insert: Any) -> list[Any]:
 
 def dump_all_text(doc: Any, out_dir: Path | str, opts: Mapping[str, Any] | None) -> tuple[list[dict[str, Any]], Path, Path]:
     options = dict(opts or {})
+    block_depth_raw = options.get("text_block_depth", 2)
+    block_depth_limit = 2
+    if block_depth_raw is not None:
+        try:
+            depth_candidate = int(block_depth_raw)
+        except Exception:
+            depth_candidate = None
+        if depth_candidate is not None:
+            block_depth_limit = max(depth_candidate, 0)
     min_height_raw = options.get("text_min_height", 0.0)
     min_height_value: float | None = None
     if min_height_raw is not None:
@@ -586,7 +596,7 @@ def dump_all_text(doc: Any, out_dir: Path | str, opts: Mapping[str, Any] | None)
     raw_lines_all: list[dict[str, Any]] = []
     mleader_total = 0
     mleader_captured = 0
-    from_blocks_depth_max = 0
+    from_blocks_depth_max = block_depth_limit
 
     def record_matches_filters(entry: Mapping[str, Any]) -> bool:
         layer_name = str(entry.get("layer") or "")
@@ -623,9 +633,11 @@ def dump_all_text(doc: Any, out_dir: Path | str, opts: Mapping[str, Any] | None)
         if isinstance(block_path, (list, tuple)) and block_path:
             block_name = " > ".join(str(part) for part in block_path if part)
             from_block = 1
+            depth = sum(1 for part in block_path if part)
         else:
             block_name = None
             from_block = 0
+            depth = 0
 
         handle_value = entry.get("handle")
         if isinstance(handle_value, str):
@@ -653,9 +665,18 @@ def dump_all_text(doc: Any, out_dir: Path | str, opts: Mapping[str, Any] | None)
             "handle": handle_text,
             "block_name": block_name,
             "from_block": from_block,
+            "depth": depth,
         }
 
-    def build_record(entity: Any, layout_name: str, *, from_block: bool, block_name: str | None) -> dict[str, Any] | None:
+    def build_record(
+        entity: Any,
+        layout_name: str,
+        *,
+        from_block: bool,
+        block_name: str | None = None,
+        block_path: tuple[str, ...] | None = None,
+        matrix: Matrix44 | None = None,
+    ) -> dict[str, Any] | None:
         dxf = getattr(entity, "dxf", None)
         try:
             etype = str(entity.dxftype()).upper()
@@ -673,10 +694,12 @@ def dump_all_text(doc: Any, out_dir: Path | str, opts: Mapping[str, Any] | None)
         height_candidate = _resolve_first_attr(dxf, _HEIGHT_ATTRS)
         width_candidate = _resolve_first_attr(dxf, ("width", "text_width", "char_width"))
         rotation_candidate = _resolve_first_attr(dxf, _ROTATION_ATTRS)
+        path_tuple: tuple[str, ...] = tuple(block_path or ())
         x_val, y_val = _world_point(entity, dxf, matrix)
         style_value = _resolve_style_name(dxf)
         handle_value = _resolve_handle(entity)
-        block_value = _compose_block_name(block_path)
+        block_value = _compose_block_name(path_tuple) or block_name
+        depth_value = sum(1 for part in path_tuple if part)
         rotation_value = _safe_float(rotation_candidate)
         rotation_world = _world_rotation(entity, rotation_value, matrix)
         height_value = _safe_float(height_candidate)
@@ -696,7 +719,8 @@ def dump_all_text(doc: Any, out_dir: Path | str, opts: Mapping[str, Any] | None)
             "handle": handle_value,
             "block_name": block_value,
             "from_block": 1 if from_block else 0,
-            "block_path": list(block_path),
+            "block_path": list(path_tuple),
+            "depth": depth_value,
         }
         return entry
 
@@ -707,22 +731,21 @@ def dump_all_text(doc: Any, out_dir: Path | str, opts: Mapping[str, Any] | None)
         transform: Matrix44 | None,
         block_path: tuple[str, ...] = (),
     ) -> None:
-        nonlocal mleader_total, mleader_captured, from_blocks_depth_max
+        nonlocal mleader_total, mleader_captured
         if entity is None:
             return
         try:
             etype = str(entity.dxftype()).upper()
         except Exception:
             etype = ""
-        if block_path:
-            depth = len(block_path)
-            if depth > from_blocks_depth_max:
-                from_blocks_depth_max = depth
+        from_block_flag = bool(block_path)
+        block_name_value = _compose_block_name(block_path)
         if etype in {"TEXT", "MTEXT", "ATTRIB", "ATTDEF"}:
             record = build_record(
                 entity,
                 layout_name,
-                from_block=bool(block_path),
+                from_block=from_block_flag,
+                block_name=block_name_value,
                 block_path=block_path,
                 matrix=transform,
             )
@@ -757,6 +780,10 @@ def dump_all_text(doc: Any, out_dir: Path | str, opts: Mapping[str, Any] | None)
         else:
             combined_path = block_path
 
+        combined_depth = sum(1 for part in combined_path if part)
+        if block_depth_limit is not None and combined_depth > block_depth_limit:
+            return
+
         child_transform: Matrix44 | None = transform
         if Matrix44 is not None:
             matrix_value = None
@@ -783,7 +810,7 @@ def dump_all_text(doc: Any, out_dir: Path | str, opts: Mapping[str, Any] | None)
 
         virtual_entities: list[Any] = []
         try:
-            virtual_entities = list(entity.virtual_entities(deep=True))
+            virtual_entities = list(entity.virtual_entities())
         except Exception:
             virtual_entities = []
         for child in virtual_entities:
@@ -1690,6 +1717,17 @@ def main(argv: Sequence[str] | None = None) -> int:
         help="Restrict anchor text scan to the specified layout name (repeatable)",
     )
     parser.add_argument(
+        "--text-block-depth",
+        dest="text_block_depth",
+        type=int,
+        metavar="N",
+        default=2,
+        help=(
+            "Maximum INSERT recursion depth when scanning text (default: %(default)s); "
+            "use 0 to disable block traversal"
+        ),
+    )
+    parser.add_argument(
         "--no-exclude-layer",
         dest="no_exclude_layer",
         action="store_true",
@@ -1913,6 +1951,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             "text_include_layers": args.dump_text_include_layers,
             "text_exclude_layers": args.dump_text_exclude_layers,
             "text_layouts": args.dump_text_layouts,
+            "text_block_depth": args.text_block_depth,
         }
         try:
             _full_entries, full_csv_path, full_jsonl_path = dump_all_text(
@@ -1958,6 +1997,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 min_height=args.min_height,
                 layers_include=None if args.no_layer_filter else include_layers,
                 layers_exclude=None if args.no_layer_filter else exclude_layers,
+                block_depth=args.text_block_depth,
                 layouts=layout_filter,
             )
         except Exception as exc:
