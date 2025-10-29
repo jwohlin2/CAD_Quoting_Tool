@@ -170,6 +170,40 @@ def test_read_text_table_uses_internal_fallback(monkeypatch: pytest.MonkeyPatch,
     assert debug.get("rows_txt_count") == 2
 
 
+def test_parse_hole_row_extracts_core_fields() -> None:
+    text = "\"Q\" (Ø.332) THRU; 3/8-24 TAP X .38 DEEP FROM BACK"
+
+    row = geo_extractor.parse_hole_row(text)
+
+    assert row["ref"] == "Q"
+    assert row["diam"] == pytest.approx(0.332)
+    assert row["tap_thread"] == "3/8-24"
+    assert row["depth"] == pytest.approx(0.38)
+    assert row["side"] == "BACK"
+    assert row["ops"] == ["TAP", "THRU"] or row["ops"] == ["THRU", "TAP"]
+
+
+def test_rebuild_structured_rows_merges_lines_and_qty() -> None:
+    lines = [
+        'QTY "Q" = 4',
+        "\"Q\" (Ø.332) THRU; 3/8-24 TAP X .38 DEEP FROM BACK",
+        "\"Q\" C'BORE X .10 DEEP",
+    ]
+
+    rows = geo_extractor.rebuild_structured_rows(lines)
+
+    assert len(rows) == 1
+    row = rows[0]
+    assert row["ref"] == "Q"
+    assert row.get("qty") == 4
+    assert "TAP" in row.get("ops", [])
+    assert "THRU" in row.get("ops", [])
+    assert "CBORE" in row.get("ops", [])
+    assert row.get("depth") == pytest.approx(0.38)
+    assert row.get("diam") == pytest.approx(0.332)
+    assert len(row.get("raw_fragments", [])) == 2
+
+
 def test_read_text_table_raises_when_layout_filter_has_no_match(
     monkeypatch: pytest.MonkeyPatch, fallback_doc: _DummyDoc
 ) -> None:
