@@ -6709,6 +6709,17 @@ def read_text_table(
         "bands": [],
         "layout_filters": layout_filters,
     }
+
+    try:
+        units_scale = detect_units_scale(doc)
+    except Exception:
+        units_scale = {}
+    try:
+        to_in = float(units_scale.get("to_in") or 1.0)
+    except Exception:
+        to_in = 1.0
+    if not math.isfinite(to_in) or to_in <= 0:
+        to_in = 1.0
     debug_scan_enabled = bool(debug_scan)
     scan_overrides = _resolve_text_scan_opts(text_scan_opts)
     roi_hint_effective: Mapping[str, Any] | None = roi_hint
