@@ -248,6 +248,13 @@ def main() -> int:
             hole_letters, diam_tokens, qtys = _parse_header(header_chunks)
             descriptions = _split_descriptions(body_chunks, diam_tokens)
             out_rows = []
+            if len(hole_letters) != len(diam_tokens) or len(hole_letters) != len(qtys):
+                print(
+                    f"[HOLE-TABLE][warn] counts mismatch: holes={len(hole_letters)} "
+                    f"diam={len(diam_tokens)} qty={len(qtys)}"
+                )
+            if any(not d.startswith(("Ø", "∅")) for d in diam_tokens):
+                print("[HOLE-TABLE][warn] non-diameter token detected in REF_DIAM:", diam_tokens)
             for i, hole in enumerate(hole_letters):
                 out_rows.append({
                     "HOLE": hole,
