@@ -782,15 +782,9 @@ def _split_descriptions(body_chunks: List[str], diam_list: List[str]) -> List[st
     positions: List[Tuple[int, int, str]] = []  # (pos, hole_idx, alias)
     for idx, token in enumerate(diam_list):
         alts = _diameter_aliases(token)
-        # last-resort numeric payloads
-        if token.startswith(("Ø", "∅")):
-            s = token[1:]
-            try:
-                f = float(s)
-                comp = f"{f:.3f}".rstrip("0").rstrip(".")
-            except Exception:
-                comp = s
-            alts += [comp, f"0{comp}", f"({comp})", f"(0{comp})"]
+        # NOTE: Avoid adding bare decimal aliases here so depths like ".500 DEEP"
+        # don't get mistaken for diameter markers. Ø/∅ tokens are still captured
+        # downstream when present in the clause text.
 
         best_pos, best_alt = None, ""
         for a in alts:
