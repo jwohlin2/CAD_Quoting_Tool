@@ -14238,6 +14238,11 @@ def extract_2d_features_from_dxf_or_dwg(path: str | Path) -> dict[str, Any]:
             src_path = Path(typing.cast(str, geo.get("source_path", "")) or "")
             if not src_path.exists():
                 src_path = Path(typing.cast(str, geo.get("path", "")) or "")
+            if (not src_path.exists()) and path:
+                try:
+                    src_path = Path(path)
+                except Exception:
+                    pass
             ops_csv = (
                 src_path.parent / "hole_table_ops.csv"
                 if src_path.parent.exists()
