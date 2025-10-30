@@ -124,6 +124,47 @@ def test_render_quote_emits_structured_sections() -> None:
     assert math.isclose(pass_through_amounts.get("Total", 0.0), 15.0, rel_tol=1e-6)
 
 
+def test_render_quote_does_not_attach_direct_costs_struct() -> None:
+    result: dict[str, object] = {
+        "price": 41.0,
+        "breakdown": {
+            "qty": 2,
+            "totals": {
+                "labor_cost": 12.0,
+                "direct_costs": 8.0,
+                "subtotal": 20.0,
+            },
+            "nre_detail": {},
+            "nre": {},
+            "material": {"material_cost": 5.0},
+            "process_costs": {"milling": 12.0},
+            "process_meta": {},
+            "pass_through": {"Material": 5.0, "Vendor": 3.0},
+            "applied_pcts": {},
+            "rates": {},
+            "params": {},
+            "labor_cost_details": {},
+            "direct_cost_details": {},
+        },
+    }
+
+    _render_text_and_doc(result)
+
+    assert "direct_costs_struct" not in result
+
+    breakdown = result.get("breakdown")
+    assert isinstance(breakdown, dict)
+    assert "direct_costs_struct" not in breakdown
+
+    pricing = breakdown.get("pricing")
+    if isinstance(pricing, dict):
+        assert "direct_costs_struct" not in pricing
+
+    totals = breakdown.get("totals")
+    if isinstance(totals, dict):
+        assert "direct_costs_struct" not in totals
+
+
 def test_render_quote_cost_breakdown_prefers_pricing_totals() -> None:
     result = {
         "price": 42.0,
@@ -315,6 +356,7 @@ def test_render_payload_obeys_pricing_math_guards() -> None:
     direct_total = float(breakdown_after.get("total_direct_costs", 0.0))
     labor_total = float(breakdown_after.get("total_labor_cost", 0.0))
     margin_pct = float(breakdown_after.get("applied_pcts", {}).get("MarginPct", 0.0))
+    final_price_per_part = summary_amounts.get("Final Price per Part", 0.0)
     final_price = float(result.get("price", 0.0))
     assert math.isclose(final_price_per_part, final_price, abs_tol=0.01)
 
