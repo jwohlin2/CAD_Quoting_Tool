@@ -3450,7 +3450,6 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
             amortized_nre_total += float(value or 0.0)
         except Exception:
             continue
-    labor_costs_display: dict[str, float] = {}
     prog_hr: float = 0.0
     direct_cost_details = breakdown.get("direct_cost_details", {}) or {}
     material_net_cost: float | None = None
@@ -3820,6 +3819,7 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
 
         label = {
             "programming": "Programming (amortized)",
+            "programming_amortized": "Programming (amortized)",
             "milling": "Milling",
             "drilling": "Drilling",
             "tapping": "Tapping",
@@ -3827,8 +3827,10 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
             "spot_drill": "Spot-Drill",
             "jig_grind": "Jig-Grind",
             "inspection": "Inspection",
+            "fixture_build_amortized": "Fixture Build (amortized)",
         }
         order = [
+            "programming_amortized",
             "programming",
             "milling",
             "drilling",
@@ -3899,9 +3901,16 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
         stored_rate = 0.0
         stored_cost = 0.0
         if canon_key:
-            stored_entry = process_cost_row_details.get(canon_key)
-            if stored_entry is not None:
-                stored_hours, stored_rate, stored_cost = stored_entry
+            summary_entry = canonical_bucket_summary.get(canon_key)
+            if isinstance(summary_entry, _MappingABC):
+                stored_hours = _safe_float(summary_entry.get("hours"), default=0.0)
+                if stored_hours <= 0.0:
+                    minutes_val = _safe_float(summary_entry.get("minutes"), default=0.0)
+                    if minutes_val > 0.0:
+                        stored_hours = minutes_val / 60.0
+                stored_cost = _safe_float(summary_entry.get("total"), default=0.0)
+                if stored_hours > 0.0 and stored_cost > 0.0:
+                    stored_rate = stored_cost / stored_hours
 
         meta = _lookup_process_meta(process_meta, key) or {}
         hr_val = stored_hours
@@ -5670,10 +5679,8 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
     canonical_bucket_order: list[str] = []
     canonical_bucket_summary: dict[str, dict[str, float]] = {}
     bucket_table_rows: list[tuple[str, float, float, float, float]] = []
-    detail_lookup: dict[str, str] = {}
     label_to_canon: dict[str, str] = {}
     canon_to_display_label: dict[str, str] = {}
-    process_cost_row_details: dict[str, tuple[float, float, float]] = {}
     class _BucketRowSpec(typing.NamedTuple):
         label: str
         hours: float
@@ -5686,7 +5693,6 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
 
     bucket_row_specs: list[_BucketRowSpec] = []
 
-    labor_costs_display.clear()
     hour_summary_entries.clear()
     display_labor_for_ladder = 0.0
     display_machine = 0.0
@@ -6003,15 +6009,10 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
     # Planner totals reconciliation previously compared bucket rows against legacy
     # planner aggregates. Those comparisons produced noisy warnings and are no
     # longer useful now that rendering is sourced directly from bucket data.
-    detail_lookup.update(bucket_state.detail_lookup)
     label_to_canon.update(bucket_state.label_to_canon)
     canon_to_display_label.update(bucket_state.canon_to_display_label)
     label_to_canon.update(bucket_label_map)
     canon_to_display_label.update(bucket_canon_label_map)
-    labor_costs_display.update(bucket_state.labor_costs_display)
-    if bucket_table_rows:
-        for label, _, _, _, total_val in bucket_table_rows:
-            labor_costs_display[label] = total_val
     if bucket_table_rows:
         display_labor_for_ladder = display_labor_from_rows
         display_machine = display_machine_from_rows
@@ -6047,13 +6048,7 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
     proc_total = 0.0
     amortized_nre_total = 0.0
 
-    def _add_labor_cost_line(
-        label: str,
-        amount: Any,
-        *,
-        process_key: str | None = None,
-        detail_bits: Iterable[Any] | None = None,
-    ) -> None:
+    def _add_labor_cost_line(label: str, amount: Any) -> None:
         nonlocal proc_total
         try:
             numeric_amount = float(amount or 0.0)
@@ -6080,7 +6075,6 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
             total_programming_hours_local = 0.0
             accumulate_from_detail = True
 
-        detail_args: list[str] = []
         detail_hours = 0.0
 
         prog_hr_detail = _safe_float(programming_detail_local.get("prog_hr"))
@@ -6088,24 +6082,12 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
             if accumulate_from_detail:
                 total_programming_hours_local += prog_hr_detail
             detail_hours += prog_hr_detail
-            detail_args.append(
-                f"- Programmer (lot): {_hours_with_rate_text(prog_hr_detail, programmer_rate)}"
-            )
 
         eng_hr_detail = _safe_float(programming_detail_local.get("eng_hr"))
         if eng_hr_detail > 0:
             if accumulate_from_detail:
                 total_programming_hours_local += eng_hr_detail
             detail_hours += eng_hr_detail
-            detail_args.append(
-                f"- Engineering (lot): {_hours_with_rate_text(eng_hr_detail, programmer_rate)}"
-            )
-
-        remaining_hours = max(total_programming_hours_local - detail_hours, 0.0)
-        if remaining_hours > 0:
-            detail_args.append(
-                f"Additional programming {fmt_hours(remaining_hours)} @ ${programmer_rate:.2f}/hr"
-            )
 
         if total_programming_hours_local <= 0:
             total_programming_hours_local = total_programming_hours
@@ -6131,10 +6113,6 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
                 labor_cost_totals[PROGRAMMING_PER_PART_LABEL] = prog_pp
             except Exception:
                 pass
-            if qty > 1:
-                detail_args.append(f"Amortized across {qty} pcs")
-            if detail_args:
-                detail_lookup[PROGRAMMING_PER_PART_LABEL] = "; ".join(detail_args)
             additions["programming_amortized"] = (prog_pp, programming_minutes)
             amortized_nre_total += prog_pp
             if "programming_amortized" not in canonical_bucket_summary:
@@ -6155,27 +6133,13 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
             except Exception:
                 fix_pp = 0.0
         if fix_pp > 0:
-            detail_args = []
             fixture_detail = nre_detail.get("fixture", {}) if isinstance(nre_detail, dict) else {}
             fixture_build_hr_detail = _safe_float(fixture_detail.get("build_hr"))
             if fixture_build_hr_detail > 0:
                 fixture_minutes += (fixture_build_hr_detail / qty_divisor) * 60.0
-                fixture_rate_detail = _resolve_rate_with_fallback(
-                    fixture_detail.get("build_rate"),
-                    "FixtureBuildRate",
-                    "ShopRate",
-                )
-                detail_args.append(
-                    f"- Build labor (lot): {_hours_with_rate_text(fixture_build_hr_detail, fixture_rate_detail)}"
-                )
             soft_jaw_hr = _safe_float(fixture_detail.get("soft_jaw_hr"))
             if soft_jaw_hr and soft_jaw_hr > 0:
                 fixture_minutes += (soft_jaw_hr / qty_divisor) * 60.0
-                detail_args.append(f"Soft jaw prep {fmt_hours(soft_jaw_hr)}")
-            if qty > 1:
-                detail_args.append(f"Amortized across {qty} pcs")
-            if detail_args:
-                detail_lookup["Fixture Build (amortized)"] = "; ".join(detail_args)
             additions["fixture_build_amortized"] = (fix_pp, fixture_minutes)
             amortized_nre_total += fix_pp
             if "fixture_build_amortized" not in canonical_bucket_summary:
@@ -6391,11 +6355,8 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
     process_table = _ProcessCostTableRecorder(
         cfg=cfg,
         bucket_state=bucket_state,
-        detail_lookup=detail_lookup,
         label_to_canon=label_to_canon,
         canon_to_display_label=canon_to_display_label,
-        process_cost_row_details=process_cost_row_details,
-        labor_costs_display=labor_costs_display,
         add_labor_cost_line=_add_labor_cost_line,
         process_meta=process_meta,
     )
@@ -6572,8 +6533,6 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
                 row_hr = billed_hr
                 row_rate = drill_rate
                 row_cost = billed_cost
-                process_cost_row_details["drilling"] = (billed_hr, drill_rate, billed_cost)
-                labor_costs_display[drilling_row.name] = billed_cost
                 process_costs_for_render["drilling"] = billed_cost
 
             card_hr = round(card_minutes_billed / 60.0, 2)
@@ -6592,13 +6551,7 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
                 else:
                     process_table.update_row("drilling", hours=row_hr)
                 drilling_row.hours = row_hr
-                process_cost_row_details["drilling"] = (
-                    row_hr,
-                    row_rate,
-                    row_cost,
-                )
                 process_costs_for_render["drilling"] = row_cost
-                labor_costs_display[drilling_row.name] = row_cost
                 drilling_row.total = row_cost
 
             drilling_meta_for_guard = None
@@ -6704,12 +6657,12 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
                 continue
             if spec.label in printed_bucket_labels:
                 continue
-            _add_labor_cost_line(spec.label, spec.total, process_key=canon_key)
+            _add_labor_cost_line(spec.label, spec.total)
             printed_bucket_labels.add(spec.label)
         for spec in ordered_specs:
             if spec.label in printed_bucket_labels:
                 continue
-            _add_labor_cost_line(spec.label, spec.total, process_key=spec.canon_key)
+            _add_labor_cost_line(spec.label, spec.total)
             printed_bucket_labels.add(spec.label)
         for label in printed_bucket_labels:
             labor_cost_totals.pop(label, None)
@@ -6733,8 +6686,7 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
         display_label = str(label)
         canon_to_display_label[canon_key] = display_label
         label_to_canon[display_label] = canon_key
-        _add_labor_cost_line(display_label, amount_val, process_key=canon_key)
-        labor_costs_display[display_label] = amount_val
+        _add_labor_cost_line(display_label, amount_val)
         misc_total += amount_val
 
     hour_summary_entries.clear()
