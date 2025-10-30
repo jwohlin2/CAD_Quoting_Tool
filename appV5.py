@@ -4356,56 +4356,6 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
     blank_len = max(required_blank[0], required_blank[1]) if required_blank[0] > 0 and required_blank[1] > 0 else 0.0
     blank_wid = min(required_blank[0], required_blank[1]) if required_blank[0] > 0 and required_blank[1] > 0 else 0.0
 
-    def _blank_has_dims(candidate: Mapping[str, Any] | None) -> bool:
-        if not isinstance(candidate, _MappingABC):
-            return False
-        return bool(
-            _coerce_positive_float(candidate.get("w"))
-            and _coerce_positive_float(candidate.get("h"))
-        )
-
-    def _apply_blank_hint(container: Mapping[str, Any] | None) -> None:
-        if not isinstance(container, _MutableMappingABC):
-            return
-        if required_blank[0] <= 0 or required_blank[1] <= 0:
-            return
-        hint_payload: dict[str, Any] = {"w": float(required_blank[0]), "h": float(required_blank[1])}
-        if required_blank[2] > 0:
-            hint_payload["t"] = float(required_blank[2])
-        existing_blank = container.get("required_blank_in")
-        if not _blank_has_dims(existing_blank):
-            container["required_blank_in"] = dict(hint_payload)
-        existing_bbox = container.get("bbox_in")
-        if not _blank_has_dims(existing_bbox):
-            container.setdefault("bbox_in", dict(hint_payload))
-
-    for context in (
-        geo_context if isinstance(geo_context, _MutableMappingABC) else None,
-        g if isinstance(g, _MutableMappingABC) else None,
-        pricing_geom if isinstance(pricing_geom, _MutableMappingABC) else None,
-    ):
-        _apply_blank_hint(context)
-    for parent in (breakdown, result):
-        if isinstance(parent, _MutableMappingABC):
-            for key in ("geo", "geo_context", "geom"):
-                _apply_blank_hint(parent.get(key))
-
-    for container in (
-        material if isinstance(material, _MutableMappingABC) else None,
-        material_stock_block if isinstance(material_stock_block, _MutableMappingABC) else None,
-    ):
-        _apply_blank_hint(container)
-
-    if blank_len > 0 and isinstance(material_stock_block, _MutableMappingABC):
-        if _coerce_positive_float(material_stock_block.get("required_blank_len_in")) is None:
-            material_stock_block["required_blank_len_in"] = float(blank_len)
-        if _coerce_positive_float(material_stock_block.get("required_blank_wid_in")) is None:
-            material_stock_block["required_blank_wid_in"] = float(blank_wid)
-        if required_blank[2] > 0 and _coerce_positive_float(
-            material_stock_block.get("required_blank_thk_in")
-        ) is None:
-            material_stock_block["required_blank_thk_in"] = float(required_blank[2])
-
     required_blank_len = float(blank_len) if blank_len > 0 else 0.0
     required_blank_wid = float(blank_wid) if blank_wid > 0 else 0.0
 
@@ -4512,12 +4462,23 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
                 else None
             )
 
-            if (need_len is None or need_len <= 0) and required_blank_len > 0:
-                need_len = float(required_blank_len)
-            if (need_wid is None or need_wid <= 0) and required_blank_wid > 0:
-                need_wid = float(required_blank_wid)
-            if (need_thk is None or need_thk <= 0) and required_blank[2] > 0:
-                need_thk = float(required_blank[2])
+            blank_w, blank_h, blank_thk = required_blank
+            if need_len is None or need_len <= 0:
+                if blank_w > 0 and blank_h > 0:
+                    need_len = float(max(blank_w, blank_h))
+                elif blank_w > 0:
+                    need_len = float(blank_w)
+                elif blank_h > 0:
+                    need_len = float(blank_h)
+            if need_wid is None or need_wid <= 0:
+                if blank_w > 0 and blank_h > 0:
+                    need_wid = float(min(blank_w, blank_h))
+                elif blank_w > 0 and (need_len is None or need_len != blank_w):
+                    need_wid = float(blank_w)
+                elif blank_h > 0 and (need_len is None or need_len != blank_h):
+                    need_wid = float(blank_h)
+            if (need_thk is None or need_thk <= 0) and blank_thk > 0:
+                need_thk = float(blank_thk)
 
             stock_len_val = _coerce_float_or_none(
                 material_stock_block.get("stock_L_in")
