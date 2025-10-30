@@ -323,64 +323,165 @@ def _max_linear_hw(msp) -> tuple[Optional[float], Optional[float]]:
 
 
 def _aabb_size(msp, include=None, exclude=None):
-    from ezdxf.math import BoundingBox
+    """
+    Compute an axis-aligned bounding box by explicitly walking geometry,
+    recursing into INSERTed blocks. Works even if entity.bbox() is missing.
+    Returns (dx, dy, dz) in drawing units or (None, None, None) if nothing found.
+    """
+    import math
 
-    geom_types = {
-        "LINE",
-        "LWPOLYLINE",
-        "POLYLINE",
-        "ARC",
-        "CIRCLE",
-        "ELLIPSE",
-        "SPLINE",
-        "SOLID",
-        "TRACE",
-        "INSERT",
-    }
-    anno_types = {"DIMENSION", "TEXT", "MTEXT", "TABLE", "HATCH"}
+    include_set = {s.upper() for s in include} if include else None
+    exclude_set = {s.upper() for s in exclude} if exclude else set()
 
-    def layer_ok(ent) -> bool:
-        layer = (ent.dxf.layer or "").upper()
-        if include:
-            if layer.upper() not in {s.upper() for s in include}:
-                return False
-        if exclude and layer.upper() in {s.upper() for s in exclude}:
+    # Heuristic: skip annotation-ish layers unless explicitly included
+    def layer_ok(layer: str) -> bool:
+        L = (layer or "").upper()
+        if include_set is not None and L not in include_set:
             return False
-        # heuristic: skip common annotation layers unless explicitly included
-        if not include and layer.startswith(("AM_", "DEFPOINTS", "DIM", "ANNOT", "TITLE", "BORDER", "FRAME")):
+        if L in exclude_set:
+            return False
+        if include_set is None and L.startswith(("AM_", "DEFPOINTS", "DIM", "ANNOT", "TITLE", "BORDER", "FRAME")):
             return False
         return True
 
-    bb = BoundingBox()
-    for e in msp:
-        kind = e.dxftype()
-        if kind in anno_types or kind not in geom_types:
-            continue
-        if not layer_ok(e):
-            continue
+    xmin = ymin = zmin = float("inf")
+    xmax = ymax = zmax = float("-inf")
+    found = False
+
+    def _upd(x, y, z=0.0):
+        nonlocal xmin, ymin, zmin, xmax, ymax, zmax, found
+        xmin = min(xmin, x)
+        ymin = min(ymin, y)
+        zmin = min(zmin, z)
+        xmax = max(xmax, x)
+        ymax = max(ymax, y)
+        zmax = max(zmax, z)
+        found = True
+
+    def _approx_arc(cx, cy, r, start_deg, end_deg, steps=72):
+        # robust sampling (handles start>end wrap)
+        start = math.radians(start_deg)
+        end = math.radians(end_deg)
+        if end < start:
+            end += 2 * math.pi
+        for i in range(steps + 1):
+            t = start + (end - start) * (i / steps)
+            yield (cx + r * math.cos(t), cy + r * math.sin(t))
+
+    def _approx_ellipse(ent, steps=128):
         try:
-            if kind == "INSERT":
-                for ve in e.virtual_entities():
-                    if layer_ok(ve):
-                        bb.extend(ve.bbox())
-            else:
-                bb.extend(e.bbox())
+            for p in ent.flattening(deviation=0.01, segments=steps):
+                # p is Vec3
+                yield float(p.x), float(p.y), float(p.z)
         except Exception:
+            # very defensive: sample param 0..1
+            for i in range(steps + 1):
+                try:
+                    p = ent.point_at(i / steps)
+                    yield float(p.x), float(p.y), float(p.z)
+                except Exception:
+                    break
+
+    def _approx_spline(ent, steps=128):
+        try:
+            for p in ent.approximate(steps):
+                yield float(p.x), float(p.y), float(p.z)
+        except Exception:
+            # last resort: control points
             try:
-                bb.extend(list(e.vertices()))
+                for p in ent.control_points:
+                    yield float(p.x), float(p.y), float(p.z)
             except Exception:
                 pass
 
-    if not bb.has_data:
-        return None, None, None
+    def _handle_entity(e, depth=0, max_depth=3):
+        kind = e.dxftype()
+        layer = getattr(e.dxf, "layer", "")
+        if not layer_ok(layer):
+            return
+        try:
+            if kind == "INSERT":
+                if depth >= max_depth:
+                    return
+                for ve in e.virtual_entities():
+                    _handle_entity(ve, depth + 1, max_depth)
+                return
 
-    (xmin, ymin, zmin), (xmax, ymax, zmax) = bb.extmin, bb.extmax
-    dx, dy, dz = xmax - xmin, ymax - ymin, zmax - zmin
-    return (
-        dx if dx > 1e-6 else None,
-        dy if dy > 1e-6 else None,
-        dz if dz > 1e-6 else None,
-    )
+            if kind in ("LINE",):
+                sx, sy, sz = map(float, e.dxf.start)
+                ex, ey, ez = map(float, e.dxf.end)
+                _upd(sx, sy, sz)
+                _upd(ex, ey, ez)
+                return
+
+            if kind in ("LWPOLYLINE", "POLYLINE"):
+                try:
+                    # try vertices() (POLYLINE) first
+                    for v in e.vertices():
+                        x = float(v.dxf.location.x)
+                        y = float(v.dxf.location.y)
+                        z = float(v.dxf.location.z)
+                        _upd(x, y, z)
+                except Exception:
+                    # LWPOLYLINE
+                    try:
+                        for x, y, *_ in e.get_points("xy"):
+                            _upd(float(x), float(y), 0.0)
+                    except Exception:
+                        pass
+                return
+
+            if kind == "CIRCLE":
+                cx, cy, cz = map(float, e.dxf.center)
+                r = float(e.dxf.radius)
+                _upd(cx - r, cy, cz)
+                _upd(cx + r, cy, cz)
+                _upd(cx, cy - r, cz)
+                _upd(cx, cy + r, cz)
+                return
+
+            if kind == "ARC":
+                cx, cy, cz = map(float, e.dxf.center)
+                r = float(e.dxf.radius)
+                sa = float(e.dxf.start_angle)
+                ea = float(e.dxf.end_angle)
+                for x, y in _approx_arc(cx, cy, r, sa, ea, steps=72):
+                    _upd(x, y, cz)
+                return
+
+            if kind == "ELLIPSE":
+                for x, y, z in _approx_ellipse(e):
+                    _upd(x, y, z)
+                return
+
+            if kind == "SPLINE":
+                for x, y, z in _approx_spline(e):
+                    _upd(x, y, z)
+                return
+
+            if kind in ("SOLID", "TRACE"):
+                for vx, vy, vz in e.wcs_vertices():
+                    _upd(float(vx), float(vy), float(vz))
+                return
+
+            # ignore TEXT/MTEXT/TABLE/DIMENSION/HATCH here
+        except Exception:
+            # swallow any odd entity we don't know how to sample
+            return
+
+    # Walk modelspace
+    for ent in msp:
+        _handle_entity(ent, 0, 3)
+
+    if not found:
+        return None, None, None
+    dx = xmax - xmin
+    dy = ymax - ymin
+    dz = zmax - zmin
+    dx = dx if dx > 1e-6 else None
+    dy = dy if dy > 1e-6 else None
+    dz = dz if dz > 1e-6 else None
+    return dx, dy, dz
 
 
 def infer_part_dims(
@@ -417,6 +518,7 @@ def infer_part_dims(
             include=(layer_include or preferred_layers),
             exclude=layer_exclude,
         )
+        print(f"[part-dims] aabb: dx={dx} dy={dy} dz={dz}")
     except Exception as e:
         print(f"[part-dims] aabb read failed: {e}")
         dx = dy = dz = None
@@ -425,11 +527,10 @@ def infer_part_dims(
         try:
             # broad fallback over everything if targeted pass failed
             dx, dy, dz = _aabb_size(msp, include=None, exclude=layer_exclude)
+            print(f"[part-dims] aabb: dx={dx} dy={dy} dz={dz}")
         except Exception as e:
             print(f"[part-dims] aabb fallback failed: {e}")
             dx = dy = dz = None
-
-    print(f"[part-dims] aabb: dx={dx} dy={dy} dz={dz}")
 
     # dimensions first
     ox = oy = None
