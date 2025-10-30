@@ -544,6 +544,12 @@ def infer_part_dims(
 
     doc = ezdxf.readfile(str(input_path))
     msp = doc.modelspace()
+    try:
+        layers = sorted({(e.dxf.layer or "") for e in msp})
+    except Exception as exc:
+        print(f"[part-dims] layer listing failed: {exc}")
+    else:
+        print(f"[part-dims] layers: {layers}")
     f = _insunits_to_inch_factor(doc)
 
     # --- AABB (view-targeted first, broad fallback) ---
