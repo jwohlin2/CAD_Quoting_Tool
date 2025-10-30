@@ -33,7 +33,7 @@ Dependencies (install as needed):
 
 from __future__ import annotations
 import argparse
-import io
+import base64
 import json
 import math
 import os
@@ -43,8 +43,10 @@ import shutil, subprocess
 import sys
 import tempfile
 import unicodedata
+import urllib.error
+import urllib.request
 from dataclasses import dataclass
-from typing import List, Tuple, Optional, Dict, Any
+from typing import Any, Dict, List, Optional, Tuple
 
 import matplotlib
 
@@ -70,6 +72,9 @@ except Exception:
 # Local LLM (llama.cpp) support ----------------
 _LOCAL_LLM = None
 _LOCAL_LLM_PATH: Optional[Path] = None
+
+_VLM_LOCAL_INSTANCE = None
+_VLM_LOCAL_KEY: Optional[Tuple[str, str, int]] = None
 
 
 def _detect_default_input() -> Optional[str]:
@@ -152,6 +157,180 @@ def _load_local_llm():
         return _LOCAL_LLM
 
     return None
+
+
+def _img_to_b64(path: str) -> str:
+    with open(path, "rb") as f:
+        return base64.b64encode(f.read()).decode("ascii")
+
+
+def _vlm_local_load(model_path: str, mmproj_path: str, n_ctx: int = 4096):
+    """
+    Load Qwen2.5-VL locally with llama-cpp-python (no server).
+    Requires llama-cpp-python installed and your GGUF + mmproj GGUF files.
+    """
+
+    global _VLM_LOCAL_INSTANCE, _VLM_LOCAL_KEY
+
+    try:
+        from llama_cpp import Llama  # type: ignore
+    except Exception as e:
+        raise RuntimeError("llama-cpp-python is required: pip install llama-cpp-python") from e
+
+    if not model_path or not mmproj_path:
+        raise RuntimeError("Provide --vlm-local-model and --vlm-local-mmproj for vlm_local backend.")
+
+    key = (str(Path(model_path).resolve()), str(Path(mmproj_path).resolve()), int(n_ctx))
+    if _VLM_LOCAL_INSTANCE is not None and _VLM_LOCAL_KEY == key:
+        return _VLM_LOCAL_INSTANCE
+
+    llm = Llama(
+        model_path=model_path,
+        mmproj=mmproj_path,  # critical for vision models
+        n_ctx=n_ctx,
+        logits_all=False,
+        verbose=False,
+    )
+
+    _VLM_LOCAL_INSTANCE = llm
+    _VLM_LOCAL_KEY = key
+    return llm
+
+
+def _vlm_local_transcribe_image(llm, image_path: str) -> str:
+    """
+    Ask the local VLM to transcribe all text from the image.
+    Uses OpenAI-style chat with data:image/png;base64 payload (supported by llama.cpp).
+    """
+
+    b64 = _img_to_b64(image_path)
+    prompt = "Transcribe ALL legible text exactly as printed in the drawing. Keep line breaks. No commentary."
+    resp = llm.create_chat_completion(
+        messages=[{
+            "role": "user",
+            "content": [
+                {"type": "text", "text": prompt},
+                {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{b64}"}}
+            ]
+        }],
+        temperature=0,
+    )
+    return (resp["choices"][0]["message"]["content"] or "").strip()
+
+
+def _vlm_local_extract_dims(llm, image_path: str):
+    """
+    Ask the local VLM to return STRICT JSON:
+    { "length": <num>, "width": <num>, "thickness": <num>, "units": "in|mm",
+      "candidates": [ ... ] }
+    """
+
+    import json as _json
+    import re as _re
+
+    b64 = _img_to_b64(image_path)
+    prompt = (
+        "You are reading a mechanical drawing. Identify the OVERALL STOCK SIZE / SIZE / BLANK dimensions "
+        "used for raw material selection (not feature dimensions). "
+        "Return STRICT JSON with keys: length, width, thickness, units, candidates. "
+        "Units must be 'in' or 'mm'. Numbers only. No extra text."
+    )
+    resp = llm.create_chat_completion(
+        messages=[{
+            "role": "user",
+            "content": [
+                {"type": "text", "text": prompt},
+                {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{b64}"}}
+            ]
+        }],
+        temperature=0,
+    )
+    txt = (resp["choices"][0]["message"]["content"] or "").strip()
+    m = _re.search(r"\{.*\}", txt, flags=_re.S)
+    if not m:
+        return None
+    try:
+        return _json.loads(m.group(0))
+    except Exception:
+        return None
+
+
+def _json_dims_to_synthetic_line(data: Dict[str, Any]) -> Optional[str]:
+    try:
+        units = str(data.get("units", "in") or "in").strip() or "in"
+        length = float(data.get("length", 0) or 0)
+        width = float(data.get("width", 0) or 0)
+        thickness = float(data.get("thickness", 0) or 0)
+    except (TypeError, ValueError):
+        return None
+    return f"SIZE: {length} x {width} x {thickness} {units}"
+
+
+def _build_openai_url(base: str, path: str) -> str:
+    base = base.rstrip("/")
+    return f"{base}/{path.lstrip('/')}"
+
+
+def _http_post_json(url: str, payload: Dict[str, Any], headers: Dict[str, str], timeout: int = 60) -> Dict[str, Any]:
+    data = json.dumps(payload).encode("utf-8")
+    req = urllib.request.Request(url, data=data, headers=headers, method="POST")
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            body = resp.read()
+    except urllib.error.HTTPError as e:
+        err = e.read().decode("utf-8", errors="ignore")
+        raise RuntimeError(f"VLM HTTP error {e.code}: {err or e.reason}") from e
+    except urllib.error.URLError as e:
+        raise RuntimeError(f"VLM request failed: {e.reason}") from e
+    return json.loads(body.decode("utf-8"))
+
+
+def _vlm_remote_chat(endpoint: str, model: str, prompt: str, image_path: str) -> str:
+    url = _build_openai_url(endpoint, "chat/completions")
+    b64 = _img_to_b64(image_path)
+    payload = {
+        "model": model,
+        "messages": [{
+            "role": "user",
+            "content": [
+                {"type": "text", "text": prompt},
+                {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{b64}"}}
+            ],
+        }],
+        "temperature": 0,
+        "max_tokens": 512,
+    }
+    headers = {"Content-Type": "application/json"}
+    api_key = os.getenv("VLM_API_KEY") or os.getenv("OPENAI_API_KEY")
+    if api_key:
+        headers["Authorization"] = f"Bearer {api_key}"
+    resp = _http_post_json(url, payload, headers)
+    try:
+        return (resp["choices"][0]["message"]["content"] or "").strip()
+    except (KeyError, IndexError, TypeError):
+        raise RuntimeError("Unexpected VLM response structure.")
+
+
+def _vlm_remote_transcribe_image(endpoint: str, model: str, image_path: str) -> str:
+    prompt = "Transcribe ALL legible text exactly as printed in the drawing. Keep line breaks. No commentary."
+    return _vlm_remote_chat(endpoint, model, prompt, image_path)
+
+
+def _vlm_remote_extract_dims(endpoint: str, model: str, image_path: str) -> Optional[Dict[str, Any]]:
+    prompt = (
+        "You are reading a mechanical drawing. Identify the OVERALL STOCK SIZE / SIZE / BLANK dimensions "
+        "used for raw material selection (not feature dimensions). "
+        "Return STRICT JSON with keys: length, width, thickness, units, candidates. "
+        "Units must be 'in' or 'mm'. Numbers only. No extra text."
+    )
+    txt = _vlm_remote_chat(endpoint, model, prompt, image_path)
+    m = re.search(r"\{.*\}", txt, flags=re.S)
+    if not m:
+        return None
+    try:
+        return json.loads(m.group(0))
+    except Exception:
+        return None
 # ---------- Data model ----------
 
 @dataclass
@@ -351,9 +530,57 @@ def _render_dxf_to_image(dxf_path: str, out_path: str, dpi: int = 300) -> str:
     return out_path
 
 
+def _perform_ocr_on_image_path(
+    img_path: str,
+    ocr_backend: str,
+    vlm_mode: str,
+    warnings: List[str],
+    vlm_endpoint: str,
+    vlm_model: str,
+    vlm_local_model: str,
+    vlm_local_mmproj: str,
+) -> str:
+    backend = (ocr_backend or "tesseract").lower()
+    if backend == "vlm_local":
+        llm = _vlm_local_load(vlm_local_model, vlm_local_mmproj)
+        if vlm_mode == "extract":
+            data = _vlm_local_extract_dims(llm, img_path)
+            if data:
+                synthetic = _json_dims_to_synthetic_line(data)
+                if synthetic:
+                    return _norm(synthetic)
+            warnings.append("vlm_local extract failed; falling back to transcription.")
+        text = _vlm_local_transcribe_image(llm, img_path)
+        return _norm(text)
+    if backend == "vlm":
+        if not vlm_endpoint:
+            raise RuntimeError("Provide --vlm-endpoint for vlm backend.")
+        if vlm_mode == "extract":
+            data = _vlm_remote_extract_dims(vlm_endpoint, vlm_model, img_path)
+            if data:
+                synthetic = _json_dims_to_synthetic_line(data)
+                if synthetic:
+                    return _norm(synthetic)
+            warnings.append("vlm extract failed; falling back to transcription.")
+        text = _vlm_remote_transcribe_image(vlm_endpoint, vlm_model, img_path)
+        return _norm(text)
+
+    if Image is None or pytesseract is None:
+        raise RuntimeError("Pillow + pytesseract required for OCR.")
+    img = Image.open(img_path)
+    img = _preprocess_image(img)
+    return _ocr_image(img)
+
+
 def _get_text_from_input(path: str,
                          oda_exe_cli: Optional[str] = None,
-                         oda_format: str = "PDF") -> Tuple[str, List[str]]:
+                         oda_format: str = "PDF",
+                         ocr_backend: str = "tesseract",
+                         vlm_endpoint: str = "http://127.0.0.1:8080/v1",
+                         vlm_model: str = "qwen2.5-vl-7b",
+                         vlm_mode: str = "transcribe",
+                         vlm_local_model: str = "",
+                         vlm_local_mmproj: str = "") -> Tuple[str, List[str]]:
     """Return OCR text + warnings for CAD/PDF/image inputs."""
     warnings: List[str] = []
     if not os.path.exists(path):
@@ -369,27 +596,37 @@ def _get_text_from_input(path: str,
                 "Provide --oda-exe path, or set ODA_CONVERTER_EXE env var, "
                 "or add OdaFileConverter.exe to PATH."
             )
-        if Image is None or pytesseract is None:
-            raise RuntimeError("Pillow + pytesseract required for OCR.")
         with tempfile.TemporaryDirectory(prefix="oda_img_") as tmpdir:
             dxf_out = _run_oda_to_dxf(oda_exe, path, tmpdir, out_ver="ACAD2018")
             img_path = os.path.join(tmpdir, "page.png")
             _render_dxf_to_image(dxf_out, img_path, dpi=300)
-            img = Image.open(img_path)
-            img = _preprocess_image(img)
-            txt = _ocr_image(img)
+            txt = _perform_ocr_on_image_path(
+                img_path,
+                ocr_backend,
+                vlm_mode,
+                warnings,
+                vlm_endpoint,
+                vlm_model,
+                vlm_local_model,
+                vlm_local_mmproj,
+            )
             return (txt, warnings)
 
     # DXF: DXF -> PNG -> OCR (same renderer)
     if ext == ".dxf":
-        if Image is None or pytesseract is None:
-            raise RuntimeError("Pillow + pytesseract required for OCR.")
         with tempfile.TemporaryDirectory(prefix="dxf_img_") as tmpdir:
             img_path = os.path.join(tmpdir, "page.png")
             _render_dxf_to_image(path, img_path, dpi=300)
-            img = Image.open(img_path)
-            img = _preprocess_image(img)
-            txt = _ocr_image(img)
+            txt = _perform_ocr_on_image_path(
+                img_path,
+                ocr_backend,
+                vlm_mode,
+                warnings,
+                vlm_endpoint,
+                vlm_model,
+                vlm_local_model,
+                vlm_local_mmproj,
+            )
             return (txt, warnings)
 
     # Native PDF
@@ -400,18 +637,51 @@ def _get_text_from_input(path: str,
         if not pages:
             warnings.append("No pages rendered from PDF.")
         texts: List[str] = []
-        for p in pages:
-            img = _preprocess_image(p) if Image else p
-            txt = _ocr_image(img)
-            texts.append(txt)
+        backend = (ocr_backend or "tesseract").lower()
+        if backend == "tesseract":
+            if Image is None or pytesseract is None:
+                raise RuntimeError("Pillow + pytesseract required for OCR.")
+            for p in pages:
+                img = _preprocess_image(p) if Image else p
+                txt = _ocr_image(img)
+                texts.append(txt)
+        else:
+            with tempfile.TemporaryDirectory(prefix="pdf_img_") as tmpdir:
+                for idx, p in enumerate(pages):
+                    img_path = os.path.join(tmpdir, f"page_{idx}.png")
+                    p.save(img_path, format="PNG")
+                    txt = _perform_ocr_on_image_path(
+                        img_path,
+                        ocr_backend,
+                        vlm_mode,
+                        warnings,
+                        vlm_endpoint,
+                        vlm_model,
+                        vlm_local_model,
+                        vlm_local_mmproj,
+                    )
+                    texts.append(txt)
         return ("\n".join(texts), warnings)
 
     # Raster images
-    if Image is None:
-        raise RuntimeError("Pillow not installed to load images.")
-    img = Image.open(path)
-    img = _preprocess_image(img)
-    txt = _ocr_image(img)
+    backend = (ocr_backend or "tesseract").lower()
+    if backend == "tesseract":
+        if Image is None:
+            raise RuntimeError("Pillow not installed to load images.")
+        img = Image.open(path)
+        img = _preprocess_image(img)
+        txt = _ocr_image(img)
+    else:
+        txt = _perform_ocr_on_image_path(
+            path,
+            ocr_backend,
+            vlm_mode,
+            warnings,
+            vlm_endpoint,
+            vlm_model,
+            vlm_local_model,
+            vlm_local_mmproj,
+        )
     return (txt, warnings)
 
 # ---------- Regex candidates ----------
@@ -552,7 +822,13 @@ def extract_part_dims(input_path: str,
                       prefer_stock: bool = False,
                       use_llm: bool = False,
                       oda_exe: Optional[str] = None,
-                      oda_format: str = "PDF") -> ExtractionResult:
+                      oda_format: str = "PDF",
+                      ocr_backend: str = "tesseract",
+                      vlm_endpoint: str = "http://127.0.0.1:8080/v1",
+                      vlm_model: str = "qwen2.5-vl-7b",
+                      vlm_mode: str = "transcribe",
+                      vlm_local_model: str = "",
+                      vlm_local_mmproj: str = "") -> ExtractionResult:
     """
     Extract (L, W, T) from a PDF/image drawing.
 
@@ -563,12 +839,28 @@ def extract_part_dims(input_path: str,
         use_llm: if True, and multiple candidates exist, ask LLM to pick best.
         oda_exe: optional explicit path to ODA File Converter for DWG/DXF inputs.
         oda_format: ODA output format prior to OCR (PDF/TIFF/PNG).
+        ocr_backend: "tesseract", "vlm", or "vlm_local".
+        vlm_endpoint: HTTP endpoint for OpenAI-compatible VLM server.
+        vlm_model: Model name for remote VLM.
+        vlm_mode: "transcribe" for raw text or "extract" for JSON dimension parsing.
+        vlm_local_model: Path to local GGUF vision model.
+        vlm_local_mmproj: Path to local mmproj GGUF for the model.
 
     Returns:
         ExtractionResult with best triple (if any), all candidates, raw OCR text, warnings.
     """
     warnings: List[str] = []
-    text, w = _get_text_from_input(input_path, oda_exe_cli=oda_exe, oda_format=oda_format)
+    text, w = _get_text_from_input(
+        input_path,
+        oda_exe_cli=oda_exe,
+        oda_format=oda_format,
+        ocr_backend=ocr_backend,
+        vlm_endpoint=vlm_endpoint,
+        vlm_model=vlm_model,
+        vlm_mode=vlm_mode,
+        vlm_local_model=vlm_local_model,
+        vlm_local_mmproj=vlm_local_mmproj,
+    )
     warnings += w
     if not text.strip():
         return ExtractionResult(best=None, candidates=[], ocr_text=text, warnings=warnings+["Empty OCR text."])
@@ -618,6 +910,14 @@ def _cli():
                                                 "Alternatively set ODA_CONVERTER_EXE env var or put it on PATH.")
     p.add_argument("--oda-format", choices=["PDF","TIFF","PNG"], default="PDF",
                    help="ODA output format before OCR (default PDF).")
+    p.add_argument("--ocr-backend", choices=["tesseract", "vlm", "vlm_local"], default="tesseract",
+                   help="tesseract (default), vlm (OpenAI-compatible endpoint), or vlm_local (llama.cpp in-process).")
+    p.add_argument("--vlm-endpoint", default="http://127.0.0.1:8080/v1", help="Only for --ocr-backend vlm.")
+    p.add_argument("--vlm-model", default="qwen2.5-vl-7b", help="Only for --ocr-backend vlm.")
+    p.add_argument("--vlm-local-model", default="", help="Path to GGUF, e.g., qwen2.5-vl-7b-instruct-q4_k_m.gguf")
+    p.add_argument("--vlm-local-mmproj", default="", help="Path to mmproj GGUF, e.g., mmproj-Qwen2.5-VL-7B-Instruct-f16.gguf")
+    p.add_argument("--vlm-mode", choices=["transcribe", "extract"], default="transcribe",
+                   help="Return raw text (transcribe) or JSON dims (extract). Works for vlm and vlm_local.")
     args = p.parse_args()
 
     input_path = args.input or default_input
@@ -638,7 +938,13 @@ def _cli():
             prefer_stock=args.prefer_stock,
             use_llm=args.use_llm,
             oda_exe=(args.oda_exe or None),
-            oda_format=args.oda_format
+            oda_format=args.oda_format,
+            ocr_backend=args.ocr_backend,
+            vlm_endpoint=args.vlm_endpoint,
+            vlm_model=args.vlm_model,
+            vlm_mode=args.vlm_mode,
+            vlm_local_model=args.vlm_local_model,
+            vlm_local_mmproj=args.vlm_local_mmproj,
         )
         out: Dict[str, Any] = {
             "best": None if res.best is None else {
