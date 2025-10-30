@@ -443,8 +443,8 @@ def _norm(s: str) -> str:
     s = re.sub(r"\s+", " ", s).strip()
     return s
 
-_NUM = r"(?:\d+(?:[.,]\d+)?|\d+\s*\d+/\d+)"  # 12, 12.00, 1 3/8
-_SEP = r"[xX×]"
+# 12, 12.00, .62, 1 3/8
+_NUM = r"(?:\d+(?:[.,]\d+)?|\.\d+|\d+\s*\d+/\d+)"
 
 def _parse_num(n: str) -> float:
     n = n.strip().replace(",", "")
@@ -576,7 +576,7 @@ def _run_oda_to_dxf(oda_exe: str, in_path: str, out_dir: str,
 
 # ---------- DXF -> PNG/TIFF rendering via ezdxf ----------
 
-def _render_dxf_to_image(dxf_path: str, out_path: str, dpi: int = 300) -> str:
+def _render_dxf_to_image(dxf_path: str, out_path: str, dpi: int = 600) -> str:
     """
     Render a DXF modelspace to a raster image (PNG/TIFF) using ezdxf's drawing add-on.
     Returns the path to the written image.
@@ -658,7 +658,10 @@ def _get_text_from_input(path: str,
                          vlm_model: str = "qwen2.5-vl-7b",
                          vlm_mode: str = "transcribe",
                          vlm_local_model: str = "",
-                         vlm_local_mmproj: str = "") -> Tuple[str, List[str]]:
+                         vlm_local_mmproj: str = "",
+                         emit_image: str = "",
+                         emit_ocr: str = "",
+                         verbose: bool = False) -> Tuple[str, List[str]]:
     """Return OCR text + warnings for CAD/PDF/image inputs."""
     warnings: List[str] = []
     if not os.path.exists(path):
@@ -677,34 +680,98 @@ def _get_text_from_input(path: str,
         with tempfile.TemporaryDirectory(prefix="oda_img_") as tmpdir:
             dxf_out = _run_oda_to_dxf(oda_exe, path, tmpdir, out_ver="ACAD2018")
             img_path = os.path.join(tmpdir, "page.png")
-            _render_dxf_to_image(dxf_out, img_path, dpi=300)
-            txt = _perform_ocr_on_image_path(
-                img_path,
-                ocr_backend,
-                vlm_mode,
-                warnings,
-                vlm_endpoint,
-                vlm_model,
-                vlm_local_model,
-                vlm_local_mmproj,
-            )
+            _render_dxf_to_image(dxf_out, img_path, dpi=600)
+            if emit_image:
+                try:
+                    shutil.copyfile(img_path, emit_image)
+                    print(f"[dims-ocr] saved render to {emit_image}")
+                except Exception:
+                    pass
+            backend = (ocr_backend or "tesseract").lower()
+            if backend == "vlm_local":
+                llm = _vlm_local_load(vlm_local_model, vlm_local_mmproj)
+                if vlm_mode == "extract":
+                    data = _vlm_local_extract_dims(llm, img_path)
+                    if data:
+                        units = (data.get("units") or "in").lower()
+                        L = float(data.get("length", 0))
+                        W = float(data.get("width", 0))
+                        T = float(data.get("thickness", 0))
+                        text = f"SIZE: {L} x {W} x {T} {units}"
+                    else:
+                        text = _vlm_local_transcribe_image(llm, img_path)
+                else:
+                    text = _vlm_local_transcribe_image(llm, img_path)
+                txt = _norm(text)
+            else:
+                txt = _perform_ocr_on_image_path(
+                    img_path,
+                    ocr_backend,
+                    vlm_mode,
+                    warnings,
+                    vlm_endpoint,
+                    vlm_model,
+                    vlm_local_model,
+                    vlm_local_mmproj,
+                )
+            if emit_ocr:
+                try:
+                    with open(emit_ocr, "w", encoding="utf-8") as f:
+                        f.write(txt)
+                    print(f"[dims-ocr] saved OCR/VLM text to {emit_ocr}")
+                except Exception:
+                    pass
+            if verbose:
+                print("[dims-ocr] OCR preview:", _norm(txt)[:500].replace("\n", " ⏎ "))
             return (txt, warnings)
 
     # DXF: DXF -> PNG -> OCR (same renderer)
     if ext == ".dxf":
         with tempfile.TemporaryDirectory(prefix="dxf_img_") as tmpdir:
             img_path = os.path.join(tmpdir, "page.png")
-            _render_dxf_to_image(path, img_path, dpi=300)
-            txt = _perform_ocr_on_image_path(
-                img_path,
-                ocr_backend,
-                vlm_mode,
-                warnings,
-                vlm_endpoint,
-                vlm_model,
-                vlm_local_model,
-                vlm_local_mmproj,
-            )
+            _render_dxf_to_image(path, img_path, dpi=600)
+            if emit_image:
+                try:
+                    shutil.copyfile(img_path, emit_image)
+                    print(f"[dims-ocr] saved render to {emit_image}")
+                except Exception:
+                    pass
+            backend = (ocr_backend or "tesseract").lower()
+            if backend == "vlm_local":
+                llm = _vlm_local_load(vlm_local_model, vlm_local_mmproj)
+                if vlm_mode == "extract":
+                    data = _vlm_local_extract_dims(llm, img_path)
+                    if data:
+                        units = (data.get("units") or "in").lower()
+                        L = float(data.get("length", 0))
+                        W = float(data.get("width", 0))
+                        T = float(data.get("thickness", 0))
+                        text = f"SIZE: {L} x {W} x {T} {units}"
+                    else:
+                        text = _vlm_local_transcribe_image(llm, img_path)
+                else:
+                    text = _vlm_local_transcribe_image(llm, img_path)
+                txt = _norm(text)
+            else:
+                txt = _perform_ocr_on_image_path(
+                    img_path,
+                    ocr_backend,
+                    vlm_mode,
+                    warnings,
+                    vlm_endpoint,
+                    vlm_model,
+                    vlm_local_model,
+                    vlm_local_mmproj,
+                )
+            if emit_ocr:
+                try:
+                    with open(emit_ocr, "w", encoding="utf-8") as f:
+                        f.write(txt)
+                    print(f"[dims-ocr] saved OCR/VLM text to {emit_ocr}")
+                except Exception:
+                    pass
+            if verbose:
+                print("[dims-ocr] OCR preview:", _norm(txt)[:500].replace("\n", " ⏎ "))
             return (txt, warnings)
 
     # Native PDF
@@ -739,7 +806,17 @@ def _get_text_from_input(path: str,
                         vlm_local_mmproj,
                     )
                     texts.append(txt)
-        return ("\n".join(texts), warnings)
+        combined = "\n".join(texts)
+        if emit_ocr:
+            try:
+                with open(emit_ocr, "w", encoding="utf-8") as f:
+                    f.write(combined)
+                print(f"[dims-ocr] saved OCR/VLM text to {emit_ocr}")
+            except Exception:
+                pass
+        if verbose and combined:
+            print("[dims-ocr] OCR preview:", _norm(combined)[:500].replace("\n", " ⏎ "))
+        return (combined, warnings)
 
     # Raster images
     backend = (ocr_backend or "tesseract").lower()
@@ -760,21 +837,32 @@ def _get_text_from_input(path: str,
             vlm_local_model,
             vlm_local_mmproj,
         )
+    if emit_ocr and txt:
+        try:
+            with open(emit_ocr, "w", encoding="utf-8") as f:
+                f.write(txt)
+            print(f"[dims-ocr] saved OCR/VLM text to {emit_ocr}")
+        except Exception:
+            pass
+    if verbose and txt:
+        print("[dims-ocr] OCR preview:", _norm(txt)[:500].replace("\n", " ⏎ "))
     return (txt, warnings)
 
 # ---------- Regex candidates ----------
 
+# allow up to ~40 non-digit chars between captured numbers (labels, line breaks)
+_GAP = r"(?:[^\d]{0,40})"
 _PATTERNS = [
-    # SIZE: 12.00 x 14.00 x 2.00 in
-    re.compile(fr"\bSIZE\s*[:\-]?\s*({_NUM})\s*{_SEP}\s*({_NUM})\s*{_SEP}\s*({_NUM})\s*(in|inch|inches|mm|millimeters)?\b", re.I),
+    # SIZE: 12.00 x 14.00 x 2.00 in  (robust gaps)
+    re.compile(fr"\bSIZE\s*[:\-]?{_GAP}({_NUM}){_GAP}[x×X]{_GAP}({_NUM}){_GAP}[x×X]{_GAP}({_NUM}){_GAP}(in|inch|inches|mm|millimeters)?\b", re.I|re.S),
     # STOCK: 18 x 18 x 3.5 IN
-    re.compile(fr"\bSTOCK\s*[:\-]?\s*({_NUM})\s*{_SEP}\s*({_NUM})\s*{_SEP}\s*({_NUM})\s*(in|inch|inches|mm|millimeters)?\b", re.I),
-    # L=12  W=14  T=2  (units optional nearby)
-    re.compile(fr"\bL\s*[:=]\s*({_NUM}).*?\bW\s*[:=]\s*({_NUM}).*?\bT\s*[:=]\s*({_NUM})(?:\s*(in|inch|inches|mm|millimeters))?", re.I),
-    # Plain triplet: 12 x 14 x 2 (INCH)
-    re.compile(fr"\b({_NUM})\s*{_SEP}\s*({_NUM})\s*{_SEP}\s*({_NUM})\s*(?:\((in|inch|inches|mm|millimeters)\))?\b", re.I),
-    # Title block "MATERIAL / SIZE 12 x 14 x 2"
-    re.compile(fr"\bSIZE\b.*?\b({_NUM})\s*{_SEP}\s*({_NUM})\s*{_SEP}\s*({_NUM})\b(?:\s*(in|inch|inches|mm|millimeters))?", re.I),
+    re.compile(fr"\bSTOCK\s*[:\-]?{_GAP}({_NUM}){_GAP}[x×X]{_GAP}({_NUM}){_GAP}[x×X]{_GAP}({_NUM}){_GAP}(in|inch|inches|mm|millimeters)?\b", re.I|re.S),
+    # L=12  W=14  T=2  (units optional)
+    re.compile(fr"\bL\s*[:=]\s*({_NUM}).*?\bW\s*[:=]\s*({_NUM}).*?\bT\s*[:=]\s*({_NUM})(?:\s*(in|inch|inches|mm|millimeters))?", re.I|re.S),
+    # Plain triplet possibly followed by (INCH) / (MM)
+    re.compile(fr"\b({_NUM}){_GAP}[x×X]{_GAP}({_NUM}){_GAP}[x×X]{_GAP}({_NUM}){_GAP}(?:\((in|inch|inches|mm|millimeters)\))?\b", re.I|re.S),
+    # Title-block "MATERIAL / SIZE ... 12 x 14 x 2"
+    re.compile(fr"\bSIZE\b.*?({_NUM}){_GAP}[x×X]{_GAP}({_NUM}){_GAP}[x×X]{_GAP}({_NUM})(?:{_GAP}(in|inch|inches|mm|millimeters))?", re.I|re.S),
 ]
 
 _UNIT_CANON = {
@@ -906,7 +994,10 @@ def extract_part_dims(input_path: str,
                       vlm_model: str = "qwen2.5-vl-7b",
                       vlm_mode: str = "transcribe",
                       vlm_local_model: str = "",
-                      vlm_local_mmproj: str = "") -> ExtractionResult:
+                      vlm_local_mmproj: str = "",
+                      emit_image: str = "",
+                      emit_ocr: str = "",
+                      verbose: bool = False) -> ExtractionResult:
     """
     Extract (L, W, T) from a PDF/image drawing.
 
@@ -923,6 +1014,9 @@ def extract_part_dims(input_path: str,
         vlm_mode: "transcribe" for raw text or "extract" for JSON dimension parsing.
         vlm_local_model: Path to local GGUF vision model.
         vlm_local_mmproj: Path to local mmproj GGUF for the model.
+        emit_image: Optional path to save rendered CAD image for debugging.
+        emit_ocr: Optional path to save OCR/VLM text output for debugging.
+        verbose: If True, print a short preview of OCR text.
 
     Returns:
         ExtractionResult with best triple (if any), all candidates, raw OCR text, warnings.
@@ -938,6 +1032,9 @@ def extract_part_dims(input_path: str,
         vlm_mode=vlm_mode,
         vlm_local_model=vlm_local_model,
         vlm_local_mmproj=vlm_local_mmproj,
+        emit_image=emit_image,
+        emit_ocr=emit_ocr,
+        verbose=verbose,
     )
     warnings += w
     if not text.strip():
@@ -1001,6 +1098,9 @@ def _cli():
     p.add_argument("--vlm-local-mmproj", default=default_mmproj_path or "", help="Path to mmproj GGUF, e.g., mmproj-Qwen2.5-VL-7B-Instruct-f16.gguf")
     p.add_argument("--vlm-mode", choices=["transcribe", "extract"], default="transcribe",
                    help="Return raw text (transcribe) or JSON dims (extract). Works for vlm and vlm_local.")
+    p.add_argument("--emit-image", default="", help="If set, save the rendered PNG/TIFF here for debugging.")
+    p.add_argument("--emit-ocr", default="", help="If set, save the OCR/VLM text here for debugging.")
+    p.add_argument("--verbose", action="store_true", help="Print a short preview of OCR text.")
     args = p.parse_args()
 
     input_path = args.input or default_input
@@ -1028,6 +1128,9 @@ def _cli():
             vlm_mode=args.vlm_mode,
             vlm_local_model=args.vlm_local_model,
             vlm_local_mmproj=args.vlm_local_mmproj,
+            emit_image=args.emit_image,
+            emit_ocr=args.emit_ocr,
+            verbose=args.verbose,
         )
         out: Dict[str, Any] = {
             "best": None if res.best is None else {
