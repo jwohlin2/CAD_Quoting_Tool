@@ -269,6 +269,20 @@ DUMMY_QUOTE_RESULT = {
                 },
             }
         },
+        "bucket_minutes_detail": {
+            "milling": 360.0,
+            "drilling": 90.0,
+            "grinding": 120.0,
+            "finishing_deburr": 60.0,
+            "inspection": 45.0,
+        },
+        "bucket_minutes_detail_for_render": {
+            "milling": 360.0,
+            "drilling": 90.0,
+            "grinding": 120.0,
+            "finishing_deburr": 60.0,
+            "inspection": 45.0,
+        },
         "hour_summary": {
             "order": [
                 "milling",
@@ -350,6 +364,7 @@ DUMMY_QUOTE_RESULT = {
             "Shipping": 65.0,
             "Consumables": 35.0,
         },
+        "pass_through_total": 520.0,
         "pass_meta": {},
         "totals": {
             "labor_cost": 1260.0,
