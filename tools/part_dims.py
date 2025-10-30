@@ -8,7 +8,7 @@ import math
 import re
 import sys
 from pathlib import Path
-from typing import Dict, Iterable, List, Optional, Sequence, Tuple
+from typing import Dict, Iterable, List, Optional, Sequence
 
 
 def _read_texts(
@@ -154,76 +154,62 @@ def _float_from_text(s: str) -> Optional[float]:
         return None
 
 
-def _max_ordinate_xy(msp) -> Tuple[Optional[float], Optional[float]]:
+def _max_ordinate_xy(msp) -> tuple[Optional[float], Optional[float]]:
     """
-    Get max X and max Y from ORDinate DIMENSIONs.
-    Strategy:
-      - Identify ORDinate by bit 64 in dim.dxf.dimtype.
-      - Axis hint: many CADs store X/Y axis in dxf.azin (0=X, 1=Y). If missing, we guess by the leader vector.
-      - Value: prefer dim.get_measurement(), fall back to text/virtual entities when necessary.
-    Returns (max_x, max_y) in drawing units, or (None, None) if not found.
+    Return (max_x, max_y) from ORDinate dimensions.
+    Uses get_measurement() when available; if missing, derives from defpoint -> defpoint2.
+    axis hint: dxf.azin (0=X, 1=Y) when present; else infer by the larger component of the vector.
+    Values returned in drawing units.
     """
     max_x = None
     max_y = None
 
     for dim in msp.query("DIMENSION"):
+        # keep only ordinates
         try:
             dt = int(dim.dxf.dimtype)
         except Exception:
             continue
-
-        # ORDinate bit is 64
-        if not (dt & 64):
+        if not (dt & 64):  # 64-bit indicates ORDinate
             continue
 
-        # axis: 0 = X-ordinate, 1 = Y-ordinate (AM/AutoCAD stores this in AZIN sometimes)
-        axis = getattr(dim.dxf, "azin", None)  # may not exist
-
-        # prefer numeric measurement
+        # try the numeric value first
         val = None
         try:
             val = float(dim.get_measurement())
         except Exception:
             val = None
 
-        if val is None:
-            txt = (dim.dxf.text or "").strip()
-            if txt and txt != "<>":
-                m = re.search(r"([-+]?\d+(?:\.\d+)?)", txt)
-                if m:
-                    val = _float_from_text(m.group(1))
+        axis = getattr(dim.dxf, "azin", None)  # 0=X, 1=Y (often set by AM)
 
-        # last resort: look inside the rendered/virtual block
         if val is None:
+            # derive from defpoints
             try:
-                for e in dim.virtual_entities():
-                    if e.dxftype() in ("TEXT", "MTEXT"):
-                        s = e.dxf.text if e.dxftype() == "TEXT" else e.plain_text()
-                        m2 = re.search(r"([-+]?\d+(?:\.\d+)?)", s)
-                        if m2:
-                            val = _float_from_text(m2.group(1))
-                            break
+                p1 = dim.dxf.defpoint
+                p2 = getattr(dim.dxf, "defpoint2", None)
+                if p2:
+                    dx = abs(float(p2[0]) - float(p1[0]))
+                    dy = abs(float(p2[1]) - float(p1[1]))
+
+                    if axis is None:
+                        # infer the axis by dominant component
+                        axis = 0 if dx >= dy else 1
+                        val = dx if axis == 0 else dy
+                    else:
+                        val = dx if axis == 0 else dy
             except Exception:
                 pass
 
         if val is None:
             continue
 
-        # If axis unknown, try to infer: compare the absolute of extension vector components if available
-        if axis is None:
-            try:
-                # tip: many ORD dims use defpoint/defpoint2; the bigger delta usually indicates the axis
-                p1 = dim.dxf.defpoint
-                p2 = getattr(dim.dxf, "defpoint2", None)
-                if p2:
-                    dx, dy = abs(p2[0] - p1[0]), abs(p2[1] - p1[1])
-                    axis = 0 if dx >= dy else 1
-            except Exception:
-                axis = 0  # default to X if we can’t tell
-
         if axis == 0:
             max_x = val if max_x is None else max(max_x, val)
+        elif axis == 1:
+            max_y = val if max_y is None else max(max_y, val)
         else:
+            # no axis hint: record both candidates conservatively
+            max_x = val if max_x is None else max(max_x, val)
             max_y = val if max_y is None else max(max_y, val)
 
     return max_x, max_y
@@ -342,6 +328,40 @@ def _max_linear_hw(
         max_v = pref_v if max_v is None else max(max_v, pref_v)
 
     return max_h, max_v
+
+
+def _thickness_from_linear(
+    msp, aabb_dx: Optional[float] = None, aabb_dy: Optional[float] = None
+) -> Optional[float]:
+    """
+    Pick a plausible thickness from linear dims:
+    - horizontal linear/aligned (base 0/1)
+    - value in [0.1, 6.0] drawing units
+    - much smaller than both AABB axes (to avoid picking overall dims)
+    """
+
+    T = None
+    for dim in msp.query("DIMENSION"):
+        try:
+            dt = int(dim.dxf.dimtype)
+        except Exception:
+            continue
+        base = dt & 7  # 0=linear(rotated), 1=aligned
+        if base not in (0, 1):
+            continue
+        try:
+            val = float(dim.get_measurement())
+        except Exception:
+            continue
+        if val < 0.1 or val > 6.0:
+            continue
+        # gate with AABB if available
+        if aabb_dx and val > 0.2 * aabb_dx:  # clearly not thickness
+            continue
+        if aabb_dy and val > 0.2 * aabb_dy:
+            continue
+        T = val if T is None else min(T, val)  # take the smallest plausible
+    return T
 
 
 def _aabb_size(msp, include=None, exclude=None):
@@ -524,6 +544,12 @@ def infer_part_dims(
 
     doc = ezdxf.readfile(str(input_path))
     msp = doc.modelspace()
+    try:
+        layers = sorted({(e.dxf.layer or "") for e in msp})
+    except Exception as exc:
+        print(f"[part-dims] layer listing failed: {exc}")
+    else:
+        print(f"[part-dims] layers: {layers}")
     f = _insunits_to_inch_factor(doc)
 
     # --- AABB (view-targeted first, broad fallback) ---
@@ -603,13 +629,20 @@ def infer_part_dims(
     else:
         L = W = None
 
-    # thickness after text parse (with strict keywords)
+    # thickness sourcing: text keywords -> linear dims -> geometry fallback
     T: Optional[float] = None
     lines = _read_texts(text_csv, text_jsonl) if (text_csv or text_jsonl) else []
     if lines:
         T = _parse_thickness_from_text(lines)
         if T is not None:
             print(f"[part-dims] thickness from text: {T:.4f} in")
+    if T is None:
+        thk_units = _thickness_from_linear(msp, dx, dy)
+        if thk_units is not None:
+            T = thk_units * f
+            if not source:
+                source = "lin"
+            print(f"[part-dims] thickness from linear: {T:.4f} in")
     if T is None and dz:
         T = dz * f
         source = source or "aabb"

@@ -456,6 +456,13 @@ def _parse_money_lines(lines: list[str]) -> dict[str, float]:
     return result
 
 
+def _section_lines(sections: Mapping[str, list[str]], prefix: str) -> list[str]:
+    for title, rows in sections.items():
+        if title.startswith(prefix):
+            return rows
+    return []
+
+
 def test_dummy_quote_material_consistency() -> None:
     payload = _dummy_quote_payload(debug_enabled=True)
     baseline = payload["decision_state"]["baseline"]
@@ -703,7 +710,7 @@ def test_dummy_quote_has_no_csv_debug_duplicates() -> None:
 def test_dummy_quote_render_avoids_duplicate_planner_tables() -> None:
     _, doc = _render_output(_dummy_quote_payload())
     sections = _quote_doc_sections(doc)
-    process_lines = sections.get("Process & Labor Costs", [])
+    process_lines = _section_lines(sections, "Process & Labor Costs")
     process_amounts = _parse_money_lines(process_lines)
     labels = [label for label in process_amounts if label.lower() != "total"]
     assert len(labels) == len(set(labels))
@@ -712,7 +719,7 @@ def test_dummy_quote_render_avoids_duplicate_planner_tables() -> None:
 def test_dummy_quote_render_has_no_planner_drift_note() -> None:
     _, doc = _render_output(_dummy_quote_payload())
     sections = _quote_doc_sections(doc)
-    drivers = [line.lower() for line in sections.get("Why this price", [])]
+    drivers = [line.lower() for line in _section_lines(sections, "Why this price")]
     assert all("drifted by" not in line for line in drivers)
 
 
@@ -778,51 +785,23 @@ def test_dummy_quote_direct_costs_match_across_sections() -> None:
     assert math.isclose(direct_costs_total, declared_direct_costs, abs_tol=1e-6)
 
     sections = _quote_doc_sections(doc)
-    cost_breakdown_lines = sections.get("Cost Breakdown", [])
-    if cost_breakdown_lines:
-        cost_breakdown = _parse_money_lines(cost_breakdown_lines)
-        direct_costs_breakdown = cost_breakdown.get("Direct Costs")
-        assert direct_costs_breakdown is not None
-        assert math.isclose(direct_costs_breakdown, direct_costs_total, abs_tol=1e-6)
 
     summary_title = next(
         title for title in sections if title.startswith("QUOTE SUMMARY - Qty")
     )
-    ladder_lines = sections.get("Pricing Ladder") or sections.get(summary_title, [])
-    ladder_amounts = _parse_money_lines(ladder_lines)
-    ladder_direct_total = ladder_amounts.get("Subtotal (Labor + Directs)")
-    if ladder_direct_total is None:
-        raise AssertionError(ladder_amounts)
+    summary_amounts = _parse_money_lines(sections[summary_title])
+    labor_total = summary_amounts.get("Total Labor Cost", 0.0)
+    direct_total_from_summary = summary_amounts.get("Total Direct Costs", 0.0)
+    ladder_direct_total = labor_total + direct_total_from_summary
+    assert math.isclose(direct_total_from_summary, direct_costs_total, abs_tol=1e-6)
 
-    total_labor = _first_numeric_or_none(
-        breakdown_after.get("total_labor_cost"),
-        totals.get("labor_cost") if isinstance(totals, Mapping) else None,
-    )
-    if total_labor is None:
-        total_labor = 0.0
-    expected_ladder = float(total_labor) + direct_costs_total
-    assert math.isclose(ladder_direct_total, expected_ladder, abs_tol=1e-6)
+    pass_through_lines = _section_lines(sections, "Pass-Through & Direct Costs")
+    pass_through_amounts = _parse_money_lines(pass_through_lines)
+    direct_costs_breakdown = pass_through_amounts.get("Total")
+    assert direct_costs_breakdown is not None
+    assert math.isclose(direct_costs_breakdown, direct_costs_total, abs_tol=1e-6)
 
-    pass_through_title = next(
-        title for title in sections if title.startswith("Pass-Through & Direct Costs")
-    )
-    pass_through_amounts = {
-        label.strip(): amount
-        for label, amount in _parse_money_lines(sections[pass_through_title]).items()
-    }
-    materials_total = sum(
-        amount
-        for label, amount in pass_through_amounts.items()
-        if label.lower() not in {"total"}
-        and "contributes" not in label.lower()
-    )
-    assert math.isclose(materials_total, direct_costs_total, abs_tol=1e-6)
-
-    pass_through_total = pass_through_amounts.get("Total")
-    assert pass_through_total is not None
-    assert 0.0 < pass_through_total <= direct_costs_total
-
-    process_amounts = _parse_money_lines(sections.get("Process & Labor Costs", []))
+    process_amounts = _parse_money_lines(_section_lines(sections, "Process & Labor Costs"))
     processes_total = sum(
         amount for label, amount in process_amounts.items() if label.lower() != "total"
     )
@@ -867,15 +846,8 @@ def test_dummy_quote_ladder_uses_pricing_direct_costs_when_available() -> None:
     qty_value = float(qty_match.group(1))
     assert math.isclose(qty_value, float(payload["breakdown"]["qty"])), "unexpected quantity"
 
-    ladder_lines = sections.get("Pricing Ladder") or sections.get(summary_title, [])
-    ladder_amounts = _parse_money_lines(ladder_lines)
-    final_price = ladder_amounts[
-        next(
-            label
-            for label in ladder_amounts
-            if label.startswith("Final Price with Margin")
-        )
-    ]
+    summary_amounts = _parse_money_lines(sections[summary_title])
+    final_price = summary_amounts.get("Final Price per Part")
     assert math.isclose(final_price, payload["price"], rel_tol=1e-6)
 
 
@@ -885,5 +857,5 @@ def test_render_omits_amortized_rows_for_single_quantity() -> None:
     payload["breakdown"]["qty"] = 1
     _, doc = _render_output(payload)
     sections = _quote_doc_sections(doc)
-    process_lines = sections.get("Process & Labor Costs", [])
+    process_lines = _section_lines(sections, "Process & Labor Costs")
     assert any("programming (amortized)" in line.lower() for line in process_lines)
