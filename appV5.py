@@ -3496,9 +3496,6 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
 
     # Optional: LLM decision bullets can be placed either on result or breakdown
     llm_notes = (result.get("llm_notes") or breakdown.get("llm_notes") or [])[:8]
-    notes_order = [
-        str(note).strip() for note in llm_notes if str(note).strip()
-    ]
 
     # ---- helpers -------------------------------------------------------------
     divider = "-" * int(page_width)
