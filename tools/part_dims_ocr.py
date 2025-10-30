@@ -47,6 +47,7 @@ import urllib.error
 import urllib.request
 from dataclasses import dataclass
 from typing import Any, Dict, Iterable, List, Optional, Tuple
+from typing import Any, Dict, Iterable, List, Optional, Tuple
 
 import matplotlib
 
@@ -390,6 +391,30 @@ def _iter_model_candidates() -> List[Path]:
             seen.add(cand)
             uniq.append(cand)
     return uniq
+
+
+def _detect_default_debug_outputs() -> tuple[str, str, str]:
+    """Return default paths for emitted debug artifacts (image, OCR text, JSON)."""
+
+    base_dir = Path("D:/CAD_Quoting_Tool/debug")
+    image_path = base_dir / "dwg_render.png"
+    text_path = base_dir / "dwg_text.txt"
+    json_path = base_dir / "dims.json"
+    return str(image_path), str(text_path), str(json_path)
+
+
+def _ensure_parent_dir(path: str) -> None:
+    """Ensure parent directory exists for the given file path."""
+
+    if not path:
+        return
+    try:
+        Path(path).expanduser().resolve(strict=False).parent.mkdir(parents=True, exist_ok=True)
+    except Exception:
+        try:
+            Path(path).expanduser().parent.mkdir(parents=True, exist_ok=True)
+        except Exception:
+            pass
 
 
 def _load_local_llm():
@@ -961,6 +986,7 @@ def _get_text_from_input(path: str,
         combined = "\n".join(texts)
         if emit_ocr:
             try:
+                _ensure_parent_dir(emit_ocr)
                 with open(emit_ocr, "w", encoding="utf-8") as f:
                     f.write(combined)
                 print(f"[dims-ocr] saved OCR/VLM text to {emit_ocr}")
@@ -991,6 +1017,7 @@ def _get_text_from_input(path: str,
         )
     if emit_ocr and txt:
         try:
+            _ensure_parent_dir(emit_ocr)
             with open(emit_ocr, "w", encoding="utf-8") as f:
                 f.write(txt)
             print(f"[dims-ocr] saved OCR/VLM text to {emit_ocr}")
@@ -1225,39 +1252,74 @@ def extract_part_dims(input_path: str,
 # ---------- CLI ----------
 
 def _cli():
-    default_input = _detect_default_input()
-    default_oda_exe = _detect_default_oda_exe()
-    default_json_out = "dims.json"
+    hardwired_input = str(Path("D:/CAD_Quoting_Tool/Cad Files/301_redacted.dwg"))
+    default_input = _detect_default_input() or hardwired_input
+
+    hardwired_oda_exe = str(Path("C:/Program Files/ODA/OdaFileConverter.exe"))
+    default_oda_exe = _detect_default_oda_exe() or hardwired_oda_exe
+
+    detected_model_path, detected_mmproj_path = _detect_default_vlm_local_assets()
+    default_model_path = detected_model_path or str(
+        Path("D:/CAD_Quoting_Tool/models/qwen2.5-vl-7b-instruct-q4_k_m.gguf")
+    )
+    default_mmproj_path = detected_mmproj_path or str(
+        Path("D:/CAD_Quoting_Tool/models/mmproj-Qwen2.5-VL-7B-Instruct-f16.gguf")
+    )
+
+    default_emit_image, default_emit_ocr, default_json_out = _detect_default_debug_outputs()
+    default_ocr_backend = "vlm_local"
 
     p = argparse.ArgumentParser(
         description="Extract part L/W/T from drawing via OCR (with optional LLM arbitration)."
     )
+
     input_help = "Path to PDF or image."
     if default_input:
         input_help += f" (default: {default_input})"
     else:
         input_help += " (default: first PDF/image found in 'Cad Files' or 'debug')"
+    json_out_help = f"Optional: write result JSON here (default: {default_json_out})."
+    if default_oda_exe:
+        oda_help = (
+            f"Path to ODA File Converter executable (default: {default_oda_exe}). "
+            "Alternatively set ODA_CONVERTER_EXE env var or put it on PATH."
+        )
+    else:
+        oda_help = "Path to ODA File Converter executable. Alternatively set ODA_CONVERTER_EXE env var or put it on PATH."
+    ocr_backend_help = (
+        "OCR backend: tesseract (pytesseract), vlm (remote OpenAI-compatible endpoint), "
+        "or vlm_local (local llama.cpp). Defaults to vlm_local so you can just run the script."
+    )
+    emit_image_help = (
+        f"If set, save the rendered PNG/TIFF here for debugging (default: {default_emit_image})."
+    )
+    emit_ocr_help = (
+        f"If set, save the OCR/VLM text here for debugging (default: {default_emit_ocr})."
+    )
+    verbose_help = "Print a short preview of OCR text (default: enabled; use --no-verbose to disable)."
+
     p.add_argument("--input", default=default_input, help=input_help)
     p.add_argument("--units", choices=["auto", "in", "mm"], default="auto", help="Units preference (default auto).")
     p.add_argument("--prefer-stock", action="store_true", help="Bias lines starting with STOCK.")
     p.add_argument("--use-llm", action="store_true", help="If multiple candidates, ask LLM to pick best (requires OPENAI_API_KEY/local model).")
-    p.add_argument("--json-out", default=default_json_out, help="Optional: write result JSON here.")
-    p.add_argument("--oda-exe", default=default_oda_exe or "", help="Path to ODA File Converter executable. "
-                                                "Alternatively set ODA_CONVERTER_EXE env var or put it on PATH.")
+    p.add_argument("--json-out", default=default_json_out, help=json_out_help)
+    p.add_argument("--oda-exe", default=default_oda_exe or "", help=oda_help)
     p.add_argument("--oda-format", choices=["PDF","TIFF","PNG"], default="PDF",
                    help="ODA output format before OCR (default PDF).")
-    p.add_argument("--ocr-backend", choices=["vlm_local"], default="vlm_local")
+    p.add_argument("--ocr-backend", choices=["tesseract", "vlm", "vlm_local"], default=default_ocr_backend, help=ocr_backend_help)
     p.add_argument("--vlm-endpoint", default="http://127.0.0.1:8080/v1", help="Only for --ocr-backend vlm.")
     p.add_argument("--vlm-model", default="qwen2.5-vl-7b", help="Only for --ocr-backend vlm.")
-    p.add_argument("--vlm-local-model", required=True, help="Path to qwen2.5-vl-*.gguf")
-    p.add_argument("--vlm-local-mmproj", required=True, help="Path to mmproj-*.gguf")
+    p.add_argument("--vlm-local-model", default=default_model_path or "", help="Path to qwen2.5-vl-*.gguf")
+    p.add_argument("--vlm-local-mmproj", default=default_mmproj_path or "", help="Path to mmproj-*.gguf")
     p.add_argument("--vlm-mode", choices=["transcribe", "extract"], default="transcribe",
                    help="Return raw text (transcribe) or JSON dims (extract). Works for vlm and vlm_local.")
-    p.add_argument("--emit-image", default="", help="Save rendered PNG/crops here (prefix).")
-    p.add_argument("--emit-ocr", default="", help="If set, save the OCR/VLM text here for debugging.")
-    p.add_argument("--verbose", action="store_true", help="Print a short preview of OCR text.")
+    p.add_argument("--emit-image", default=default_emit_image, help=emit_image_help)
+    p.add_argument("--emit-ocr", default=default_emit_ocr, help=emit_ocr_help)
+    p.add_argument("--verbose", action="store_true", dest="verbose", help=verbose_help)
+    p.add_argument("--no-verbose", action="store_false", dest="verbose", help="Disable OCR preview output.")
     p.add_argument("--plan-crop", default="0,0,0.72,1.0", help="left,top,right,bottom as fractions (plan/top view)")
     p.add_argument("--side-crop", default="0.72,0,1.0,1.0", help="left,top,right,bottom as fractions (side view)")
+    p.set_defaults(verbose=True)
     args = p.parse_args()
 
     input_path = args.input or default_input
@@ -1309,6 +1371,7 @@ def _cli():
             "warnings": res.warnings,
         }
         if args.json_out:
+            _ensure_parent_dir(args.json_out)
             with open(args.json_out, "w", encoding="utf-8") as f:
                 json.dump(out, f, indent=2)
             print(f"[dims] wrote {args.json_out}")
