@@ -77,26 +77,7 @@ from fractions import Fraction
 from cad_quoter.app._value_utils import (
     _format_value,
 )
-from typing import Any as _AnyForCoerce
-
-
-def _coerce_positive_float(value: _AnyForCoerce) -> float | None:
-    """Best-effort positive finite float coercion without importing utils early.
-
-    Avoids a circular import between utils.numeric and domain_models.values at
-    app startup by providing a local fallback.
-    """
-
-    try:
-        number = float(value)
-    except Exception:
-        return None
-    try:
-        if not math.isfinite(number):
-            return None
-    except Exception:
-        pass
-    return number if number > 0 else None
+from cad_quoter.utils.numeric import coerce_positive_float as _coerce_positive_float
 
 
 _MM_DIM_TOKEN = re.compile(
