@@ -3426,9 +3426,6 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
     if geo_context is None and isinstance(geometry, _MappingABC):
         geo_context = geometry
 
-    # Optional: LLM decision bullets can be placed either on result or breakdown
-    llm_notes = (result.get("llm_notes") or breakdown.get("llm_notes") or [])[:8]
-
     # ---- helpers -------------------------------------------------------------
     divider = "-" * int(page_width)
 
@@ -7587,16 +7584,6 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
     row("= Subtotal before Margin:", subtotal_before_margin)
     row(f"Final Price with Margin ({_pct(applied_pcts.get('MarginPct'))}):", price)
     _push(lines, "")
-
-    # ---- LLM adjustments bullets (optional) ---------------------------------
-    if llm_notes:
-        _push(lines, "LLM Adjustments")
-        _push(lines, divider)
-        import textwrap as _tw
-        for n in llm_notes:
-            for w in _tw.wrap(str(n), width=page_width):
-                _push(lines, f"- {w}")
-        _push(lines, "")
 
     if not explanation_lines:
         plan_info_for_explainer: Mapping[str, Any] | None = None
