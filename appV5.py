@@ -2909,9 +2909,6 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
         prefer_removal_drilling_hours = True
     else:
         prefer_removal_drilling_hours = bool(prefer_removal_drilling_hours)
-    stock_price_source = getattr(cfg, "stock_price_source", None)
-    scrap_price_source = getattr(cfg, "scrap_price_source", None)
-
     totals       = breakdown.get("totals", {}) or {}
     if not isinstance(totals, dict):
         try:
