@@ -7,3 +7,9 @@ debug/
 
 # IDE/editor configs
 .vscode/
+models/mmproj-Qwen2.5-VL-3B-Instruct-Q8_0.gguf
+models/Qwen2.5-VL-3B-Instruct-Q4_K_M.gguf
+models/Qwen2.5-VL-7B-Instruct-mmproj-f16.gguf
+.gitignore
+tools/__pycache__/part_dims_ocr.cpython-311.pyc
+models/qwen2.5-vl-7b-instruct-q4_k_m.gguf
