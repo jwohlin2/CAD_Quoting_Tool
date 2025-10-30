@@ -9149,17 +9149,35 @@ def compute_quote_from_df(  # type: ignore[reportGeneralTypeIssues]
         material_total_for_why = float(material_display_amount)
         material_net_cost = float(material_total_direct_cost)
 
-    breakdown.setdefault("pass_through_total", 0.0)
+    def _pass_through_total_for_render(
+        container: Mapping[str, Any] | None,
+    ) -> float:
+        if not isinstance(container, _MappingABC):
+            return 0.0
+        return _safe_float(container.get("pass_through_total"))
 
-    bucket_minutes_detail_raw = breakdown.setdefault("bucket_minutes_detail", {})
-    if isinstance(bucket_minutes_detail_raw, dict):
-        bucket_minutes_detail_for_render = bucket_minutes_detail_raw
-    elif isinstance(bucket_minutes_detail_raw, _MappingABC):
-        bucket_minutes_detail_for_render = dict(bucket_minutes_detail_raw)
-        breakdown["bucket_minutes_detail"] = bucket_minutes_detail_for_render
-    else:
-        bucket_minutes_detail_for_render = {}
-        breakdown["bucket_minutes_detail"] = bucket_minutes_detail_for_render
+    def _bucket_minutes_detail_for_render_from(
+        container: Mapping[str, Any] | None,
+    ) -> dict[str, Any]:
+        if not isinstance(container, _MappingABC):
+            return {}
+        raw_value = container.get("bucket_minutes_detail")
+        if isinstance(raw_value, dict):
+            return dict(raw_value)
+        if isinstance(raw_value, _MappingABC):
+            try:
+                return dict(raw_value)
+            except Exception:
+                return {str(key): raw_value[key] for key in raw_value.keys()}
+        return {}
+
+    pass_through_total_for_render = _pass_through_total_for_render(
+        breakdown if isinstance(breakdown, _MappingABC) else None
+    )
+
+    bucket_minutes_detail_for_render = _bucket_minutes_detail_for_render_from(
+        breakdown if isinstance(breakdown, _MappingABC) else None
+    )
 
     family = None
     if isinstance(geo_payload, _MappingABC):
