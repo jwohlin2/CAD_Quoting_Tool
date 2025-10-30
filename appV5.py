@@ -78,44 +78,9 @@ from cad_quoter.app._value_utils import (
     _format_value,
 )
 from cad_quoter.utils.numeric import coerce_positive_float as _coerce_positive_float
+from cad_quoter.utils.machining import parse_length_to_mm
 
 
-_MM_DIM_TOKEN = re.compile(
-    r"(?:Ø|⌀|DIA|REF)?\s*((?:\d+\s*/\s*\d+)|(?:\d+(?:\.\d+)?))\s*(?:MM|MILLIM(?:E|E)T(?:E|)RS?)",
-    re.IGNORECASE,
-)
-
-
-def _parse_dim_to_mm(value: Any) -> float | None:
-    """Parse a dimension string containing millimeter units to a float value."""
-
-    if value is None:
-        return None
-    if isinstance(value, (int, float)):
-        try:
-            mm_val = float(value)
-        except Exception:
-            return None
-        return mm_val if math.isfinite(mm_val) and mm_val > 0 else None
-
-    text = str(value).strip()
-    if not text:
-        return None
-
-    match = _MM_DIM_TOKEN.search(text)
-    if not match:
-        return None
-
-    token = match.group(1).replace(" ", "")
-    try:
-        if "/" in token:
-            mm_val = float(Fraction(token))
-        else:
-            mm_val = float(token)
-    except Exception:
-        return None
-
-    return mm_val if math.isfinite(mm_val) and mm_val > 0 else None
 from cad_quoter.app.chart_lines import (
     collect_chart_lines_context as _collect_chart_lines_context,
 )
@@ -1701,7 +1666,7 @@ def _drilling_groups_from_ops_summary(
             else:
                 diameter_in = _parse_ref_to_inch(raw_label)
                 if diameter_in is None:
-                    dia_mm = _parse_dim_to_mm(raw_label)
+                    dia_mm = _coerce_positive_float(parse_length_to_mm(raw_label))
                     diameter_in = (dia_mm / 25.4) if dia_mm else None
             if diameter_in is None or not math.isfinite(diameter_in) or diameter_in <= 0:
                 continue
