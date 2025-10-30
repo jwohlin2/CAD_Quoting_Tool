@@ -425,7 +425,7 @@ def _quote_doc_from_text(text: str, divider: str = "-" * 74) -> QuoteDoc:
 
 
 def _render_output(
-    payload: dict, *, drop_planner_display: bool = False
+    payload: dict, *, drop_planner_display: bool = False, debug_enabled: bool = False
 ) -> tuple[list[str], QuoteDoc]:
     if drop_planner_display:
         payload = copy.deepcopy(payload)
@@ -435,7 +435,11 @@ def _render_output(
             breakdown.pop("planner_bucket_rollup", None)
             breakdown.pop("planner_bucket_display_map", None)
             breakdown.pop("process_plan", None)
-    rendered = appV5.render_quote(payload, currency="$")
+    rendered = appV5.render_quote(
+        payload,
+        currency="$",
+        debug_enabled=debug_enabled,
+    )
     return rendered.splitlines(), _quote_doc_from_text(rendered)
 
 
@@ -738,6 +742,16 @@ def test_dummy_quote_render_avoids_duplicate_planner_tables() -> None:
     process_amounts = _parse_money_lines(process_lines)
     labels = [label for label in process_amounts if label.lower() != "total"]
     assert len(labels) == len(set(labels))
+
+
+def test_dummy_quote_render_hides_planner_diagnostics_by_default() -> None:
+    lines, _ = _render_output(_dummy_quote_payload())
+    assert all("Planner diagnostics" not in line for line in lines)
+
+
+def test_dummy_quote_render_shows_planner_diagnostics_when_debug_enabled() -> None:
+    lines, _ = _render_output(_dummy_quote_payload(), debug_enabled=True)
+    assert any("Planner diagnostics" in line for line in lines)
 
 
 def test_dummy_quote_render_has_no_planner_drift_note() -> None:

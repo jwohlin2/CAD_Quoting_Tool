@@ -2847,6 +2847,7 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
     page_width: int = 74,
     cfg: QuoteConfiguration | None = None,
     geometry: Mapping[str, Any] | None = None,
+    debug_enabled: bool = False,
 ) -> str:
     """Pretty printer for a full quote with auto-included non-zero lines."""
 
@@ -3637,16 +3638,20 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
                 return meta_override
         return None
 
-    llm_debug_enabled_flag = bool(APP_ENV.llm_debug_enabled)
+    debug_enabled = bool(debug_enabled)
+    llm_debug_enabled_flag = False
 
-    if not llm_debug_enabled_flag:
-        for source in (result, breakdown):
-            override = _resolve_llm_debug_override(
-                source if isinstance(source, _MappingABC) else None
-            )
-            if override is not None:
-                llm_debug_enabled_flag = override
-                break
+    if debug_enabled:
+        llm_debug_enabled_flag = bool(APP_ENV.llm_debug_enabled)
+
+        if not llm_debug_enabled_flag:
+            for source in (result, breakdown):
+                override = _resolve_llm_debug_override(
+                    source if isinstance(source, _MappingABC) else None
+                )
+                if override is not None:
+                    llm_debug_enabled_flag = override
+                    break
 
     # ---- header --------------------------------------------------------------
     class _QuoteLines(list[str]):
@@ -6008,7 +6013,7 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
 
         return additions
 
-    if bucket_table_rows:
+    if debug_enabled and bucket_table_rows:
         render_bucket_table(bucket_table_rows)
 
     amortized_overrides = _prepare_amortized_details()
@@ -16122,6 +16127,7 @@ class App(tk.Tk):
                     llm_explanation=llm_explanation,
                     cfg=cfg,
                     geometry=geometry_ctx,
+                    debug_enabled=APP_ENV.llm_debug_enabled,
                 )
                 full_report = render_quote(
                     res,
@@ -16130,6 +16136,7 @@ class App(tk.Tk):
                     llm_explanation=llm_explanation,
                     cfg=cfg,
                     geometry=geometry_ctx,
+                    debug_enabled=APP_ENV.llm_debug_enabled,
                 )
                 # Persist reports for diagnosis even if UI widgets fail to update
                 try:
