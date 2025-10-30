@@ -977,7 +977,6 @@ from cad_quoter.utils.text_rules import (
 )
 from cad_quoter.utils.debug_tables import (
     _accumulate_drill_debug,
-    append_removal_debug_if_enabled,
 )
 from cad_quoter.ui import llm_panel
 from cad_quoter.ui import session_io
@@ -7692,71 +7691,6 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
             write_wrapped(part, "  ")
         if lines[-1]:
             _push(lines, "")
-        # Append the compact removal debug table (if available)
-        append_removal_debug_if_enabled(lines, removal_summary_for_display)
-
-    # ──────────────────────────────────────────────────────────────────────────
-    # Nice, compact sanity check at the very end (only when debug is enabled)
-    # Shows whether drilling hours are consistent across views:
-    #  - planner bucket minutes
-    #  - canonical bucket rollup (minutes)
-    #  - hour summary entry
-    #  - process_meta['drilling']['hr']
-    # ──────────────────────────────────────────────────────────────────────────
-    try:
-        _llm_dbg = _resolve_llm_debug_enabled(result, breakdown, params, {"llm_debug_enabled": True})
-    except Exception:
-        _llm_dbg = bool(APP_ENV.llm_debug_enabled)
-    if _llm_dbg:
-        try:
-            # Pull minutes from planner bucket view if available
-            _planner_min = None
-            _canon_min = None
-            _hsum_hr = None
-            _meta_hr = None
-
-            _pbv = locals().get("planner_bucket_view")
-            if isinstance(_pbv, _MappingABC):
-                _buckets = _pbv.get("buckets") if isinstance(_pbv.get("buckets"), _MappingABC) else {}
-                _drill = _buckets.get("Drilling") or _buckets.get("drilling") if isinstance(_buckets, _MappingABC) else None
-                if isinstance(_drill, _MappingABC):
-                    _planner_min = _coerce_float_or_none(_drill.get("minutes"))
-
-            _canon = locals().get("canonical_bucket_rollup")
-            if isinstance(_canon, _MappingABC):
-                _canon_min = _coerce_float_or_none(_canon.get("drilling"))
-                if _canon_min is not None:
-                    _canon_min = round(float(_canon_min) * 60.0, 1)  # hours→minutes
-
-            _hsum = locals().get("hour_summary_entries")
-            if isinstance(_hsum, _MappingABC):
-                # hour_summary_entries: {label: (hr, include_flag)}
-                for _label, (_hr, _inc) in _hsum.items():
-                    if str(_label).strip().lower() == "drilling":
-                        _hsum_hr = _coerce_float_or_none(_hr)
-                        break
-
-            _pmeta = locals().get("process_meta")
-            if isinstance(_pmeta, _MappingABC):
-                _meta_hr = _coerce_float_or_none((_pmeta.get("drilling") or {}).get("hr"))
-
-            _push(lines, "DEBUG — Drilling sanity")
-            _push(lines, divider)
-            def _fmt(x, unit):
-                return "—" if x is None or not math.isfinite(float(x)) else f"{float(x):.2f} {unit}"
-            _push(lines, 
-                "  bucket(planner): "
-                + _fmt(_planner_min, "min")
-                + "   canonical: "
-                + _fmt(_canon_min, "min")
-                + "   hour_summary: "
-                + _fmt(_hsum_hr, "hr")
-                + "   meta: "
-                + _fmt(_meta_hr, "hr")
-            )
-            _push(lines, "")
-        except Exception:
-            pass
 
     text = "\n".join(lines)
 
