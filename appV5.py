@@ -3498,14 +3498,12 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
         except Exception:
             continue
     labor_costs_display: dict[str, float] = {}
-    hour_summary_entries: dict[str, tuple[float, bool]] = {}
     prog_hr: float = 0.0
     direct_cost_details = breakdown.get("direct_cost_details", {}) or {}
     material_net_cost: float | None = None
     pass_through_total = 0.0
     display_machine = 0.0
     display_labor_for_ladder = 0.0
-    hour_summary_entries: dict[str, tuple[float, bool]] = {}
     qty_raw = result.get("qty")
     if qty_raw in (None, "", 0):
         qty_raw = breakdown.get("qty")
@@ -3565,7 +3563,6 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
     divider = "-" * int(page_width)
 
     red_flags: list[str] = []
-    hour_summary_entries: dict[str, tuple[float, bool]] = {}
     for source in (result, breakdown):
         flags_raw = source.get("red_flags") if isinstance(source, _MappingABC) else None
         if isinstance(flags_raw, (list, tuple, set)):
