@@ -15826,3 +15826,20 @@ class App(tk.Tk):
 
 # Emit chart-debug key lines at most once globally per run
 _PRINTED_CHART_DEBUG_KEYS = False
+
+
+if __name__ == "__main__":  # pragma: no cover - manual launch helper
+    """
+    Allow `python appV5.py` (or VS Code's “Run Python File”) to launch the GUI.
+
+    The actual CLI harness lives in `cad_quoter.app.cli`; we just delegate to it
+    here so existing workflows continue to work.
+    """
+
+    try:
+        from cad_quoter.app.cli import run_default_app as _run_default_app
+    except Exception as exc:  # pragma: no cover - safeguard against import issues
+        print(f"[ERROR] Unable to import GUI launcher: {exc}", file=sys.stderr)
+        sys.exit(1)
+
+    sys.exit(_run_default_app())
