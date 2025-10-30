@@ -403,6 +403,34 @@ def infer_part_dims(
     msp = doc.modelspace()
     f = _insunits_to_inch_factor(doc)
 
+    dx = dy = dz = None
+    # Try a targeted AABB over common part layers first; then a broad fallback.
+    preferred_layers = [
+        "PUN_SHOE-PLAN",
+        "PUN_SHOE-DETAIL",
+        "PUN_SHOE-PLAN_ASSY",
+        "PUN_SHOE-ASSY",
+    ]
+    try:
+        dx, dy, dz = _aabb_size(
+            msp,
+            include=(layer_include or preferred_layers),
+            exclude=layer_exclude,
+        )
+    except Exception as e:
+        print(f"[part-dims] aabb read failed: {e}")
+        dx = dy = dz = None
+
+    if (dx is None or dy is None) and not layer_include:
+        try:
+            # broad fallback over everything if targeted pass failed
+            dx, dy, dz = _aabb_size(msp, include=None, exclude=layer_exclude)
+        except Exception as e:
+            print(f"[part-dims] aabb fallback failed: {e}")
+            dx = dy = dz = None
+
+    print(f"[part-dims] aabb: dx={dx} dy={dy} dz={dz}")
+
     # dimensions first
     ox = oy = None
     try:
@@ -415,22 +443,24 @@ def infer_part_dims(
     except Exception as e:
         print(f"[part-dims] linear read failed: {e}")
     print(f"[part-dims] linear: Hmax={lh} Vmax={lv}")
-    dx = dy = dz = None
-    try:
-        dx, dy, dz = _aabb_size(msp, include=layer_include, exclude=layer_exclude)
-    except Exception as e:
-        print(f"[part-dims] aabb read failed: {e}")
-
     source: Optional[str] = None
 
-    def _clip(vals, ref):
+    def _band_clip(vals, ref, lo=0.85, hi=1.15):
         if ref is None:
-            return [v for v in vals if v is not None]
-        limit = 1.5 * ref
-        return [v for v in vals if (v is not None and v <= limit)]
+            # no ref → ignore tiny feature dims; keep only values >= 3.0 in drawing units
+            return [v for v in vals if (v is not None and v >= 3.0)]
+        lo_v, hi_v = lo * ref, hi * ref
+        return [v for v in vals if (v is not None and lo_v <= v <= hi_v)]
 
-    cand_w = _clip([ox, lh, dx], dx)
-    cand_h = _clip([oy, lv, dy], dy)
+    # Use AABB sizes as the reference band (if present)
+    cand_w = _band_clip([ox, lh, dx], dx)
+    cand_h = _band_clip([oy, lv, dy], dy)
+
+    # If nothing survives the band, keep the largest (but still ignore tiny ones)
+    if not cand_w:
+        cand_w = [v for v in [ox, lh, dx] if v is not None]
+    if not cand_h:
+        cand_h = [v for v in [oy, lv, dy] if v is not None]
 
     width_units = max(cand_w) if cand_w else None
     height_units = max(cand_h) if cand_h else None
@@ -443,12 +473,12 @@ def infer_part_dims(
         H = height_units * f
         L, W = (H, W) if H >= W else (W, H)
         src_bits = []
+        if dx is not None or dy is not None:
+            src_bits.append("aabb")
         if ox is not None or oy is not None:
             src_bits.append("ord")
         if lh is not None or lv is not None:
             src_bits.append("lin")
-        if dx is not None or dy is not None:
-            src_bits.append("aabb")
         source = "+".join(src_bits)
         print(f"[part-dims] fused dimensions: L={L:.4f} in, W={W:.4f} in from {source}")
     else:
