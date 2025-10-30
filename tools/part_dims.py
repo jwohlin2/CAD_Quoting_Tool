@@ -504,33 +504,29 @@ def infer_part_dims(
     msp = doc.modelspace()
     f = _insunits_to_inch_factor(doc)
 
-    dx = dy = dz = None
-    # Try a targeted AABB over common part layers first; then a broad fallback.
-    preferred_layers = [
-        "PUN_SHOE-PLAN",
-        "PUN_SHOE-DETAIL",
-        "PUN_SHOE-PLAN_ASSY",
-        "PUN_SHOE-ASSY",
+    # --- AABB (view-targeted first, broad fallback) ---
+    preferred_layer_sets = [
+        ["PUN_SHOE-PLAN"],
+        ["PUN_SHOE-DETAIL"],
+        ["PUN_SHOE-PLAN_ASSY"],
+        ["PUN_SHOE-ASSY"],
     ]
-    try:
-        dx, dy, dz = _aabb_size(
-            msp,
-            include=(layer_include or preferred_layers),
-            exclude=layer_exclude,
-        )
-        print(f"[part-dims] aabb: dx={dx} dy={dy} dz={dz}")
-    except Exception as e:
-        print(f"[part-dims] aabb read failed: {e}")
-        dx = dy = dz = None
+    dx = dy = dz = None
 
-    if (dx is None or dy is None) and not layer_include:
-        try:
-            # broad fallback over everything if targeted pass failed
+    if layer_include:
+        # user passed explicit filters; honor them
+        dx, dy, dz = _aabb_size(msp, include=layer_include, exclude=layer_exclude)
+    else:
+        # try each candidate view layer until we get real geometry
+        for inc in preferred_layer_sets:
+            dx, dy, dz = _aabb_size(msp, include=inc, exclude=layer_exclude)
+            print(f"[part-dims] aabb try include={inc}: dx={dx} dy={dy} dz={dz}")
+            if dx and dy:
+                break
+        if dx is None or dy is None:
+            # last resort: everything (excluding annotation-ish layers)
             dx, dy, dz = _aabb_size(msp, include=None, exclude=layer_exclude)
-            print(f"[part-dims] aabb: dx={dx} dy={dy} dz={dz}")
-        except Exception as e:
-            print(f"[part-dims] aabb fallback failed: {e}")
-            dx = dy = dz = None
+            print(f"[part-dims] aabb broad: dx={dx} dy={dy} dz={dz}")
 
     # dimensions first
     ox = oy = None
