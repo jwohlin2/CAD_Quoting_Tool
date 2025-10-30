@@ -4106,15 +4106,9 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
     if price_driver_lines:
         why_parts.extend(price_driver_lines)
 
-    hour_trace_data = None
-    if isinstance(result, _MappingABC):
-        hour_trace_data = result.get("hour_trace")
-    if hour_trace_data is None and isinstance(breakdown, _MappingABC):
-        hour_trace_data = breakdown.get("hour_trace")
-    explanation_lines: list[str] = []
-    # ``explanation_lines`` will be merged into ``why_parts`` after the process
-    # bucket rows are prepared so the cost makeup + contributor text can be
-    # derived from the exact rows rendered in the Process & Labor table.
+    # ``why_parts`` aggregates the narrative, LLM explanation (if provided),
+    # price drivers, and any other plain-text reasons rendered later in the
+    # Process & Labor table.
 
     process_meta, bucket_alias_map = _fold_process_meta(process_meta_raw)
     applied_process = _fold_applied_process(applied_process_raw, bucket_alias_map)
@@ -5552,18 +5546,6 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
                 extra_map[key] = float(value)
             except Exception:
                 extra_map[key] = value
-
-    geometry_for_explainer: Mapping[str, Any] | None = None
-    if isinstance(geometry, _MappingABC) and geometry:
-        geometry_for_explainer = typing.cast(Mapping[str, Any], geometry)
-    elif isinstance(g, dict) and g:
-        geometry_for_explainer = typing.cast(Mapping[str, Any], g)
-    elif isinstance(breakdown, _MappingABC):
-        for key in ("geometry", "geo_context", "geometry_context", "geo"):
-            candidate = breakdown.get(key)
-            if isinstance(candidate, _MappingABC) and candidate:
-                geometry_for_explainer = typing.cast(Mapping[str, Any], candidate)
-                break
 
     def _norm(s: Any) -> str:
         return re.sub(r"[^a-z0-9]+", "_", str(s or "").lower()).strip("_")
