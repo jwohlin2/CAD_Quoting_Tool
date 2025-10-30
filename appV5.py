@@ -131,6 +131,7 @@ from cad_quoter.app.llm_helpers import (
     init_llm_integration,
     load_qwen_vl,
 )
+from cad_quoter.app import ui_settings as _ui_settings
 from cad_quoter.app.optional_loaders import (
     pd,
     build_geo_from_dxf,
@@ -14333,35 +14334,13 @@ class App(tk.Tk):
         self.vars_df_full = full_df
 
     def set_material_vendor_csv(self) -> None:
-        path = filedialog.askopenfilename(
-            parent=self,
-            title="Select Material Vendor CSV",
-            filetypes=[("CSV files", "*.csv"), ("All files", "*.*")],
-        )
-        if not path:
-            return
-        if not isinstance(self.settings, dict):
-            self.settings = {}
-        self.settings["material_vendor_csv"] = path
-        self.params["MaterialVendorCSVPath"] = path
-        self.llm_services.save_settings(self.settings_path, self.settings)
-        try:
-            self.pricing.clear_cache()
-        except Exception:
-            pass
-        self.status_var.set(f"Material vendor CSV set to {path}")
+        path = _ui_settings.set_material_vendor_csv(self)
+        if path:
+            self.params["MaterialVendorCSVPath"] = path
 
     def clear_material_vendor_csv(self) -> None:
-        if not isinstance(self.settings, dict):
-            self.settings = {}
-        self.settings["material_vendor_csv"] = ""
+        _ui_settings.clear_material_vendor_csv(self)
         self.params["MaterialVendorCSVPath"] = ""
-        self.llm_services.save_settings(self.settings_path, self.settings)
-        try:
-            self.pricing.clear_cache()
-        except Exception:
-            pass
-        self.status_var.set("Material vendor CSV cleared.")
 
     def _ensure_llm_loaded(self):
         """Load the optional vision LLM on-demand.
