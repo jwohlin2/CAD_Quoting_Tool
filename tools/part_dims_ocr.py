@@ -315,8 +315,11 @@ def _run_oda_convert(oda_exe: str, in_path: str, out_dir: str,
     os.makedirs(tmp_out, exist_ok=True)
 
     # Build command:
-    # ODAFileConverter <in_dir> <out_dir> <in_ver> <out_ver> <audit> <recover> <out_format>
-    # out_format: PDF, BMP, TIFF, etc. PNG often appears as “BMP” family; TIFF is reliable for OCR.
+    # ODAFileConverter <in_dir> <out_dir> <in_ver> <out_ver> <audit> <recover> <filter> <out_type>
+    # out_type: PDF, BMP, TIFF, etc. PNG often appears as “BMP” family; TIFF is reliable for OCR.
+    filter_pattern = "*.dwg" if in_path.lower().endswith(".dwg") else "*.dxf"
+    out_type = out_format.upper()
+
     cmd = [
         oda_exe,
         tmp_in,
@@ -325,7 +328,8 @@ def _run_oda_convert(oda_exe: str, in_path: str, out_dir: str,
         out_ver,
         str(int(bool(audit))),
         str(int(bool(recover))),
-        out_format.upper(),
+        filter_pattern,
+        out_type,
     ]
 
     # Run
