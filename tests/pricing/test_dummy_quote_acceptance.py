@@ -7,6 +7,7 @@ import appV5
 from cad_quoter.domain_models import normalize_material_key
 from cad_quoter.pricing import materials as materials_pricing
 from cad_quoter.pricing.speeds_feeds_selector import material_group_for_speeds_feeds
+from cad_quoter.utils.render_utils import QuoteDoc
 
 
 def _compute_direct_costs_for_test(
@@ -391,7 +392,7 @@ def _dummy_quote_payload(*, debug_enabled: bool = False) -> dict:
 
 def _render_output(
     payload: dict, *, drop_planner_display: bool = False
-) -> tuple[list[str], dict]:
+) -> tuple[list[str], QuoteDoc]:
     if drop_planner_display:
         payload = copy.deepcopy(payload)
         breakdown = payload.get("breakdown", {})
@@ -400,17 +401,57 @@ def _render_output(
             breakdown.pop("planner_bucket_rollup", None)
             breakdown.pop("planner_bucket_display_map", None)
             breakdown.pop("process_plan", None)
-    rendered = appV5.render_quote(payload, currency="$")
-    breakdown = payload.get("breakdown", {})
-    payload_data = breakdown.get("render_payload") if isinstance(breakdown, dict) else None
-    assert isinstance(payload_data, dict), "expected structured render payload"
-    return rendered.splitlines(), payload_data
+    captured: list[QuoteDoc] = []
+
+    class _Recorder(appV5.QuoteDocRecorder):  # type: ignore[misc]
+        def build_doc(self) -> QuoteDoc:
+            doc = super().build_doc()
+            captured.append(doc)
+            return doc
+
+    original = appV5.QuoteDocRecorder
+    appV5.QuoteDocRecorder = _Recorder
+    try:
+        rendered = appV5.render_quote(payload, currency="$")
+    finally:
+        appV5.QuoteDocRecorder = original
+
+    assert captured, "expected quote document"
+    return rendered.splitlines(), captured[-1]
 
 
 def _extract_currency(line: str) -> float:
     match = re.search(r"\$([0-9,]+\.[0-9]{2})", line)
     assert match, f"expected currency value in line: {line!r}"
     return float(match.group(1).replace(",", ""))
+
+
+def _quote_doc_sections(doc: QuoteDoc) -> dict[str, list[str]]:
+    sections: dict[str, list[str]] = {}
+    for section in doc.sections:
+        title = section.title or ""
+        sections[title] = [row.text for row in section.rows]
+    return sections
+
+
+_MONEY_RE = re.compile(r"\$([0-9,]+\.[0-9]{2})")
+
+
+def _parse_money_lines(lines: list[str]) -> dict[str, float]:
+    result: dict[str, float] = {}
+    for line in lines:
+        match = _MONEY_RE.search(line)
+        if not match:
+            continue
+        amount = float(match.group(1).replace(",", ""))
+        label = line[: match.start()].strip()
+        if label.endswith(":"):
+            label = label[:-1].strip()
+        if label.startswith("="):
+            label = label.lstrip("= ").strip()
+        if label:
+            result[label] = amount
+    return result
 
 
 def test_dummy_quote_material_consistency() -> None:
@@ -643,15 +684,19 @@ def test_dummy_quote_has_no_csv_debug_duplicates() -> None:
 
 
 def test_dummy_quote_render_avoids_duplicate_planner_tables() -> None:
-    _, payload = _render_output(_dummy_quote_payload())
-    process_labels = [entry.get("label") for entry in payload.get("processes", [])]
-    assert len(process_labels) == len(set(process_labels))
+    _, doc = _render_output(_dummy_quote_payload())
+    sections = _quote_doc_sections(doc)
+    process_lines = sections.get("Process & Labor Costs", [])
+    process_amounts = _parse_money_lines(process_lines)
+    labels = [label for label in process_amounts if label.lower() != "total"]
+    assert len(labels) == len(set(labels))
 
 
 def test_dummy_quote_render_has_no_planner_drift_note() -> None:
-    _, payload = _render_output(_dummy_quote_payload())
-    drivers = payload.get("price_drivers", [])
-    assert all("drifted by" not in driver.get("detail", "").lower() for driver in drivers)
+    _, doc = _render_output(_dummy_quote_payload())
+    sections = _quote_doc_sections(doc)
+    drivers = [line.lower() for line in sections.get("Why this price", [])]
+    assert all("drifted by" not in line for line in drivers)
 
 
 def test_dummy_quote_bucket_hours_and_costs_align() -> None:
@@ -709,31 +754,41 @@ def test_dummy_quote_direct_costs_match_across_sections() -> None:
     declared_direct_costs = float(totals.get("direct_costs", 0.0))
     assert declared_direct_costs > 0
 
-    _, render_payload = _render_output(payload)
+    _, doc = _render_output(payload)
 
     breakdown_after = payload["breakdown"]
     direct_costs_total = float(breakdown_after.get("total_direct_costs", 0.0))
     assert math.isclose(direct_costs_total, declared_direct_costs, abs_tol=1e-6)
 
-    cost_breakdown = dict(render_payload.get("cost_breakdown", []))
-    direct_costs_breakdown = float(cost_breakdown.get("Direct Costs", 0.0))
+    sections = _quote_doc_sections(doc)
+    cost_breakdown = _parse_money_lines(sections.get("Cost Breakdown", []))
+    direct_costs_breakdown = cost_breakdown.get("Direct Costs")
+    assert direct_costs_breakdown is not None
     assert math.isclose(direct_costs_breakdown, direct_costs_total, abs_tol=1e-6)
 
-    ladder_payload = render_payload.get("ladder", {})
-    ladder_direct_total = float(ladder_payload.get("direct_total", 0.0))
+    summary_title = next(
+        title for title in sections if title.startswith("QUOTE SUMMARY - Qty")
+    )
+    summary_amounts = _parse_money_lines(sections[summary_title])
+    ladder_direct_total = summary_amounts.get("Subtotal (Labor + Directs)")
+    assert ladder_direct_total is not None
     assert math.isclose(ladder_direct_total, direct_costs_total, abs_tol=1e-6)
 
-    structured_direct_total = float(render_payload.get("materials_direct", 0.0))
-    assert math.isclose(structured_direct_total, direct_costs_total, abs_tol=1e-6)
-
-    materials_entries = render_payload.get("materials", [])
-    materials_total = sum(float(entry.get("amount", 0.0)) for entry in materials_entries)
+    pass_through_lines = sections.get("Pass-Through & Direct Costs", [])
+    pass_through_amounts = _parse_money_lines(pass_through_lines)
+    materials_total = sum(
+        amount for label, amount in pass_through_amounts.items() if label.lower() not in {"total"}
+    )
     assert math.isclose(materials_total, direct_costs_total, abs_tol=1e-6)
 
-    pass_through_total = float(breakdown_after.get("pass_through_total", 0.0))
+    pass_through_total = pass_through_amounts.get("Total")
+    assert pass_through_total is not None
     assert 0.0 < pass_through_total <= direct_costs_total
 
-    processes_total = sum(float(entry.get("amount", 0.0)) for entry in render_payload.get("processes", []))
+    process_amounts = _parse_money_lines(sections.get("Process & Labor Costs", []))
+    processes_total = sum(
+        amount for label, amount in process_amounts.items() if label.lower() != "total"
+    )
     assert processes_total > 0
 
 
@@ -765,19 +820,28 @@ def test_dummy_quote_ladder_uses_pricing_direct_costs_when_available() -> None:
     pricing_directs = direct_costs + machine_cost + 12.34
     payload["pricing"] = {"total_direct_costs": pricing_directs}
 
-    _, render_payload = _render_output(payload)
+    _, doc = _render_output(payload)
+    sections = _quote_doc_sections(doc)
+    summary_title = next(
+        title for title in sections if title.startswith("QUOTE SUMMARY - Qty")
+    )
+    qty_match = re.search(r"Qty\s+([0-9.]+)", summary_title)
+    assert qty_match is not None
+    qty_value = float(qty_match.group(1))
+    assert math.isclose(qty_value, float(payload["breakdown"]["qty"])), "unexpected quantity"
 
-    summary = render_payload.get("summary", {})
-    assert summary.get("qty") == payload["breakdown"]["qty"]
-    assert math.isclose(summary.get("final_price", 0.0), payload["price"], rel_tol=1e-6)
+    summary_amounts = _parse_money_lines(sections[summary_title])
+    final_price = summary_amounts[
+        next(label for label in summary_amounts if label.startswith("Final Price with Margin"))
+    ]
+    assert math.isclose(final_price, payload["price"], rel_tol=1e-6)
 
 
 def test_render_omits_amortized_rows_for_single_quantity() -> None:
     payload = _dummy_quote_payload()
     payload["qty"] = 1
     payload["breakdown"]["qty"] = 1
-    _, render_payload = _render_output(payload)
-
-    processes = render_payload.get("processes", [])
-    labels = [entry.get("label", "").lower() for entry in processes]
-    assert any("programming (amortized)" in label for label in labels)
+    _, doc = _render_output(payload)
+    sections = _quote_doc_sections(doc)
+    process_lines = sections.get("Process & Labor Costs", [])
+    assert any("programming (amortized)" in line.lower() for line in process_lines)

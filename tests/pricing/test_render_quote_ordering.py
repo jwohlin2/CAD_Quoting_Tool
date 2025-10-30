@@ -1,20 +1,65 @@
 import math
+import re
 from collections.abc import Mapping
 
 import appV5
 
 from cad_quoter.llm import explain_quote
+from cad_quoter.utils.render_utils import QuoteDoc
 
 
-def _render_payload(result: Mapping) -> dict:
-    rendered = appV5.render_quote(result, currency="$")
-    assert "QUOTE SUMMARY" in rendered
-    breakdown = result.get("breakdown", {}) if isinstance(result, dict) else {}
-    payload = breakdown.get("render_payload") if isinstance(breakdown, dict) else None
-    if payload is None and isinstance(result, dict):
-        payload = result.get("render_payload")
-    assert isinstance(payload, dict), "expected render payload attached to result"
-    return payload
+def _render_text_and_doc(result: Mapping) -> tuple[str, QuoteDoc]:
+    captured: list[QuoteDoc] = []
+
+    class _Recorder(appV5.QuoteDocRecorder):  # type: ignore[misc]
+        def build_doc(self) -> QuoteDoc:
+            doc = super().build_doc()
+            captured.append(doc)
+            return doc
+
+    original = appV5.QuoteDocRecorder
+    appV5.QuoteDocRecorder = _Recorder
+    try:
+        rendered = appV5.render_quote(result, currency="$")
+    finally:
+        appV5.QuoteDocRecorder = original
+    assert captured, "expected quote document"
+    return rendered, captured[-1]
+
+
+def _quote_doc_sections(doc: QuoteDoc) -> dict[str, list[str]]:
+    sections: dict[str, list[str]] = {}
+    for section in doc.sections:
+        title = section.title or ""
+        sections[title] = [row.text for row in section.rows]
+    return sections
+
+
+_MONEY_RE = re.compile(r"\$([0-9,]+\.[0-9]{2})")
+
+
+def _parse_money_lines(lines: list[str]) -> dict[str, float]:
+    result: dict[str, float] = {}
+    for line in lines:
+        match = _MONEY_RE.search(line)
+        if not match:
+            continue
+        amount = float(match.group(1).replace(",", ""))
+        label = line[: match.start()].strip()
+        if label.endswith(":"):
+            label = label[:-1].strip()
+        if label.startswith("="):
+            label = label.lstrip("= ").strip()
+        if label:
+            result[label] = amount
+    return result
+
+
+def _summary_section(sections: Mapping[str, list[str]]) -> tuple[str, list[str]]:
+    for title, rows in sections.items():
+        if title.startswith("QUOTE SUMMARY - Qty"):
+            return title, rows
+    raise AssertionError("expected QUOTE SUMMARY section")
 
 
 def test_render_quote_emits_structured_sections() -> None:
@@ -46,20 +91,44 @@ def test_render_quote_emits_structured_sections() -> None:
         },
     }
 
-    payload = _render_payload(result)
+    rendered, doc = _render_text_and_doc(result)
+    assert "QUOTE SUMMARY" in rendered
 
-    summary = payload["summary"]
-    assert summary["qty"] == 3
-    assert math.isclose(summary["margin_pct"], 0.15, rel_tol=1e-6)
-    assert math.isclose(summary["final_price"], result["price"], rel_tol=1e-6)
+    sections = _quote_doc_sections(doc)
+    summary_title, summary_lines = _summary_section(sections)
 
-    drivers = payload.get("price_drivers", [])
-    assert any("Tight tolerance" in driver.get("detail", "") for driver in drivers)
-    assert any("fixture" in driver.get("detail", "").lower() for driver in drivers)
+    qty_match = re.search(r"Qty\s+([0-9.]+)", summary_title)
+    assert qty_match is not None
+    qty_value = float(qty_match.group(1))
+    assert math.isclose(qty_value, 3.0, rel_tol=1e-6)
 
-    cost_breakdown = dict(payload.get("cost_breakdown", []))
+    summary_amounts = _parse_money_lines(summary_lines)
+    final_price_line = next(
+        (line for line in summary_lines if line.strip().startswith("Final Price with Margin")),
+        "",
+    )
+    margin_pct_match = re.search(r"\(([0-9.]+)%\)", final_price_line)
+    assert margin_pct_match is not None
+    margin_pct = float(margin_pct_match.group(1)) / 100.0
+    assert math.isclose(margin_pct, 0.15, rel_tol=1e-6)
+
+    final_price = summary_amounts.get(
+        next(
+            label
+            for label in summary_amounts
+            if label.startswith("Final Price with Margin")
+        )
+    )
+    assert final_price is not None
+    assert math.isclose(final_price, result["price"], rel_tol=1e-6)
+
+    why_lines = [line.strip() for line in sections.get("Why this price", []) if line.strip()]
+    assert any("Tight tolerance" in line for line in why_lines)
+    assert any("fixture" in line.lower() for line in why_lines)
+
+    cost_breakdown = _parse_money_lines(sections.get("Cost Breakdown", []))
     assert math.isclose(cost_breakdown["Direct Costs"], 15.0, rel_tol=1e-6)
-    assert "Machine & Labor" in cost_breakdown
+    assert any(label.startswith("Machine & Labor") for label in cost_breakdown)
 
 
 def test_render_quote_cost_breakdown_prefers_pricing_totals() -> None:
@@ -90,12 +159,15 @@ def test_render_quote_cost_breakdown_prefers_pricing_totals() -> None:
         },
     }
 
-    payload = _render_payload(result)
-    cost_breakdown = dict(payload.get("cost_breakdown", []))
+    rendered, doc = _render_text_and_doc(result)
+    assert "QUOTE SUMMARY" in rendered
+
+    sections = _quote_doc_sections(doc)
+    cost_breakdown = _parse_money_lines(sections.get("Cost Breakdown", []))
     assert math.isclose(cost_breakdown["Direct Costs"], 17.5, rel_tol=1e-6)
 
-    materials = payload.get("materials", [])
-    assert any(entry.get("label") == "Shipping" for entry in materials)
+    pass_through_lines = sections.get("Pass-Through & Direct Costs", [])
+    assert any("Shipping" in line for line in pass_through_lines)
 
 
 def test_render_quote_process_payload_tracks_bucket_view() -> None:
@@ -156,17 +228,24 @@ def test_render_quote_process_payload_tracks_bucket_view() -> None:
 
     result = {"price": 1450.0, "breakdown": breakdown}
 
-    payload = _render_payload(result)
-    processes = payload.get("processes", [])
-    labels = [entry["label"] for entry in processes]
-    assert "Milling" in labels
+    rendered, doc = _render_text_and_doc(result)
+    assert "QUOTE SUMMARY" in rendered
+
+    sections = _quote_doc_sections(doc)
+    process_lines = sections.get("Process & Labor Costs", [])
+    process_amounts = _parse_money_lines(process_lines)
+    labels = list(process_amounts.keys())
+    assert any(label.startswith("Milling") for label in labels)
     assert any(label.startswith("Finishing") for label in labels)
 
-    drilling_rows = [entry for entry in processes if entry["label"].lower().startswith("drill")]
-    if drilling_rows:
-        drilling = drilling_rows[0]
-        assert math.isclose(drilling.get("hours", 0.0), 1.5, rel_tol=1e-6)
-        assert math.isclose(drilling.get("amount", 0.0), 300.0, rel_tol=1e-6)
+    drilling_amount = None
+    for label, amount in process_amounts.items():
+        if label.lower().startswith("drilling"):
+            drilling_amount = amount
+            break
+    if drilling_amount is not None:
+        assert math.isclose(drilling_amount, 300.0, rel_tol=1e-6)
+        assert any("1.50" in line for line in process_lines if "Drilling" in line)
 
 
 def test_render_payload_obeys_pricing_math_guards() -> None:
@@ -216,27 +295,39 @@ def test_render_payload_obeys_pricing_math_guards() -> None:
 
     result = {"price": 1078.0, "breakdown": breakdown}
 
-    payload = _render_payload(result)
-    summary = payload["summary"]
-    subtotal_before_margin = summary.get("subtotal_before_margin")
+    rendered, doc = _render_text_and_doc(result)
+    assert "QUOTE SUMMARY" in rendered
+
+    sections = _quote_doc_sections(doc)
+    _, summary_lines = _summary_section(sections)
+    summary_amounts = _parse_money_lines(summary_lines)
+    subtotal_before_margin = summary_amounts.get("Subtotal before Margin")
     assert subtotal_before_margin is not None
 
-    materials_direct = payload.get("materials_direct")
-    assert materials_direct is not None
+    cost_breakdown = _parse_money_lines(sections.get("Cost Breakdown", []))
+    direct_costs_reported = cost_breakdown.get("Direct Costs")
+    assert direct_costs_reported is not None
 
-    processes = payload.get("processes", [])
-    labor_sum = sum(float(entry.get("amount", 0.0) or 0.0) for entry in processes)
-    assert math.isclose(subtotal_before_margin, materials_direct + labor_sum, abs_tol=0.01)
+    process_amounts = _parse_money_lines(sections.get("Process & Labor Costs", []))
+    labor_sum = sum(
+        amount for label, amount in process_amounts.items() if label.lower() != "total"
+    )
+    assert math.isclose(subtotal_before_margin, direct_costs_reported + labor_sum, abs_tol=0.01)
 
-    margin_pct = summary.get("margin_pct")
-    final_price = summary.get("final_price")
-    assert margin_pct is not None and final_price is not None
+    breakdown_after = result["breakdown"]
+    totals = breakdown_after.get("totals", {})
+    subtotal_from_totals = float(totals.get("with_expedite", 0.0))
+    direct_total = float(breakdown_after.get("total_direct_costs", 0.0))
+    labor_total = float(breakdown_after.get("total_labor_cost", 0.0))
+    margin_pct = float(breakdown_after.get("applied_pcts", {}).get("MarginPct", 0.0))
+    final_price = float(result.get("price", 0.0))
+
+    assert math.isclose(subtotal_from_totals, subtotal_before_margin, abs_tol=0.01)
+    assert math.isclose(direct_total, direct_costs_reported, abs_tol=0.01)
+    assert math.isclose(labor_total, labor_sum, abs_tol=0.01)
+
     expected_final = round(subtotal_before_margin * (1 + margin_pct), 2)
     assert math.isclose(final_price, expected_final, abs_tol=0.01)
-
-    reported_labor_total = payload.get("labor_total_amount")
-    assert reported_labor_total is not None
-    assert math.isclose(reported_labor_total, labor_sum, abs_tol=0.01)
 
 
 def test_explain_quote_reports_drilling_minutes_from_removal_card() -> None:
