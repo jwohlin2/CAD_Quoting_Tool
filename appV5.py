@@ -3301,28 +3301,12 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
     # Shipping is displayed in exactly one section of the quote to avoid
     # conflicting totals.  Prefer the pass-through value when available and
     # otherwise fall back to a material-specific entry before rendering.
-    shipping_pipeline = "pass_through"  # pipeline (a) – display under Pass-Through
-    shipping_source = "pass_through"
     shipping_raw_value: Any = pass_through.get("Shipping")
     if not shipping_raw_value:
         shipping_raw_value = material_block.get("shipping")
-        if shipping_raw_value:
-            shipping_source = "material"
-        else:
-            shipping_source = None
     shipping_total = float(_coerce_float_or_none(shipping_raw_value) or 0.0)
-    if shipping_pipeline == "pass_through":
-        pass_through["Shipping"] = shipping_total
-        material_block.pop("shipping", None)
-        show_material_shipping = False
-    else:
-        pass_through.pop("Shipping", None)
-        if shipping_source:
-            material_block["shipping"] = shipping_total
-        show_material_shipping = (
-            (shipping_total > 0)
-            or (shipping_total == 0 and bool(shipping_source) and show_zeros)
-        )
+    pass_through["Shipping"] = shipping_total
+    material_block.pop("shipping", None)
 
     material_total_for_directs_val = _coerce_float_or_none(
         material_block.get("material_cost_before_credit")
@@ -4825,7 +4809,7 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
             if scrap_credit_lines:
                 detail_lines.extend(scrap_credit_lines)
 
-            shipping_tax_lines: list[str] = []
+            material_tax_lines: list[str] = []
             base_cost_before_scrap = _coerce_float_or_none(
                 material.get("material_cost_before_credit")
             )
@@ -4852,18 +4836,12 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
 
             if base_cost_before_scrap is not None or show_zeros:
                 base_val = float(base_cost_before_scrap or 0.0)
-                if show_material_shipping and (shipping_total > 0 or show_zeros):
-                    if shipping_source:
-                        shipping_display = shipping_total
-                    else:
-                        shipping_display = base_val * 0.15
-                    shipping_tax_lines.append(f"  Shipping: {_m(shipping_display)}")
                 tax_cost = base_val * 0.065
                 if tax_cost > 0 or show_zeros:
-                    shipping_tax_lines.append(f"  Material Tax: {_m(tax_cost)}")
+                    material_tax_lines.append(f"  Material Tax: {_m(tax_cost)}")
 
-            if shipping_tax_lines:
-                detail_lines.extend(shipping_tax_lines)
+            if material_tax_lines:
+                detail_lines.extend(material_tax_lines)
 
             if upg or unit_price_kg or unit_price_lb or show_zeros:
                 grams_per_lb = 1000.0 / LB_PER_KG
