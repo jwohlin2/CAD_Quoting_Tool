@@ -3662,14 +3662,10 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
                 break
 
     # ---- header --------------------------------------------------------------
-    doc_builder = QuoteDocRecorder(divider)
-
     class _QuoteLines(list[str]):
         def append(self, text: str) -> None:  # type: ignore[override]
             sanitized = _sanitize_render_text(text)
-            previous = self[-1] if self else None
             super().append(sanitized)
-            doc_builder.observe_line(len(self) - 1, sanitized, previous)
 
     lines: list[str] = _QuoteLines()
 
@@ -3684,7 +3680,6 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
         sanitized = _sanitize_render_text(text)
         if 0 <= index < len(lines):
             lines[index] = sanitized
-        doc_builder.replace_line(index, sanitized)
 
     def write_line(s: str, indent: str = ""):
         append_line(f"{indent}{s}")
@@ -7535,14 +7530,6 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
     if 0 <= pass_through_header_index < len(lines):
         header_text = f"Pass-Through & Direct Costs (Total: {fmt_money(directs_total_value, currency)})"
         lines[pass_through_header_index] = header_text
-        try:
-            sections = getattr(doc_builder, "_sections", [])
-            for section in reversed(sections):
-                if getattr(section, "title", None) == "Pass-Through & Direct Costs":
-                    section.title = header_text
-                    break
-        except Exception:
-            pass
 
     directs = float(round(directs_total_value, 2))
     if 0 <= total_direct_costs_row_index < len(lines):
@@ -8158,8 +8145,7 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
         except Exception:
             pass
 
-    doc = doc_builder.build_doc()
-    text = render_quote_doc(doc, divider=divider)
+    text = "\n".join(lines)
 
     # ASCII-sanitize output to avoid mojibake like '×' on some Windows setups
     text = _sanitize_render_text(text)

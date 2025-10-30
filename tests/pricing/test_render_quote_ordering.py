@@ -5,26 +5,21 @@ from collections.abc import Mapping
 import appV5
 
 from cad_quoter.llm import explain_quote
-from cad_quoter.utils.render_utils import QuoteDoc
+from cad_quoter.utils.render_utils import QuoteDoc, QuoteDocRecorder
+
+
+def _quote_doc_from_text(text: str, divider: str = "-" * 74) -> QuoteDoc:
+    recorder = QuoteDocRecorder(divider)
+    previous = None
+    for index, line in enumerate(text.splitlines()):
+        recorder.observe_line(index, line, previous)
+        previous = line
+    return recorder.build_doc()
 
 
 def _render_text_and_doc(result: Mapping) -> tuple[str, QuoteDoc]:
-    captured: list[QuoteDoc] = []
-
-    class _Recorder(appV5.QuoteDocRecorder):  # type: ignore[misc]
-        def build_doc(self) -> QuoteDoc:
-            doc = super().build_doc()
-            captured.append(doc)
-            return doc
-
-    original = appV5.QuoteDocRecorder
-    appV5.QuoteDocRecorder = _Recorder
-    try:
-        rendered = appV5.render_quote(result, currency="$")
-    finally:
-        appV5.QuoteDocRecorder = original
-    assert captured, "expected quote document"
-    return rendered, captured[-1]
+    rendered = appV5.render_quote(result, currency="$")
+    return rendered, _quote_doc_from_text(rendered)
 
 
 def _quote_doc_sections(doc: QuoteDoc) -> dict[str, list[str]]:
