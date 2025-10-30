@@ -991,7 +991,6 @@ from cad_quoter.ui.planner_render import (
     _display_bucket_label,
     _display_rate_for_row,
     _hole_table_minutes_from_geo,
-    _rate_key_for_bucket,
     _lookup_bucket_rate,
     _normalize_bucket_key,
     _op_role_for_name,
@@ -3854,105 +3853,6 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
         lines.append(" " * 66 + "-------")
         lines.append(f"  Total{' '*58}${total_cost:>10,.2f}")
         lines.append("")
-
-    def _is_extra_segment(segment: str) -> bool:
-        try:
-            return bool(EXTRA_DETAIL_RE.match(str(segment)))
-        except Exception:
-            return False
-
-    def _merge_detail(existing: str | None, new_bits: list[str]) -> str | None:
-        segments: list[str] = []
-        seen: set[str] = set()
-        for bit in new_bits:
-            seg = str(bit).strip()
-            if not seg or _is_extra_segment(seg):
-                continue
-            if seg not in seen:
-                segments.append(seg)
-                seen.add(seg)
-        if existing:
-            for segment in _RE_SPLIT(r";\s*", str(existing)):
-                seg = segment.strip()
-                if not seg or EXTRA_DETAIL_RE.match(seg):
-                    continue
-                if seg not in seen:
-                    segments.append(seg)
-                    seen.add(seg)
-        if segments:
-            return "; ".join(segments)
-        if existing:
-            filtered_existing: list[str] = []
-            for segment in _RE_SPLIT(r";\s*", str(existing)):
-                seg = segment.strip()
-                if not seg or EXTRA_DETAIL_RE.match(seg):
-                    continue
-                filtered_existing.append(seg)
-            if filtered_existing:
-                return "; ".join(filtered_existing)
-            return str(existing).strip()
-        return None
-
-    def add_process_notes(key: str, indent: str = "    "):
-        canon_key = _canonical_bucket_key(key)
-        stored_hours = 0.0
-        stored_rate = 0.0
-        stored_cost = 0.0
-        if canon_key:
-            stored_entry = process_cost_row_details.get(canon_key)
-            if stored_entry is not None:
-                stored_hours, stored_rate, stored_cost = stored_entry
-
-        meta = _lookup_process_meta(process_meta, key) or {}
-        hr_val = stored_hours
-        if hr_val <= 0:
-            try:
-                hr_val = float(meta.get("hr", 0.0) or 0.0)
-            except Exception:
-                hr_val = 0.0
-        if hr_val <= 0:
-            try:
-                minutes_val = float(meta.get("minutes", 0.0) or 0.0)
-            except Exception:
-                minutes_val = 0.0
-            if minutes_val > 0:
-                hr_val = minutes_val / 60.0
-        meta_rate = 0.0
-        if meta:
-            try:
-                meta_rate = float(meta.get("rate", 0.0) or 0.0)
-            except Exception:
-                meta_rate = 0.0
-        if meta_rate > 0:
-            rate_float = meta_rate
-        else:
-            rate_float = stored_rate
-            if rate_float <= 0:
-                rate_val = meta.get("rate") if meta else None
-                try:
-                    rate_float = float(rate_val or 0.0)
-                except Exception:
-                    rate_float = 0.0
-        if rate_float <= 0 and stored_cost > 0 and hr_val > 0:
-            rate_float = stored_cost / hr_val
-        if rate_float <= 0:
-            rate_key = _rate_key_for_bucket(str(key))
-            if rate_key:
-                try:
-                    rate_float = float(rates.get(rate_key, 0.0) or 0.0)
-                except Exception:
-                    rate_float = 0.0
-        try:
-            base_extra_val = float(meta.get("base_extra", 0.0) or 0.0)
-        except Exception:
-            base_extra_val = 0.0
-
-        if hr_val > 0:
-            write_line(_hours_with_rate_text(hr_val, rate_float), indent)
-        elif base_extra_val > 0 and rate_float > 0:
-            inferred_hours = base_extra_val / rate_float
-            if inferred_hours > 0:
-                write_line(_hours_with_rate_text(inferred_hours, rate_float), indent)
 
     def add_pass_basis(key: str, indent: str = "    "):
         basis_map = breakdown.get("pass_basis", {}) or {}
