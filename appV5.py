@@ -6836,18 +6836,6 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
             printed_bucket_labels.add(spec.label)
         for label in printed_bucket_labels:
             labor_cost_totals.pop(label, None)
-            spec = bucket_specs_for_render.get(label)
-            if spec is None:
-                continue
-            hours_val = _minutes_to_hours(spec.minutes)
-            existing_entry = hour_summary_entries.get(label)
-            include_flag = True
-            if isinstance(existing_entry, tuple) and len(existing_entry) == 2:
-                include_flag = bool(existing_entry[1])
-            if hours_val > 0.0:
-                hour_summary_entries[label] = (round(hours_val, 2), include_flag)
-            else:
-                hour_summary_entries.pop(label, None)
 
     misc_total = 0.0
     for label, amount in labor_cost_totals.items():
