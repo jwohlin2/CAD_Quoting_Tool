@@ -38,6 +38,7 @@ import json
 import math
 import os
 import re
+from pathlib import Path
 import shutil
 import subprocess
 import sys
@@ -76,27 +77,10 @@ def _detect_default_input() -> Optional[str]:
         if candidate.exists():
             return str(candidate)
 
-    root = Path(__file__).resolve().parent.parent
-    preferred = [
-        root / "Cad Files" / "301_redacted.pdf",
-        root / "Cad Files" / "301_redacted.png",
-        root / "Cad Files" / "301_redacted.jpg",
-    ]
-    for candidate in preferred:
-        if candidate.exists():
-            return str(candidate)
+    hardwired = Path("D:/CAD_Quoting_Tool/Cad Files/301_redacted.dwg")
+    if hardwired.exists():
+        return str(hardwired)
 
-    search_dirs = [
-        root / "Cad Files",
-        root / "debug",
-    ]
-    exts = (".pdf", ".png", ".jpg", ".jpeg", ".tif", ".tiff")
-    for directory in search_dirs:
-        if not directory.is_dir():
-            continue
-        for ext in exts:
-            for candidate in sorted(directory.glob(f"*{ext}")):
-                return str(candidate)
     return None
 
 
@@ -289,12 +273,16 @@ def _which_oda(oda_exe_cli: Optional[str] = None) -> Optional[str]:
     return None
 
 
-def _run_oda_convert(oda_exe: str, in_path: str, out_dir: str,
-                     out_format: str = "PDF",
-                     in_ver: str = "ACAD2018",
-                     out_ver: str = "ACAD2018",
-                     audit: int = 0,
-                     recover: int = 0) -> str:
+def _run_oda_convert(
+    oda_exe: str,
+    in_path: str,
+    out_dir: str,
+    out_format: str = "PDF",
+    in_ver: str = "ACAD2018",
+    out_ver: str = "ACAD2018",
+    audit: int = 0,
+    recover: int = 0,
+) -> str:
     """
     Call ODA File Converter. ODA expects *directories* for in/out.
     We put the single DWG/DXF into a temp input dir, run the converter,
@@ -317,15 +305,22 @@ def _run_oda_convert(oda_exe: str, in_path: str, out_dir: str,
     # Build command:
     # ODAFileConverter <in_dir> <out_dir> <in_ver> <out_ver> <audit> <recover> <out_format>
     # out_format: PDF, BMP, TIFF, etc. PNG often appears as “BMP” family; TIFF is reliable for OCR.
+    format_upper = out_format.upper()
+    oda_out_ver = out_ver
+    if format_upper in {"PDF", "TIFF", "PNG", "BMP", "JPG", "JPEG"}:
+        oda_out_ver = format_upper
+
+    filter_pattern = "*.dwg" if in_path.lower().endswith(".dwg") else "*.dxf"
+
     cmd = [
         oda_exe,
         tmp_in,
         tmp_out,
         in_ver,
-        out_ver,
+        oda_out_ver,
         str(int(bool(audit))),
         str(int(bool(recover))),
-        out_format.upper(),
+        filter_pattern,
     ]
 
     # Run
