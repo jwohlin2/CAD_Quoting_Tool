@@ -230,6 +230,77 @@ def _max_ordinate_xy(msp) -> Tuple[Optional[float], Optional[float]]:
     return max_x, max_y
 
 
+def _max_linear_hw(msp) -> tuple[Optional[float], Optional[float]]:
+    """
+    Scan non-ordinate DIMENSIONs and return (max_horizontal, max_vertical) in drawing units.
+    Heuristics:
+      - Use dim.get_measurement() when available.
+      - Determine orientation by angle when possible; otherwise by extents of defpoints.
+      - Ignore obviously tiny notes (< 0.05 in) to avoid arrows and small callouts.
+    """
+
+    max_h: Optional[float] = None
+    max_v: Optional[float] = None
+
+    for dim in msp.query("DIMENSION"):
+        try:
+            dt = int(dim.dxf.dimtype)
+        except Exception:
+            continue
+
+        if dt & 64:  # skip ordinates here
+            continue
+
+        val: Optional[float] = None
+        try:
+            val = float(dim.get_measurement())
+        except Exception:
+            pass
+
+        if val is None:
+            txt = (dim.dxf.text or "").strip()
+            if txt and txt != "<>":
+                m = re.search(r"([-+]?\d+(?:\.\d+)?)", txt)
+                if m:
+                    try:
+                        val = float(m.group(1))
+                    except Exception:
+                        pass
+
+        if val is None or val < 0.05:
+            continue
+
+        angle = getattr(dim.dxf, "angle", None)
+        orient: Optional[str] = None  # 'H' or 'V'
+
+        if angle is not None:
+            try:
+                a = abs(float(angle)) % 180.0
+                orient = "H" if a <= 45 or a >= 135 else "V"
+            except Exception:
+                orient = None
+        else:
+            try:
+                p1 = dim.dxf.defpoint
+                p2 = getattr(dim.dxf, "defpoint2", None)
+                if p2:
+                    dx = abs(p2[0] - p1[0])
+                    dy = abs(p2[1] - p1[1])
+                    orient = "H" if dx >= dy else "V"
+            except Exception:
+                orient = None
+
+        if orient == "H":
+            max_h = val if max_h is None else max(max_h, val)
+        elif orient == "V":
+            max_v = val if max_v is None else max(max_v, val)
+        else:
+            max_h = val if max_h is None else max(max_h, val)
+            max_v = val if max_v is None else max(max_v, val)
+
+    return max_h, max_v
+
+
 def _aabb_size(msp, include=None, exclude=None):
     from ezdxf.math import BoundingBox
 
@@ -317,23 +388,42 @@ def infer_part_dims(
         ox, oy = _max_ordinate_xy(msp)
     except Exception as e:
         print(f"[part-dims] ordinate read failed: {e}")
-    L: Optional[float] = None
-    W: Optional[float] = None
+    lh = lv = None
+    try:
+        lh, lv = _max_linear_hw(msp)
+    except Exception as e:
+        print(f"[part-dims] linear read failed: {e}")
+    dx = dy = dz = None
+    try:
+        dx, dy, dz = _aabb_size(msp, include=layer_include, exclude=layer_exclude)
+    except Exception as e:
+        print(f"[part-dims] aabb read failed: {e}")
+
     source: Optional[str] = None
 
-    if ox is not None and oy is not None:
-        L, W = sorted([ox * f, oy * f], reverse=True)
-        source = "dimensions"
-        print(f"[part-dims] using ordinate dimensions: L={L:.4f} in, W={W:.4f} in")
+    candidates_w = [v for v in [ox, lh, dx] if v is not None]
+    candidates_h = [v for v in [oy, lv, dy] if v is not None]
 
-    dx = dy = dz = None
+    width_units = max(candidates_w) if candidates_w else None
+    height_units = max(candidates_h) if candidates_h else None
 
-    if L is None or W is None:
-        dx, dy, dz = _aabb_size(msp, include=layer_include, exclude=layer_exclude)
-        if dx and dy:
-            L, W = sorted([dx * f, dy * f], reverse=True)
-            source = source or "aabb"
-            print(f"[part-dims] using AABB dimensions: L={L:.4f} in, W={W:.4f} in")
+    L: Optional[float] = None
+    W: Optional[float] = None
+
+    if width_units is not None and height_units is not None:
+        width_in = width_units * f
+        height_in = height_units * f
+        L, W = (height_in, width_in) if height_in >= width_in else (width_in, height_in)
+        parts = [
+            ("ord", (ox is not None or oy is not None)),
+            ("lin", (lh is not None or lv is not None)),
+            ("aabb", (dx is not None or dy is not None)),
+        ]
+        source = "+".join(s for s, ok in parts if ok) or None
+        src_label = source or "unknown"
+        print(f"[part-dims] fused dimensions: L={L:.4f} in, W={W:.4f} in from {src_label}")
+    else:
+        L = W = None
 
     # thickness after text parse (with strict keywords)
     T: Optional[float] = None
