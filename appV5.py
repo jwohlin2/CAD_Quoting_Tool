@@ -4382,6 +4382,7 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
                 upg,
                 minchg,
                 matcost,
+                mat_total,
                 scrap,
                 scrap_credit if scrap_credit_entered else 0.0,
             ]
