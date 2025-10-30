@@ -2642,14 +2642,6 @@ except Exception:  # pragma: no cover - defensive
 
 _normalize_lookup_key = normalize_material_key
 
-_clean_hole_groups = _drilling_legacy._clean_hole_groups
-_coerce_overhead_dataclass = _drilling_legacy._coerce_overhead_dataclass
-_drill_overhead_from_params = _drilling_legacy._drill_overhead_from_params
-_machine_params_from_params = _drilling_legacy._machine_params_from_params
-_legacy_estimate_drilling_hours = _drilling_legacy.legacy_estimate_drilling_hours
-_apply_drill_minutes_clamp = _drilling_legacy._apply_drill_minutes_clamp
-_drill_minutes_per_hole_bounds = _drilling_legacy._drill_minutes_per_hole_bounds
-
 _CANONICAL_MIC6_DISPLAY = "Aluminum MIC6"
 _MIC6_NORMALIZED_KEY = _normalize_lookup_key(_CANONICAL_MIC6_DISPLAY)
 _MATERIAL_META_KEY_BY_NORMALIZED: dict[str, str] = {}
@@ -9362,7 +9354,7 @@ def compute_quote_from_df(  # type: ignore[reportGeneralTypeIssues]
                     or geo_payload.get("hole_sets")
                 )
                 if raw_groups is not None:
-                    hole_groups_for_estimate = _clean_hole_groups(raw_groups)
+                    hole_groups_for_estimate = _drilling_legacy._clean_hole_groups(raw_groups)
             try:
                 estimator_hours = estimate_drilling_hours(
                     hole_diams,
