@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import json
+
 import pytest
 
 import appV5
@@ -122,6 +124,24 @@ def test_collect_ops_entries_uses_explode(monkeypatch: pytest.MonkeyPatch) -> No
     ]
 
 
+def test_collect_ops_entries_accepts_string_payload(monkeypatch: pytest.MonkeyPatch) -> None:
+    entries = [["A", "Ø0.257", 4, "1/4-20 TAP FROM FRONT"]]
+
+    monkeypatch.setattr(appV5, "_explode_rows_to_operations", lambda rows: entries)
+
+    geo_map = {
+        "hole_table": {
+            "lines": "HOLE TABLE\nA Ø0.257 4 1/4-20 TAP FROM FRONT",
+        }
+    }
+
+    result = appV5._collect_ops_entries_for_display(geo_map)
+
+    assert result == [
+        {"hole": "A", "ref": "Ø0.257", "qty": 4, "desc": "1/4-20 TAP FROM FRONT"}
+    ]
+
+
 def test_format_hole_table_section_outputs_operations() -> None:
     rows = [
         {"hole": "A", "ref": "Ø1.7500", "qty": 4, "desc": "±.0001 THRU (JIG GRIND)"},
@@ -134,3 +154,41 @@ def test_format_hole_table_section_outputs_operations() -> None:
     assert lines[0] == "HOLE TABLE OPERATIONS"
     assert any(line.strip().startswith("A") for line in lines[1:])
     assert any("THRU" in line for line in lines)
+
+
+def test_collect_ops_entries_prefers_hole_labels(monkeypatch: pytest.MonkeyPatch) -> None:
+    summary_rows = [{"hole": "", "ref": "Ø.3320", "qty": 1, "desc": "THRU"}]
+    exploded_rows = [
+        ["G", "Ø.3320", 1, "THRU"],
+        ["G", "Ø.3320", 1, "3/8-24 TAP X .38 DEEP FROM BACK"],
+    ]
+
+    monkeypatch.setattr(appV5, "_explode_rows_to_operations", lambda rows: exploded_rows)
+
+    geo_map = {
+        "ops_summary": {"rows": summary_rows},
+        "hole_table": {"lines": ["HOLE TABLE", "G Ø.3320 1 THRU"]},
+    }
+
+    result = appV5._collect_ops_entries_for_display(geo_map)
+
+    assert {"hole": "G", "ref": "Ø.3320", "qty": 1, "desc": "THRU"} in result
+    assert {"hole": "", "ref": "Ø.3320", "qty": 1, "desc": "THRU"} not in result
+
+
+def test_collect_ops_entries_matches_gold_sample() -> None:
+    with open("tests/gold/hole_table_sample.jsonl", "r", encoding="utf-8") as fh:
+        sample = json.loads(fh.readline())
+
+    geo_map = {"hole_table": {"lines": sample["raw_lines"]}}
+
+    expected = [
+        {"hole": hole, "ref": ref, "qty": int(qty), "desc": desc}
+        for hole, ref, qty, desc in sample["expected_ops"]
+    ]
+
+    result = appV5._collect_ops_entries_for_display(geo_map)
+
+    assert sorted(result, key=lambda row: (row["hole"], row["ref"], row["desc"])) == sorted(
+        expected, key=lambda row: (row["hole"], row["ref"], row["desc"])
+    )
