@@ -292,6 +292,8 @@ def test_render_payload_obeys_pricing_math_guards() -> None:
     sections = _quote_doc_sections(doc)
     _, summary_lines = _summary_section(sections)
     summary_amounts = _parse_money_lines(summary_lines)
+    final_price_per_part = summary_amounts.get("Final Price per Part")
+    assert final_price_per_part is not None
     subtotal_before_margin = (
         summary_amounts.get("Total Labor Cost", 0.0)
         + summary_amounts.get("Total Direct Costs", 0.0)
