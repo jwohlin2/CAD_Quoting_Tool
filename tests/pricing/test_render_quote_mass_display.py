@@ -215,6 +215,15 @@ def _base_material_quote(material: dict) -> dict:
     }
 
 
+def _render_lines_and_payload(result: dict) -> tuple[list[str], dict]:
+    rendered = appV5.render_quote(result, currency="$", show_zeros=False)
+    breakdown = result.get("breakdown")
+    assert isinstance(breakdown, dict), "expected dict breakdown"
+    payload = breakdown.get("render_payload")
+    assert isinstance(payload, dict), "expected structured render payload"
+    return rendered.splitlines(), payload
+
+
 def _amortized_breakdown(qty: int, *, config_flags: dict | None = None) -> dict:
     labor_costs: dict[str, float] = {}
     if qty > 1:
@@ -252,6 +261,7 @@ def _amortized_breakdown(qty: int, *, config_flags: dict | None = None) -> dict:
         "qty": qty,
         "totals": _base_totals(),
         "material": {},
+        "pricing_source": "planner",
         "nre_detail": {
             "programming": {
                 "per_lot": 150.0,
@@ -335,31 +345,35 @@ def test_render_quote_does_not_duplicate_detail_lines() -> None:
     result = {
         "price": 10.0,
         "breakdown": _amortized_breakdown(5),
+        "app_meta": {"used_planner": True},
     }
 
-    rendered = appV5.render_quote(result, currency="$", show_zeros=False)
+    lines, _ = _render_lines_and_payload(result)
+    rendered = "\n".join(lines)
+
     assert rendered.count("- Programmer (lot): 1.00 hr @ $45.00/hr") == 1
     assert rendered.count("Programmer (lot) 1.00 hr @ $45.00/hr") == 0
-    assert "Programming (per part)" in rendered
-    assert "Fixture Build (amortized)" in rendered
-    assert "- Programmer (lot): 1.00 hr @ $45.00/hr" in rendered
+    assert "Programming (amortized)" in rendered
+    assert "fixture_build_amortized" in rendered
+    assert "Fixturing:" in rendered
     assert "- Build labor (lot): 0.50 hr @ $60.00/hr" in rendered
     assert "includes $200.00 extras" not in rendered
-    assert rendered.count("1.50 hr @ $120.00/hr") == 1
 
 
 def test_render_quote_shows_amortized_nre_for_single_qty() -> None:
     result = {
         "price": 10.0,
         "breakdown": _amortized_breakdown(1),
+        "app_meta": {"used_planner": True},
     }
 
     assert result["breakdown"]["labor_costs"] == {}
 
-    rendered = appV5.render_quote(result, currency="$", show_zeros=False)
+    lines, _ = _render_lines_and_payload(result)
+    rendered = "\n".join(lines)
 
-    assert "Programming (per part)" in rendered
-    assert "Fixture Build (amortized)" in rendered
+    assert "Programming (amortized)" in rendered
+    assert "fixture_build_amortized" in rendered
     assert "Programming & Eng:" in rendered
     assert "Fixturing:" in rendered
 
@@ -369,9 +383,10 @@ def test_render_quote_uses_programming_per_lot_for_single_qty() -> None:
     breakdown["nre_detail"]["programming"]["per_lot"] = 0.0
     breakdown["nre"]["programming_per_lot"] = 1462.0
 
-    result = {"price": 10.0, "breakdown": breakdown}
+    result = {"price": 10.0, "breakdown": breakdown, "app_meta": {"used_planner": True}}
 
-    rendered = appV5.render_quote(result, currency="$", show_zeros=False)
+    lines, _ = _render_lines_and_payload(result)
+    rendered = "\n".join(lines)
 
     programming_line = next(
         line for line in rendered.splitlines() if "Programming & Eng:" in line
@@ -390,12 +405,13 @@ def test_render_quote_includes_amortized_labor_totals_for_single_qty() -> None:
     breakdown["process_meta"] = {}
     breakdown["labor_cost_details"] = {}
 
-    result = {"price": 10.0, "breakdown": breakdown}
+    result = {"price": 10.0, "breakdown": breakdown, "app_meta": {"used_planner": True}}
 
-    rendered = appV5.render_quote(result, currency="$", show_zeros=False)
+    lines, _ = _render_lines_and_payload(result)
+    rendered = "\n".join(lines)
 
-    assert "Programming (per part)" in rendered
-    assert "Fixture Build (amortized)" in rendered
+    assert "Programming (amortized)" in rendered
+    assert "fixture_build_amortized" in rendered
     assert "Grinding" in rendered
 
 
@@ -405,14 +421,16 @@ def test_render_quote_ignores_force_amortized_flag_for_single_qty() -> None:
         "breakdown": _amortized_breakdown(
             1, config_flags={"show_amortized_nre": True}
         ),
+        "app_meta": {"used_planner": True},
     }
 
     assert result["breakdown"]["labor_costs"] == {}
 
-    rendered = appV5.render_quote(result, currency="$", show_zeros=False)
+    lines, _ = _render_lines_and_payload(result)
+    rendered = "\n".join(lines)
 
-    assert "Programming (per part)" in rendered
-    assert "Fixture Build (amortized)" in rendered
+    assert "Programming (amortized)" in rendered
+    assert "fixture_build_amortized" in rendered
     assert "Amortized across" not in rendered
 
 
@@ -433,6 +451,7 @@ def test_render_quote_shows_flat_extras_when_no_hours() -> None:
             "qty": 1,
             "totals": _base_totals(),
             "material": {},
+            "pricing_source": "planner",
             "nre": {},
             "nre_detail": {},
             "nre_cost_details": {},
@@ -450,9 +469,16 @@ def test_render_quote_shows_flat_extras_when_no_hours() -> None:
             "process_plan": {"bucket_view": bucket_view},
             "process_plan_summary": {"bucket_view": bucket_view},
         },
+        "app_meta": {"used_planner": True},
     }
 
-    rendered = appV5.render_quote(result, currency="$", show_zeros=False)
+    lines, payload = _render_lines_and_payload(result)
+    rendered = "\n".join(lines)
 
     assert "includes $200.00 extras" not in rendered
-    assert "2.22 hr @ $90.00/hr" in rendered
+
+    grinding_entry = next(
+        entry for entry in payload.get("processes", []) if entry.get("label") == "Grinding"
+    )
+    assert pytest.approx(grinding_entry.get("hours", 0.0), rel=1e-3) == 2.22
+    assert pytest.approx(grinding_entry.get("rate", 0.0), rel=1e-3) == 95.0

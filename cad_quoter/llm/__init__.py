@@ -1263,6 +1263,13 @@ def explain_quote(
         items.sort(key=lambda x: x[1], reverse=True)
         return items[:n]
 
+    planner_context = bool(
+        plan_info_mappings
+        or plan_drilling_reasons
+        or recognized_ops_from_plan > 0
+        or (render_state_extra is not None)
+    )
+
     drivers = _top_drivers(bucket_view_obj)
     lines.append("Why this price")
     lines.append("-" * 74)
@@ -1270,7 +1277,8 @@ def explain_quote(
         txt = ", ".join(f"{k.replace('_', ' ').title()} ${v:,.2f}" for k, v in drivers)
         lines.append(f"  Main cost drivers: {txt}.")
     else:
-        lines.append("  Main cost drivers derive from process buckets; none dominate.")
+        source_label = "planner buckets" if planner_context else "process buckets"
+        lines.append(f"  Main cost drivers derive from {source_label}; none dominate.")
     lines.append("")
 
     def _iter_named_values(values: Any) -> Iterable[tuple[str, float]]:

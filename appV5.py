@@ -4108,26 +4108,8 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
         _push(lines, MATERIAL_WARNING_LABEL)
     _push(lines, "")
 
-    if isinstance(breakdown, _MutableMappingABC):
-        if pricing_source_value:
-            breakdown["pricing_source"] = pricing_source_value
-        else:
-            breakdown.pop("pricing_source", None)
-
     if isinstance(result, _MutableMappingABC):
-        app_meta_container = result.setdefault("app_meta", {})
-        if isinstance(app_meta_container, _MutableMappingABC):
-            if pricing_source_value and str(pricing_source_value).strip().lower() == "planner":
-                app_meta_container.setdefault("used_planner", True)
-
-        decision_state = result.get("decision_state")
-        if isinstance(decision_state, _MutableMappingABC):
-            baseline_state = decision_state.get("baseline")
-            if isinstance(baseline_state, _MutableMappingABC):
-                if pricing_source_value:
-                    baseline_state["pricing_source"] = pricing_source_value
-                else:
-                    baseline_state.pop("pricing_source", None)
+        result.setdefault("app_meta", {})
 
     def render_drill_debug(entries: Sequence[str]) -> None:
         _push(lines, "Drill Debug")
@@ -5624,6 +5606,7 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
         card_minutes_val = 0.0
     card_minutes_precise = float(card_minutes_val)
     removal_drilling_minutes = card_minutes_precise if have_card_minutes else None
+    removal_drilling_hours_precise: float | None = None
     if drill_total_minutes_estimate > 0.0:
         removal_drilling_minutes = float(drill_total_minutes_estimate)
         removal_drilling_hours_precise = removal_drilling_minutes / 60.0
@@ -6458,6 +6441,102 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
                 )
             )
 
+    legacy_cost_items: Iterable[tuple[str, Any]]
+    if isinstance(process_costs_canon, _MappingABC):
+        legacy_cost_items = process_costs_canon.items()
+    else:
+        try:
+            legacy_cost_items = dict(process_costs_canon or {}).items()  # type: ignore[assignment]
+        except Exception:
+            legacy_cost_items = []
+
+    for raw_key, raw_amount in legacy_cost_items:
+        canon_key = _canonical_bucket_key(raw_key) or str(raw_key or "").strip()
+        if not canon_key:
+            continue
+        existing_amount = _safe_float(
+            process_costs_for_render.get(canon_key), default=0.0
+        )
+        summary_entry_existing = canonical_bucket_summary.get(canon_key)
+        if (
+            existing_amount > 0.0
+            and isinstance(summary_entry_existing, _MappingABC)
+            and _safe_float(summary_entry_existing.get("total"), default=0.0) > 0.0
+        ):
+            continue
+
+        amount_val = _safe_float(raw_amount, default=0.0)
+        if amount_val <= 0.0 and not show_zeros:
+            continue
+
+        meta_entry = _lookup_process_meta(process_meta, canon_key)
+        hours_val = 0.0
+        minutes_val = 0.0
+        if isinstance(meta_entry, _MappingABC):
+            hours_val = _safe_float(meta_entry.get("hr"), default=0.0)
+            minutes_val = _safe_float(meta_entry.get("minutes"), default=0.0)
+        if minutes_val <= 0.0 and hours_val > 0.0:
+            minutes_val = hours_val * 60.0
+        if hours_val <= 0.0 and minutes_val > 0.0:
+            hours_val = minutes_val / 60.0
+
+        rate_val = 0.0
+        if hours_val > 0.0 and amount_val > 0.0:
+            try:
+                rate_val = amount_val / hours_val
+            except Exception:
+                rate_val = 0.0
+        elif amount_val > 0.0:
+            rate_guess = _rate_for_bucket(canon_key, rates or {})
+            if rate_guess > 0.0:
+                rate_val = rate_guess
+                hours_val = amount_val / rate_guess if rate_guess else 0.0
+                minutes_val = hours_val * 60.0 if hours_val > 0.0 else 0.0
+
+        label = _display_bucket_label(canon_key, label_overrides)
+
+        summary_entry = canonical_bucket_summary.setdefault(
+            canon_key,
+            {"minutes": 0.0, "hours": 0.0, "labor": 0.0, "machine": 0.0, "total": 0.0},
+        )
+        if minutes_val > 0.0:
+            summary_entry["minutes"] = minutes_val
+        if hours_val > 0.0:
+            summary_entry["hours"] = hours_val
+        if amount_val > 0.0 or show_zeros:
+            summary_entry["labor"] = amount_val
+            summary_entry["machine"] = 0.0
+            summary_entry["total"] = amount_val
+
+        process_costs_for_render[canon_key] = amount_val
+        if minutes_val > 0.0:
+            bucket_minutes_detail[canon_key] = minutes_val
+        if canon_key not in canonical_bucket_order:
+            canonical_bucket_order.append(canon_key)
+
+        label_to_canon.setdefault(label, canon_key)
+        canon_to_display_label.setdefault(canon_key, label)
+
+        new_spec = _BucketRowSpec(
+            label=label,
+            hours=hours_val,
+            rate=rate_val,
+            total=amount_val,
+            labor=amount_val,
+            machine=0.0,
+            canon_key=canon_key,
+            minutes=minutes_val,
+        )
+
+        replaced = False
+        for idx, spec in enumerate(bucket_row_specs):
+            if spec.canon_key == canon_key or spec.label == label:
+                bucket_row_specs[idx] = new_spec
+                replaced = True
+                break
+        if not replaced:
+            bucket_row_specs.append(new_spec)
+
     for canon_key in process_costs_for_render:
         label = _display_bucket_label(canon_key, label_overrides)
         label_to_canon.setdefault(label, canon_key)
@@ -7228,6 +7307,9 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
 
     if misc_total > 0:
         process_table.had_rows = True
+
+    bucket_view_obj = locals().get("bucket_view_obj")
+    bucket_view_struct = locals().get("bucket_view_struct")
 
     bucket_view_for_render: Mapping[str, Any] | None
     if isinstance(bucket_view_obj, (_MappingABC, dict)):
