@@ -174,7 +174,7 @@ def _parse_numeric_text(value: str) -> float | None:
     return _parse_mixed_fraction(value)
 
 
-def _parse_length_to_mm(value: Any) -> float | None:
+def parse_length_to_mm(value: Any) -> float | None:
     """Coerce a numeric or textual length into millimetres."""
 
     if value is None:
@@ -214,6 +214,9 @@ def _parse_length_to_mm(value: Any) -> float | None:
     return float(numeric_val)
 
 
+_parse_length_to_mm = parse_length_to_mm
+
+
 __all__ = [
     "_jsonify_debug_value",
     "_jsonify_debug_summary",
@@ -238,5 +241,5 @@ __all__ = [
     "_ipm_from_rpm_ipr",
     "ipm_from_rpm_ipr",
     "_parse_numeric_text",
-    "_parse_length_to_mm",
+    "parse_length_to_mm",
 ]

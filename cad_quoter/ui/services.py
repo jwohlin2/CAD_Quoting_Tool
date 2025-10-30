@@ -41,7 +41,7 @@ from cad_quoter.app.optional_loaders import (
     pdf_document_to_structured as _pdf_document_to_structured,
 )
 
-from cad_quoter.utils.machining import _parse_length_to_mm
+from cad_quoter.utils.machining import parse_length_to_mm
 
 
 @dataclass(slots=True)
@@ -295,7 +295,7 @@ def infer_geo_override_defaults(geo_data: dict[str, Any] | None) -> dict[str, An
 
     plate_len_in = _coerce_float_or_none(find_value("plate_len_in", "plate_length_in"))
     if plate_len_in is None:
-        plate_len_mm = _parse_length_to_mm(find_value("plate_len_mm", "plate_length_mm"))
+        plate_len_mm = parse_length_to_mm(find_value("plate_len_mm", "plate_length_mm"))
         if plate_len_mm is not None:
             plate_len_in = float(plate_len_mm) / 25.4
     if plate_len_in is not None and plate_len_in > 0:
@@ -303,7 +303,7 @@ def infer_geo_override_defaults(geo_data: dict[str, Any] | None) -> dict[str, An
 
     plate_wid_in = _coerce_float_or_none(find_value("plate_wid_in", "plate_width_in"))
     if plate_wid_in is None:
-        plate_wid_mm = _parse_length_to_mm(find_value("plate_wid_mm", "plate_width_mm"))
+        plate_wid_mm = parse_length_to_mm(find_value("plate_wid_mm", "plate_width_mm"))
         if plate_wid_mm is not None:
             plate_wid_in = float(plate_wid_mm) / 25.4
     if plate_wid_in is not None and plate_wid_in > 0:
@@ -313,7 +313,7 @@ def infer_geo_override_defaults(geo_data: dict[str, Any] | None) -> dict[str, An
         find_value("thickness_in_guess", "thickness_in", "deepest_hole_in")
     )
     if thickness_in is None:
-        thickness_mm = _parse_length_to_mm(find_value("thickness_mm", "thickness_mm_guess"))
+        thickness_mm = parse_length_to_mm(find_value("thickness_mm", "thickness_mm_guess"))
         if thickness_mm is not None:
             thickness_in = float(thickness_mm) / 25.4
     if thickness_in is not None and thickness_in > 0:
@@ -373,7 +373,7 @@ def infer_geo_override_defaults(geo_data: dict[str, Any] | None) -> dict[str, An
         for entry in raw_holes_mm:
             val = _coerce_float_or_none(entry)
             if val is None and entry is not None:
-                val = _parse_length_to_mm(entry)
+                val = parse_length_to_mm(entry)
             if val is None or val <= 0:
                 continue
             hole_sum += float(val)
@@ -401,7 +401,7 @@ def infer_geo_override_defaults(geo_data: dict[str, Any] | None) -> dict[str, An
                 count = _coerce_float_or_none(count_val)
                 if count is None or count <= 0:
                     continue
-                diam_mm = _parse_length_to_mm(diam_key)
+                diam_mm = parse_length_to_mm(diam_key)
                 if diam_mm is None or diam_mm <= 0:
                     continue
                 hole_sum += float(diam_mm) * float(count)
