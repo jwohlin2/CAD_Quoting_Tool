@@ -3003,9 +3003,6 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
         or material_selection.get("canonical_material")
         or ""
     ).strip()
-    if canonical_material_breakdown:
-        material_selection.setdefault("canonical", canonical_material_breakdown)
-        material_selection.setdefault("canonical_material", canonical_material_breakdown)
     canonical_display_lookup = ""
     if normalized_material_key:
         canonical_display_lookup = str(
@@ -3023,19 +3020,6 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
         fallback_display = MATERIAL_DISPLAY_BY_KEY.get(normalized_material_key, "")
         if fallback_display:
             material_display_label = str(fallback_display).strip()
-    if material_display_label:
-        material_selection["material_display"] = material_display_label
-    if normalized_material_key:
-        material_selection.setdefault("normalized_material_key", normalized_material_key)
-        material_selection.setdefault("material_lookup", normalized_material_key)
-    group_material_breakdown = str(
-        material_selection.get("group")
-        or material_selection.get("material_group")
-        or ""
-    ).strip()
-    if group_material_breakdown:
-        material_selection.setdefault("group", group_material_breakdown)
-        material_selection.setdefault("material_group", group_material_breakdown)
     material = material_block
 
     MATERIAL_WARNING_LABEL = "⚠ MATERIALS MISSING"
@@ -4377,6 +4361,14 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
             _push(lines, "Material & Stock")
             _push(lines, divider)
             canonical_material_display = str(material_display_label or "").strip()
+            if (
+                not canonical_material_display
+                and isinstance(canonical_display_lookup, str)
+                and canonical_display_lookup.strip()
+            ):
+                canonical_material_display = canonical_display_lookup.strip()
+            if not canonical_material_display and canonical_material_breakdown:
+                canonical_material_display = str(canonical_material_breakdown).strip()
             if not canonical_material_display and isinstance(material_selection, _MappingABC):
                 canonical_material_display = str(
                     material_selection.get("material_display")
@@ -4417,7 +4409,6 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
                 material_name_display = str(material_name_display).strip()
             if material_name_display:
                 material_display_label = str(material_name_display)
-                material_selection.setdefault("material_display", material_display_label)
                 _push(lines, f"  Material used:  {material_name_display}")
 
             blank_lines: list[str] = []
