@@ -1,6 +1,16 @@
 import pandas as pd
+import pytest
 
 import appV5
+
+
+def _render_text_and_payload(result: dict) -> tuple[str, dict]:
+    rendered = appV5.render_quote(result, currency="$")
+    breakdown = result.get("breakdown")
+    assert isinstance(breakdown, dict), "expected dict breakdown"
+    payload = breakdown.get("render_payload")
+    assert isinstance(payload, dict), "expected structured render payload"
+    return rendered, payload
 
 
 def test_project_management_and_toolmaker_rows_rendered() -> None:
@@ -46,6 +56,21 @@ def test_project_management_and_toolmaker_rows_rendered() -> None:
     assert "project_management" not in process_costs or process_costs["project_management"] == 0.0, breakdown
     assert process_costs["toolmaker_support"] > 0, breakdown
 
-    rendered = appV5.render_quote(result, currency="$")
+    rendered, payload = _render_text_and_payload(result)
     assert "Project Management" not in rendered
-    assert "Toolmaker Support" in rendered
+    processes = payload.get("processes", [])
+    toolmaker_entry = next(
+        (
+            entry
+            for entry in processes
+            if entry.get("label") == "Toolmaker Support"
+        ),
+        None,
+    )
+    assert toolmaker_entry is not None, processes
+    assert toolmaker_entry.get("amount") == pytest.approx(
+        process_costs["toolmaker_support"], abs=1e-2
+    )
+    assert toolmaker_entry.get("hours") == pytest.approx(
+        toolmaker_meta["hr"], abs=1e-2
+    )

@@ -4,6 +4,7 @@ import re
 from typing import Any
 
 import appV5
+from cad_quoter.app.planner_adapter import resolve_pricing_source_value
 from cad_quoter.domain_models import normalize_material_key
 from cad_quoter.pricing import materials as materials_pricing
 from cad_quoter.pricing.speeds_feeds_selector import material_group_for_speeds_feeds
@@ -120,6 +121,7 @@ DUMMY_QUOTE_RESULT = {
         )
     ],
     "ui_vars": {"Material": "Aluminum MIC6"},
+    "app_meta": {"used_planner": True},
     "decision_state": {
         "baseline": {
             "normalized_quote_material": "aluminum mic6",
@@ -366,7 +368,6 @@ DUMMY_QUOTE_RESULT = {
             "Planner drill analysis: material Aluminum MIC6 with matched feeds",
         ],
         "direct_cost_details": {},
-        "app_meta": {"used_planner": True},
     },
 }
 
@@ -481,7 +482,21 @@ def test_dummy_quote_pricing_source_reflects_planner_usage() -> None:
     baseline = payload["decision_state"]["baseline"]
     assert baseline["used_planner"] is True
 
+    app_meta = payload.get("app_meta") or {}
+    assert app_meta.get("used_planner") is True
+
     breakdown = payload["breakdown"]
+    pricing_source_value = resolve_pricing_source_value(
+        breakdown.get("pricing_source"),
+        used_planner=app_meta.get("used_planner"),
+        process_meta=breakdown.get("process_meta"),
+        process_meta_raw=breakdown.get("process_plan"),
+        breakdown=breakdown,
+        hour_summary_entries=(breakdown.get("hour_summary") or {}).get("buckets"),
+    )
+
+    assert pricing_source_value is not None
+    assert pricing_source_value.lower() == "planner"
     assert breakdown["pricing_source"].lower() == "planner"
     assert breakdown.get("pricing_source_text", "").lower() != "legacy"
 
