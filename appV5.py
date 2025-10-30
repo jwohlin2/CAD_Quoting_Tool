@@ -2556,54 +2556,18 @@ try:
 except Exception:
     _extract_text_lines_from_dxf = None
 
-# ---------- OCC helpers delegated to cad_quoter.geometry ----------
-STACK = getattr(geometry, "STACK", "pythonocc")
-STACK_GPROP = getattr(geometry, "STACK_GPROP", STACK)
-
-
-def _missing_geo_helper(name: str) -> Callable[..., Any]:
-    def _raise(*_args: Any, **_kwargs: Any) -> Any:
-        raise RuntimeError(f"{name} is unavailable (OCCT bindings required)")
-
-    return _raise
-
-
-BND_ADD_FALLBACK: Callable[..., Any] = lambda *_args, **_kwargs: None
-bnd_add = getattr(geometry, "bnd_add", BND_ADD_FALLBACK)
-BRepTools_UVBounds = getattr(
-    geometry, "uv_bounds", _missing_geo_helper("BRepTools.UVBounds")
-)
-BRepCheck_Analyzer = getattr(
-    geometry, "BRepCheck_Analyzer", _missing_geo_helper("BRepCheck_Analyzer")
-)
-brep_read = getattr(geometry, "brep_read", _missing_geo_helper("brep_read"))
-
-_read_step_or_iges_or_brep_impl = typing.cast(
-    Callable[[str | Path], Any],
-    getattr(
-        geometry,
-        "read_step_or_iges_or_brep",
-        _missing_geo_helper("read_step_or_iges_or_brep"),
-    ),
-)
-_require_ezdxf = typing.cast(
-    Callable[[], Any],
-    getattr(geometry, "require_ezdxf", _missing_geo_helper("require_ezdxf")),
-)
-_convert_dwg_to_dxf = typing.cast(
-    Callable[[str], str],
-    getattr(geometry, "convert_dwg_to_dxf", _missing_geo_helper("convert_dwg_to_dxf")),
-)
-_get_dwg_converter_path = typing.cast(
-    Callable[[], str | None],
-    getattr(geometry, "get_dwg_converter_path", lambda: None),
+from cad_quoter.geometry_shims import (
+    convert_dwg_to_dxf as _convert_dwg_to_dxf,
+    get_dwg_converter_path as _get_dwg_converter_path,
+    read_step_or_iges_or_brep as _read_step_or_iges_or_brep,
+    require_ezdxf as _require_ezdxf,
 )
 
 
 def read_step_or_iges_or_brep(path: str) -> Any:
     """Backwards-compatible shim that forwards to :mod:`cad_quoter.geometry`."""
 
-    return _read_step_or_iges_or_brep_impl(path)
+    return _read_step_or_iges_or_brep(path)
 
 # ---- tiny helpers you can use elsewhere --------------------------------------
 # Optional PDF stack
