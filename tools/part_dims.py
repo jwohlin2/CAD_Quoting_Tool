@@ -248,7 +248,9 @@ def _max_linear_hw(msp) -> tuple[Optional[float], Optional[float]]:
         except Exception:
             continue
 
-        if dt & 64:  # skip ordinates here
+        # keep only LINEAR/ALIGNED; skip ORDINATE/ANGULAR/RADIUS/DIAMETER/etc.
+        base = dt & 7           # DXF base type: 0=linear(rotated), 1=aligned, 6=ordinate
+        if base not in (0, 1):
             continue
 
         val: Optional[float] = None
@@ -401,11 +403,20 @@ def infer_part_dims(
 
     source: Optional[str] = None
 
-    candidates_w = [v for v in [ox, lh, dx] if v is not None]
-    candidates_h = [v for v in [oy, lv, dy] if v is not None]
+    def _clip(vals, ref):
+        if ref is None:
+            return [v for v in vals if v is not None]
+        limit = 1.5 * ref
+        return [v for v in vals if (v is not None and v <= limit)]
 
-    width_units = max(candidates_w) if candidates_w else None
-    height_units = max(candidates_h) if candidates_h else None
+    cand_w_all = [ox, lh, dx]
+    cand_h_all = [oy, lv, dy]
+
+    cand_w = _clip(cand_w_all, dx)
+    cand_h = _clip(cand_h_all, dy)
+
+    width_units = max(cand_w) if cand_w else None
+    height_units = max(cand_h) if cand_h else None
 
     L: Optional[float] = None
     W: Optional[float] = None
