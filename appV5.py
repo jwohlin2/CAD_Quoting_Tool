@@ -3129,7 +3129,6 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
             applied_pcts = dict(applied_pcts_raw or {})
         except Exception:
             applied_pcts = {}
-    breakdown["applied_pcts"] = applied_pcts
     process_meta_raw = breakdown.get("process_meta", {}) or {}
     applied_process_raw = breakdown.get("applied_process", {}) or {}
     process_meta: dict[str, Any] = {}
@@ -3425,9 +3424,6 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
             geo_context = candidate
     if geo_context is None and isinstance(geometry, _MappingABC):
         geo_context = geometry
-
-    # Optional: LLM decision bullets can be placed either on result or breakdown
-    llm_notes = (result.get("llm_notes") or breakdown.get("llm_notes") or [])[:8]
 
     # ---- helpers -------------------------------------------------------------
     divider = "-" * int(page_width)
@@ -4068,7 +4064,7 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
 
     narrative = result.get("narrative") or breakdown.get("narrative")
     why_parts: list[str] = []
-    material_total_for_why = 0.0
+    why_lines: list[str] = []
     if narrative:
         if isinstance(narrative, str):
             parts = [seg.strip() for seg in _RE_SPLIT(r"(?<=\.)\s+", narrative) if seg.strip()]
@@ -6934,7 +6930,6 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
                     2,
                 )
     material_display_amount = round(float(material_direct_contribution), 2)
-    material_total_for_why = float(material_display_amount)
     if material_component_net is not None:
         material_net_cost = float(material_component_net)
     else:
@@ -6947,7 +6942,6 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
             fallback_amount = max(fallback_amount, float(material_entries_total))
         if fallback_amount > 0:
             material_display_amount = round(fallback_amount, 2)
-            material_total_for_why = float(material_display_amount)
             material_net_cost = float(material_display_amount)
     if material_entries_have_label and material_display_amount <= 0.0:
         material_warning_needed = True
@@ -7143,7 +7137,6 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
     machine_summary_total = _safe_float(display_machine, 0.0)
 
     if isinstance(breakdown, dict):
-        breakdown["pass_through_total"] = pass_through_total
         breakdown["total_direct_costs"] = total_direct_costs_value
         breakdown["total_labor_cost"] = round(labor_summary_total, 2)
         if vendor_items_total:
@@ -7569,15 +7562,90 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
     row(f"Final Price with Margin ({_pct(applied_pcts.get('MarginPct'))}):", price)
     _push(lines, "")
 
-    # ---- LLM adjustments bullets (optional) ---------------------------------
-    if llm_notes:
-        _push(lines, "LLM Adjustments")
-        _push(lines, divider)
-        import textwrap as _tw
-        for n in llm_notes:
-            for w in _tw.wrap(str(n), width=page_width):
-                _push(lines, f"- {w}")
-        _push(lines, "")
+    if not explanation_lines:
+        plan_info_for_explainer: Mapping[str, Any] | None = None
+        plan_info_payload: dict[str, Any] = {}
+
+        process_plan_for_explainer: Mapping[str, Any] | None = None
+        process_plan_candidate = locals().get("process_plan_summary_local")
+        if isinstance(process_plan_candidate, _MappingABC) and process_plan_candidate:
+            process_plan_for_explainer = process_plan_candidate
+        elif isinstance(breakdown, _MappingABC):
+            candidate_summary = breakdown.get("process_plan")
+            if isinstance(candidate_summary, _MappingABC) and candidate_summary:
+                process_plan_for_explainer = candidate_summary
+        if isinstance(process_plan_for_explainer, _MappingABC) and process_plan_for_explainer:
+            plan_info_payload["process_plan_summary"] = process_plan_for_explainer
+
+        if isinstance(breakdown, _MappingABC):
+            process_plan_map = breakdown.get("process_plan")
+            if isinstance(process_plan_map, _MappingABC) and process_plan_map:
+                plan_info_payload.setdefault("process_plan", process_plan_map)
+            plan_pricing_map = breakdown.get("process_plan_pricing")
+            if isinstance(plan_pricing_map, _MappingABC) and plan_pricing_map:
+                plan_info_payload.setdefault("pricing", plan_pricing_map)
+
+        planner_pricing_for_explainer: Mapping[str, Any] | None = None
+        if isinstance(breakdown, _MappingABC):
+            candidate_planner = breakdown.get("process_plan_pricing")
+            if isinstance(candidate_planner, _MappingABC) and candidate_planner:
+                planner_pricing_for_explainer = candidate_planner
+        if (
+            planner_pricing_for_explainer is None
+            and isinstance(result, _MappingABC)
+        ):
+            candidate_planner = result.get("process_plan_pricing")
+            if isinstance(candidate_planner, _MappingABC) and candidate_planner:
+                planner_pricing_for_explainer = candidate_planner
+        if planner_pricing_for_explainer is None:
+            candidate_planner = locals().get("planner_result")
+            if isinstance(candidate_planner, _MappingABC) and candidate_planner:
+                planner_pricing_for_explainer = candidate_planner
+
+        if isinstance(planner_pricing_for_explainer, _MappingABC) and planner_pricing_for_explainer:
+            plan_info_payload["planner_pricing"] = planner_pricing_for_explainer
+
+        bucket_plan_info: dict[str, Any] = {}
+        if isinstance(bucket_state, PlannerBucketRenderState):
+            extra_map = getattr(bucket_state, "extra", None)
+            if isinstance(extra_map, _MappingABC) and extra_map:
+                try:
+                    bucket_plan_info.update(dict(extra_map))
+                except Exception:
+                    for key, value in extra_map.items():
+                        bucket_plan_info[key] = value
+            bucket_minutes_detail_map = getattr(bucket_state, "bucket_minutes_detail", None)
+            if isinstance(bucket_minutes_detail_map, _MappingABC) and bucket_minutes_detail_map:
+                bucket_plan_info.setdefault(
+                    "bucket_minutes_detail_for_render",
+                    bucket_minutes_detail_map,
+                )
+        if bucket_plan_info:
+            plan_info_payload["bucket_state_extra"] = bucket_plan_info
+
+        if plan_info_payload:
+            plan_info_for_explainer = plan_info_payload
+
+        try:
+            explanation_text = explain_quote(
+                breakdown,
+                hour_trace=hour_trace_data,
+                geometry=geometry_for_explainer,
+                render_state=bucket_state,
+                plan_info=plan_info_for_explainer,
+            )
+        except Exception:
+            explanation_text = ""
+        if explanation_text:
+            for line in str(explanation_text).splitlines():
+                text = line.strip()
+                if text:
+                    explanation_lines.append(text)
+
+    if explanation_lines:
+        why_lines.extend(explanation_lines)
+    if why_lines:
+        why_parts.extend(why_lines)
 
     if why_parts:
         if lines and lines[-1]:
@@ -8908,15 +8976,7 @@ def compute_quote_from_df(  # type: ignore[reportGeneralTypeIssues]
         material_direct_contribution = round(material_total_direct_cost, 2)
         material_display_amount = round(material_total_direct_cost, 2)
         material_total_for_directs = float(material_total_direct_cost)
-        material_total_for_why = float(material_display_amount)
         material_net_cost = float(material_total_direct_cost)
-
-    def _pass_through_total_for_render(
-        container: Mapping[str, Any] | None,
-    ) -> float:
-        if not isinstance(container, _MappingABC):
-            return 0.0
-        return _safe_float(container.get("pass_through_total"))
 
     def _bucket_minutes_detail_for_render_from(
         container: Mapping[str, Any] | None,
@@ -8932,10 +8992,6 @@ def compute_quote_from_df(  # type: ignore[reportGeneralTypeIssues]
             except Exception:
                 return {str(key): raw_value[key] for key in raw_value.keys()}
         return {}
-
-    pass_through_total_for_render = _pass_through_total_for_render(
-        breakdown if isinstance(breakdown, _MappingABC) else None
-    )
 
     bucket_minutes_detail_for_render = _bucket_minutes_detail_for_render_from(
         breakdown if isinstance(breakdown, _MappingABC) else None
