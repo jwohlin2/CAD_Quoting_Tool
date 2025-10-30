@@ -6919,42 +6919,6 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
             _record_hour_entry(label, round(hours_val, 2))
             seen_hour_labels.add(label)
 
-    if planner_mode:
-        buckets_for_hours = (
-            bucket_view_struct.get("buckets")
-            if isinstance(bucket_view_struct, _MappingABC)
-            else None
-        )
-        if not isinstance(buckets_for_hours, _MappingABC):
-            buckets_for_hours = {}
-
-        pl_lab = 0.0
-        pl_mac = 0.0
-        total_planner_hours = 0.0
-        for raw_key, info in buckets_for_hours.items():
-            if not isinstance(info, _MappingABC):
-                continue
-            minutes_val = _safe_float(info.get("minutes"), default=0.0)
-            if minutes_val <= 0.0:
-                continue
-            hours_val = minutes_val / 60.0
-            total_planner_hours += hours_val
-            canon_key = _canonical_bucket_key(raw_key)
-            norm_key = canon_key or _norm(raw_key)
-            if norm_key in LABORISH:
-                pl_lab += hours_val
-            else:
-                pl_mac += hours_val
-
-        residual_machine = total_planner_hours - pl_lab
-        if residual_machine < 0.0:
-            residual_machine = 0.0
-        if abs(pl_mac - residual_machine) > 0.01:
-            pl_mac = residual_machine
-
-        planner_total_hr = round(max(total_planner_hours, pl_lab + pl_mac), 2)
-        # Planner-specific summaries are now handled through the bucket table.
-
     if (not planner_mode) or len(hour_summary_entries) == planner_entry_baseline:
         if charged_hour_entries:
             seen_hour_canon_keys: set[str] = set()
