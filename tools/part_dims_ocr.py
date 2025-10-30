@@ -48,7 +48,6 @@ import urllib.error
 import urllib.request
 from dataclasses import dataclass
 from typing import Any, Dict, Iterable, List, Optional, Tuple
-from typing import Any, Dict, Iterable, List, Optional, Tuple
 
 import matplotlib
 
@@ -97,18 +96,9 @@ def _load_qwen_local(model_path: str, mmproj_path: str, n_ctx: int = 4096):
     return llm
 
 
-def _crop_frac(img, box_str: str):
-    # box_str like "0,0,0.72,1.0"
-    l, t, r, b = [float(x) for x in box_str.split(",")]
-    W, H = img.size
-    return img.crop((int(l * W), int(t * H), int(r * W), int(b * H)))
-
-
-def _img_b64(img):
-    import io
-
+def _img_b64(pil_img):
     buf = io.BytesIO()
-    img.save(buf, format="PNG")
+    pil_img.save(buf, format="PNG")
     return base64.b64encode(buf.getvalue()).decode("ascii")
 
 
@@ -128,102 +118,49 @@ def _parse_num(tok: str) -> float:
 
 
 def _extract_numbers_from_img(llm, pil_img) -> list[float]:
-    """Ask the VLM to list numeric dimensions only, then parse to floats."""
-
-    def _img_b64(img):
-        buf = io.BytesIO()
-        img.save(buf, format="PNG")
-        return base64.b64encode(buf.getvalue()).decode("ascii")
+    """Ask the VLM to list only numeric dims, then parse to floats."""
 
     b64 = _img_b64(pil_img)
-    resp = llm.create_chat_completion(
-        messages=[
-            {
-                "role": "user",
-                "content": [
-                    {
-                        "type": "text",
-                        "text": (
-                            "From this CAD view, output ONLY numeric dimensions you can read, separated by spaces. "
-                            "No words, no units, no angles, no parentheses."
-                        ),
-                    },
-                    {
-                        "type": "image_url",
-                        "image_url": {"url": f"data:image/png;base64,{b64}"},
-                    },
-                ],
-            }
+    resp = llm.create_chat_completion(messages=[{
+        "role": "user",
+        "content": [
+            {"type": "text", "text": (
+                "From this mechanical drawing, output ONLY the numeric dimensions you can read, "
+                "separated by spaces (no words/units/angles)."
+            )},
+            {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{b64}"}},
         ],
-        temperature=0,
-    )
+    }], temperature=0)
     txt = (resp["choices"][0]["message"]["content"] or "")
     return [_parse_num(t) for t in _NUMTOK.findall(txt)]
 
 
-def _pick_dims(plan_nums: list[float], side_nums: list[float]) -> tuple[float, float, float] | None:
-    P = sorted([x for x in plan_nums if x >= 10.0], reverse=True)
-    if len(P) < 2:
-        P = sorted(plan_nums, reverse=True)[:2]
-    if len(P) < 2:
-        return None
-    L, W = P[0], P[1]
-
-    Tcand = [x for x in side_nums if 0.25 <= x <= 3.00]
-    T = max(Tcand) if Tcand else (sorted(side_nums)[0] if side_nums else None)
-    if T is None:
-        return None
-    return (L, W, T)
-
-
-def _qwen_extract_block_dims_local(llm, full_img, plan_img, side_img) -> dict | None:
+def _qwen_extract_block_dims_no_crops(llm, full_img) -> dict | None:
     """
-    Ask Qwen2.5-VL (local) to output strict JSON for overall block dimensions.
-    Uses explicit rules so it selects outer baseline dimensions on plan view,
-    and overall slab thickness on side view.
+    One-shot extraction: let Qwen identify views and return strict JSON.
+    Falls back to numeric heuristics if the JSON response isn't plausible.
     """
 
-    def _img_b64(img):
-        buf = io.BytesIO()
-        img.save(buf, format="PNG")
-        return base64.b64encode(buf.getvalue()).decode("ascii")
-
-    b_full = _img_b64(full_img)
-    b_plan = _img_b64(plan_img)
-    b_side = _img_b64(side_img)
-
-    system = (
-        "You analyze mechanical drawings. Return overall stock size only."
-    )
     rules = (
-        "Identify the OVERALL block dimensions of a rectangular plate:\n"
-        "• Use the PLAN/TOP view to pick LENGTH and WIDTH = the two LARGEST linear dimensions that span the outer edges. "
-        "  Prefer baseline dimensions with extension lines/arrows touching the outer rectangle. Ignore interior callouts.\n"
-        "• Use the SIDE view to pick THICKNESS = the overall plate thickness. Ignore counterbores, chamfers (.03 x 45°), taps, and small offsets.\n"
-        "• Prefer whole-inch or 2-decimal values when close candidates exist (e.g., 15.50 over 15.49 if both appear).\n"
-        "• Units are almost always inches if numbers look like 12.00, 15.50, 2.00; otherwise detect mm if clearly labeled.\n"
+        "You are reading a CAD drawing of a rectangular plate shown in multiple views. "
+        "Identify the OVERALL STOCK SIZE:\n"
+        "• LENGTH and WIDTH: choose the two LARGEST baseline dimensions that span the outer edges "
+        "  of the plan/top view (ignore interior hole callouts and small features like .03 x 45°).\n"
+        "• THICKNESS: choose the overall slab thickness from a side view (ignore chamfers, counterbores, taps).\n"
+        "• Prefer clean two-decimal values (e.g., 15.50, 12.00, 2.00) when close candidates exist.\n"
+        "• Units are inches if numbers look like 12.00/15.50/2.00; otherwise 'mm' if clearly labeled.\n"
         "• Return STRICT JSON ONLY:\n"
         '{"length": <number>, "width": <number>, "thickness": <number>, "units": "in"|"mm"}\n'
         "No commentary."
     )
-
-    messages = [
-        {"role": "system", "content": system},
-        {
-            "role": "user",
-            "content": [
-                {"type": "text", "text": rules},
-                {"type": "text", "text": "Full sheet (context only):"},
-                {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{b_full}"}},
-                {"type": "text", "text": "Plan/top view crop (choose LENGTH & WIDTH from this view):"},
-                {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{b_plan}"}},
-                {"type": "text", "text": "Side view crop (choose THICKNESS from this view):"},
-                {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{b_side}"}},
-            ],
-        },
-    ]
-
-    resp = llm.create_chat_completion(messages=messages, temperature=0)
+    b64 = _img_b64(full_img)
+    resp = llm.create_chat_completion(messages=[{
+        "role": "user",
+        "content": [
+            {"type": "text", "text": rules},
+            {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{b64}"}},
+        ],
+    }], temperature=0)
     txt = (resp["choices"][0]["message"]["content"] or "").strip()
     m = re.search(r"\{.*\}", txt, flags=re.S)
     data = None
@@ -233,68 +170,40 @@ def _qwen_extract_block_dims_local(llm, full_img, plan_img, side_img) -> dict | 
         except Exception:
             data = None
 
-    # Post-check: if JSON missing or obviously wrong, fall back to numeric evidence.
-    # Plan: take two largest >= 10.0 (sheet shows things like 12.00, 13.50, 15.50).
-    # Side: take the largest in [0.25, 3.50] as thickness (common plate range).
-    if not data or any(k not in data for k in ("length", "width", "thickness")):
-        data = {}
-
     try:
-        L, W, T = float(data.get("length", 0)), float(data.get("width", 0)), float(data.get("thickness", 0))
+        L = float(data.get("length", 0)) if data else 0
+        W = float(data.get("width", 0)) if data else 0
+        T = float(data.get("thickness", 0)) if data else 0
     except Exception:
-        L, W, T = 0.0, 0.0, 0.0
+        L = W = T = 0
 
-    def _looks_plausible(L, W, T):
-        return (max(L, W) >= 12.0 and min(L, W) >= 8.0 and 0.25 <= T <= 3.5)
+    def plausible(length: float, width: float, thickness: float) -> bool:
+        return (max(length, width) >= 12.0 and min(length, width) >= 8.0 and 0.40 <= thickness <= 3.50)
 
-    if not _looks_plausible(L, W, T):
-        plan_nums = _extract_numbers_from_img(llm, plan_img)
-        side_nums = _extract_numbers_from_img(llm, side_img)
-
-        big = sorted([x for x in plan_nums if x >= 10.0], reverse=True)
-        if len(big) < 2:
-            big = sorted(plan_nums, reverse=True)[:2]
-        if len(big) >= 2:
-            L, W = big[0], big[1]
-
-        t_candidates = [x for x in side_nums if 0.25 <= x <= 3.50]
-        if t_candidates:
-            T = max(t_candidates)
-        elif side_nums:
-            T = sorted(side_nums)[0]
+    if not plausible(L, W, T):
+        nums = _extract_numbers_from_img(llm, full_img)
+        lw = sorted([x for x in nums if x >= 10.0], reverse=True) or sorted(nums, reverse=True)
+        if len(lw) >= 2:
+            L, W = lw[0], lw[1]
+        tiny = {0.03, 0.04, 0.06, 0.08, 0.09, 0.10, 0.12, 0.19, 0.25, 0.375}
+        tc = [x for x in nums if 0.40 <= x <= 3.50 and x not in tiny]
+        if tc:
+            T = max(tc, key=lambda v: (-abs(v - round(v, 2)), v))
+        elif nums:
+            T = min(nums)
 
         if L and W and T:
             data = {"length": float(L), "width": float(W), "thickness": float(T), "units": "in"}
 
-    # final sanity
-    if not data or any(k not in data for k in ("length", "width", "thickness", "units")):
-        return None
     return data
 
 
-def _vlm_local_transcribe_all(llm, image):
-    b64 = _img_b64(image)
-    resp = llm.create_chat_completion(messages=[{
-        "role": "user",
-        "content": [
-            {"type": "text", "text": (
-                "Transcribe all visible numeric dimensions from this drawing (just the numbers with decimals or fractions). "
-                "List them separated by spaces. No words, no comments."
-            )},
-            {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{b64}"}},
-        ],
-    }], temperature=0)
-    return (resp["choices"][0]["message"]["content"] or "")
-
-
-def _emit_images_with_crops(emit_image: str, full_img, plan_img, side_img) -> None:
+def _emit_rendered_image(emit_image: str, full_img) -> None:
     if not emit_image:
         return
     try:
-        full_path = emit_image if emit_image.lower().endswith(".png") else emit_image + "_full.png"
-        full_img.save(full_path)
-        plan_img.save(emit_image + "_plan.png")
-        side_img.save(emit_image + "_side.png")
+        path = emit_image if emit_image.lower().endswith(".png") else emit_image + ".png"
+        full_img.save(path)
     except Exception:
         pass
 
@@ -310,29 +219,7 @@ def _emit_ocr_text(emit_ocr: str, text: str) -> None:
         pass
 
 
-def _fallback_dims_from_text(nums: List[float]) -> Optional[Tuple[float, float, float]]:
-    if len(nums) < 3:
-        return None
-
-    uniq: List[float] = []
-    for val in sorted(nums, reverse=True):
-        if not any(abs(val - existing) < 1e-3 for existing in uniq):
-            uniq.append(val)
-        if len(uniq) >= 3:
-            break
-
-    if len(uniq) < 3:
-        return None
-
-    L, W, T = uniq[0], uniq[1], uniq[2]
-    if W < T:
-        W, T = T, W
-    return (L, W, T)
-
-
 def _vlm_local_process_render(img_path: str,
-                              plan_crop: str,
-                              side_crop: str,
                               vlm_local_model: str,
                               vlm_local_mmproj: str,
                               emit_image: str,
@@ -342,86 +229,33 @@ def _vlm_local_process_render(img_path: str,
     if Image is None:
         raise RuntimeError("Pillow is required for VLM local rendering.")
 
+    llm = _load_qwen_local(vlm_local_model, vlm_local_mmproj)
+
     with Image.open(img_path) as img:
         img.load()
-        plan_img = _crop_frac(img, plan_crop).copy()
-        side_img = _crop_frac(img, side_crop).copy()
+        full_img = img.convert("RGB")
 
-        _emit_images_with_crops(emit_image, img, plan_img, side_img)
+    _emit_rendered_image(emit_image, full_img)
 
-        llm = _load_qwen_local(vlm_local_model, vlm_local_mmproj)
-        data = _qwen_extract_block_dims_local(llm, img, plan_img, side_img)
-
-        def _looks_like_default(triple: Tuple[float, float, float]) -> bool:
-            L, W, T = triple
-            return (
-                abs(L - 12.0) < 1e-3
-                and abs(W - 8.0) < 1e-3
-                and abs(T - 2.0) < 1e-3
-            )
-
-        need_heuristic = not data
-        parsed_dims: Optional[Tuple[float, float, float]] = None
-        if data:
-            try:
-                parsed_dims = (float(data["length"]), float(data["width"]), float(data["thickness"]))
-            except Exception:
-                parsed_dims = None
-                need_heuristic = True
-            else:
-                if _looks_like_default(parsed_dims):
-                    need_heuristic = True
-
-        guess: Optional[Tuple[float, float, float]] = None
-        if need_heuristic:
-            plan_nums = _extract_numbers_from_img(llm, plan_img)
-            side_nums = _extract_numbers_from_img(llm, side_img)
-            guess = _pick_dims(plan_nums, side_nums)
-            if guess and verbose:
-                L, W, T = guess
-                print(f"[dims-ocr] heuristic -> SIZE: {L} x {W} x {T} in")
-
-        if guess:
-            L, W, T = guess
-            text = f"SIZE: {L} x {W} x {T} in"
-            _emit_ocr_text(emit_ocr, text)
-            return text, warnings
-
-        if data and parsed_dims:
-            text = f"SIZE: {data['length']} x {data['width']} x {data['thickness']} {data['units']}"
-            if verbose:
-                print("[dims-ocr] VLM JSON ->", text)
-            _emit_ocr_text(emit_ocr, text)
-            return text, warnings
-
-        txt_nums = _vlm_local_transcribe_all(llm, img)
+    data = _qwen_extract_block_dims_no_crops(llm, full_img)
+    if data:
+        text = f"SIZE: {data['length']} x {data['width']} x {data['thickness']} {data['units']}"
         if verbose:
-            print("[dims-ocr] OCR nums preview:", txt_nums[:200])
-        nums: List[float] = []
-        for token in re.findall(r"\d+\s*\d+/\d+|\d+[.,]\d+|\.\d+|\d+", txt_nums):
-            token = token.replace(",", "")
-            if re.match(r"^\d+\s+\d+/\d+$", token):
-                a, b, c = re.match(r"^(\d+)\s+(\d+)/(\d+)$", token).groups()
-                val = float(a) + float(b) / float(c)
-            elif re.match(r"^\d+/\d+$", token):
-                a, b = token.split("/")
-                val = float(a) / float(b)
-            else:
-                val = float(token)
-            nums.append(val)
+            print("[dims-ocr] VLM JSON ->", text)
+        try:
+            payload = json.dumps(data)
+        except Exception:
+            payload = text
+        _emit_ocr_text(emit_ocr, payload)
+        return text, warnings
 
-        guess = _fallback_dims_from_text(nums)
-        if guess:
-            L, W, T = guess
-            units = "in"
-            text = f"SIZE: {L} x {W} x {T} {units}"
-            _emit_ocr_text(emit_ocr, text)
-            return text, warnings
+    warnings.append("VLM extraction failed; falling back to transcription.")
+    txt = _vlm_local_transcribe_image(llm, img_path)
+    if verbose:
+        print("[dims-ocr] VLM transcription fallback ->", txt[:200])
+    _emit_ocr_text(emit_ocr, txt)
+    return txt, warnings
 
-        if txt_nums:
-            _emit_ocr_text(emit_ocr, txt_nums)
-        warnings.append("No dimension triples found.")
-        return "", warnings
 def _detect_default_input() -> Optional[str]:
     """Best-effort to locate a sample input so CLI can run without flags."""
 
@@ -912,36 +746,46 @@ def _run_oda_to_dxf(oda_exe: str, in_path: str, out_dir: str,
 
 # ---------- DXF -> PNG/TIFF rendering via ezdxf ----------
 
-def _render_dxf_to_image(dxf_path: str, out_path: str, dpi: int = 600) -> str:
+def _render_dxf_to_image(dxf_path: str, out_png: str, dpi: int = 800):
     """
-    Render a DXF modelspace to a raster image (PNG/TIFF) using ezdxf's drawing add-on.
-    Returns the path to the written image.
+    High-contrast DXF->PNG render:
+      - white background
+      - monochrome (all geometry black)
+      - boosted lineweights so the outer profile shows
+      - accurate lineweight policy
     """
-    try:
-        import ezdxf
-        from ezdxf.addons.drawing import RenderContext, Frontend
-        from ezdxf.addons.drawing.matplotlib import MatplotlibBackend
-    except Exception as e:
-        raise RuntimeError("ezdxf (and its drawing add-on) + matplotlib are required. pip install ezdxf matplotlib") from e
+    from ezdxf.addons.drawing import RenderContext, Frontend
+    from ezdxf.addons.drawing.matplotlib import MatplotlibBackend
+    from ezdxf.addons.drawing.config import Configuration, LinePolicy
+
+    import ezdxf, matplotlib.pyplot as plt
 
     doc = ezdxf.readfile(dxf_path)
     msp = doc.modelspace()
 
-    # Create a borderless figure
-    fig = plt.figure(figsize=(8, 8), dpi=dpi)
-    ax = fig.add_axes([0, 0, 1, 1])
+    # High-contrast config (no layer colors)
+    cfg = Configuration(
+        background_color="#FFFFFF",
+        monochrome=True,              # <-- all entities forced to black
+        default_color="#000000",
+        line_policy=LinePolicy.ACCURATE,
+        min_lineweight=0.35,          # bump thin lines
+        lineweight_scaling=1.8,       # scale CAD LWs up
+        show_hatches=True,
+        show_text=True,
+    )
+
     ctx = RenderContext(doc)
-    backend = MatplotlibBackend(ax)
-    Frontend(ctx, backend).draw_layout(msp, finalize=True)
+    fig = plt.figure(figsize=(12, 8), dpi=dpi)
+    ax = fig.add_axes([0, 0, 1, 1])
+    ax.set_axis_off()
 
-    # Fit the drawing nicely
-    ax.autoscale(True)
-    ax.set_aspect("equal")
-    ax.axis("off")
+    backend = MatplotlibBackend(ax, adjust_figure=True)
+    Frontend(ctx, backend, config=cfg).draw_layout(msp, finalize=True)
 
-    fig.savefig(out_path, dpi=dpi, bbox_inches="tight", pad_inches=0)
+    fig.savefig(out_png, dpi=dpi, facecolor="#FFFFFF")
     plt.close(fig)
-    return out_path
+    return out_png
 
 
 def _perform_ocr_on_image_path(
@@ -995,8 +839,6 @@ def _get_text_from_input(path: str,
                          vlm_mode: str = "transcribe",
                          vlm_local_model: str = "",
                          vlm_local_mmproj: str = "",
-                         plan_crop: str = "0,0,0.72,1.0",
-                         side_crop: str = "0.72,0,1.0,1.0",
                          emit_image: str = "",
                          emit_ocr: str = "",
                          verbose: bool = False) -> Tuple[str, List[str]]:
@@ -1018,13 +860,11 @@ def _get_text_from_input(path: str,
         with tempfile.TemporaryDirectory(prefix="oda_img_") as tmpdir:
             dxf_out = _run_oda_to_dxf(oda_exe, path, tmpdir, out_ver="ACAD2018")
             img_path = os.path.join(tmpdir, "page.png")
-            _render_dxf_to_image(dxf_out, img_path, dpi=600)
+            _render_dxf_to_image(dxf_out, img_path)
             backend = (ocr_backend or "tesseract").lower()
             if backend == "vlm_local":
                 text, local_warnings = _vlm_local_process_render(
                     img_path,
-                    plan_crop,
-                    side_crop,
                     vlm_local_model,
                     vlm_local_mmproj,
                     emit_image,
@@ -1037,9 +877,7 @@ def _get_text_from_input(path: str,
             if emit_image and Image is not None:
                 with Image.open(img_path) as img:
                     img.load()
-                    plan_img = _crop_frac(img, plan_crop).copy()
-                    side_img = _crop_frac(img, side_crop).copy()
-                    _emit_images_with_crops(emit_image, img, plan_img, side_img)
+                    _emit_rendered_image(emit_image, img)
 
             txt = _perform_ocr_on_image_path(
                 img_path,
@@ -1061,13 +899,11 @@ def _get_text_from_input(path: str,
     if ext == ".dxf":
         with tempfile.TemporaryDirectory(prefix="dxf_img_") as tmpdir:
             img_path = os.path.join(tmpdir, "page.png")
-            _render_dxf_to_image(path, img_path, dpi=600)
+            _render_dxf_to_image(path, img_path)
             backend = (ocr_backend or "tesseract").lower()
             if backend == "vlm_local":
                 text, local_warnings = _vlm_local_process_render(
                     img_path,
-                    plan_crop,
-                    side_crop,
                     vlm_local_model,
                     vlm_local_mmproj,
                     emit_image,
@@ -1080,9 +916,7 @@ def _get_text_from_input(path: str,
             if emit_image and Image is not None:
                 with Image.open(img_path) as img:
                     img.load()
-                    plan_img = _crop_frac(img, plan_crop).copy()
-                    side_img = _crop_frac(img, side_crop).copy()
-                    _emit_images_with_crops(emit_image, img, plan_img, side_img)
+                    _emit_rendered_image(emit_image, img)
 
             txt = _perform_ocr_on_image_path(
                 img_path,
@@ -1323,8 +1157,6 @@ def extract_part_dims(input_path: str,
                       vlm_mode: str = "transcribe",
                       vlm_local_model: str = "",
                       vlm_local_mmproj: str = "",
-                      plan_crop: str = "0,0,0.72,1.0",
-                      side_crop: str = "0.72,0,1.0,1.0",
                       emit_image: str = "",
                       emit_ocr: str = "",
                       verbose: bool = False) -> ExtractionResult:
@@ -1344,9 +1176,7 @@ def extract_part_dims(input_path: str,
         vlm_mode: "transcribe" for raw text or "extract" for JSON dimension parsing.
         vlm_local_model: Path to local GGUF vision model.
         vlm_local_mmproj: Path to local mmproj GGUF for the model.
-        plan_crop: Fractional crop for the plan/top view (left,top,right,bottom).
-        side_crop: Fractional crop for the side view (left,top,right,bottom).
-        emit_image: Optional prefix to save rendered CAD image + crops for debugging.
+        emit_image: Optional path/prefix to save the rendered CAD image for debugging.
         emit_ocr: Optional path to save OCR/VLM text output for debugging.
         verbose: If True, print a short preview of OCR text.
 
@@ -1364,8 +1194,6 @@ def extract_part_dims(input_path: str,
         vlm_mode=vlm_mode,
         vlm_local_model=vlm_local_model,
         vlm_local_mmproj=vlm_local_mmproj,
-        plan_crop=plan_crop,
-        side_crop=side_crop,
         emit_image=emit_image,
         emit_ocr=emit_ocr,
         verbose=verbose,
@@ -1466,8 +1294,6 @@ def _cli():
     p.add_argument("--emit-ocr", default=default_emit_ocr, help=emit_ocr_help)
     p.add_argument("--verbose", action="store_true", dest="verbose", help=verbose_help)
     p.add_argument("--no-verbose", action="store_false", dest="verbose", help="Disable OCR preview output.")
-    p.add_argument("--plan-crop", default="0,0,0.72,1.0", help="left,top,right,bottom as fractions (plan/top view)")
-    p.add_argument("--side-crop", default="0.72,0,1.0,1.0", help="left,top,right,bottom as fractions (side view)")
     p.set_defaults(verbose=True)
     args = p.parse_args()
 
@@ -1496,8 +1322,6 @@ def _cli():
             vlm_mode=args.vlm_mode,
             vlm_local_model=args.vlm_local_model,
             vlm_local_mmproj=args.vlm_local_mmproj,
-            plan_crop=args.plan_crop,
-            side_crop=args.side_crop,
             emit_image=args.emit_image,
             emit_ocr=args.emit_ocr,
             verbose=args.verbose,
