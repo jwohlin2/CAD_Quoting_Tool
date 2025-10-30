@@ -5,6 +5,8 @@ import re
 
 import pytest
 
+from cad_quoter.utils.render_utils import QuoteDoc
+
 
 def test_die_plate_deep_drill_regression() -> None:
     import appV5
@@ -139,13 +141,28 @@ def test_die_plate_deep_drill_regression() -> None:
         ),
     }
 
-    rendered = appV5.render_quote(result, currency="$", show_zeros=False)
-    payload = breakdown.get("render_payload")
-    assert isinstance(payload, dict)
+    captured: list[QuoteDoc] = []
+
+    class _Recorder(appV5.QuoteDocRecorder):  # type: ignore[misc]
+        def build_doc(self) -> QuoteDoc:
+            doc = super().build_doc()
+            captured.append(doc)
+            return doc
+
+    original = appV5.QuoteDocRecorder
+    appV5.QuoteDocRecorder = _Recorder
+    try:
+        rendered = appV5.render_quote(result, currency="$", show_zeros=False)
+    finally:
+        appV5.QuoteDocRecorder = original
+
+    assert captured, "expected quote document"
+    doc = captured[-1]
 
     assert "Quote Summary" in rendered
-    drivers = payload.get("price_drivers", [])
-    assert any("deep_drill" in driver.get("detail", "").lower() for driver in drivers)
+    sections = {section.title or "": [row.text for row in section.rows] for section in doc.sections}
+    drivers = [line.lower() for line in sections.get("Why this price", [])]
+    assert any("deep_drill" in line for line in drivers)
 
 
 def test_steel_die_plate_deep_drill_runtime_floor() -> None:
