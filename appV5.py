@@ -3283,6 +3283,22 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
         breakdown.get("suppress_planner_details_due_to_drift")
     )
 
+    mat_total_val: float | None = None
+    if isinstance(material_stock_block, dict):
+        mat_total_val = _coerce_float_or_none(
+            material_stock_block.get("total_material_cost")
+        )
+    if mat_total_val is None and isinstance(material, dict):
+        mat_total_val = _coerce_float_or_none(material.get("material_cost"))
+    mat_total = float(mat_total_val or 0.0)
+    if mat_total == 0.0 and isinstance(material, dict):
+        base = float(material.get("base_cost") or 0.0)
+        tax = float(material.get("material_tax") or 0.0)
+        scrap_credit = float(material.get("material_scrap_credit") or 0.0)
+        recomputed = round(max(0.0, base + tax - scrap_credit), 2)
+        if recomputed > 0:
+            mat_total = recomputed
+
     # Shipping is displayed in exactly one section of the quote to avoid
     # conflicting totals.  Prefer the pass-through value when available and
     # otherwise fall back to a material-specific entry before rendering.
@@ -3325,6 +3341,8 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
             material_block.get("material_direct_cost")
         )
     material_total_for_directs = float(material_total_for_directs_val or 0.0)
+    if material_total_for_directs <= 0 and mat_total > 0:
+        material_total_for_directs = float(mat_total)
     if material_total_for_directs <= 0 and isinstance(material_stock_block, dict):
         try:
             material_total_for_directs = float(
@@ -4286,28 +4304,6 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
                 pricing_geom = candidate_geo
     if pricing_geom is None:
         pricing_geom = g if isinstance(g, _MappingABC) else {}
-    mat_total_val = None
-    if isinstance(material_stock_block, dict):
-        mat_total_val = _coerce_float_or_none(
-            material_stock_block.get("total_material_cost")
-        )
-    if mat_total_val is None and isinstance(material, dict):
-        mat_total_val = _coerce_float_or_none(material.get("material_cost"))
-    mat_total = float(mat_total_val or 0.0)
-    # Recompute material total from components if needed
-    if mat_total == 0.0 and isinstance(material, dict):
-        base = float(material.get("base_cost") or 0.0)
-        tax = float(material.get("material_tax") or 0.0)
-        scrap_credit = float(material.get("material_scrap_credit") or 0.0)
-        recomputed = round(max(0.0, base + tax - scrap_credit), 2)
-        if recomputed > 0:
-            mat_total = recomputed
-            # surface it everywhere our renderers and directs look:
-            material["material_cost"] = mat_total
-            if isinstance(material_stock_block, dict):
-                material_stock_block["total_material_cost"] = mat_total
-    if isinstance(material, dict) and mat_total > 0:
-        material["material_cost"] = float(mat_total)
 
     def _lookup_blank(container: Mapping[str, Any] | None) -> Mapping[str, Any] | None:
         if not isinstance(container, _MappingABC):
@@ -4637,6 +4633,10 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
                 material_cost_map.update(material_stock_block)
             if isinstance(material, _MappingABC):
                 material_cost_map.update(material)
+            if mat_total > 0:
+                material_cost_map.setdefault("total_material_cost", mat_total)
+                material_cost_map.setdefault("material_cost", mat_total)
+                material_cost_map.setdefault("material_direct_cost", mat_total)
             material_cost_components = _material_cost_components(
                 material_cost_map,
                 overrides=material_overrides,
