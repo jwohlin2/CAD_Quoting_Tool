@@ -3131,7 +3131,6 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
             applied_pcts = dict(applied_pcts_raw or {})
         except Exception:
             applied_pcts = {}
-    breakdown["applied_pcts"] = applied_pcts
     process_meta_raw = breakdown.get("process_meta", {}) or {}
     applied_process_raw = breakdown.get("applied_process", {}) or {}
     process_meta: dict[str, Any] = {}
