@@ -134,3 +134,23 @@ def test_format_hole_table_section_outputs_operations() -> None:
     assert lines[0] == "HOLE TABLE OPERATIONS"
     assert any(line.strip().startswith("A") for line in lines[1:])
     assert any("THRU" in line for line in lines)
+
+
+def test_collect_ops_entries_prefers_hole_labels(monkeypatch: pytest.MonkeyPatch) -> None:
+    summary_rows = [{"hole": "", "ref": "Ø.3320", "qty": 1, "desc": "THRU"}]
+    exploded_rows = [
+        ["G", "Ø.3320", 1, "THRU"],
+        ["G", "Ø.3320", 1, "3/8-24 TAP X .38 DEEP FROM BACK"],
+    ]
+
+    monkeypatch.setattr(appV5, "_explode_rows_to_operations", lambda rows: exploded_rows)
+
+    geo_map = {
+        "ops_summary": {"rows": summary_rows},
+        "hole_table": {"lines": ["HOLE TABLE", "G Ø.3320 1 THRU"]},
+    }
+
+    result = appV5._collect_ops_entries_for_display(geo_map)
+
+    assert {"hole": "G", "ref": "Ø.3320", "qty": 1, "desc": "THRU"} in result
+    assert {"hole": "", "ref": "Ø.3320", "qty": 1, "desc": "THRU"} not in result

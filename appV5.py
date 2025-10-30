@@ -543,11 +543,11 @@ def _collect_ops_entries_for_display(
             if isinstance(ops_payload, Sequence):
                 _extend(ops_payload)
 
-    if not entries and fallback_rows:
+    if fallback_rows:
         _extend(fallback_rows)
 
-    if not entries and isinstance(geo_map, _MappingABC):
-        text_rows: list[str] = []
+    text_rows: list[str] = []
+    if isinstance(geo_map, _MappingABC):
         hole_table_payload = geo_map.get("hole_table")
         if isinstance(hole_table_payload, _MappingABC):
             lines = hole_table_payload.get("lines")
@@ -558,14 +558,14 @@ def _collect_ops_entries_for_display(
             if isinstance(value, Sequence):
                 text_rows.extend(str(s) for s in value if isinstance(s, str))
 
-        if text_rows and _explode_rows_to_operations:
-            try:
-                exploded = _explode_rows_to_operations(text_rows) or []
-            except Exception:
-                exploded = []
-            _extend(exploded)
+    if text_rows and _explode_rows_to_operations:
+        try:
+            exploded = _explode_rows_to_operations(text_rows) or []
+        except Exception:
+            exploded = []
+        _extend(exploded)
 
-    if not entries and isinstance(geo_map, _MappingABC):
+    if isinstance(geo_map, _MappingABC):
         structured = geo_map.get("hole_table_structured")
         if isinstance(structured, Sequence):
             _extend(structured)
@@ -574,6 +574,29 @@ def _collect_ops_entries_for_display(
             structured_payload = hole_table_payload.get("structured")
             if isinstance(structured_payload, Sequence):
                 _extend(structured_payload)
+
+    if entries:
+        hole_pref_keys = {
+            (
+                str(entry.get("ref", "")),
+                int(entry.get("qty") or 0),
+                str(entry.get("desc", "")),
+            )
+            for entry in entries
+            if entry.get("hole")
+        }
+        if hole_pref_keys:
+            entries = [
+                entry
+                for entry in entries
+                if entry.get("hole")
+                or (
+                    str(entry.get("ref", "")),
+                    int(entry.get("qty") or 0),
+                    str(entry.get("desc", "")),
+                )
+                not in hole_pref_keys
+            ]
 
     return entries
 
