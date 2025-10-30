@@ -15981,14 +15981,6 @@ class App(tk.Tk):
                     geometry=geometry_ctx,
                     debug_enabled=APP_ENV.llm_debug_enabled,
                 )
-                # Persist reports for diagnosis even if UI widgets fail to update
-                try:
-                    with open("latest_quote_simplified.txt", "w", encoding="utf-8") as f:
-                        f.write(simplified_report or "")
-                    with open("latest_quote_full.txt", "w", encoding="utf-8") as f:
-                        f.write(full_report or "")
-                except Exception:
-                    pass
             except AssertionError as e:
                 # Be resilient to strict invariants inside render_quote; surface
                 # a readable fallback rather than crashing the UI.
@@ -16012,13 +16004,6 @@ class App(tk.Tk):
                         ef.write(err_text + "\n\n" + _tb.format_exc())
                 except Exception:
                     pass
-                try:
-                    with open("latest_quote_simplified.txt", "w", encoding="utf-8") as f:
-                        f.write(simplified_report or "")
-                    with open("latest_quote_full.txt", "w", encoding="utf-8") as f:
-                        f.write(full_report or "")
-                except Exception:
-                    pass
             except Exception as e:
                 # Catch any other errors from render_quote and still produce a fallback
                 import traceback as _tb
@@ -16039,13 +16024,6 @@ class App(tk.Tk):
                 try:
                     with open("latest_quote_error.txt", "w", encoding="utf-8") as ef:
                         ef.write(err_text + "\n\n" + _tb.format_exc())
-                except Exception:
-                    pass
-                try:
-                    with open("latest_quote_simplified.txt", "w", encoding="utf-8") as f:
-                        f.write(simplified_report or "")
-                    with open("latest_quote_full.txt", "w", encoding="utf-8") as f:
-                        f.write(full_report or "")
                 except Exception:
                     pass
 
