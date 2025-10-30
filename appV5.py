@@ -3037,7 +3037,6 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
         material_selection.setdefault("group", group_material_breakdown)
         material_selection.setdefault("material_group", group_material_breakdown)
     material = material_block
-    material_detail_for_breakdown = material
 
     MATERIAL_WARNING_LABEL = "⚠ MATERIALS MISSING"
     material_warning_entries: list[Mapping[str, Any]] = []
@@ -4271,8 +4270,6 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
 
     # Legacy planner comparison table removed to avoid duplicate process views.
 
-    material_display_for_debug: str = ""
-
     # Prep material pricing/mass estimates so the renderer and downstream
     # consumers see consistent values even when geometry inputs are sparse.
     pricing_geom: Mapping[str, Any] | None = None
@@ -4450,7 +4447,6 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
             if material_name_display:
                 material_display_label = str(material_name_display)
                 material_selection.setdefault("material_display", material_display_label)
-                material_display_for_debug = material_name_display
                 _push(lines, f"  Material used:  {material_name_display}")
 
             blank_lines: list[str] = []
@@ -8952,10 +8948,6 @@ def compute_quote_from_df(  # type: ignore[reportGeneralTypeIssues]
         if scrap_mass_lb_val is not None and scrap_mass_lb_val > 0
         else None
     )
-    if scrap_mass_lb is not None:
-        mat_block["scrap_credit_mass_lb"] = float(scrap_mass_lb)
-        material_entry["scrap_credit_mass_lb"] = float(scrap_mass_lb)
-
     credit_override_amount: float | None = None
     unit_price_override: float | None = None
     recovery_override: float | None = None
