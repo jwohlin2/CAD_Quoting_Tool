@@ -991,7 +991,6 @@ from cad_quoter.ui.planner_render import (
     _display_bucket_label,
     _display_rate_for_row,
     _hole_table_minutes_from_geo,
-    _rate_key_for_bucket,
     _lookup_bucket_rate,
     _normalize_bucket_key,
     _op_role_for_name,
