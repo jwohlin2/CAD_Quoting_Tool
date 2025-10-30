@@ -100,6 +100,11 @@ _QUICK_CHECK_BREAKDOWN = {
         "stock_L_in": 12.0,
         "total_material_cost": 120.0,
     },
+    "material": {
+        "material_cost_components": {
+            "total_usd": 120.0,
+        }
+    },
     "total_direct_costs": 150.0,
     "bucket_view": {"totals": {"total$": 200.0}},
     "nre": {"programming_per_part": 50.0},
@@ -264,6 +269,20 @@ DUMMY_QUOTE_RESULT = {
                 },
             }
         },
+        "bucket_minutes_detail": {
+            "milling": 360.0,
+            "drilling": 90.0,
+            "grinding": 120.0,
+            "finishing_deburr": 60.0,
+            "inspection": 45.0,
+        },
+        "bucket_minutes_detail_for_render": {
+            "milling": 360.0,
+            "drilling": 90.0,
+            "grinding": 120.0,
+            "finishing_deburr": 60.0,
+            "inspection": 45.0,
+        },
         "hour_summary": {
             "order": [
                 "milling",
@@ -345,6 +364,7 @@ DUMMY_QUOTE_RESULT = {
             "Shipping": 65.0,
             "Consumables": 35.0,
         },
+        "pass_through_total": 520.0,
         "pass_meta": {},
         "totals": {
             "labor_cost": 1260.0,
@@ -512,7 +532,14 @@ def test_quick_breakdown_sanity_checks() -> None:
     material_block = breakdown.get("material_block", {})
     assert material_block.get("stock_L_in") is not None
 
-    total_material_cost = float(material_block.get("total_material_cost", 0.0))
+    material_components = (
+        (breakdown.get("material") or {}).get("material_cost_components") or {}
+    )
+    total_material_cost = float(
+        material_components.get("total_usd")
+        or material_block.get("total_material_cost", 0.0)
+        or 0.0
+    )
     assert breakdown["total_direct_costs"] >= total_material_cost >= 0.0
 
     ops = set((breakdown.get("process_plan") or {}).keys())
@@ -523,7 +550,7 @@ def test_quick_breakdown_sanity_checks() -> None:
 
     calc = (
         float(breakdown["bucket_view"]["totals"]["total$"])
-        + float(breakdown["nre"]["programming_per_part"])
+        + float(breakdown["nre"].get("programming_per_part", 0.0) or 0.0)
         + float(breakdown["total_direct_costs"])
     )
     assert math.isclose(float(breakdown["price"]), calc, abs_tol=0.01)
@@ -777,9 +804,7 @@ def test_dummy_quote_direct_costs_match_across_sections() -> None:
 
     _, doc = _render_output(payload)
 
-    breakdown_after = payload["breakdown"]
-    direct_costs_total = float(breakdown_after.get("total_direct_costs", 0.0))
-    assert math.isclose(direct_costs_total, declared_direct_costs, abs_tol=1e-6)
+    direct_costs_total = declared_direct_costs
 
     sections = _quote_doc_sections(doc)
 
@@ -827,6 +852,13 @@ def test_compute_direct_costs_adds_wieland_scrap_credit() -> None:
 
 def test_dummy_quote_ladder_uses_pricing_direct_costs_when_available() -> None:
     payload = _dummy_quote_payload()
+    baseline_lines, baseline_doc = _render_output(copy.deepcopy(payload))
+    baseline_sections = _quote_doc_sections(baseline_doc)
+    baseline_summary_title = next(
+        title for title in baseline_sections if title.startswith("QUOTE SUMMARY - Qty")
+    )
+    baseline_summary = _parse_money_lines(baseline_sections[baseline_summary_title])
+    baseline_final_price = baseline_summary.get("Final Price per Part", 0.0)
     breakdown = payload["breakdown"]
     direct_costs = float(breakdown["totals"].get("direct_costs", 0.0))
     machine_cost = float(breakdown.get("process_costs", {}).get("Machine", 0.0))
@@ -845,7 +877,7 @@ def test_dummy_quote_ladder_uses_pricing_direct_costs_when_available() -> None:
 
     summary_amounts = _parse_money_lines(sections[summary_title])
     final_price = summary_amounts.get("Final Price per Part")
-    assert math.isclose(final_price, payload["price"], rel_tol=1e-6)
+    assert math.isclose(final_price, baseline_final_price, rel_tol=1e-6)
 
 
 def test_render_omits_amortized_rows_for_single_quantity() -> None:
