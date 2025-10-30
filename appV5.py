@@ -5055,15 +5055,6 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
             if detail_lines:
                 append_lines(detail_lines)
             mc: Mapping[str, Any] | None = material_cost_components
-            if not mc:
-                try:
-                    mc = _material_cost_components(
-                        material_block,
-                        overrides=material_overrides,
-                        cfg=cfg,
-                    )
-                except Exception:
-                    mc = None
             if mc:
                 stock_piece_val = mc.get("stock_piece_usd")
                 if stock_piece_val is not None:
