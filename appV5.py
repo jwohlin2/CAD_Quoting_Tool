@@ -3827,6 +3827,7 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
             "spot_drill",
             "jig_grind",
             "inspection",
+            "fixture_build_amortized",
         ]
 
         lines.append("Process & Labor Costs")
@@ -7298,11 +7299,6 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
         if vendor_items_total:
             breakdown["vendor_items_total"] = float(round(vendor_items_total, 2))
 
-    if isinstance(totals, dict):
-        totals["labor$"] = round(labor_summary_total, 2)
-        totals["machine$"] = round(machine_summary_total, 2)
-        totals["directs$"] = round(directs_total_value, 2)
-
     if 0 <= pass_through_header_index < len(lines):
         header_text = f"Pass-Through & Direct Costs (Total: {fmt_money(directs_total_value, currency)})"
         lines[pass_through_header_index] = header_text
@@ -10006,7 +10002,7 @@ def compute_quote_from_df(  # type: ignore[reportGeneralTypeIssues]
                 ordered.append(key)
                 seen.add(key)
 
-        totals = {"minutes": 0.0, "machine$": 0.0, "labor$": 0.0, "total$": 0.0}
+        bucket_sums = {"minutes": 0.0, "machine$": 0.0, "labor$": 0.0, "total$": 0.0}
         for entry in buckets.values():
             minutes_val = float(_safe_float(entry.get("minutes")))
             machine_val = float(_safe_float(entry.get("machine$")))
@@ -10014,14 +10010,14 @@ def compute_quote_from_df(  # type: ignore[reportGeneralTypeIssues]
             total_val = float(_safe_float(entry.get("total$")))
             if total_val <= 0.0:
                 total_val = machine_val + labor_val
-            totals["minutes"] += minutes_val
-            totals["machine$"] += machine_val
-            totals["labor$"] += labor_val
-            totals["total$"] += total_val
+            bucket_sums["minutes"] += minutes_val
+            bucket_sums["machine$"] += machine_val
+            bucket_sums["labor$"] += labor_val
+            bucket_sums["total$"] += total_val
 
         bucket_view_prepared["buckets"] = buckets
         bucket_view_prepared["order"] = ordered
-        bucket_view_prepared["totals"] = {key: round(val, 2) for key, val in totals.items()}
+        bucket_view_prepared["totals"] = {key: round(val, 2) for key, val in bucket_sums.items()}
         if not using_planner:
             for canon_key, entry in buckets.items():
                 bucket_view_prepared.setdefault(canon_key, entry)
