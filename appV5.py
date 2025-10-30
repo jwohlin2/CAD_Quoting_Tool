@@ -5503,8 +5503,6 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
         if combined_minutes > 0.0:
             total_minutes_snapshot = combined_minutes
 
-    drill_minutes_extra_targets: list[_MutableMappingABC[str, Any]] = []
-
     def _stash_drill_minutes(owner: Any) -> _MutableMappingABC[str, Any] | None:
         if owner is None:
             return None
@@ -5537,9 +5535,7 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
         for key in ("planner_render_state", "bucket_render_state", "render_state"):
             initial_stash_candidates.append(breakdown.get(key))
     for candidate_owner in initial_stash_candidates:
-        extra_map_candidate = _stash_drill_minutes(candidate_owner)
-        if extra_map_candidate is not None and extra_map_candidate not in drill_minutes_extra_targets:
-            drill_minutes_extra_targets.append(extra_map_candidate)
+        _stash_drill_minutes(candidate_owner)
 
     canonical_bucket_order: list[str] = []
     canonical_bucket_summary: dict[str, dict[str, float]] = {}
@@ -5566,12 +5562,7 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
     if isinstance(breakdown, _MappingABC):
         candidate_view = breakdown.get("bucket_view")
         if isinstance(candidate_view, _MutableMappingABC):
-            extra_map_candidate = _stash_drill_minutes(candidate_view)
-            if (
-                extra_map_candidate is not None
-                and extra_map_candidate not in drill_minutes_extra_targets
-            ):
-                drill_minutes_extra_targets.append(extra_map_candidate)
+            _stash_drill_minutes(candidate_view)
             bucket_view_struct = typing.cast(Mapping[str, Any], candidate_view)
         elif isinstance(candidate_view, _MappingABC):
             bucket_view_struct = typing.cast(Mapping[str, Any], candidate_view)
@@ -5617,12 +5608,7 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
     )
     render_state = bucket_state
 
-    bucket_state_extra_map = _stash_drill_minutes(bucket_state)
-    if (
-        bucket_state_extra_map is not None
-        and bucket_state_extra_map not in drill_minutes_extra_targets
-    ):
-        drill_minutes_extra_targets.append(bucket_state_extra_map)
+    _stash_drill_minutes(bucket_state)
 
     if removal_card_extra:
         extra_map = getattr(bucket_state, "extra", None)
