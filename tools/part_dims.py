@@ -232,15 +232,15 @@ def _max_ordinate_xy(msp) -> Tuple[Optional[float], Optional[float]]:
 
 def _max_linear_hw(msp) -> tuple[Optional[float], Optional[float]]:
     """
-    Scan non-ordinate DIMENSIONs and return (max_horizontal, max_vertical) in drawing units.
-    Heuristics:
-      - Use dim.get_measurement() when available.
-      - Determine orientation by angle when possible; otherwise by extents of defpoints.
-      - Ignore obviously tiny notes (< 0.05 in) to avoid arrows and small callouts.
+    Return (Hmax, Vmax) for LINEAR/ALIGNED dimensions only.
+    Orientation priority:
+      1) explicit rotation angle (0/180 ~= horizontal, 90 ~= vertical)
+      2) vector from defpoint -> defpoint2 (larger delta axis wins)
+      3) dimension line direction inferred from virtual_entities()
     """
 
-    max_h: Optional[float] = None
-    max_v: Optional[float] = None
+    max_h = None
+    max_v = None
 
     for dim in msp.query("DIMENSION"):
         try:
@@ -248,17 +248,16 @@ def _max_linear_hw(msp) -> tuple[Optional[float], Optional[float]]:
         except Exception:
             continue
 
-        # keep only LINEAR/ALIGNED; skip ORDINATE/ANGULAR/RADIUS/DIAMETER/etc.
-        base = dt & 7           # DXF base type: 0=linear(rotated), 1=aligned, 6=ordinate
-        if base not in (0, 1):
+        base = dt & 7              # 0=linear(rotated), 1=aligned, 2=angular, 3=diameter, 4=radius, 5=angular3pt, 6=ordinate
+        if base not in (0, 1):     # accept ONLY linear/aligned
             continue
 
-        val: Optional[float] = None
+        # value
+        val = None
         try:
             val = float(dim.get_measurement())
         except Exception:
             pass
-
         if val is None:
             txt = (dim.dxf.text or "").strip()
             if txt and txt != "<>":
@@ -268,35 +267,55 @@ def _max_linear_hw(msp) -> tuple[Optional[float], Optional[float]]:
                         val = float(m.group(1))
                     except Exception:
                         pass
-
         if val is None or val < 0.05:
             continue
 
+        # orientation: try rotation angle first
+        orient: Optional[str] = None
         angle = getattr(dim.dxf, "angle", None)
-        orient: Optional[str] = None  # 'H' or 'V'
-
         if angle is not None:
-            try:
-                a = abs(float(angle)) % 180.0
-                orient = "H" if a <= 45 or a >= 135 else "V"
-            except Exception:
-                orient = None
-        else:
+            a = abs(float(angle)) % 180.0
+            orient = "H" if a <= 45.0 or a >= 135.0 else "V"
+
+        # if still unknown, compare defpoints
+        if orient is None:
             try:
                 p1 = dim.dxf.defpoint
                 p2 = getattr(dim.dxf, "defpoint2", None)
-                if p2:
-                    dx = abs(p2[0] - p1[0])
-                    dy = abs(p2[1] - p1[1])
+                if p2 is not None:
+                    dx, dy = abs(p2[0] - p1[0]), abs(p2[1] - p1[1])
                     orient = "H" if dx >= dy else "V"
             except Exception:
-                orient = None
+                pass
 
+        # last resort: inspect virtual entities (dimension line is usually a long LINE)
+        if orient is None:
+            try:
+                best_len = 0.0
+                best_orient = None
+                for ve in dim.virtual_entities():
+                    if ve.dxftype() == "LINE":
+                        try:
+                            sx, sy, _ = ve.dxf.start
+                            ex, ey, _ = ve.dxf.end
+                        except Exception:
+                            continue
+                        dx = abs(ex - sx); dy = abs(ey - sy)
+                        l = (dx**2 + dy**2) ** 0.5
+                        if l > best_len:
+                            best_len = l
+                            best_orient = "H" if dx >= dy else "V"
+                orient = best_orient
+            except Exception:
+                pass
+
+        # record
         if orient == "H":
             max_h = val if max_h is None else max(max_h, val)
         elif orient == "V":
             max_v = val if max_v is None else max(max_v, val)
         else:
+            # unknown → count towards both (rare)
             max_h = val if max_h is None else max(max_h, val)
             max_v = val if max_v is None else max(max_v, val)
 
@@ -395,6 +414,7 @@ def infer_part_dims(
         lh, lv = _max_linear_hw(msp)
     except Exception as e:
         print(f"[part-dims] linear read failed: {e}")
+    print(f"[part-dims] linear: Hmax={lh} Vmax={lv}")
     dx = dy = dz = None
     try:
         dx, dy, dz = _aabb_size(msp, include=layer_include, exclude=layer_exclude)
@@ -409,11 +429,8 @@ def infer_part_dims(
         limit = 1.5 * ref
         return [v for v in vals if (v is not None and v <= limit)]
 
-    cand_w_all = [ox, lh, dx]
-    cand_h_all = [oy, lv, dy]
-
-    cand_w = _clip(cand_w_all, dx)
-    cand_h = _clip(cand_h_all, dy)
+    cand_w = _clip([ox, lh, dx], dx)
+    cand_h = _clip([oy, lv, dy], dy)
 
     width_units = max(cand_w) if cand_w else None
     height_units = max(cand_h) if cand_h else None
@@ -422,17 +439,18 @@ def infer_part_dims(
     W: Optional[float] = None
 
     if width_units is not None and height_units is not None:
-        width_in = width_units * f
-        height_in = height_units * f
-        L, W = (height_in, width_in) if height_in >= width_in else (width_in, height_in)
-        parts = [
-            ("ord", (ox is not None or oy is not None)),
-            ("lin", (lh is not None or lv is not None)),
-            ("aabb", (dx is not None or dy is not None)),
-        ]
-        source = "+".join(s for s, ok in parts if ok) or None
-        src_label = source or "unknown"
-        print(f"[part-dims] fused dimensions: L={L:.4f} in, W={W:.4f} in from {src_label}")
+        W = width_units * f
+        H = height_units * f
+        L, W = (H, W) if H >= W else (W, H)
+        src_bits = []
+        if ox is not None or oy is not None:
+            src_bits.append("ord")
+        if lh is not None or lv is not None:
+            src_bits.append("lin")
+        if dx is not None or dy is not None:
+            src_bits.append("aabb")
+        source = "+".join(src_bits)
+        print(f"[part-dims] fused dimensions: L={L:.4f} in, W={W:.4f} in from {source}")
     else:
         L = W = None
 
