@@ -2875,14 +2875,6 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
 
     state_payload: Any | None = None
 
-    # Ensure a mutable view of the breakdown for downstream helpers that update it
-    try:
-        if isinstance(breakdown, _MutableMappingABC):
-            breakdown_mutable = typing.cast(MutableMapping[str, Any], breakdown)
-        else:
-            breakdown_mutable = dict(breakdown)
-    except Exception:
-        breakdown_mutable = {}
     if isinstance(result, _MappingABC):
         state_payload = result.get("quote_state")
 
