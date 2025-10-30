@@ -16,6 +16,10 @@ for _module_name in ("requests", "bs4", "lxml"):
 import cad_quoter.pricing.materials as materials
 
 
+def _fail_live_price(*_args, **_kwargs):
+    raise RuntimeError("providers unavailable")
+
+
 def test_resolve_price_per_lb_prefers_mcmaster_before_resolver(monkeypatch):
     module = types.ModuleType("metals_api")
 
@@ -40,18 +44,20 @@ def test_resolve_price_per_lb_prefers_mcmaster_before_resolver(monkeypatch):
     assert price == pytest.approx(123.45)
     assert source == "mcmaster:aluminum"
 
-    wieland_module = types.ModuleType("cad_quoter.pricing.wieland_scraper")
 
 def test_resolve_price_per_lb_uses_resolver_when_providers_fail(monkeypatch):
     module = types.ModuleType("metals_api")
     module.price_per_lb_for_material = lambda _material_key: None  # type: ignore[attr-defined]
     monkeypatch.setitem(sys.modules, "metals_api", module)
 
+    wieland_module = types.ModuleType("cad_quoter.pricing.wieland_scraper")
     wieland_module.get_live_material_price = _fail_live_price  # type: ignore[attr-defined]
     monkeypatch.setitem(sys.modules, "cad_quoter.pricing.wieland_scraper", wieland_module)
 
     def _failing_mcmaster(_name: str, *, unit: str = "kg") -> tuple[float | None, str]:
         return None, ""
+
+    fallback_calls: list[tuple[str, str]] = []
 
     def _fake_resolver(name: str, *, unit: str = "kg") -> tuple[float, str]:
         fallback_calls.append((name, unit))
@@ -65,7 +71,6 @@ def test_resolve_price_per_lb_uses_resolver_when_providers_fail(monkeypatch):
     assert fallback_calls == [("6061", "lb")]
     assert price == pytest.approx(321.0)
     assert source == "backup_csv"
-
 
 def test_material_price_helper_returns_fallback_price(monkeypatch):
     def _fake_resolver(name: str, *, unit: str = "kg") -> tuple[float, str]:
