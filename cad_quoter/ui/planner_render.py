@@ -286,7 +286,6 @@ class PlannerBucketRenderState:
     display_machine_total: float = 0.0
     bucket_minutes_detail: dict[str, float] = field(default_factory=dict)
     process_costs_for_render: dict[str, float] = field(default_factory=dict)
-    notes: dict[str, str] = field(default_factory=dict)
     extra: dict[str, Any] = field(default_factory=dict)
     rates: dict[str, float] = field(default_factory=dict)
 
@@ -377,8 +376,6 @@ def _build_planner_bucket_render_state(
     bucket_view: Mapping[str, Any] | None,
     *,
     label_overrides: Mapping[str, str] | None = None,
-    labor_cost_details: Mapping[str, Any] | None = None,
-    labor_cost_details_input: Mapping[str, Any] | None = None,
     process_costs_canon: Mapping[str, float] | None = None,
     rates: Mapping[str, Any] | None = None,
     removal_drilling_hours: float | None = None,
@@ -501,17 +498,6 @@ def _build_planner_bucket_render_state(
     if not isinstance(order, Sequence):
         order = _preferred_order_then_alpha(buckets.keys())
 
-    details_map = (
-        dict(labor_cost_details)
-        if isinstance(labor_cost_details, _MappingABC)
-        else {}
-    )
-    detail_inputs_map = (
-        dict(labor_cost_details_input)
-        if isinstance(labor_cost_details_input, _MappingABC)
-        else {}
-    )
-
     machine_hours_total = 0.0
     labor_hours_total = 0.0
 
@@ -593,24 +579,6 @@ def _build_planner_bucket_render_state(
                         f"machine {split_machine_hours:.2f} hr @ ${cfg.machine_rate_per_hr:.0f}/hr, "
                         f"labor {split_labor_hours:.2f} hr @ ${cfg.labor_rate_per_hr:.0f}/hr"
                     )
-
-        detail_text: str | None = None
-        for candidate in (canon_key, label):
-            candidate_key = str(candidate)
-            if candidate_key in details_map and details_map[candidate_key]:
-                detail_text = details_map[candidate_key]
-                break
-            if (
-                candidate_key in detail_inputs_map
-                and detail_inputs_map[candidate_key]
-            ):
-                detail_text = detail_inputs_map[candidate_key]
-                break
-        if split_detail_line:
-            if detail_text not in (None, ""):
-                detail_text = f"{detail_text}; {split_detail_line}"
-            else:
-                detail_text = split_detail_line
 
     for canon_key, metrics in state.canonical_summary.items():
         state.bucket_minutes_detail[canon_key] = _safe_float(
