@@ -166,11 +166,8 @@ from cad_quoter.app.hole_ops import (
 )
 try:
     from tools.hole_ops import explode_rows_to_operations as _explode_rows_to_operations
-except Exception:  # pragma: no cover - runtime fallback when tools package unavailable
-    try:
-        from hole_ops import explode_rows_to_operations as _explode_rows_to_operations  # type: ignore[no-redef]
-    except Exception:  # pragma: no cover - preserve behaviour without optional dependency
-        _explode_rows_to_operations = None  # type: ignore[assignment]
+except Exception:  # pragma: no cover - optional helper unavailable at runtime
+    _explode_rows_to_operations = None  # type: ignore[assignment]
 from cad_quoter.app.container import (
     ServiceContainer,
     SupportsPricingEngine,

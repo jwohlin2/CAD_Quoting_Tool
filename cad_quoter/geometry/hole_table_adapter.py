@@ -6,15 +6,7 @@ to tools.hole_ops to produce structured rows + atomic operations (in-memory).
 
 from typing import List, Tuple, Dict
 
-# If tools/ is not a package, add a path shim here or in the caller:
-try:
-    from tools.hole_ops import explode_rows_to_operations  # main entry
-except Exception:  # fallback if needed
-    import sys
-    import pathlib
-
-    sys.path.append(str(pathlib.Path(__file__).resolve().parents[2] / "tools"))
-    from hole_ops import explode_rows_to_operations  # type: ignore
+from tools.hole_ops import explode_rows_to_operations
 
 # Import the same helpers you already use in geo_dump.py to find hole-table chunks.
 # If geo_dump helpers are local-private, paste minimal clones here (recommended),

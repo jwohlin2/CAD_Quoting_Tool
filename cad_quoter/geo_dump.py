@@ -34,14 +34,8 @@ from fractions import Fraction
 from pathlib import Path
 from typing import List, Tuple
 
-import sys, pathlib
-sys.path.append(str(pathlib.Path(__file__).resolve().parents[1] / "tools"))
-from hole_ops import explode_rows_to_operations
-from stock_dims import infer_stock_dims_from_lines, read_texts_from_csv
-
-REPO_ROOT = Path(__file__).resolve().parent.parent
-if str(REPO_ROOT) not in sys.path:
-    sys.path.insert(0, str(REPO_ROOT))
+from tools.hole_ops import explode_rows_to_operations
+from tools.stock_dims import infer_stock_dims_from_lines, read_texts_from_csv
 
 from cad_quoter import geo_extractor
 
