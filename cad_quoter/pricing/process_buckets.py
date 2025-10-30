@@ -1081,7 +1081,7 @@ def bucketize(
                 )
 
     cleaned_buckets: Dict[str, Dict[str, float]] = {}
-    totals = {"minutes": 0.0, "machine$": 0.0, "labor$": 0.0, "total$": 0.0}
+    bucket_sums = {"minutes": 0.0, "machine$": 0.0, "labor$": 0.0, "total$": 0.0}
 
     for key in PLANNER_BUCKET_ORDER:
         entry = buckets.get(key)
@@ -1096,12 +1096,12 @@ def bucketize(
             "total$": round(entry["total$"], 2),
         }
         cleaned_buckets[bucket_label(key)] = rounded
-        totals["minutes"] += rounded["minutes"]
-        totals["machine$"] += rounded["machine$"]
-        totals["labor$"] += rounded["labor$"]
-        totals["total$"] += rounded["total$"]
+        bucket_sums["minutes"] += rounded["minutes"]
+        bucket_sums["machine$"] += rounded["machine$"]
+        bucket_sums["labor$"] += rounded["labor$"]
+        bucket_sums["total$"] += rounded["total$"]
 
-    totals = {key: round(value, 2) for key, value in totals.items()}
+    bucket_totals = {key: round(value, 2) for key, value in bucket_sums.items()}
 
-    return {"buckets": cleaned_buckets, "totals": totals}
+    return {"buckets": cleaned_buckets, "totals": bucket_totals}
 

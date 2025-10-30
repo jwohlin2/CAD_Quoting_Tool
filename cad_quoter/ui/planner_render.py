@@ -1339,7 +1339,7 @@ def _prepare_bucket_view(raw_view: Mapping[str, Any] | None) -> dict[str, Any]:
         bucket["machine$"] += machine
 
     cleaned: dict[str, dict[str, float]] = {}
-    totals = {"minutes": 0.0, "labor$": 0.0, "machine$": 0.0, "total$": 0.0}
+    bucket_sums = {"minutes": 0.0, "labor$": 0.0, "machine$": 0.0, "total$": 0.0}
 
     for canon, metrics in folded.items():
         minutes = round(float(metrics.get("minutes", 0.0)), 2)
@@ -1362,14 +1362,14 @@ def _prepare_bucket_view(raw_view: Mapping[str, Any] | None) -> dict[str, Any]:
             "total$": total,
         }
 
-        totals["minutes"] += minutes
-        totals["labor$"] += labor
-        totals["machine$"] += machine
-        totals["total$"] += total
+        bucket_sums["minutes"] += minutes
+        bucket_sums["labor$"] += labor
+        bucket_sums["machine$"] += machine
+        bucket_sums["total$"] += total
 
     prepared["buckets"] = cleaned
     prepared["order"] = _preferred_order_then_alpha(cleaned.keys())
-    prepared["totals"] = {key: round(value, 2) for key, value in totals.items()}
+    prepared["totals"] = {key: round(value, 2) for key, value in bucket_sums.items()}
 
     return prepared
 
