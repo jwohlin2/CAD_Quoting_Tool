@@ -62,6 +62,108 @@ try:
 except Exception:
     convert_from_path = None  # type: ignore
 
+# Local LLM (llama.cpp) support ----------------
+_LOCAL_LLM = None
+_LOCAL_LLM_PATH: Optional[Path] = None
+
+
+def _detect_default_input() -> Optional[str]:
+    """Best-effort to locate a sample input so CLI can run without flags."""
+
+    env_path = os.getenv("PART_DIMS_OCR_INPUT")
+    if env_path:
+        candidate = Path(env_path).expanduser()
+        if candidate.exists():
+            return str(candidate)
+
+    root = Path(__file__).resolve().parent.parent
+    preferred = [
+        root / "Cad Files" / "301_redacted.pdf",
+        root / "Cad Files" / "301_redacted.png",
+        root / "Cad Files" / "301_redacted.jpg",
+    ]
+    for candidate in preferred:
+        if candidate.exists():
+            return str(candidate)
+
+    search_dirs = [
+        root / "Cad Files",
+        root / "debug",
+    ]
+    exts = (".pdf", ".png", ".jpg", ".jpeg", ".tif", ".tiff")
+    for directory in search_dirs:
+        if not directory.is_dir():
+            continue
+        for ext in exts:
+            for candidate in sorted(directory.glob(f"*{ext}")):
+                return str(candidate)
+    return None
+
+
+def _iter_model_candidates() -> List[Path]:
+    """Return possible GGUF model paths (env + ./models directory)."""
+
+    candidates: List[Path] = []
+    env_path = os.getenv("QWEN_GGUF_PATH")
+    if env_path:
+        p = Path(env_path).expanduser()
+        if p.is_file():
+            candidates.append(p)
+
+    repo_models = Path(__file__).resolve().parent.parent / "models"
+    if repo_models.is_dir():
+        ggufs = sorted(repo_models.glob("*.gguf"))
+        candidates.extend(ggufs)
+
+    # Deduplicate while preserving order
+    seen: set[Path] = set()
+    uniq: List[Path] = []
+    for cand in candidates:
+        cand = cand.resolve()
+        if cand not in seen:
+            seen.add(cand)
+            uniq.append(cand)
+    return uniq
+
+
+def _load_local_llm():
+    """Load llama-cpp model from models/ folder if available; return Llama instance or None."""
+
+    global _LOCAL_LLM, _LOCAL_LLM_PATH
+    if _LOCAL_LLM is not None:
+        return _LOCAL_LLM
+
+    try:
+        from llama_cpp import Llama  # type: ignore
+    except Exception:
+        return None
+
+    for model_path in _iter_model_candidates():
+        try:
+            kwargs: Dict[str, Any] = {
+                "model_path": str(model_path),
+                "chat_format": "qwen",
+                "n_ctx": int(os.getenv("QWEN_CONTEXT", "4096") or "4096"),
+                "logits_all": False,
+                "seed": 0,
+            }
+            n_threads = int(os.getenv("QWEN_N_THREADS", "0") or "0")
+            if n_threads > 0:
+                kwargs["n_threads"] = n_threads
+            n_gpu_layers = int(os.getenv("QWEN_N_GPU_LAYERS", "0") or "0")
+            if n_gpu_layers > 0:
+                kwargs["n_gpu_layers"] = n_gpu_layers
+            llm = Llama(**kwargs)
+        except Exception as exc:
+            print(f"[dims-ocr] failed to load local LLM {model_path}: {exc}", file=sys.stderr)
+            continue
+
+        _LOCAL_LLM = llm
+        _LOCAL_LLM_PATH = model_path
+        print(f"[dims-ocr] using local GGUF model: {model_path}")
+        return _LOCAL_LLM
+
+    return None
 # ---------- Data model ----------
 
 @dataclass
@@ -381,62 +483,85 @@ def _find_candidates(text: str, prefer_stock: bool) -> List[DimensionTriple]:
 
 def _llm_pick_best(cands: List[DimensionTriple], ocr_text: str) -> Optional[int]:
     """
-    Optional: ask an LLM to choose the best triple.
-    Requires OPENAI_API_KEY and openai>=1.x installed; if not available, returns None.
+    Optional: ask an LLM (local or cloud) to choose the best triple.
+    Prefers local llama.cpp GGUF models in ./models; falls back to OpenAI if configured.
     """
-    try:
-        import openai  # type: ignore
-    except Exception:
-        return None
 
-    api_key = os.getenv("OPENAI_API_KEY")
-    if not api_key:
-        return None
-    openai.api_key = api_key
-
-    # Build a compact prompt
-    options = []
-    for idx, c in enumerate(cands):
-        options.append({
+    # Prepare prompt payload once
+    options = [
+        {
             "index": idx,
             "length": c.length,
             "width": c.width,
             "thickness": c.thickness,
             "units": c.units,
-            "source": c.source[:200]
-        })
+            "source": c.source[:200],
+        }
+        for idx, c in enumerate(cands)
+    ]
+
+    base_instruction = (
+        "You are selecting overall part dimensions from OCR text.\n"
+        "Pick the most likely Length, Width, Thickness triple (in the drawing units) used for stock selection.\n"
+        "Prefer values explicitly labeled as SIZE or STOCK; avoid feature dimensions.\n"
+        "Return ONLY the integer index of the best option."
+    )
+    user_payload = (
+        f"Options: {json.dumps(options)}\n\n"
+        f"OCR Text (truncated): {ocr_text[:3000]}"
+    )
+
+    # --- Try local llama.cpp model first ---
+    llm = _load_local_llm()
+    if llm is not None:
+        try:
+            response = llm.create_chat_completion(
+                messages=[
+                    {"role": "system", "content": base_instruction},
+                    {"role": "user", "content": user_payload},
+                ],
+                temperature=0.0,
+                max_tokens=32,
+            )
+            content = response["choices"][0]["message"]["content"]  # type: ignore[index]
+            m = re.search(r"(\d+)", content or "")
+            if m:
+                return int(m.group(1))
+        except Exception as exc:
+            print(f"[dims-ocr] local LLM arbitration failed: {exc}", file=sys.stderr)
+
+    # --- Fallback to OpenAI (if API key present) ---
+    api_key = os.getenv("OPENAI_API_KEY")
+    if not api_key:
+        return None
 
     try:
-        # Use the new Responses API if available; fall back to chat otherwise
-        # We keep it simple: ask for the index of the best option.
-        prompt = (
-            "You are selecting overall part dimensions from OCR text.\n"
-            "Pick the most likely Length, Width, Thickness triple (in the drawing units) used for stock selection.\n"
-            "Prefer values explicitly labeled as SIZE or STOCK; avoid feature dims.\n"
-            "Return ONLY the integer index of the best option.\n\n"
-            f"Options: {json.dumps(options)}\n\n"
-            f"OCR Text (truncated): {ocr_text[:3000]}"
+        from openai import OpenAI  # type: ignore
+        client = OpenAI(api_key=api_key)
+        resp = client.responses.create(
+            model=os.getenv("OPENAI_MODEL", "gpt-4o-mini"),
+            input=f"{base_instruction}\n\n{user_payload}",
         )
+        content = resp.output[0].content[0].text.strip()  # type: ignore[index]
+    except Exception:
         try:
-            # Modern client (responses)
-            from openai import OpenAI  # type: ignore
-            client = OpenAI(api_key=api_key)
-            resp = client.responses.create(
-                model=os.getenv("OPENAI_MODEL","gpt-4o-mini"),
-                input=prompt,
-            )
-            content = resp.output[0].content[0].text.strip()  # type: ignore
-        except Exception:
-            # Legacy chat completion
-            content = openai.ChatCompletion.create(
-                model=os.getenv("OPENAI_MODEL","gpt-4o-mini"),
-                messages=[{"role":"user","content":prompt}],
+            import openai  # type: ignore
+
+            openai.api_key = api_key
+            content = openai.ChatCompletion.create(  # type: ignore[attr-defined]
+                model=os.getenv("OPENAI_MODEL", "gpt-4o-mini"),
+                messages=[
+                    {"role": "system", "content": base_instruction},
+                    {"role": "user", "content": user_payload},
+                ],
                 temperature=0,
             )["choices"][0]["message"]["content"].strip()
-        m = re.search(r"(\d+)", content)
-        return int(m.group(1)) if m else None
-    except Exception:
-        return None
+        except Exception as exc:
+            print(f"[dims-ocr] OpenAI arbitration failed: {exc}", file=sys.stderr)
+            return None
+
+    m = re.search(r"(\d+)", content or "")
+    return int(m.group(1)) if m else None
 
 # ---------- Public API ----------
 
@@ -493,11 +618,19 @@ def extract_part_dims(input_path: str,
 # ---------- CLI ----------
 
 def _cli():
-    p = argparse.ArgumentParser(description="Extract part L/W/T from drawing via OCR (with optional LLM arbitration).")
-    p.add_argument("--input", required=True, help="Path to PDF or image.")
-    p.add_argument("--units", choices=["auto","in","mm"], default="auto", help="Units preference (default auto).")
+    default_input = _detect_default_input()
+    p = argparse.ArgumentParser(
+        description="Extract part L/W/T from drawing via OCR (with optional LLM arbitration)."
+    )
+    input_help = "Path to PDF or image."
+    if default_input:
+        input_help += f" (default: {default_input})"
+    else:
+        input_help += " (default: first PDF/image found in 'Cad Files' or 'debug')"
+    p.add_argument("--input", default=default_input, help=input_help)
+    p.add_argument("--units", choices=["auto", "in", "mm"], default="auto", help="Units preference (default auto).")
     p.add_argument("--prefer-stock", action="store_true", help="Bias lines starting with STOCK.")
-    p.add_argument("--use-llm", action="store_true", help="If multiple candidates, ask LLM to pick best (requires OPENAI_API_KEY).")
+    p.add_argument("--use-llm", action="store_true", help="If multiple candidates, ask LLM to pick best (requires OPENAI_API_KEY/local model).")
     p.add_argument("--json-out", default="", help="Optional: write result JSON here.")
     p.add_argument("--oda-exe", default="", help="Path to ODA File Converter executable. "
                                                 "Alternatively set ODA_CONVERTER_EXE env var or put it on PATH.")
@@ -505,9 +638,20 @@ def _cli():
                    help="ODA output format before OCR (default PDF).")
     args = p.parse_args()
 
+    input_path = args.input or default_input
+    if not input_path:
+        p.error("No input file provided; pass --input or set PART_DIMS_OCR_INPUT.")
+
+    input_path = str(Path(input_path).expanduser())
+    if default_input:
+        default_norm = str(Path(default_input).expanduser().resolve(strict=False))
+        input_norm = str(Path(input_path).expanduser().resolve(strict=False))
+        if os.path.normcase(default_norm) == os.path.normcase(input_norm):
+            print(f"[dims-ocr] defaulting to input: {input_path}")
+
     try:
         res = extract_part_dims(
-            args.input,
+            input_path,
             units=args.units,
             prefer_stock=args.prefer_stock,
             use_llm=args.use_llm,
