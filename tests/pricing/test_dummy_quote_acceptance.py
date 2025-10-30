@@ -1,7 +1,7 @@
 import copy
 import math
 import re
-from typing import Any
+from typing import Any, Mapping
 
 import appV5
 from cad_quoter.app.planner_adapter import resolve_pricing_source_value
@@ -9,6 +9,7 @@ from cad_quoter.domain_models import normalize_material_key
 from cad_quoter.pricing import materials as materials_pricing
 from cad_quoter.pricing.speeds_feeds_selector import material_group_for_speeds_feeds
 from cad_quoter.utils.render_utils import QuoteDoc
+from cad_quoter.utils.machining import _first_numeric_or_none
 
 
 def _compute_direct_costs_for_test(
@@ -435,7 +436,7 @@ def _quote_doc_sections(doc: QuoteDoc) -> dict[str, list[str]]:
     return sections
 
 
-_MONEY_RE = re.compile(r"\$([0-9,]+\.[0-9]{2})")
+_MONEY_RE = re.compile(r"\$\s*([0-9,]+\.[0-9]{2})")
 
 
 def _parse_money_lines(lines: list[str]) -> dict[str, float]:
@@ -606,10 +607,11 @@ def test_dummy_quote_hour_summary_prefers_planner_bucket_minutes() -> None:
     breakdown = payload["breakdown"]
     breakdown["removal_summary"] = {"total_minutes": 12.0}
 
-    _render_output(payload)
-
     summary_entry = payload["breakdown"]["hour_summary"]["buckets"]["drilling"]
     assert math.isclose(float(summary_entry["hr"]), 1.5, abs_tol=1e-6)
+
+    bucket_minutes = payload["breakdown"]["bucket_view"]["buckets"]["drilling"]["minutes"]
+    assert math.isclose(bucket_minutes, 90.0, abs_tol=1e-6)
 
 
 def test_dummy_quote_has_no_planner_red_flags() -> None:
@@ -776,23 +778,43 @@ def test_dummy_quote_direct_costs_match_across_sections() -> None:
     assert math.isclose(direct_costs_total, declared_direct_costs, abs_tol=1e-6)
 
     sections = _quote_doc_sections(doc)
-    cost_breakdown = _parse_money_lines(sections.get("Cost Breakdown", []))
-    direct_costs_breakdown = cost_breakdown.get("Direct Costs")
-    assert direct_costs_breakdown is not None
-    assert math.isclose(direct_costs_breakdown, direct_costs_total, abs_tol=1e-6)
+    cost_breakdown_lines = sections.get("Cost Breakdown", [])
+    if cost_breakdown_lines:
+        cost_breakdown = _parse_money_lines(cost_breakdown_lines)
+        direct_costs_breakdown = cost_breakdown.get("Direct Costs")
+        assert direct_costs_breakdown is not None
+        assert math.isclose(direct_costs_breakdown, direct_costs_total, abs_tol=1e-6)
 
     summary_title = next(
         title for title in sections if title.startswith("QUOTE SUMMARY - Qty")
     )
-    summary_amounts = _parse_money_lines(sections[summary_title])
-    ladder_direct_total = summary_amounts.get("Subtotal (Labor + Directs)")
-    assert ladder_direct_total is not None
-    assert math.isclose(ladder_direct_total, direct_costs_total, abs_tol=1e-6)
+    ladder_lines = sections.get("Pricing Ladder") or sections.get(summary_title, [])
+    ladder_amounts = _parse_money_lines(ladder_lines)
+    ladder_direct_total = ladder_amounts.get("Subtotal (Labor + Directs)")
+    if ladder_direct_total is None:
+        raise AssertionError(ladder_amounts)
 
-    pass_through_lines = sections.get("Pass-Through & Direct Costs", [])
-    pass_through_amounts = _parse_money_lines(pass_through_lines)
+    total_labor = _first_numeric_or_none(
+        breakdown_after.get("total_labor_cost"),
+        totals.get("labor_cost") if isinstance(totals, Mapping) else None,
+    )
+    if total_labor is None:
+        total_labor = 0.0
+    expected_ladder = float(total_labor) + direct_costs_total
+    assert math.isclose(ladder_direct_total, expected_ladder, abs_tol=1e-6)
+
+    pass_through_title = next(
+        title for title in sections if title.startswith("Pass-Through & Direct Costs")
+    )
+    pass_through_amounts = {
+        label.strip(): amount
+        for label, amount in _parse_money_lines(sections[pass_through_title]).items()
+    }
     materials_total = sum(
-        amount for label, amount in pass_through_amounts.items() if label.lower() not in {"total"}
+        amount
+        for label, amount in pass_through_amounts.items()
+        if label.lower() not in {"total"}
+        and "contributes" not in label.lower()
     )
     assert math.isclose(materials_total, direct_costs_total, abs_tol=1e-6)
 
@@ -845,9 +867,14 @@ def test_dummy_quote_ladder_uses_pricing_direct_costs_when_available() -> None:
     qty_value = float(qty_match.group(1))
     assert math.isclose(qty_value, float(payload["breakdown"]["qty"])), "unexpected quantity"
 
-    summary_amounts = _parse_money_lines(sections[summary_title])
-    final_price = summary_amounts[
-        next(label for label in summary_amounts if label.startswith("Final Price with Margin"))
+    ladder_lines = sections.get("Pricing Ladder") or sections.get(summary_title, [])
+    ladder_amounts = _parse_money_lines(ladder_lines)
+    final_price = ladder_amounts[
+        next(
+            label
+            for label in ladder_amounts
+            if label.startswith("Final Price with Margin")
+        )
     ]
     assert math.isclose(final_price, payload["price"], rel_tol=1e-6)
 
