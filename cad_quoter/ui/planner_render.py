@@ -281,8 +281,6 @@ class PlannerBucketRenderState:
     table_rows: list[tuple[str, float, float, float, float]] = field(default_factory=list)
     label_to_canon: dict[str, str] = field(default_factory=dict)
     canon_to_display_label: dict[str, str] = field(default_factory=dict)
-    detail_lookup: dict[str, str] = field(default_factory=dict)
-    labor_costs_display: dict[str, float] = field(default_factory=dict)
     hour_entries: dict[str, tuple[float, bool]] = field(default_factory=dict)
     display_labor_total: float = 0.0
     display_machine_total: float = 0.0
@@ -577,7 +575,6 @@ def _build_planner_bucket_render_state(
         state.table_rows.append((label, hours_val, labor_val, machine_val, total_val))
         state.label_to_canon[label] = canon_key
         state.canon_to_display_label.setdefault(canon_key, label)
-        state.labor_costs_display[label] = total_val
         state.display_labor_total += labor_raw
         state.display_machine_total += machine_raw
         state.hour_entries[label] = (hours_val, True)
@@ -614,8 +611,6 @@ def _build_planner_bucket_render_state(
                 detail_text = f"{detail_text}; {split_detail_line}"
             else:
                 detail_text = split_detail_line
-        if detail_text not in (None, ""):
-            state.detail_lookup[label] = str(detail_text)
 
     for canon_key, metrics in state.canonical_summary.items():
         state.bucket_minutes_detail[canon_key] = _safe_float(

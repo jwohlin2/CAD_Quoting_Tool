@@ -38,21 +38,15 @@ class _ProcessCostTableRecorder:
         *,
         cfg: Any,
         bucket_state: Any,
-        detail_lookup: MutableMapping[str, Any],
         label_to_canon: MutableMapping[str, str],
         canon_to_display_label: MutableMapping[str, str],
-        process_cost_row_details: MutableMapping[str, tuple[float, float, float]],
-        labor_costs_display: MutableMapping[str, float],
         add_labor_cost_line: Callable[..., Any],
         process_meta: Mapping[str, Any] | None,
     ) -> None:
         self.cfg = cfg
         self.bucket_state = bucket_state
-        self.detail_lookup = detail_lookup
         self.label_to_canon = label_to_canon
         self.canon_to_display_label = canon_to_display_label
-        self.process_cost_row_details = process_cost_row_details
-        self.labor_costs_display = labor_costs_display
         self.add_labor_cost_line = add_labor_cost_line
         self.process_meta = process_meta
 
@@ -94,8 +88,6 @@ class _ProcessCostTableRecorder:
             cost_val = float(cost or 0.0)
         except Exception:
             cost_val = 0.0
-        if canon_key:
-            self.process_cost_row_details[canon_key] = (hours_val, rate_val, cost_val)
         record_canon = canon_key or _canonical_bucket_key(display_label)
         if not record_canon:
             record_canon = None
@@ -115,17 +107,6 @@ class _ProcessCostTableRecorder:
             render_state=self.bucket_state,
             hours=hours_val,
         )
-        detail_parts: list[str] = []
-        if rate_display:
-            detail_parts.append(str(rate_display))
-        existing_detail = self.detail_lookup.get(display_label)
-        if existing_detail not in (None, ""):
-            for segment in str(existing_detail).split(";"):
-                cleaned = segment.strip()
-                if not cleaned or cleaned.startswith("-"):
-                    continue
-                if cleaned not in detail_parts:
-                    detail_parts.append(cleaned)
         if hours_val > 0.0 and cost_val > 0.0:
             planner_rate_override: float | None = None
             if record_canon and self.bucket_state is not None:
@@ -165,16 +146,7 @@ class _ProcessCostTableRecorder:
                 "rate_display": rate_display,
             }
         )
-        self.add_labor_cost_line(
-            display_label,
-            cost,
-            process_key=canon_key,
-            detail_bits=detail_parts if detail_parts else None,
-        )
-        try:
-            self.labor_costs_display[display_label] = float(cost or 0.0)
-        except Exception:
-            self.labor_costs_display[display_label] = 0.0
+        self.add_labor_cost_line(display_label, cost)
     def update_row(
         self,
         canon_key: str,
