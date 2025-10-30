@@ -552,11 +552,11 @@ def _collect_ops_entries_for_display(
         if isinstance(hole_table_payload, _MappingABC):
             lines = hole_table_payload.get("lines")
             if isinstance(lines, Sequence):
-                text_rows.extend(str(s) for s in lines if isinstance(s, str))
+                _extend_text_rows(lines)
         for key in ("chart_lines", "hole_table_lines", "chart_text_lines", "hole_chart_lines"):
             value = geo_map.get(key)
             if isinstance(value, Sequence):
-                text_rows.extend(str(s) for s in value if isinstance(s, str))
+                _extend_text_rows(value)
 
     if text_rows and _explode_rows_to_operations:
         try:
