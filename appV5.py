@@ -4069,7 +4069,6 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
     narrative = result.get("narrative") or breakdown.get("narrative")
     why_parts: list[str] = []
     why_lines: list[str] = []
-    material_total_for_why = 0.0
     if narrative:
         if isinstance(narrative, str):
             parts = [seg.strip() for seg in _RE_SPLIT(r"(?<=\.)\s+", narrative) if seg.strip()]
@@ -6953,7 +6952,6 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
                     2,
                 )
     material_display_amount = round(float(material_direct_contribution), 2)
-    material_total_for_why = float(material_display_amount)
     if material_component_net is not None:
         material_net_cost = float(material_component_net)
     else:
@@ -6966,7 +6964,6 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
             fallback_amount = max(fallback_amount, float(material_entries_total))
         if fallback_amount > 0:
             material_display_amount = round(fallback_amount, 2)
-            material_total_for_why = float(material_display_amount)
             material_net_cost = float(material_display_amount)
     if material_entries_have_label and material_display_amount <= 0.0:
         material_warning_needed = True
@@ -9012,7 +9009,6 @@ def compute_quote_from_df(  # type: ignore[reportGeneralTypeIssues]
         material_direct_contribution = round(material_total_direct_cost, 2)
         material_display_amount = round(material_total_direct_cost, 2)
         material_total_for_directs = float(material_total_direct_cost)
-        material_total_for_why = float(material_display_amount)
         material_net_cost = float(material_total_direct_cost)
 
     def _pass_through_total_for_render(
