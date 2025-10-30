@@ -2851,26 +2851,8 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
 ) -> str:
     """Pretty printer for a full quote with auto-included non-zero lines."""
 
-    overrides = (
-        ("prefer_removal_drilling_hours", True),
-        ("separate_machine_labor", True),
-        ("machine_rate_per_hr", 45.0),
-        ("labor_rate_per_hr", 45.0),
-    )
-
-    cfg_obj: QuoteConfiguration | Any = cfg or QuoteConfiguration(
-        default_params=copy.deepcopy(PARAMS_DEFAULT)
-    )
-    for name, value in overrides:
-        try:
-            setattr(cfg_obj, name, value)
-        except Exception:
-            cfg_obj = QuoteConfiguration(default_params=copy.deepcopy(PARAMS_DEFAULT))
-            for name2, value2 in overrides:
-                setattr(cfg_obj, name2, value2)
-            break
-
-    cfg = cfg_obj
+    if cfg is None:
+        cfg = QuoteConfiguration(default_params=copy.deepcopy(PARAMS_DEFAULT))
 
     breakdown    = result.get("breakdown", {}) or {}
 
