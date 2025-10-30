@@ -16,11 +16,8 @@ from cad_quoter.vendors import ezdxf as _ezdxf_vendor
 
 try:  # pragma: no cover - optional helper available during packaging
     from tools.hole_ops import explode_rows_to_operations
-except Exception:  # pragma: no cover - import fallback when tools/ is not a package
-    try:
-        from hole_ops import explode_rows_to_operations  # type: ignore
-    except Exception:  # pragma: no cover - optional dependency unavailable
-        explode_rows_to_operations = None  # type: ignore[assignment]
+except Exception:  # pragma: no cover - optional dependency unavailable
+    explode_rows_to_operations = None  # type: ignore[assignment]
 
 try:  # pragma: no cover - optional dependency
     _EZDXF = _ezdxf_vendor.require_ezdxf()

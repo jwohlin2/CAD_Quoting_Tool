@@ -7,14 +7,7 @@ import csv
 from pathlib import Path
 from typing import Iterable, List
 
-try:  # pragma: no cover - runtime fallback for direct execution
-    from tools.hole_ops import explode_rows_to_operations
-except ModuleNotFoundError:  # pragma: no cover
-    import sys
-    from pathlib import Path
-
-    sys.path.append(str(Path(__file__).resolve().parent))
-    from hole_ops import explode_rows_to_operations  # type: ignore[no-redef]
+from .hole_ops import explode_rows_to_operations
 
 
 OPS_FIELDNAMES = ("HOLE", "REF_DIAM", "QTY", "DESCRIPTION/DEPTH")
