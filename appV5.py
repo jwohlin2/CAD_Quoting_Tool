@@ -6251,66 +6251,6 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
 
         return additions
 
-    if bucket_table_rows and isinstance(breakdown, _MappingABC):
-        drilling_meta_guard = breakdown.get("drilling_meta")
-        bucket_view_guard = breakdown.get("bucket_view")
-        buckets_guard = (
-            bucket_view_guard.get("buckets")
-            if isinstance(bucket_view_guard, _MappingABC)
-            else None
-        )
-        drilling_bucket_guard = (
-            buckets_guard.get("drilling")
-            if isinstance(buckets_guard, _MappingABC)
-            else None
-        )
-        if isinstance(drilling_meta_guard, _MappingABC) and isinstance(
-            drilling_bucket_guard, _MappingABC
-        ):
-            try:
-                card_minutes_guard = float(
-                    drilling_meta_guard["total_minutes_billed"]
-                )
-                row_minutes_guard = float(drilling_bucket_guard["minutes"])
-            except (KeyError, TypeError, ValueError):
-                card_minutes_guard = row_minutes_guard = None
-            if (
-                card_minutes_guard is not None
-                and row_minutes_guard is not None
-                and abs(card_minutes_guard - row_minutes_guard) > 0.6
-            ):
-                removal_drilling_minutes_precise = (
-                    float(removal_drilling_minutes)
-                    if removal_drilling_minutes is not None
-                    else None
-                )
-                if (
-                    prefer_removal_drilling_hours
-                    and removal_drilling_hours_precise is not None
-                ):
-                    billed_minutes_guard = _safe_float(
-                        drilling_meta_guard.get("total_minutes_billed"),
-                        default=0.0,
-                    )
-                    logger.info(
-                        "[minutes-sync] Overriding Drilling bucket minutes from %.2f -> %.2f (source=removal_card)",
-                        row_minutes_guard,
-                        removal_drilling_minutes_precise
-                        if removal_drilling_minutes_precise is not None
-                        else billed_minutes_guard,
-                    )
-                    _sync_drilling_bucket_view(
-                        bucket_view_guard,
-                        billed_minutes=float(billed_minutes_guard or 0.0),
-                        billed_cost=None,
-                    )
-                else:
-                    raise RuntimeError(
-                        "[FATAL] Drilling minutes mismatch: "
-                        f"card {round(card_minutes_guard, 2)} vs row {round(row_minutes_guard, 2)}. "
-                        "Late writer is overwriting bucket_view."
-                    )
-
     if bucket_table_rows:
         render_bucket_table(bucket_table_rows)
 
@@ -7270,11 +7210,6 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
         bucket_view_for_render = typing.cast(Mapping[str, Any], bucket_view_struct)
     else:
         bucket_view_for_render = None
-
-    if isinstance(bucket_view_obj, (_MutableMappingABC, dict)):
-        _normalize_buckets(typing.cast(MutableMapping[str, Any], bucket_view_obj))
-    elif isinstance(bucket_view_struct, (_MutableMappingABC, dict)):
-        _normalize_buckets(typing.cast(MutableMapping[str, Any], bucket_view_struct))
 
     process_section_start = len(lines)
 
