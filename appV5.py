@@ -4547,6 +4547,8 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
             )
 
             picked_stock: dict[str, Any] | None = None
+            picked_part_number: str | None = None
+            picked_source_hint: str | None = None
             material_lookup_for_pick = normalized_material_key or ""
             if not material_lookup_for_pick and material_display_label:
                 material_lookup_for_pick = _normalize_lookup_key(material_display_label)
@@ -4565,41 +4567,11 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
                 stock_wid_val = float(picked_stock.get("wid_in") or 0.0)
                 stock_thk_val = float(picked_stock.get("thk_in") or 0.0)
                 part_number = picked_stock.get("mcmaster_part")
+                if part_number:
+                    picked_part_number = str(part_number)
                 source_hint = picked_stock.get("source") or "mcmaster-catalog"
-                if isinstance(material_stock_block, _MutableMappingABC):
-                    material_stock_block["stock_L_in"] = float(stock_len_val)
-                    material_stock_block["stock_W_in"] = float(stock_wid_val)
-                    material_stock_block["stock_T_in"] = float(stock_thk_val)
-                    material_stock_block["stock_source_tag"] = source_hint
-                    material_stock_block["source"] = source_hint
-                    if part_number:
-                        material_stock_block["mcmaster_part"] = part_number
-                        material_stock_block["part_no"] = part_number
-                        if not material_stock_block.get("stock_price_source"):
-                            material_stock_block["stock_price_source"] = "mcmaster_api"
-                if isinstance(material, _MutableMappingABC):
-                    material["stock_source_tag"] = source_hint
-                    material["source"] = source_hint
-                    if part_number:
-                        material["mcmaster_part"] = part_number
-                        material["part_no"] = part_number
-                        if not material.get("stock_price_source"):
-                            material["stock_price_source"] = (
-                                material_stock_block.get("stock_price_source")
-                                if isinstance(material_stock_block, _MappingABC)
-                                else "mcmaster_api"
-                            )
-                if isinstance(result, _MutableMappingABC):
-                    if part_number:
-                        result["mcmaster_part"] = part_number
-                        result["part_no"] = part_number
-                        if not result.get("stock_price_source"):
-                            result["stock_price_source"] = (
-                                material_stock_block.get("stock_price_source")
-                                if isinstance(material_stock_block, _MappingABC)
-                                else "mcmaster_api"
-                            )
-                    result["stock_source"] = source_hint
+                if source_hint:
+                    picked_source_hint = str(source_hint)
             elif (
                 material_lookup_for_pick
                 and "mic6" in material_lookup_for_pick.lower()
@@ -4646,11 +4618,29 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
                 source_tag = source_tag.strip()
                 if not source_tag:
                     source_tag = None
+            if not source_tag and picked_source_hint:
+                source_tag = picked_source_hint
 
             if stock_len_val and stock_wid_val and stock_thk_val:
                 part_label = ""
-                if isinstance(result, Mapping):
-                    part_label = str(result.get("mcmaster_part") or "").strip()
+                if picked_part_number:
+                    part_label = picked_part_number.strip()
+                else:
+                    for container in (
+                        material_stock_block,
+                        material,
+                        result,
+                    ):
+                        if not isinstance(container, _MappingABC):
+                            continue
+                        part_candidate = (
+                            container.get("mcmaster_part")
+                            or container.get("part_no")
+                        )
+                        if part_candidate:
+                            part_label = str(part_candidate).strip()
+                            if part_label:
+                                break
                 part_display = part_label or "—"
                 stock_line = (
                     "  Rounded to catalog: "
@@ -4696,24 +4686,6 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
             )
             total_material_cost = material_cost_components["total_usd"]
             material_net_cost = material_cost_components["net_usd"]
-            if total_material_cost is not None:
-                try:
-                    material_block["total_material_cost"] = total_material_cost
-                except Exception:
-                    pass
-                try:
-                    material_record = breakdown.get("material") if isinstance(breakdown, _MappingABC) else None
-                    if isinstance(material_record, _MutableMappingABC):
-                        material_record["total_material_cost"] = float(total_material_cost)
-                    elif isinstance(material_record, _MappingABC):
-                        updated_material = dict(material_record)
-                        updated_material["total_material_cost"] = float(total_material_cost)
-                        if isinstance(breakdown, _MutableMappingABC):
-                            breakdown["material"] = updated_material
-                    elif isinstance(breakdown, _MutableMappingABC):
-                        breakdown["material"] = {"total_material_cost": float(total_material_cost)}
-                except Exception:
-                    pass
             net_mass_val = _coerce_float_or_none(net_mass_g)
             effective_mass_source = material.get("effective_mass_g")
             effective_mass_val = _coerce_float_or_none(effective_mass_source)
@@ -4801,12 +4773,8 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
 
             if scrap_mass_val is not None:
                 scrap_credit_mass_lb = float(scrap_mass_val) / 1000.0 * LB_PER_KG
-                material_detail_for_breakdown["scrap_credit_mass_lb"] = (
-                    scrap_credit_mass_lb
-                )
             else:
                 scrap_credit_mass_lb = None
-                material_detail_for_breakdown.pop("scrap_credit_mass_lb", None)
 
             legacy_weight_lines: list[str] = []
             if (starting_mass_val and starting_mass_val > 0) or show_zeros:
@@ -7575,8 +7543,6 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
         display_machine = float(display_machine) + float(machine_gap)
         if display_machine < 0:
             display_machine = 0.0
-    if isinstance(totals, dict):
-        totals["labor_cost"] = computed_total_labor_cost
     if 0 <= total_labor_row_index < len(lines):
         replace_line(
             total_labor_row_index,
@@ -7709,11 +7675,6 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
         ladder_directs = ladder_directs_override
 
     computed_total_labor_cost = ladder_labor
-    if isinstance(breakdown, dict):
-        breakdown["total_labor_cost"] = round(ladder_labor, 2)
-    if isinstance(totals, dict):
-        totals["labor_cost"] = ladder_labor
-
     final_per_part = round(machine_labor_total + nre_per_part + ladder_directs, 2)
     ladder_subtotal = final_per_part
     if 0 <= total_labor_row_index < len(lines):
@@ -7723,20 +7684,10 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
         )
     if not roughly_equal(declared_subtotal, ladder_subtotal, eps=0.01):
         declared_subtotal = ladder_subtotal
-    if isinstance(breakdown, dict):
-        try:
-            breakdown["ladder_subtotal"] = ladder_subtotal
-            if math.isclose(_safe_float(applied_pcts.get("MarginPct"), 0.0), 0.0, abs_tol=1e-6):
-                breakdown["price"] = ladder_subtotal
-        except Exception:
-            pass
-
     printed_subtotal = round(float(declared_subtotal or 0.0), 2)
     if not roughly_equal(ladder_subtotal, printed_subtotal, eps=0.01):
         printed_subtotal = ladder_subtotal
         declared_subtotal = ladder_subtotal
-        if isinstance(totals, dict):
-            totals["subtotal"] = ladder_subtotal
     assert roughly_equal(ladder_labor + ladder_directs, printed_subtotal, eps=0.01)
 
     subtotal = ladder_subtotal
@@ -7905,16 +7856,7 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
     expedite_cost = ladder_totals.get("expedite_cost", 0.0)
     final_price = ladder_totals["with_margin"]
 
-    if isinstance(totals, dict):
-        totals["with_expedite"] = with_expedite
-        totals["with_margin"] = final_price
-        totals["price"] = final_price
-
     price = final_price
-    if isinstance(result, dict):
-        result["price"] = price
-    if isinstance(breakdown, dict):
-        breakdown["final_price"] = final_price
     replace_line(final_price_row_index, _format_row("Final Price per Part:", price))
 
     row("Subtotal (Labor + Directs):", subtotal)
