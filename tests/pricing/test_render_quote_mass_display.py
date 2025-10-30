@@ -3,7 +3,7 @@ import re
 import appV5
 import pytest
 from cad_quoter.pricing.materials import LB_PER_KG
-from cad_quoter.utils.render_utils import QuoteDoc
+from cad_quoter.utils.render_utils import QuoteDoc, QuoteDocRecorder
 
 
 def _format_weight_lb_oz_for_test(mass_g: float | None) -> str:
@@ -218,24 +218,18 @@ def _base_material_quote(material: dict) -> dict:
     }
 
 
+def _quote_doc_from_text(text: str, divider: str = "-" * 74) -> QuoteDoc:
+    recorder = QuoteDocRecorder(divider)
+    previous = None
+    for index, line in enumerate(text.splitlines()):
+        recorder.observe_line(index, line, previous)
+        previous = line
+    return recorder.build_doc()
+
+
 def _render_lines_and_doc(result: dict) -> tuple[list[str], QuoteDoc]:
-    captured: list[QuoteDoc] = []
-
-    class _Recorder(appV5.QuoteDocRecorder):  # type: ignore[misc]
-        def build_doc(self) -> QuoteDoc:
-            doc = super().build_doc()
-            captured.append(doc)
-            return doc
-
-    original = appV5.QuoteDocRecorder
-    appV5.QuoteDocRecorder = _Recorder
-    try:
-        rendered = appV5.render_quote(result, currency="$", show_zeros=False)
-    finally:
-        appV5.QuoteDocRecorder = original
-
-    assert captured, "expected quote document"
-    return rendered.splitlines(), captured[-1]
+    rendered = appV5.render_quote(result, currency="$", show_zeros=False)
+    return rendered.splitlines(), _quote_doc_from_text(rendered)
 
 
 def _quote_doc_sections(doc: QuoteDoc) -> dict[str, list[str]]:

@@ -8,7 +8,7 @@ from cad_quoter.app.planner_adapter import resolve_pricing_source_value
 from cad_quoter.domain_models import normalize_material_key
 from cad_quoter.pricing import materials as materials_pricing
 from cad_quoter.pricing.speeds_feeds_selector import material_group_for_speeds_feeds
-from cad_quoter.utils.render_utils import QuoteDoc
+from cad_quoter.utils.render_utils import QuoteDoc, QuoteDocRecorder
 from cad_quoter.utils.machining import _first_numeric_or_none
 
 
@@ -395,6 +395,15 @@ def _dummy_quote_payload(*, debug_enabled: bool = False) -> dict:
     return payload
 
 
+def _quote_doc_from_text(text: str, divider: str = "-" * 74) -> QuoteDoc:
+    recorder = QuoteDocRecorder(divider)
+    previous = None
+    for index, line in enumerate(text.splitlines()):
+        recorder.observe_line(index, line, previous)
+        previous = line
+    return recorder.build_doc()
+
+
 def _render_output(
     payload: dict, *, drop_planner_display: bool = False
 ) -> tuple[list[str], QuoteDoc]:
@@ -406,23 +415,8 @@ def _render_output(
             breakdown.pop("planner_bucket_rollup", None)
             breakdown.pop("planner_bucket_display_map", None)
             breakdown.pop("process_plan", None)
-    captured: list[QuoteDoc] = []
-
-    class _Recorder(appV5.QuoteDocRecorder):  # type: ignore[misc]
-        def build_doc(self) -> QuoteDoc:
-            doc = super().build_doc()
-            captured.append(doc)
-            return doc
-
-    original = appV5.QuoteDocRecorder
-    appV5.QuoteDocRecorder = _Recorder
-    try:
-        rendered = appV5.render_quote(payload, currency="$")
-    finally:
-        appV5.QuoteDocRecorder = original
-
-    assert captured, "expected quote document"
-    return rendered.splitlines(), captured[-1]
+    rendered = appV5.render_quote(payload, currency="$")
+    return rendered.splitlines(), _quote_doc_from_text(rendered)
 
 
 def _extract_currency(line: str) -> float:

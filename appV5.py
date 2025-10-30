@@ -2851,26 +2851,8 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
 ) -> str:
     """Pretty printer for a full quote with auto-included non-zero lines."""
 
-    overrides = (
-        ("prefer_removal_drilling_hours", True),
-        ("separate_machine_labor", True),
-        ("machine_rate_per_hr", 45.0),
-        ("labor_rate_per_hr", 45.0),
-    )
-
-    cfg_obj: QuoteConfiguration | Any = cfg or QuoteConfiguration(
-        default_params=copy.deepcopy(PARAMS_DEFAULT)
-    )
-    for name, value in overrides:
-        try:
-            setattr(cfg_obj, name, value)
-        except Exception:
-            cfg_obj = QuoteConfiguration(default_params=copy.deepcopy(PARAMS_DEFAULT))
-            for name2, value2 in overrides:
-                setattr(cfg_obj, name2, value2)
-            break
-
-    cfg = cfg_obj
+    if cfg is None:
+        cfg = QuoteConfiguration(default_params=copy.deepcopy(PARAMS_DEFAULT))
 
     breakdown    = result.get("breakdown", {}) or {}
 
@@ -3004,27 +2986,14 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
         if isinstance(baseline_candidate, _MappingABC):
             baseline = baseline_candidate
 
-    pricing: dict[str, Any]
-    pricing_obj: Mapping[str, Any] | None = None
+    pricing: Mapping[str, Any] = {}
     for container in (breakdown, result):
-        if not isinstance(container, _MutableMappingABC):
+        if not isinstance(container, _MappingABC):
             continue
         candidate = container.get("pricing")
-        if isinstance(candidate, _MutableMappingABC):
-            pricing_obj = candidate
-            break
         if isinstance(candidate, _MappingABC):
-            pricing_obj = dict(candidate)
-            container["pricing"] = pricing_obj
+            pricing = typing.cast(Mapping[str, Any], candidate)
             break
-    if pricing_obj is None:
-        pricing = {}
-    else:
-        pricing = dict(pricing_obj) if not isinstance(pricing_obj, dict) else pricing_obj
-    if isinstance(breakdown, _MutableMappingABC):
-        breakdown["pricing"] = pricing
-    if isinstance(result, _MutableMappingABC):
-        result["pricing"] = pricing
     normalized_material_key = str(
         material_selection.get("material_lookup")
         or material_selection.get("normalized_material_key")
@@ -3680,14 +3649,10 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
                 break
 
     # ---- header --------------------------------------------------------------
-    doc_builder = QuoteDocRecorder(divider)
-
     class _QuoteLines(list[str]):
         def append(self, text: str) -> None:  # type: ignore[override]
             sanitized = _sanitize_render_text(text)
-            previous = self[-1] if self else None
             super().append(sanitized)
-            doc_builder.observe_line(len(self) - 1, sanitized, previous)
 
     lines: list[str] = _QuoteLines()
 
@@ -3702,7 +3667,6 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
         sanitized = _sanitize_render_text(text)
         if 0 <= index < len(lines):
             lines[index] = sanitized
-        doc_builder.replace_line(index, sanitized)
 
     def write_line(s: str, indent: str = ""):
         append_line(f"{indent}{s}")
@@ -4314,22 +4278,17 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
 
     # Prep material pricing/mass estimates so the renderer and downstream
     # consumers see consistent values even when geometry inputs are sparse.
-    mat_info = pricing.setdefault("material", {}) if isinstance(pricing, dict) else {}
-    if not isinstance(mat_info, dict):
-        try:
-            mat_info = dict(mat_info or {})
-        except Exception:
-            mat_info = {}
-        if isinstance(pricing, dict):
-            pricing["material"] = mat_info
-    pricing_geom = pricing.get("geom") if isinstance(pricing, dict) else None
-    if not isinstance(pricing_geom, _MappingABC):
-        pricing_geom = pricing.get("geo") if isinstance(pricing, dict) else None
-    if not isinstance(pricing_geom, _MappingABC):
+    pricing_geom: Mapping[str, Any] | None = None
+    if isinstance(pricing, _MappingABC):
+        candidate_geom = pricing.get("geom")
+        if isinstance(candidate_geom, _MappingABC):
+            pricing_geom = candidate_geom
+        else:
+            candidate_geo = pricing.get("geo")
+            if isinstance(candidate_geo, _MappingABC):
+                pricing_geom = candidate_geo
+    if pricing_geom is None:
         pricing_geom = g if isinstance(g, _MappingABC) else {}
-    ml = str((pricing_geom or {}).get("material_lookup") or "").lower()
-
-    DENSITY_G_CC = {"aluminum": 2.70, "tool_steel": 7.85, "stainless": 7.90, "titanium": 4.5}
     mat_total_val = None
     if isinstance(material_stock_block, dict):
         mat_total_val = _coerce_float_or_none(
@@ -4350,33 +4309,8 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
             material["material_cost"] = mat_total
             if isinstance(material_stock_block, dict):
                 material_stock_block["total_material_cost"] = mat_total
-    if isinstance(mat_info, dict) and mat_total > 0:
-        mat_info["material_cost"] = float(mat_total)
-        if isinstance(material, dict):
-            for key in (
-                "mass_g",
-                "starting_mass_g_est",
-                "net_mass_g",
-                "scrap_mass_g",
-                "unit_price_usd_per_lb",
-                "source",
-            ):
-                if key in material:
-                    mat_info[key] = material[key]
     if isinstance(material, dict) and mat_total > 0:
         material["material_cost"] = float(mat_total)
-
-    if isinstance(pricing, dict):
-        directs = pricing.setdefault("direct_costs", {})
-        if not isinstance(directs, dict):
-            try:
-                directs = dict(directs or {})
-            except Exception:
-                directs = {}
-            pricing["direct_costs"] = directs
-        directs["material"] = float(mat_total)
-        if _coerce_float_or_none(pricing.get("total_direct_costs")) is None:
-            pricing["total_direct_costs"] = float(sum(directs.values()))
 
     def _lookup_blank(container: Mapping[str, Any] | None) -> Mapping[str, Any] | None:
         if not isinstance(container, _MappingABC):
@@ -5117,8 +5051,6 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
                     if T_disp_val is not None:
                         T_disp = f"{float(T_disp_val):.3f}"
                     stock_line = f"— × — × {T_disp} in"
-            if isinstance(mat_info, dict):
-                mat_info["stock_size_display"] = stock_line
             _push(lines, f"  Stock used: {stock_line}")
             if detail_lines:
                 append_lines(detail_lines)
@@ -6219,66 +6151,6 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
 
         return additions
 
-    if bucket_table_rows and isinstance(breakdown, _MappingABC):
-        drilling_meta_guard = breakdown.get("drilling_meta")
-        bucket_view_guard = breakdown.get("bucket_view")
-        buckets_guard = (
-            bucket_view_guard.get("buckets")
-            if isinstance(bucket_view_guard, _MappingABC)
-            else None
-        )
-        drilling_bucket_guard = (
-            buckets_guard.get("drilling")
-            if isinstance(buckets_guard, _MappingABC)
-            else None
-        )
-        if isinstance(drilling_meta_guard, _MappingABC) and isinstance(
-            drilling_bucket_guard, _MappingABC
-        ):
-            try:
-                card_minutes_guard = float(
-                    drilling_meta_guard["total_minutes_billed"]
-                )
-                row_minutes_guard = float(drilling_bucket_guard["minutes"])
-            except (KeyError, TypeError, ValueError):
-                card_minutes_guard = row_minutes_guard = None
-            if (
-                card_minutes_guard is not None
-                and row_minutes_guard is not None
-                and abs(card_minutes_guard - row_minutes_guard) > 0.6
-            ):
-                removal_drilling_minutes_precise = (
-                    float(removal_drilling_minutes)
-                    if removal_drilling_minutes is not None
-                    else None
-                )
-                if (
-                    prefer_removal_drilling_hours
-                    and removal_drilling_hours_precise is not None
-                ):
-                    billed_minutes_guard = _safe_float(
-                        drilling_meta_guard.get("total_minutes_billed"),
-                        default=0.0,
-                    )
-                    logger.info(
-                        "[minutes-sync] Overriding Drilling bucket minutes from %.2f -> %.2f (source=removal_card)",
-                        row_minutes_guard,
-                        removal_drilling_minutes_precise
-                        if removal_drilling_minutes_precise is not None
-                        else billed_minutes_guard,
-                    )
-                    _sync_drilling_bucket_view(
-                        bucket_view_guard,
-                        billed_minutes=float(billed_minutes_guard or 0.0),
-                        billed_cost=None,
-                    )
-                else:
-                    raise RuntimeError(
-                        "[FATAL] Drilling minutes mismatch: "
-                        f"card {round(card_minutes_guard, 2)} vs row {round(row_minutes_guard, 2)}. "
-                        "Late writer is overwriting bucket_view."
-                    )
-
     if bucket_table_rows:
         render_bucket_table(bucket_table_rows)
 
@@ -7239,11 +7111,6 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
     else:
         bucket_view_for_render = None
 
-    if isinstance(bucket_view_obj, (_MutableMappingABC, dict)):
-        _normalize_buckets(typing.cast(MutableMapping[str, Any], bucket_view_obj))
-    elif isinstance(bucket_view_struct, (_MutableMappingABC, dict)):
-        _normalize_buckets(typing.cast(MutableMapping[str, Any], bucket_view_struct))
-
     process_section_start = len(lines)
 
     bucket_entries_for_totals: Mapping[str, Any] | None = None
@@ -7377,16 +7244,15 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
     if material_entries_have_label and material_display_amount <= 0.0:
         material_warning_needed = True
     direct_costs_map: dict[Any, Any]
-    if isinstance(pricing, dict):
-        direct_costs_map = pricing.setdefault("direct_costs", {})
-        if not isinstance(direct_costs_map, dict):
-            try:
-                direct_costs_map = dict(direct_costs_map or {})
-            except Exception:
-                direct_costs_map = {}
-            pricing["direct_costs"] = direct_costs_map
-    else:
+    direct_costs_source: Mapping[Any, Any] | None = None
+    if isinstance(pricing, _MappingABC):
+        candidate_directs = pricing.get("direct_costs")
+        if isinstance(candidate_directs, _MappingABC):
+            direct_costs_source = typing.cast(Mapping[Any, Any], candidate_directs)
+    if direct_costs_source is None:
         direct_costs_map = {}
+    else:
+        direct_costs_map = dict(direct_costs_source)
 
     def _assign_direct_value(raw_key: Any, amount: Any) -> None:
         try:
@@ -7568,17 +7434,21 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
     labor_summary_total = _safe_float(proc_total, 0.0)
     machine_summary_total = _safe_float(display_machine, 0.0)
 
+    if isinstance(breakdown, dict):
+        breakdown["pass_through_total"] = pass_through_total
+        breakdown["total_direct_costs"] = total_direct_costs_value
+        breakdown["total_labor_cost"] = round(labor_summary_total, 2)
+        if vendor_items_total:
+            breakdown["vendor_items_total"] = float(round(vendor_items_total, 2))
+
+    if isinstance(totals, dict):
+        totals["labor$"] = round(labor_summary_total, 2)
+        totals["machine$"] = round(machine_summary_total, 2)
+        totals["directs$"] = round(directs_total_value, 2)
+
     if 0 <= pass_through_header_index < len(lines):
         header_text = f"Pass-Through & Direct Costs (Total: {fmt_money(directs_total_value, currency)})"
         lines[pass_through_header_index] = header_text
-        try:
-            sections = getattr(doc_builder, "_sections", [])
-            for section in reversed(sections):
-                if getattr(section, "title", None) == "Pass-Through & Direct Costs":
-                    section.title = header_text
-                    break
-        except Exception:
-            pass
 
     directs = float(round(directs_total_value, 2))
     if 0 <= total_direct_costs_row_index < len(lines):
@@ -8166,8 +8036,7 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
         except Exception:
             pass
 
-    doc = doc_builder.build_doc()
-    text = render_quote_doc(doc, divider=divider)
+    text = "\n".join(lines)
 
     # ASCII-sanitize output to avoid mojibake like '×' on some Windows setups
     text = _sanitize_render_text(text)

@@ -5,7 +5,7 @@ import re
 
 import pytest
 
-from cad_quoter.utils.render_utils import QuoteDoc
+from cad_quoter.utils.render_utils import QuoteDoc, QuoteDocRecorder
 
 
 def test_die_plate_deep_drill_regression() -> None:
@@ -141,23 +141,13 @@ def test_die_plate_deep_drill_regression() -> None:
         ),
     }
 
-    captured: list[QuoteDoc] = []
-
-    class _Recorder(appV5.QuoteDocRecorder):  # type: ignore[misc]
-        def build_doc(self) -> QuoteDoc:
-            doc = super().build_doc()
-            captured.append(doc)
-            return doc
-
-    original = appV5.QuoteDocRecorder
-    appV5.QuoteDocRecorder = _Recorder
-    try:
-        rendered = appV5.render_quote(result, currency="$", show_zeros=False)
-    finally:
-        appV5.QuoteDocRecorder = original
-
-    assert captured, "expected quote document"
-    doc = captured[-1]
+    recorder = QuoteDocRecorder("-" * 74)
+    rendered = appV5.render_quote(result, currency="$", show_zeros=False)
+    previous = None
+    for index, line in enumerate(rendered.splitlines()):
+        recorder.observe_line(index, line, previous)
+        previous = line
+    doc = recorder.build_doc()
 
     assert "Quote Summary" in rendered
     sections = {section.title or "": [row.text for row in section.rows] for section in doc.sections}

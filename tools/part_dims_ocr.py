@@ -32,7 +32,17 @@ Dependencies (install as needed):
 """
 
 from __future__ import annotations
-import argparse, json, math, os, re, sys, tempfile, unicodedata, io
+import argparse
+import io
+import json
+import math
+import os
+import re
+import shutil
+import subprocess
+import sys
+import tempfile
+import unicodedata
 from dataclasses import dataclass
 from typing import List, Tuple, Optional, Dict, Any
 
@@ -149,16 +159,158 @@ def _ocr_image(img: "Image.Image") -> str:
     txt = pytesseract.image_to_string(img, config=cfg)
     return _norm(txt)
 
-def _get_text_from_input(path: str) -> Tuple[str, List[str]]:
+# ---------- ODA File Converter (DWG/DXF -> PDF/TIFF/PNG) ----------
+
+def _which_oda(oda_exe_cli: Optional[str] = None) -> Optional[str]:
     """
-    Returns (text, warnings). Renders PDF to images and OCRs each page; concatenates text.
+    Resolve path to ODA File Converter executable.
+    Priority:
+      1) --oda-exe CLI argument
+      2) ODA_CONVERTER_EXE env var
+      3) PATH (OdaFileConverter.exe / ODAFileConverter)
+    """
+    # CLI flag wins
+    if oda_exe_cli and os.path.exists(oda_exe_cli):
+        return oda_exe_cli
+
+    # Env
+    env_path = os.getenv("ODA_CONVERTER_EXE")
+    if env_path and os.path.exists(env_path):
+        return env_path
+
+    # PATH common names
+    for name in ("OdaFileConverter.exe", "ODAFileConverter.exe", "ODAFileConverter", "OdaFileConverter"):
+        p = shutil.which(name)
+        if p:
+            return p
+
+    return None
+
+
+def _run_oda_convert(oda_exe: str, in_path: str, out_dir: str,
+                     out_format: str = "PDF",
+                     in_ver: str = "ACAD2018",
+                     out_ver: str = "ACAD2018",
+                     audit: int = 0,
+                     recover: int = 0) -> str:
+    """
+    Call ODA File Converter. ODA expects *directories* for in/out.
+    We put the single DWG/DXF into a temp input dir, run the converter,
+    and return the resulting file path (PDF/TIFF/PNG).
+    """
+    if not os.path.exists(oda_exe):
+        raise FileNotFoundError(f"ODA File Converter not found: {oda_exe}")
+
+    # Prepare temp input dir containing our single file
+    tmp_in = os.path.join(out_dir, "_oda_in")
+    os.makedirs(tmp_in, exist_ok=True)
+    base = os.path.basename(in_path)
+    src = os.path.join(tmp_in, base)
+    shutil.copy2(in_path, src)
+
+    # Output directory (ODA writes converted files here)
+    tmp_out = os.path.join(out_dir, "_oda_out")
+    os.makedirs(tmp_out, exist_ok=True)
+
+    # Build command:
+    # ODAFileConverter <in_dir> <out_dir> <in_ver> <out_ver> <audit> <recover> <out_format>
+    # out_format: PDF, BMP, TIFF, etc. PNG often appears as “BMP” family; TIFF is reliable for OCR.
+    cmd = [
+        oda_exe,
+        tmp_in,
+        tmp_out,
+        in_ver,
+        out_ver,
+        str(int(bool(audit))),
+        str(int(bool(recover))),
+        out_format.upper(),
+    ]
+
+    # Run
+    try:
+        subprocess.run(cmd, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    except subprocess.CalledProcessError as e:
+        raise RuntimeError(f"ODA conversion failed: {e.stderr.decode(errors='ignore') or e.stdout.decode(errors='ignore')}")
+
+    # Find produced file
+    name_wo_ext, _ = os.path.splitext(base)
+    # ODA often appends extension based on chosen out_format
+    candidates = []
+    if out_format.upper() == "PDF":
+        candidates.append(os.path.join(tmp_out, name_wo_ext + ".pdf"))
+    elif out_format.upper() in ("TIFF", "TIF"):
+        # Could be multi-page: name_wo_ext.tif or name_wo_ext_1.tif, etc.
+        for fname in os.listdir(tmp_out):
+            if fname.lower().startswith(name_wo_ext.lower()) and fname.lower().endswith((".tif", ".tiff")):
+                candidates.append(os.path.join(tmp_out, fname))
+    elif out_format.upper() in ("PNG", "BMP", "JPG", "JPEG"):
+        for fname in os.listdir(tmp_out):
+            if fname.lower().startswith(name_wo_ext.lower()) and fname.lower().endswith(("."+out_format.lower(),)):
+                candidates.append(os.path.join(tmp_out, fname))
+    else:
+        # Default: scan for anything with our base name
+        for fname in os.listdir(tmp_out):
+            if fname.lower().startswith(name_wo_ext.lower()):
+                candidates.append(os.path.join(tmp_out, fname))
+
+    if not candidates:
+        # Fallback: pick the first file in out dir
+        outs = [os.path.join(tmp_out, f) for f in os.listdir(tmp_out)]
+        if not outs:
+            raise RuntimeError("ODA conversion produced no files.")
+        candidates = outs
+
+    # Return first candidate (PDF preferred if multiple)
+    candidates.sort()
+    return candidates[0]
+
+
+def _get_text_from_input(path: str,
+                         oda_exe_cli: Optional[str] = None,
+                         oda_format: str = "PDF") -> Tuple[str, List[str]]:
+    """
+    Returns (text, warnings). If input is DWG/DXF, uses ODA File Converter to render to
+    PDF or image first, then OCRs the result. For PDF/image inputs, OCRs directly.
     """
     warnings: List[str] = []
     if not os.path.exists(path):
         raise FileNotFoundError(path)
     ext = os.path.splitext(path)[1].lower()
     texts: List[str] = []
-    if ext in (".pdf",):
+
+    # DWG/DXF: render via ODA to PDF/TIFF/PNG, then OCR that artifact
+    if ext in (".dwg", ".dxf"):
+        oda_exe = _which_oda(oda_exe_cli)
+        if not oda_exe:
+            raise RuntimeError(
+                "ODA File Converter not found.\n"
+                "Provide --oda-exe path, or set ODA_CONVERTER_EXE env var, "
+                "or add OdaFileConverter.exe to your PATH."
+            )
+        with tempfile.TemporaryDirectory(prefix="oda_ocr_") as tmpdir:
+            out_path = _run_oda_convert(oda_exe, path, tmpdir, out_format=oda_format)
+            out_ext = os.path.splitext(out_path)[1].lower()
+            if out_ext == ".pdf":
+                if convert_from_path is None:
+                    raise RuntimeError("pdf2image not available to render ODA PDF.")
+                pages = convert_from_path(out_path, dpi=300)
+                if not pages:
+                    warnings.append("No pages rendered from ODA PDF.")
+                for p in pages:
+                    img = _preprocess_image(p) if Image else p
+                    txt = _ocr_image(img)
+                    texts.append(txt)
+            else:
+                # Single raster (TIFF/PNG/BMP/JPG)
+                if Image is None:
+                    raise RuntimeError("Pillow not installed to load ODA-rendered image.")
+                img = Image.open(out_path)
+                img = _preprocess_image(img)
+                texts.append(_ocr_image(img))
+        return ("\n".join(texts), warnings)
+
+    # Native PDF
+    if ext == ".pdf":
         if convert_from_path is None:
             raise RuntimeError("pdf2image not available to render PDFs.")
         pages = _render_pdf_to_images(path)
@@ -168,13 +320,15 @@ def _get_text_from_input(path: str) -> Tuple[str, List[str]]:
             img = _preprocess_image(p) if Image else p
             txt = _ocr_image(img)
             texts.append(txt)
-    else:
-        if Image is None:
-            raise RuntimeError("Pillow not installed to load images.")
-        img = Image.open(path)
-        img = _preprocess_image(img)
-        texts.append(_ocr_image(img))
-    return "\n".join(texts), warnings
+        return ("\n".join(texts), warnings)
+
+    # Raster images
+    if Image is None:
+        raise RuntimeError("Pillow not installed to load images.")
+    img = Image.open(path)
+    img = _preprocess_image(img)
+    texts.append(_ocr_image(img))
+    return ("\n".join(texts), warnings)
 
 # ---------- Regex candidates ----------
 
@@ -289,7 +443,9 @@ def _llm_pick_best(cands: List[DimensionTriple], ocr_text: str) -> Optional[int]
 def extract_part_dims(input_path: str,
                       units: str = "auto",
                       prefer_stock: bool = False,
-                      use_llm: bool = False) -> ExtractionResult:
+                      use_llm: bool = False,
+                      oda_exe: Optional[str] = None,
+                      oda_format: str = "PDF") -> ExtractionResult:
     """
     Extract (L, W, T) from a PDF/image drawing.
 
@@ -298,12 +454,14 @@ def extract_part_dims(input_path: str,
         units: "in", "mm", or "auto" (auto = detect; inches-biased).
         prefer_stock: small score bump to lines starting with "STOCK".
         use_llm: if True, and multiple candidates exist, ask LLM to pick best.
+        oda_exe: optional explicit path to ODA File Converter for DWG/DXF inputs.
+        oda_format: ODA output format prior to OCR (PDF/TIFF/PNG).
 
     Returns:
         ExtractionResult with best triple (if any), all candidates, raw OCR text, warnings.
     """
     warnings: List[str] = []
-    text, w = _get_text_from_input(input_path)
+    text, w = _get_text_from_input(input_path, oda_exe_cli=oda_exe, oda_format=oda_format)
     warnings += w
     if not text.strip():
         return ExtractionResult(best=None, candidates=[], ocr_text=text, warnings=warnings+["Empty OCR text."])
@@ -341,6 +499,10 @@ def _cli():
     p.add_argument("--prefer-stock", action="store_true", help="Bias lines starting with STOCK.")
     p.add_argument("--use-llm", action="store_true", help="If multiple candidates, ask LLM to pick best (requires OPENAI_API_KEY).")
     p.add_argument("--json-out", default="", help="Optional: write result JSON here.")
+    p.add_argument("--oda-exe", default="", help="Path to ODA File Converter executable. "
+                                                "Alternatively set ODA_CONVERTER_EXE env var or put it on PATH.")
+    p.add_argument("--oda-format", choices=["PDF","TIFF","PNG"], default="PDF",
+                   help="ODA output format before OCR (default PDF).")
     args = p.parse_args()
 
     try:
@@ -348,7 +510,9 @@ def _cli():
             args.input,
             units=args.units,
             prefer_stock=args.prefer_stock,
-            use_llm=args.use_llm
+            use_llm=args.use_llm,
+            oda_exe=(args.oda_exe or None),
+            oda_format=args.oda_format
         )
         out: Dict[str, Any] = {
             "best": None if res.best is None else {
