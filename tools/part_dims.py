@@ -149,86 +149,88 @@ def _insunits_to_inch_factor(doc) -> float:
 
 def _float_from_text(s: str) -> Optional[float]:
     try:
-        return float(s.strip().replace(",", ""))
+        return float(str(s).strip().replace(",", ""))
     except Exception:
         return None
 
 
 def _max_ordinate_xy(msp) -> Tuple[Optional[float], Optional[float]]:
     """
-    Try to read X/Y-ordinate values from DIMENSION entities.
-    Works without ezdxf.addons; if we can't confidently detect axis, we return (None, None)
-    so the caller will fall back to the AABB path.
+    Get max X and max Y from ORDinate DIMENSIONs.
+    Strategy:
+      - Identify ORDinate by bit 64 in dim.dxf.dimtype.
+      - Axis hint: many CADs store X/Y axis in dxf.azin (0=X, 1=Y). If missing, we guess by the leader vector.
+      - Value: prefer dim.dxf.text (if numeric), else dim.get_measurement(), else scan virtual_entities() for TEXT/MTEXT.
+    Returns (max_x, max_y) in drawing units, or (None, None) if not found.
     """
     max_x = None
     max_y = None
+
     for dim in msp.query("DIMENSION"):
-        # Ordinate test: bit 64 set in dimtype
         try:
-            dimtype = int(dim.dxf.dimtype)
+            dt = int(dim.dxf.dimtype)
         except Exception:
             continue
-        is_ordinate = bool(dimtype & 64)
-        if not is_ordinate:
+
+        # ORDinate bit is 64
+        if not (dt & 64):
             continue
 
-        # Try to get the displayed numeric value
-        val = None
+        # axis: 0 = X-ordinate, 1 = Y-ordinate (AM/AutoCAD stores this in AZIN sometimes)
+        axis = getattr(dim.dxf, "azin", None)  # may not exist
+
+        # value from explicit text?
         txt = (dim.dxf.text or "").strip()
+        val = None
         if txt and txt != "<>":
-            m = re.search(r'([-+]?\d+(?:\.\d+)?)', txt)
+            m = re.search(r"([-+]?\d+(?:\.\d+)?)", txt)
             if m:
-                try:
-                    val = float(m.group(1))
-                except Exception:
-                    val = None
+                val = _float_from_text(m.group(1))
+
+        # try measurement
         if val is None:
             try:
-                # some ezdxf versions support this for ordinate too
                 val = float(dim.get_measurement())
             except Exception:
-                pass
+                val = None
+
+        # last resort: look inside the rendered/virtual block
         if val is None:
-            # Last resort: scan virtual entities for TEXT/MTEXT showing the number
             try:
                 for e in dim.virtual_entities():
                     if e.dxftype() in ("TEXT", "MTEXT"):
                         s = e.dxf.text if e.dxftype() == "TEXT" else e.plain_text()
-                        m2 = re.search(r'([-+]?\d+(?:\.\d+)?)', s or "")
+                        m2 = re.search(r"([-+]?\d+(?:\.\d+)?)", s)
                         if m2:
-                            try:
-                                val = float(m2.group(1))
-                                break
-                            except Exception:
-                                pass
+                            val = _float_from_text(m2.group(1))
+                            break
             except Exception:
                 pass
+
         if val is None:
             continue
 
-        # Axis detection without addons: many drawings store 0=X,1=Y in AZIN (AM_ ordinate)
-        axis_flag = getattr(dim.dxf, "azin", None)  # 0 = X-ordinate, 1 = Y-ordinate (if present)
-        if axis_flag == 0:
+        # If axis unknown, try to infer: compare the absolute of extension vector components if available
+        if axis is None:
+            try:
+                # tip: many ORD dims use defpoint/defpoint2; the bigger delta usually indicates the axis
+                p1 = dim.dxf.defpoint
+                p2 = getattr(dim.dxf, "defpoint2", None)
+                if p2:
+                    dx, dy = abs(p2[0] - p1[0]), abs(p2[1] - p1[1])
+                    axis = 0 if dx >= dy else 1
+            except Exception:
+                axis = 0  # default to X if we can’t tell
+
+        if axis == 0:
             max_x = val if max_x is None else max(max_x, val)
-        elif axis_flag == 1:
-            max_y = val if max_y is None else max(max_y, val)
         else:
-            # Unknown axis -> give up gracefully; let AABB handle it
-            return None, None
+            max_y = val if max_y is None else max(max_y, val)
+
     return max_x, max_y
 
 
-def _aabb_size(
-    msp,
-    include: Optional[Iterable[str]] = None,
-    exclude: Optional[Iterable[str]] = None,
-) -> Tuple[Optional[float], Optional[float], Optional[float]]:
-    """
-    Compute AABB over likely 'part' geometry.
-    - Includes LINE, LWPOLYLINE, POLYLINE, ARC, CIRCLE, ELLIPSE, SPLINE, SOLID, TRACE, INSERT (expanded)
-    - Excludes DIMENSION, TEXT, MTEXT, TABLE, HATCH by default (can be tuned)
-    - Honors layer include/exclude filters if provided
-    """
+def _aabb_size(msp, include=None, exclude=None):
     from ezdxf.math import BoundingBox
 
     geom_types = {
@@ -245,55 +247,48 @@ def _aabb_size(
     }
     anno_types = {"DIMENSION", "TEXT", "MTEXT", "TABLE", "HATCH"}
 
-    bbox = BoundingBox()
-
-    def _layer_ok(ent) -> bool:
+    def layer_ok(ent) -> bool:
         layer = (ent.dxf.layer or "").upper()
         if include:
-            if all(layer.upper() != pat.upper() for pat in include):
+            if layer.upper() not in {s.upper() for s in include}:
                 return False
-        if exclude:
-            if any(layer.upper() == pat.upper() for pat in exclude):
-                return False
-        # heuristic: skip common annotation layers if not explicitly included
+        if exclude and layer.upper() in {s.upper() for s in exclude}:
+            return False
+        # heuristic: skip common annotation layers unless explicitly included
         if not include and layer.startswith(("AM_", "DEFPOINTS", "DIM", "ANNOT", "TITLE", "BORDER", "FRAME")):
             return False
         return True
 
-    # 1) add entities
+    bb = BoundingBox()
     for e in msp:
         kind = e.dxftype()
-        if kind in anno_types:
+        if kind in anno_types or kind not in geom_types:
             continue
-        if kind not in geom_types:
-            continue
-        if not _layer_ok(e):
+        if not layer_ok(e):
             continue
         try:
             if kind == "INSERT":
-                # expand block references
                 for ve in e.virtual_entities():
-                    if _layer_ok(ve):
-                        bbox.extend(ve.bbox())  # ezdxf ≥ 1.0
+                    if layer_ok(ve):
+                        bb.extend(ve.bbox())
             else:
-                bbox.extend(e.bbox())
+                bb.extend(e.bbox())
         except Exception:
-            # last resort: accumulate explicit vertex points if available
             try:
-                bbox.extend(list(e.vertices()))
+                bb.extend(list(e.vertices()))
             except Exception:
                 pass
 
-    if not bbox.has_data:
+    if not bb.has_data:
         return None, None, None
 
-    (xmin, ymin, zmin), (xmax, ymax, zmax) = bbox.extmin, bbox.extmax
-    dx, dy, dz = (xmax - xmin), (ymax - ymin), (zmax - zmin)
-    # guard against garbage zeros
-    dx = dx if dx > 1e-6 else None
-    dy = dy if dy > 1e-6 else None
-    dz = dz if dz > 1e-6 else None
-    return dx, dy, dz
+    (xmin, ymin, zmin), (xmax, ymax, zmax) = bb.extmin, bb.extmax
+    dx, dy, dz = xmax - xmin, ymax - ymin, zmax - zmin
+    return (
+        dx if dx > 1e-6 else None,
+        dy if dy > 1e-6 else None,
+        dz if dz > 1e-6 else None,
+    )
 
 
 def infer_part_dims(
