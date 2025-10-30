@@ -160,7 +160,7 @@ def _max_ordinate_xy(msp) -> Tuple[Optional[float], Optional[float]]:
     Strategy:
       - Identify ORDinate by bit 64 in dim.dxf.dimtype.
       - Axis hint: many CADs store X/Y axis in dxf.azin (0=X, 1=Y). If missing, we guess by the leader vector.
-      - Value: prefer dim.dxf.text (if numeric), else dim.get_measurement(), else scan virtual_entities() for TEXT/MTEXT.
+      - Value: prefer dim.get_measurement(), fall back to text/virtual entities when necessary.
     Returns (max_x, max_y) in drawing units, or (None, None) if not found.
     """
     max_x = None
@@ -179,20 +179,19 @@ def _max_ordinate_xy(msp) -> Tuple[Optional[float], Optional[float]]:
         # axis: 0 = X-ordinate, 1 = Y-ordinate (AM/AutoCAD stores this in AZIN sometimes)
         axis = getattr(dim.dxf, "azin", None)  # may not exist
 
-        # value from explicit text?
-        txt = (dim.dxf.text or "").strip()
+        # prefer numeric measurement
         val = None
-        if txt and txt != "<>":
-            m = re.search(r"([-+]?\d+(?:\.\d+)?)", txt)
-            if m:
-                val = _float_from_text(m.group(1))
+        try:
+            val = float(dim.get_measurement())
+        except Exception:
+            val = None
 
-        # try measurement
         if val is None:
-            try:
-                val = float(dim.get_measurement())
-            except Exception:
-                val = None
+            txt = (dim.dxf.text or "").strip()
+            if txt and txt != "<>":
+                m = re.search(r"([-+]?\d+(?:\.\d+)?)", txt)
+                if m:
+                    val = _float_from_text(m.group(1))
 
         # last resort: look inside the rendered/virtual block
         if val is None:
@@ -230,7 +229,9 @@ def _max_ordinate_xy(msp) -> Tuple[Optional[float], Optional[float]]:
     return max_x, max_y
 
 
-def _max_linear_hw(msp) -> tuple[Optional[float], Optional[float]]:
+def _max_linear_hw(
+    msp, aabb_dx: Optional[float] = None, aabb_dy: Optional[float] = None
+) -> tuple[Optional[float], Optional[float]]:
     """
     Return (Hmax, Vmax) for LINEAR/ALIGNED dimensions only.
     Orientation priority:
@@ -241,6 +242,8 @@ def _max_linear_hw(msp) -> tuple[Optional[float], Optional[float]]:
 
     max_h = None
     max_v = None
+    pref_h = None
+    pref_v = None
 
     for dim in msp.query("DIMENSION"):
         try:
@@ -257,7 +260,7 @@ def _max_linear_hw(msp) -> tuple[Optional[float], Optional[float]]:
         try:
             val = float(dim.get_measurement())
         except Exception:
-            pass
+            val = None
         if val is None:
             txt = (dim.dxf.text or "").strip()
             if txt and txt != "<>":
@@ -309,15 +312,34 @@ def _max_linear_hw(msp) -> tuple[Optional[float], Optional[float]]:
             except Exception:
                 pass
 
-        # record
+        layer = (dim.dxf.layer or "").upper()
+
         if orient == "H":
             max_h = val if max_h is None else max(max_h, val)
+            if (
+                layer == "AM_0"
+                and base in (0, 1)
+                and aabb_dx is not None
+                and 0.85 * aabb_dx <= val <= 1.15 * aabb_dx
+            ):
+                pref_h = val if pref_h is None else max(pref_h, val)
         elif orient == "V":
             max_v = val if max_v is None else max(max_v, val)
+            if (
+                layer == "AM_0"
+                and base in (0, 1)
+                and aabb_dy is not None
+                and 0.85 * aabb_dy <= val <= 1.15 * aabb_dy
+            ):
+                pref_v = val if pref_v is None else max(pref_v, val)
         else:
-            # unknown → count towards both (rare)
             max_h = val if max_h is None else max(max_h, val)
             max_v = val if max_v is None else max(max_v, val)
+
+    if pref_h is not None:
+        max_h = pref_h if max_h is None else max(max_h, pref_h)
+    if pref_v is not None:
+        max_v = pref_v if max_v is None else max(max_v, pref_v)
 
     return max_h, max_v
 
@@ -536,7 +558,7 @@ def infer_part_dims(
         print(f"[part-dims] ordinate read failed: {e}")
     lh = lv = None
     try:
-        lh, lv = _max_linear_hw(msp)
+        lh, lv = _max_linear_hw(msp, aabb_dx=dx, aabb_dy=dy)
     except Exception as e:
         print(f"[part-dims] linear read failed: {e}")
     print(f"[part-dims] linear: Hmax={lh} Vmax={lv}")
@@ -609,6 +631,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     parser.add_argument("--jsonl", help="JSONL text dump with a 'text' field")
     parser.add_argument("--include", nargs="*", help="Layer names to include (AABB)")
     parser.add_argument("--exclude", nargs="*", help="Layer names to exclude (AABB)")
+    parser.add_argument("--thk", type=float, help="Override thickness (inches)")
 
     args = parser.parse_args(argv)
 
@@ -619,6 +642,11 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         layer_include=args.include,
         layer_exclude=args.exclude,
     )
+
+    if args.thk is not None and result.get("thickness_in") is None:
+        result["thickness_in"] = float(args.thk)
+        src = result.get("source") or ""
+        result["source"] = f"{src}+override" if src else "override"
 
     print(json.dumps(result, indent=2))
 
