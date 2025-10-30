@@ -1,3 +1,4 @@
+import copy
 import math
 import re
 from collections.abc import Mapping
@@ -196,6 +197,57 @@ def test_render_quote_cost_breakdown_prefers_pricing_totals() -> None:
     pass_through_amounts = _parse_money_lines(pass_through_lines)
     assert math.isclose(pass_through_amounts.get("Total", 0.0), 17.5, rel_tol=1e-6)
     assert any("Shipping" in line for line in pass_through_lines)
+
+
+def test_render_quote_ignores_quote_artifacts() -> None:
+    base_result = {
+        "price": 46.0,
+        "narrative": "Tight tolerance adds inspection time.",
+        "llm_notes": ["LLM suggested fixture optimization."],
+        "breakdown": {
+            "qty": 3,
+            "totals": {
+                "labor_cost": 25.0,
+                "direct_costs": 15.0,
+                "subtotal": 40.0,
+                "with_expedite": 47.124,
+            },
+            "nre_detail": {},
+            "nre": {},
+            "material": {},
+            "process_costs": {"machining": 25.0},
+            "process_meta": {},
+            "pass_through": {"Material": 15.0},
+            "applied_pcts": {"MarginPct": 0.15},
+            "rates": {},
+            "params": {},
+            "labor_cost_details": {},
+            "direct_cost_details": {},
+        },
+    }
+
+    baseline_text = appV5.render_quote(copy.deepcopy(base_result), currency="$")
+
+    artifact_payload = [
+        {"label": "CAD Preview", "path": "/tmp/preview.step"},
+        {"label": "LLM Transcript", "path": "transcript.txt"},
+    ]
+    result_with_artifacts = copy.deepcopy(base_result)
+    result_with_artifacts["quote_artifacts"] = copy.deepcopy(artifact_payload)
+    result_with_artifacts["breakdown"]["quote_artifacts"] = copy.deepcopy(artifact_payload)
+
+    preserved_top_level = copy.deepcopy(result_with_artifacts["quote_artifacts"])
+    preserved_breakdown = copy.deepcopy(result_with_artifacts["breakdown"]["quote_artifacts"])
+
+    rendered_with_artifacts = appV5.render_quote(result_with_artifacts, currency="$")
+
+    assert rendered_with_artifacts == baseline_text
+    for artifact in artifact_payload:
+        assert artifact["label"] not in rendered_with_artifacts
+        assert artifact["path"] not in rendered_with_artifacts
+
+    assert result_with_artifacts["quote_artifacts"] == preserved_top_level
+    assert result_with_artifacts["breakdown"]["quote_artifacts"] == preserved_breakdown
 
 
 def test_render_quote_process_payload_tracks_bucket_view() -> None:
