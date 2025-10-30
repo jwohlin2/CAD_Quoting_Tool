@@ -124,6 +124,24 @@ def test_collect_ops_entries_uses_explode(monkeypatch: pytest.MonkeyPatch) -> No
     ]
 
 
+def test_collect_ops_entries_accepts_string_payload(monkeypatch: pytest.MonkeyPatch) -> None:
+    entries = [["A", "Ø0.257", 4, "1/4-20 TAP FROM FRONT"]]
+
+    monkeypatch.setattr(appV5, "_explode_rows_to_operations", lambda rows: entries)
+
+    geo_map = {
+        "hole_table": {
+            "lines": "HOLE TABLE\nA Ø0.257 4 1/4-20 TAP FROM FRONT",
+        }
+    }
+
+    result = appV5._collect_ops_entries_for_display(geo_map)
+
+    assert result == [
+        {"hole": "A", "ref": "Ø0.257", "qty": 4, "desc": "1/4-20 TAP FROM FRONT"}
+    ]
+
+
 def test_format_hole_table_section_outputs_operations() -> None:
     rows = [
         {"hole": "A", "ref": "Ø1.7500", "qty": 4, "desc": "±.0001 THRU (JIG GRIND)"},
