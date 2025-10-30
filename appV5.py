@@ -3546,21 +3546,6 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
         str(note).strip() for note in llm_notes if str(note).strip()
     ]
 
-    llm_debug_enabled_effective = bool(APP_ENV.llm_debug_enabled)
-    for source in (result, breakdown):
-        if not isinstance(source, _MappingABC):
-            continue
-        for key in ("app", "app_meta"):
-            app_info = source.get(key)
-            if not isinstance(app_info, _MappingABC):
-                continue
-            if "llm_debug_enabled" in app_info:
-                llm_debug_enabled_effective = bool(app_info.get("llm_debug_enabled"))
-                break
-        else:
-            continue
-        break
-
     # ---- helpers -------------------------------------------------------------
     divider = "-" * int(page_width)
 
