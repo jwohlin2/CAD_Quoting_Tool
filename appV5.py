@@ -3155,15 +3155,14 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
     bucket_alias_map: dict[str, str] = {}
     applied_process: dict[str, Any] = {}
     rates_raw    = breakdown.get("rates", {}) or {}
-    if isinstance(rates_raw, _MutableMappingABC):
-        rates = rates_raw
-    elif isinstance(rates_raw, _MappingABC):
-        rates = dict(rates_raw)
+    if isinstance(rates_raw, _MappingABC):
+        rates_provided = dict(rates_raw)
     else:
         try:
-            rates = dict(rates_raw or {})
+            rates_provided = dict(rates_raw or {})
         except Exception:
-            rates = {}
+            rates_provided = {}
+    rates_overrides: dict[str, Any] = {}
 
     def _coerce_rate_value(value: Any) -> float:
         try:
@@ -3178,33 +3177,39 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
         if cfg_labor_rate_value <= 0.0:
             cfg_labor_rate_value = 45.0
 
-    if "ShopRate" not in rates:
-        fallback_shop = _coerce_rate_value(rates.get("MillingRate"))
-        rates.setdefault("ShopRate", fallback_shop)
-    shop_rate_val = _coerce_rate_value(rates.get("ShopRate"))
+    shop_rate_val: float
+    if "ShopRate" in rates_provided:
+        shop_rate_val = _coerce_rate_value(rates_provided.get("ShopRate"))
+    else:
+        fallback_shop = _coerce_rate_value(rates_provided.get("MillingRate"))
+        shop_rate_val = fallback_shop
+        rates_overrides["ShopRate"] = shop_rate_val
 
-    if "EngineerRate" not in rates:
-        engineer_fallback = _coerce_rate_value(rates.get("MillingRate"))
+    engineer_rate_val: float
+    if "EngineerRate" in rates_provided:
+        engineer_rate_val = _coerce_rate_value(rates_provided.get("EngineerRate"))
+    else:
+        engineer_fallback = _coerce_rate_value(rates_provided.get("MillingRate"))
         if engineer_fallback <= 0 and shop_rate_val > 0:
             engineer_fallback = shop_rate_val
-        rates.setdefault("EngineerRate", engineer_fallback)
-    engineer_rate_val = _coerce_rate_value(rates.get("EngineerRate"))
+        engineer_rate_val = engineer_fallback
+        rates_overrides["EngineerRate"] = engineer_rate_val
 
-    labor_rate_value = _coerce_rate_value(rates.get("LaborRate"))
+    labor_rate_value = _coerce_rate_value(rates_provided.get("LaborRate"))
     if labor_rate_value <= 0:
-        labor_rate_value = _coerce_rate_value(rates.get("ShopLaborRate"))
+        labor_rate_value = _coerce_rate_value(rates_provided.get("ShopLaborRate"))
     if labor_rate_value <= 0:
         labor_rate_value = 85.0
     if separate_labor_cfg and cfg_labor_rate_value > 0.0:
         labor_rate_value = cfg_labor_rate_value
-    rates["LaborRate"] = labor_rate_value
+    rates_overrides["LaborRate"] = labor_rate_value
 
-    machine_rate_value = _coerce_rate_value(rates.get("MachineRate"))
+    machine_rate_value = _coerce_rate_value(rates_provided.get("MachineRate"))
     if machine_rate_value <= 0:
-        machine_rate_value = _coerce_rate_value(rates.get("ShopMachineRate"))
+        machine_rate_value = _coerce_rate_value(rates_provided.get("ShopMachineRate"))
     if machine_rate_value <= 0:
         machine_rate_value = 90.0
-    rates["MachineRate"] = machine_rate_value
+    rates_overrides["MachineRate"] = machine_rate_value
 
     cfg_programmer_rate: float | None = None
     if cfg and getattr(cfg, "separate_machine_labor", False):
@@ -3216,26 +3221,12 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
         programmer_rate_value = float(cfg_programmer_rate)
         programming_rate_value = float(cfg_programmer_rate)
     else:
-        if "ProgrammerRate" not in rates:
-            programmer_fallback = (
-                engineer_rate_val if engineer_rate_val > 0 else _coerce_rate_value(rates.get("MillingRate"))
-            )
-            if programmer_fallback <= 0 and shop_rate_val > 0:
-                programmer_fallback = shop_rate_val
-            if programmer_fallback <= 0:
-                programmer_fallback = _coerce_rate_value(rates.get("LaborRate"))
-            if programmer_fallback <= 0:
-                programmer_fallback = 90.0
-            if programmer_fallback > 0:
-                programmer_fallback = max(programmer_fallback, 90.0)
-            rates.setdefault("ProgrammerRate", programmer_fallback)
-
-        programmer_rate_value = _coerce_rate_value(rates.get("ProgrammerRate"))
+        programmer_rate_value = _coerce_rate_value(rates_provided.get("ProgrammerRate"))
         if programmer_rate_value <= 0:
             programmer_rate_value = (
                 engineer_rate_val
                 if engineer_rate_val > 0
-                else _coerce_rate_value(rates.get("MillingRate"))
+                else _coerce_rate_value(rates_provided.get("MillingRate"))
             )
         if programmer_rate_value <= 0 and shop_rate_val > 0:
             programmer_rate_value = shop_rate_val
@@ -3246,7 +3237,7 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
         if programmer_rate_value > 0:
             programmer_rate_value = max(programmer_rate_value, 90.0)
 
-        programming_rate_value = _coerce_rate_value(rates.get("ProgrammingRate"))
+        programming_rate_value = _coerce_rate_value(rates_provided.get("ProgrammingRate"))
         if programming_rate_value <= 0:
             programming_rate_value = programmer_rate_value
         if programming_rate_value <= 0:
@@ -3256,19 +3247,19 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
         if programming_rate_value > 0:
             programming_rate_value = max(programming_rate_value, 90.0)
 
-    rates["ProgrammerRate"] = programmer_rate_value
-    rates["ProgrammingRate"] = programming_rate_value
+    rates_overrides["ProgrammerRate"] = programmer_rate_value
+    rates_overrides["ProgrammingRate"] = programming_rate_value
 
-    inspector_rate_value = _coerce_rate_value(rates.get("InspectorRate"))
+    inspector_rate_value = _coerce_rate_value(rates_provided.get("InspectorRate"))
     if inspector_rate_value <= 0:
         inspector_rate_value = labor_rate_value
     if inspector_rate_value <= 0:
         inspector_rate_value = 85.0
     if inspector_rate_value > 0:
         inspector_rate_value = max(inspector_rate_value, 85.0)
-    rates["InspectorRate"] = inspector_rate_value
+    rates_overrides["InspectorRate"] = inspector_rate_value
 
-    inspection_rate_value = _coerce_rate_value(rates.get("InspectionRate"))
+    inspection_rate_value = _coerce_rate_value(rates_provided.get("InspectionRate"))
     if inspection_rate_value <= 0:
         inspection_rate_value = inspector_rate_value
     if inspection_rate_value <= 0:
@@ -3277,12 +3268,9 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
         inspection_rate_value = 85.0
     if inspection_rate_value > 0:
         inspection_rate_value = max(inspection_rate_value, 85.0)
-    rates["InspectionRate"] = inspection_rate_value
+    rates_overrides["InspectionRate"] = inspection_rate_value
 
-    rates.setdefault("LaborRate", 85.0)
-    rates.setdefault("MachineRate", 90.0)
-    rates.setdefault("ProgrammingRate", rates.get("ProgrammerRate", rates["LaborRate"]))
-    rates.setdefault("InspectionRate", rates.get("InspectorRate", rates["LaborRate"]))
+    rates = {**rates_provided, **rates_overrides}
 
     fallback_two_bucket_rates = _normalized_two_bucket_rates(rates)
     fallback_flat_rates = two_bucket_to_flat(fallback_two_bucket_rates)
@@ -3820,6 +3808,7 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
 
         label = {
             "programming": "Programming (amortized)",
+            "programming_amortized": "Programming (amortized)",
             "milling": "Milling",
             "drilling": "Drilling",
             "tapping": "Tapping",
@@ -5151,12 +5140,13 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
                 row("Total Material Cost :", total_material_cost, indent="  ")
             _push(lines, "")
 
-    rates.setdefault("LaborRate", 85.0)
-    rates.setdefault(
-        "ProgrammingRate", float(rates.get("ProgrammerRate") or rates["LaborRate"])
-    )
+    rates = {**{"LaborRate": 85.0}, **rates}
+    if _coerce_rate_value(rates.get("ProgrammingRate")) <= 0:
+        rates = {
+            **rates,
+            "ProgrammingRate": float(rates.get("ProgrammerRate") or rates["LaborRate"]),
+        }
 
-    nre = breakdown.setdefault("nre", {})
     prog_hr = float(nre.get("programming_hr") or 0.0)
     if prog_hr > 0 and float(nre.get("programming_cost") or 0.0) == 0.0:
         if cfg and getattr(cfg, "separate_machine_labor", False):
