@@ -1606,7 +1606,8 @@ def _compute_drilling_removal_section(
             )
             _push(
                 lines,
-                f"TOTAL DRILLING (with toolchange) . {drill_minutes_total:.2f} min",
+                f"TOTAL DRILLING (with toolchange) . {drill_minutes_total:.2f} min  ("
+                f"{fmt_hours(minutes_to_hours(drill_minutes_total))})",
             )
             lines.append("")
 
@@ -7598,12 +7599,11 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
     total_direct_costs_value = computed_direct_total
     labor_summary_total = _safe_float(proc_total, 0.0)
     machine_summary_total = _safe_float(display_machine, 0.0)
-    ladder_labor_component = labor_summary_total
 
     if isinstance(breakdown, dict):
         breakdown["pass_through_total"] = pass_through_total
         breakdown["total_direct_costs"] = total_direct_costs_value
-        breakdown["total_labor_cost"] = round(ladder_labor_component, 2)
+        breakdown["total_labor_cost"] = round(labor_summary_total, 2)
         if vendor_items_total:
             breakdown["vendor_items_total"] = float(round(vendor_items_total, 2))
 
@@ -7612,13 +7612,8 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
         totals["machine$"] = round(machine_summary_total, 2)
         totals["directs$"] = round(directs_total_value, 2)
 
-    ladder_subtotal = round(
-        _safe_float((breakdown or {}).get("total_labor_cost"), ladder_labor_component)
-        + _safe_float((breakdown or {}).get("total_direct_costs"), directs_total_value),
-        2,
-    )
-    if isinstance(breakdown, _MutableMappingABC):
-        breakdown["ladder_subtotal"] = ladder_subtotal
+    if isinstance(pricing, dict):
+        pricing["total_direct_costs"] = total_direct_costs_value
 
     if 0 <= pass_through_header_index < len(lines):
         header_text = f"Pass-Through & Direct Costs (Total: {fmt_money(directs_total_value, currency)})"
@@ -7632,17 +7627,7 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
         except Exception:
             pass
 
-    if isinstance(pricing, dict):
-        pricing["total_direct_costs"] = total_direct_costs_value
-    if isinstance(breakdown, dict):
-        breakdown["pass_through_total"] = pass_through_total
-        try:
-            breakdown["total_direct_costs"] = total_direct_costs_value
-        except Exception:
-            breakdown["total_direct_costs"] = total_direct_costs
     directs = float(round(directs_total_value, 2))
-    if isinstance(totals, dict):
-        totals["direct_costs"] = total_direct_costs_value
     if 0 <= total_direct_costs_row_index < len(lines):
         replace_line(
             total_direct_costs_row_index,
