@@ -71,7 +71,7 @@ def _summary_section(sections: Mapping[str, list[str]]) -> tuple[str, list[str]]
 
 def test_render_quote_emits_structured_sections() -> None:
     result = {
-        "price": 54.19,
+        "price": 46.0,
         "narrative": "Tight tolerance adds inspection time.",
         "llm_notes": ["LLM suggested fixture optimization."],
         "breakdown": {
@@ -194,17 +194,17 @@ def test_render_quote_process_payload_tracks_bucket_view() -> None:
     breakdown = {
         "qty": 1,
         "totals": {
-            "labor_cost": 900.0,
-            "direct_costs": 175.0,
-            "subtotal": 1075.0,
-            "with_expedite": 1241.625,
+            "labor_cost": 950.0,
+            "direct_costs": 25.0,
+            "subtotal": 975.0,
+            "with_expedite": 975.0,
         },
         "nre_detail": {},
         "nre": {},
         "material": {"scrap_pct": 0.12},
         "process_costs": {},
         "process_meta": {},
-        "pass_through": {"Material": 150.0, "Shipping": 25.0},
+        "pass_through": {"Shipping": 25.0},
         "applied_pcts": {
             "MarginPct": 0.15,
         },
@@ -218,7 +218,7 @@ def test_render_quote_process_payload_tracks_bucket_view() -> None:
         "process_plan_summary": {"bucket_view": bucket_view},
     }
 
-    result = {"price": 1450.0, "breakdown": breakdown}
+    result = {"price": 1121.25, "breakdown": breakdown}
 
     rendered, doc = _render_text_and_doc(result)
     assert "QUOTE SUMMARY" in rendered
@@ -314,6 +314,7 @@ def test_render_payload_obeys_pricing_math_guards() -> None:
     labor_total = float(breakdown_after.get("total_labor_cost", 0.0))
     margin_pct = float(breakdown_after.get("applied_pcts", {}).get("MarginPct", 0.0))
     final_price = float(result.get("price", 0.0))
+    assert math.isclose(final_price_per_part, final_price, abs_tol=0.01)
 
     assert math.isclose(subtotal_from_totals, subtotal_before_margin, abs_tol=0.01)
     assert math.isclose(direct_total, direct_costs_reported, abs_tol=0.01)

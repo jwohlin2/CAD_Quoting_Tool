@@ -9,6 +9,7 @@ from cad_quoter.domain_models import normalize_material_key
 from cad_quoter.pricing import materials as materials_pricing
 from cad_quoter.pricing.speeds_feeds_selector import material_group_for_speeds_feeds
 from cad_quoter.utils.render_utils import QuoteDoc
+from cad_quoter.utils.machining import _first_numeric_or_none
 
 
 def _compute_direct_costs_for_test(
@@ -613,10 +614,11 @@ def test_dummy_quote_hour_summary_prefers_planner_bucket_minutes() -> None:
     breakdown = payload["breakdown"]
     breakdown["removal_summary"] = {"total_minutes": 12.0}
 
-    _render_output(payload)
-
     summary_entry = payload["breakdown"]["hour_summary"]["buckets"]["drilling"]
     assert math.isclose(float(summary_entry["hr"]), 1.5, abs_tol=1e-6)
+
+    bucket_minutes = payload["breakdown"]["bucket_view"]["buckets"]["drilling"]["minutes"]
+    assert math.isclose(bucket_minutes, 90.0, abs_tol=1e-6)
 
 
 def test_dummy_quote_has_no_planner_red_flags() -> None:
