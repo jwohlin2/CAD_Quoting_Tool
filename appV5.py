@@ -413,30 +413,42 @@ def _collect_ops_entries_for_display(
                 continue
             _append_text(raw)
 
-    if isinstance(geo_map, _MappingABC):
-        hole_table_ops = geo_map.get("hole_table_ops")
-        if isinstance(hole_table_ops, Sequence):
-            _extend(hole_table_ops)
+    def _extend_map_sequences(
+        container: Mapping[str, Any] | None,
+        keys: Iterable[str],
+        extender: Callable[[Iterable[Any]], None],
+    ) -> None:
+        if not isinstance(container, _MappingABC):
+            return
+        for key in keys:
+            value = container.get(key)
+            if isinstance(value, Sequence) and not isinstance(value, (str, bytes, bytearray)):
+                extender(value)
 
-        hole_table_payload = geo_map.get("hole_table")
-        if isinstance(hole_table_payload, _MappingABC):
-            ops_payload = hole_table_payload.get("ops")
-            if isinstance(ops_payload, Sequence):
-                _extend(ops_payload)
+    def _mapping_value(
+        container: Mapping[str, Any] | None,
+        key: str,
+    ) -> Mapping[str, Any] | None:
+        if not isinstance(container, _MappingABC):
+            return None
+        value = container.get(key)
+        return value if isinstance(value, _MappingABC) else None
+
+    geo_payload = geo_map if isinstance(geo_map, _MappingABC) else None
+    hole_table_payload = _mapping_value(geo_payload, "hole_table")
+
+    _extend_map_sequences(geo_payload, ("hole_table_ops",), _extend)
+    _extend_map_sequences(hole_table_payload, ("ops",), _extend)
 
     if fallback_rows:
         _extend(fallback_rows)
 
-    if isinstance(geo_map, _MappingABC):
-        hole_table_payload = geo_map.get("hole_table")
-        if isinstance(hole_table_payload, _MappingABC):
-            lines = hole_table_payload.get("lines")
-            if isinstance(lines, Sequence):
-                _extend_text_rows(lines)
-        for key in ("chart_lines", "hole_table_lines", "chart_text_lines", "hole_chart_lines"):
-            value = geo_map.get(key)
-            if isinstance(value, Sequence):
-                _extend_text_rows(value)
+    _extend_map_sequences(hole_table_payload, ("lines",), _extend_text_rows)
+    _extend_map_sequences(
+        geo_payload,
+        ("chart_lines", "hole_table_lines", "chart_text_lines", "hole_chart_lines"),
+        _extend_text_rows,
+    )
 
     if text_rows and _explode_rows_to_operations:
         try:
@@ -445,15 +457,9 @@ def _collect_ops_entries_for_display(
             exploded = []
         _extend(exploded)
 
-    if isinstance(geo_map, _MappingABC):
-        structured = geo_map.get("hole_table_structured")
-        if isinstance(structured, Sequence):
-            _extend(structured)
-        hole_table_payload = geo_map.get("hole_table")
-        if isinstance(hole_table_payload, _MappingABC):
-            structured_payload = hole_table_payload.get("structured")
-            if isinstance(structured_payload, Sequence):
-                _extend(structured_payload)
+    _extend_map_sequences(geo_payload, ("hole_table_structured",), _extend)
+    hole_table_payload = hole_table_payload or _mapping_value(geo_payload, "hole_table")
+    _extend_map_sequences(hole_table_payload, ("structured",), _extend)
 
     if entries:
         hole_pref_keys = {
