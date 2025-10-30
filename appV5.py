@@ -3453,7 +3453,6 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
         labor_cost_details_input[canonical_label] = merged
 
     labor_cost_details: dict[str, str] = dict(labor_cost_details_input)
-    labor_cost_details_seed: dict[str, str] = dict(labor_cost_details_input)
 
     labor_cost_totals_raw = breakdown.get("labor_costs", {}) or {}
     labor_cost_totals: dict[str, float] = {}
