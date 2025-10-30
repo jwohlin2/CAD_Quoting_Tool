@@ -4697,23 +4697,25 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
             total_material_cost = material_cost_components["total_usd"]
             material_net_cost = material_cost_components["net_usd"]
             if total_material_cost is not None:
-                try:
-                    material_block["total_material_cost"] = total_material_cost
-                except Exception:
-                    pass
-                try:
-                    material_record = breakdown.get("material") if isinstance(breakdown, _MappingABC) else None
-                    if isinstance(material_record, _MutableMappingABC):
-                        material_record["total_material_cost"] = float(total_material_cost)
-                    elif isinstance(material_record, _MappingABC):
-                        updated_material = dict(material_record)
-                        updated_material["total_material_cost"] = float(total_material_cost)
-                        if isinstance(breakdown, _MutableMappingABC):
-                            breakdown["material"] = updated_material
-                    elif isinstance(breakdown, _MutableMappingABC):
-                        breakdown["material"] = {"total_material_cost": float(total_material_cost)}
-                except Exception:
-                    pass
+                if isinstance(material_block, _MutableMappingABC):
+                    material_block["total_material_cost"] = float(total_material_cost)
+                material_record = (
+                    breakdown.get("material")
+                    if isinstance(breakdown, _MappingABC)
+                    else None
+                )
+                if isinstance(material_record, _MutableMappingABC):
+                    material_record["total_material_cost"] = float(total_material_cost)
+                elif isinstance(material_record, _MappingABC) and isinstance(
+                    breakdown, _MutableMappingABC
+                ):
+                    updated_material = dict(material_record)
+                    updated_material["total_material_cost"] = float(total_material_cost)
+                    breakdown["material"] = updated_material
+                elif isinstance(breakdown, _MutableMappingABC):
+                    breakdown["material"] = {
+                        "total_material_cost": float(total_material_cost)
+                    }
             net_mass_val = _coerce_float_or_none(net_mass_g)
             effective_mass_source = material.get("effective_mass_g")
             effective_mass_val = _coerce_float_or_none(effective_mass_source)
@@ -5087,15 +5089,6 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
             if detail_lines:
                 append_lines(detail_lines)
             mc: Mapping[str, Any] | None = material_cost_components
-            if not mc:
-                try:
-                    mc = _material_cost_components(
-                        material_block,
-                        overrides=material_overrides,
-                        cfg=cfg,
-                    )
-                except Exception:
-                    mc = None
             if mc:
                 stock_piece_val = mc.get("stock_piece_usd")
                 if stock_piece_val is not None:

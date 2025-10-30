@@ -100,6 +100,11 @@ _QUICK_CHECK_BREAKDOWN = {
         "stock_L_in": 12.0,
         "total_material_cost": 120.0,
     },
+    "material": {
+        "material_cost_components": {
+            "total_usd": 120.0,
+        }
+    },
     "total_direct_costs": 150.0,
     "bucket_view": {"totals": {"total$": 200.0}},
     "nre": {"programming_per_part": 50.0},
@@ -512,7 +517,14 @@ def test_quick_breakdown_sanity_checks() -> None:
     material_block = breakdown.get("material_block", {})
     assert material_block.get("stock_L_in") is not None
 
-    total_material_cost = float(material_block.get("total_material_cost", 0.0))
+    material_components = (
+        (breakdown.get("material") or {}).get("material_cost_components") or {}
+    )
+    total_material_cost = float(
+        material_components.get("total_usd")
+        or material_block.get("total_material_cost", 0.0)
+        or 0.0
+    )
     assert breakdown["total_direct_costs"] >= total_material_cost >= 0.0
 
     ops = set((breakdown.get("process_plan") or {}).keys())
