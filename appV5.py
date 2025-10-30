@@ -2888,7 +2888,6 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
             totals = dict(totals_raw or {})
         except Exception:
             totals = {}
-    breakdown["totals"] = totals
     declared_labor_total = float(totals.get("labor_cost", 0.0) or 0.0)
     nre_detail   = breakdown.get("nre_detail", {}) or {}
     nre_raw      = breakdown.get("nre", {}) or {}
@@ -2899,7 +2898,6 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
             nre = dict(nre_raw or {})
         except Exception:
             nre = {}
-    breakdown["nre"] = nre
     material_raw = breakdown.get("material", {}) or {}
     if isinstance(material_raw, _MutableMappingABC):
         material_block = material_raw
