@@ -37,7 +37,6 @@ from typing import List, Tuple
 import sys, pathlib
 sys.path.append(str(pathlib.Path(__file__).resolve().parents[1] / "tools"))
 from hole_ops import explode_rows_to_operations
-from part_dims import infer_part_dims
 from stock_dims import infer_stock_dims_from_lines, read_texts_from_csv
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
@@ -45,10 +44,6 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 from cad_quoter import geo_extractor
-try:
-    from cad_quoter.geometry import convert_dwg_to_dxf as _convert_dwg_to_dxf  # type: ignore
-except Exception:
-    _convert_dwg_to_dxf = None  # type: ignore
 
 # ---------- HOLE TABLE helpers ----------
 _UHEX_RE = re.compile(r"\\U\+([0-9A-Fa-f]{4})")
@@ -310,89 +305,7 @@ def main() -> int:
         for r in rows:
             fh.write(json.dumps(r, ensure_ascii=False) + "\n")
 
-    # --- DIMENSION DUMP (numeric, not text) ---
-
-    def _dim_base(dt: int) -> int:
-        """Return the base dimension type (0=linear, 1=aligned, ...)."""
-
-        return dt & 7
-
-    def dump_dimensions(msp, out_dir: Path) -> None:
-        rows = []
-        for dim in msp.query("DIMENSION"):
-            try:
-                dt = int(dim.dxf.dimtype)
-                base = _dim_base(dt)
-                is_ordinate = bool(dt & 64)
-            except Exception:
-                dt = base = 0
-                is_ordinate = False
-
-            try:
-                val = float(dim.get_measurement())
-            except Exception:
-                val = None
-
-            angle = getattr(dim.dxf, "angle", None)
-            azin = getattr(dim.dxf, "azin", None)
-            p1 = tuple(getattr(dim.dxf, "defpoint", (None, None, None)))
-            p2 = tuple(getattr(dim.dxf, "defpoint2", (None, None, None)))
-
-            rows.append(
-                {
-                    "layer": dim.dxf.layer or "",
-                    "base": base,
-                    "is_ordinate": int(is_ordinate),
-                    "value": val,
-                    "angle_deg": float(angle) if angle is not None else None,
-                    "axis_hint": azin,
-                    "defpoint": p1,
-                    "defpoint2": p2,
-                    "raw_text": dim.dxf.text or "",
-                }
-            )
-
-        csv_path = out_dir / "dims_all.csv"
-        with csv_path.open("w", newline="", encoding="utf-8") as fh:
-            w = csv.writer(fh)
-            w.writerow(
-                [
-                    "layer",
-                    "base",
-                    "is_ordinate",
-                    "value",
-                    "angle_deg",
-                    "axis_hint",
-                    "defpoint",
-                    "defpoint2",
-                    "raw_text",
-                ]
-            )
-            for r in rows:
-                w.writerow(
-                    [
-                        r["layer"],
-                        r["base"],
-                        r["is_ordinate"],
-                        r["value"],
-                        r["angle_deg"],
-                        r["axis_hint"],
-                        r["defpoint"],
-                        r["defpoint2"],
-                        r["raw_text"],
-                    ]
-                )
-
-        jsonl_path = out_dir / "dims_all.jsonl"
-        with jsonl_path.open("w", encoding="utf-8") as fh:
-            for r in rows:
-                fh.write(json.dumps(r) + "\n")
-
-        print(
-            f"[DIM-DUMP] rows={len(rows)} csv={csv_path} jsonl={jsonl_path}"
-        )
-
-    dump_dimensions(doc.modelspace(), outdir)
+    # (Removed DIM-DUMP: no dims_all.csv/jsonl)
 
     # ---- Infer stock dimensions from extracted text ----
     try:
@@ -414,37 +327,7 @@ def main() -> int:
                 writer.writerow(["", "", ""])
         print(f"[stock-dims] csv={stock_csv}")
 
-    # ---- Part dimension inference (geometry + text) ----
-    part_dims_path: Path | None = None
-    suffix = in_path.suffix.lower()
-    if suffix == ".dxf":
-        part_dims_path = in_path
-    elif suffix == ".dwg":
-        if _convert_dwg_to_dxf is None:
-            print("[part-dims] skipped: DWG conversion unavailable")
-        else:
-            try:
-                part_dims_path = Path(_convert_dwg_to_dxf(str(in_path)))
-            except Exception as exc:
-                part_dims_path = None
-                print(f"[part-dims] DWG→DXF conversion failed: {exc}")
-    else:
-        print(f"[part-dims] skipped: unsupported input type '{suffix}'")
-
-    if part_dims_path is not None:
-        if part_dims_path.exists():
-            try:
-                part_dims_result = infer_part_dims(
-                    str(part_dims_path),
-                    str(csv_path),
-                    str(jsonl_path) if jsonl_path.exists() else None,
-                )
-            except Exception as exc:
-                print(f"[part-dims] failed: {exc}")
-            else:
-                print(f"[part-dims] {part_dims_result}")
-        else:
-            print(f"[part-dims] skipped: {part_dims_path} not found")
+    # (Removed part-dims inference: no reading or computing of DIMENSION geometry)
 
     # ---- Emit structured HOLE TABLE + ops (via hole_ops) ----
     try:
