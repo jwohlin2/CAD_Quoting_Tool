@@ -302,120 +302,13 @@ from cad_quoter.pricing.process_view import (
 )
 
 
-# ==== BUCKET SEEDING (single source of truth) ===========================
+# ==== BUCKET SEEDING (single source of truth via planner_render helpers)
 def _minutes_to_hours(m: Any) -> float:
     return _as_float(m, 0.0) / 60.0
 
 
 def minutes_to_hours(m: Any) -> float:
     return _minutes_to_hours(m)
-
-
-def _seed_bucket_minutes_cost(
-    bucket_view: MutableMapping[str, Any] | Mapping[str, Any] | None,
-    key: str,
-    minutes: float,
-    *,
-    machine_rate_per_hr: float = 0.0,
-    labor_rate_per_hr: float = 0.0,
-) -> None:
-    """Seed minutes + explicit $ into a bucket; NEVER back-solve a rate."""
-
-    if not isinstance(bucket_view, (_MutableMappingABC, dict)):
-        return
-
-    try:
-        minutes_val = float(minutes or 0.0)
-    except Exception:
-        minutes_val = 0.0
-
-    if (not math.isfinite(minutes_val)) or minutes_val < 0 or minutes_val > 1_000 * 60:
-        minutes_val = 0.0
-
-    hours_val = _minutes_to_hours(minutes_val)
-
-    try:
-        buckets = bucket_view.setdefault("buckets", {})
-    except Exception:
-        return
-
-    if not isinstance(buckets, dict):
-        try:
-            buckets = dict(buckets or {})
-        except Exception:
-            return
-        bucket_view["buckets"] = buckets
-
-    entry = buckets.setdefault(
-        key,
-        {"minutes": 0.0, "machine$": 0.0, "labor$": 0.0, "total$": 0.0},
-    )
-
-    machine_rate = float(machine_rate_per_hr or 0.0)
-    labor_rate = float(labor_rate_per_hr or 0.0)
-
-    machine_cost = hours_val * machine_rate
-    labor_cost = hours_val * labor_rate
-
-    entry["minutes"] = round(minutes_val, 2)
-    entry["machine$"] = round(machine_cost, 2)
-    entry["labor$"] = round(labor_cost, 2)
-    entry["total$"] = round(entry["machine$"] + entry["labor$"], 2)
-
-
-def _normalize_buckets(bucket_view_obj: MutableMapping[str, Any] | Mapping[str, Any] | None) -> None:
-    if not isinstance(bucket_view_obj, (_MutableMappingABC, dict)):
-        return
-
-    alias = {
-        "programming_amortized": "programming",
-        "spotdrill": "spot_drill",
-        "spot-drill": "spot_drill",
-        "jiggrind": "jig_grind",
-        "jig-grind": "jig_grind",
-    }
-
-    try:
-        buckets_obj = bucket_view_obj.get("buckets")
-    except Exception:
-        buckets_obj = None
-
-    if isinstance(buckets_obj, dict):
-        source_items = buckets_obj.items()
-    elif isinstance(buckets_obj, _MappingABC):
-        source_items = buckets_obj.items()
-    else:
-        source_items = ()
-
-    norm: dict[str, dict[str, float]] = {}
-    for raw_key, entry in source_items:
-        try:
-            key = str(raw_key or "")
-        except Exception:
-            key = ""
-        if not key or not isinstance(entry, _MappingABC):
-            continue
-        nk = alias.get(key, key)
-        dst = norm.setdefault(
-            nk,
-            {"minutes": 0.0, "machine$": 0.0, "labor$": 0.0, "total$": 0.0},
-        )
-        dst["minutes"] += _as_float(entry.get("minutes"), 0.0)
-        dst["machine$"] += _as_float(entry.get("machine$"), 0.0)
-        dst["labor$"] += _as_float(entry.get("labor$"), 0.0)
-        dst["total$"] = round(dst["machine$"] + dst["labor$"], 2)
-
-    bucket_view_obj["buckets"] = norm
-
-    try:
-        buckets_snapshot = (
-            bucket_view_obj.get("buckets")
-            if isinstance(bucket_view_obj, (_MappingABC, dict))
-            else None
-        )
-    except Exception:
-        buckets_snapshot = None
-    logging.debug(f"[buckets-final] {buckets_snapshot or {}}")
 
 
 def _as_float(x: Any, default: float = 0.0) -> float:
@@ -1041,6 +934,7 @@ from cad_quoter.ui.planner_render import (
     _prepare_bucket_view,
     _extract_bucket_map,
     _process_label,
+    _seed_bucket_minutes_cost,
     _seed_bucket_minutes as _planner_seed_bucket_minutes,
     _normalize_buckets,
     _split_hours_for_bucket,
