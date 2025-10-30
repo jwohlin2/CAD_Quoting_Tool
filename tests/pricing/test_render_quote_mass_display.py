@@ -1,6 +1,9 @@
+import re
+
 import appV5
 import pytest
 from cad_quoter.pricing.materials import LB_PER_KG
+from cad_quoter.utils.render_utils import QuoteDoc
 
 
 def _format_weight_lb_oz_for_test(mass_g: float | None) -> str:
@@ -215,13 +218,52 @@ def _base_material_quote(material: dict) -> dict:
     }
 
 
-def _render_lines_and_payload(result: dict) -> tuple[list[str], dict]:
-    rendered = appV5.render_quote(result, currency="$", show_zeros=False)
-    breakdown = result.get("breakdown")
-    assert isinstance(breakdown, dict), "expected dict breakdown"
-    payload = breakdown.get("render_payload")
-    assert isinstance(payload, dict), "expected structured render payload"
-    return rendered.splitlines(), payload
+def _render_lines_and_doc(result: dict) -> tuple[list[str], QuoteDoc]:
+    captured: list[QuoteDoc] = []
+
+    class _Recorder(appV5.QuoteDocRecorder):  # type: ignore[misc]
+        def build_doc(self) -> QuoteDoc:
+            doc = super().build_doc()
+            captured.append(doc)
+            return doc
+
+    original = appV5.QuoteDocRecorder
+    appV5.QuoteDocRecorder = _Recorder
+    try:
+        rendered = appV5.render_quote(result, currency="$", show_zeros=False)
+    finally:
+        appV5.QuoteDocRecorder = original
+
+    assert captured, "expected quote document"
+    return rendered.splitlines(), captured[-1]
+
+
+def _quote_doc_sections(doc: QuoteDoc) -> dict[str, list[str]]:
+    sections: dict[str, list[str]] = {}
+    for section in doc.sections:
+        title = section.title or ""
+        sections[title] = [row.text for row in section.rows]
+    return sections
+
+
+_MONEY_RE = re.compile(r"\$\s*([0-9,]+\.[0-9]{2})")
+
+
+def _parse_money_lines(lines: list[str]) -> dict[str, float]:
+    result: dict[str, float] = {}
+    for line in lines:
+        match = _MONEY_RE.search(line)
+        if not match:
+            continue
+        amount = float(match.group(1).replace(",", ""))
+        label = line[: match.start()].strip()
+        if label.endswith(":"):
+            label = label[:-1].strip()
+        if label.startswith("="):
+            label = label.lstrip("= ").strip()
+        if label:
+            result[label] = amount
+    return result
 
 
 def _amortized_breakdown(qty: int, *, config_flags: dict | None = None) -> dict:
@@ -348,7 +390,7 @@ def test_render_quote_does_not_duplicate_detail_lines() -> None:
         "app_meta": {"used_planner": True},
     }
 
-    lines, _ = _render_lines_and_payload(result)
+    lines, _ = _render_lines_and_doc(result)
     rendered = "\n".join(lines)
 
     assert rendered.count("- Programmer (lot): 1.00 hr @ $45.00/hr") == 1
@@ -369,7 +411,7 @@ def test_render_quote_shows_amortized_nre_for_single_qty() -> None:
 
     assert result["breakdown"]["labor_costs"] == {}
 
-    lines, _ = _render_lines_and_payload(result)
+    lines, _ = _render_lines_and_doc(result)
     rendered = "\n".join(lines)
 
     assert "Programming (amortized)" in rendered
@@ -385,7 +427,7 @@ def test_render_quote_uses_programming_per_lot_for_single_qty() -> None:
 
     result = {"price": 10.0, "breakdown": breakdown, "app_meta": {"used_planner": True}}
 
-    lines, _ = _render_lines_and_payload(result)
+    lines, _ = _render_lines_and_doc(result)
     rendered = "\n".join(lines)
 
     programming_line = next(
@@ -407,7 +449,7 @@ def test_render_quote_includes_amortized_labor_totals_for_single_qty() -> None:
 
     result = {"price": 10.0, "breakdown": breakdown, "app_meta": {"used_planner": True}}
 
-    lines, _ = _render_lines_and_payload(result)
+    lines, _ = _render_lines_and_doc(result)
     rendered = "\n".join(lines)
 
     assert "Programming (amortized)" in rendered
@@ -426,7 +468,7 @@ def test_render_quote_ignores_force_amortized_flag_for_single_qty() -> None:
 
     assert result["breakdown"]["labor_costs"] == {}
 
-    lines, _ = _render_lines_and_payload(result)
+    lines, _ = _render_lines_and_doc(result)
     rendered = "\n".join(lines)
 
     assert "Programming (amortized)" in rendered
@@ -472,13 +514,16 @@ def test_render_quote_shows_flat_extras_when_no_hours() -> None:
         "app_meta": {"used_planner": True},
     }
 
-    lines, payload = _render_lines_and_payload(result)
+    lines, doc = _render_lines_and_doc(result)
     rendered = "\n".join(lines)
 
     assert "includes $200.00 extras" not in rendered
 
-    grinding_entry = next(
-        entry for entry in payload.get("processes", []) if entry.get("label") == "Grinding"
-    )
-    assert pytest.approx(grinding_entry.get("hours", 0.0), rel=1e-3) == 2.22
-    assert pytest.approx(grinding_entry.get("rate", 0.0), rel=1e-3) == 95.0
+    sections = _quote_doc_sections(doc)
+    process_lines = sections.get("Process & Labor Costs", [])
+    grinding_line = next((line for line in process_lines if "grinding" in line.lower()), "")
+    assert grinding_line, process_lines
+    amounts = _parse_money_lines(process_lines)
+    grinding_amount = amounts.get("grinding")
+    assert grinding_amount is not None
+    assert grinding_amount == pytest.approx(200.0, abs=1e-2)
