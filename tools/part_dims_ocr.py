@@ -34,6 +34,7 @@ Dependencies (install as needed):
 from __future__ import annotations
 import argparse
 import base64
+import io
 import json
 import math
 import os
@@ -116,31 +117,46 @@ _NUMTOK = re.compile(r"\d+\s*\d+/\d+|\d+[.,]\d+|\.\d+|\d+")
 
 def _parse_num(tok: str) -> float:
     tok = tok.replace(",", "").strip()
-    m = re.match(r"^(\d+)\s+(\d+)/(\d+)$", tok)
+    m = re.match(r"^(\d+)\s+(\d+)/(\d+)$", tok)   # 1 3/8
     if m:
         a, b, c = m.groups()
         return float(a) + float(b) / float(c)
-    if re.match(r"^\d+/\d+$", tok):
+    if re.match(r"^\d+/\d+$", tok):               # 3/8
         a, b = tok.split("/")
         return float(a) / float(b)
     return float(tok)
 
 
 def _extract_numbers_from_img(llm, pil_img) -> list[float]:
+    """Ask the VLM to list numeric dimensions only, then parse to floats."""
+
+    def _img_b64(img):
+        buf = io.BytesIO()
+        img.save(buf, format="PNG")
+        return base64.b64encode(buf.getvalue()).decode("ascii")
+
     b64 = _img_b64(pil_img)
-    resp = llm.create_chat_completion(messages=[{
-        "role": "user",
-        "content": [
+    resp = llm.create_chat_completion(
+        messages=[
             {
-                "type": "text",
-                "text": (
-                    "From this CAD view, output ONLY numeric dimensions you can read, separated by spaces. "
-                    "No words, no units, no angles."
-                ),
-            },
-            {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{b64}"}},
+                "role": "user",
+                "content": [
+                    {
+                        "type": "text",
+                        "text": (
+                            "From this CAD view, output ONLY numeric dimensions you can read, separated by spaces. "
+                            "No words, no units, no angles, no parentheses."
+                        ),
+                    },
+                    {
+                        "type": "image_url",
+                        "image_url": {"url": f"data:image/png;base64,{b64}"},
+                    },
+                ],
+            }
         ],
-    }], temperature=0)
+        temperature=0,
+    )
     txt = (resp["choices"][0]["message"]["content"] or "")
     return [_parse_num(t) for t in _NUMTOK.findall(txt)]
 
@@ -161,51 +177,99 @@ def _pick_dims(plan_nums: list[float], side_nums: list[float]) -> tuple[float, f
 
 
 def _qwen_extract_block_dims_local(llm, full_img, plan_img, side_img) -> dict | None:
-    """Ask Qwen2.5-VL (local) to output strict JSON for L/W/T."""
+    """
+    Ask Qwen2.5-VL (local) to output strict JSON for overall block dimensions.
+    Uses explicit rules so it selects outer baseline dimensions on plan view,
+    and overall slab thickness on side view.
+    """
+
+    def _img_b64(img):
+        buf = io.BytesIO()
+        img.save(buf, format="PNG")
+        return base64.b64encode(buf.getvalue()).decode("ascii")
 
     b_full = _img_b64(full_img)
     b_plan = _img_b64(plan_img)
     b_side = _img_b64(side_img)
 
-    prompt = (
-        "You are reading a mechanical drawing of a rectangular block shown in two views: "
-        "plan/top view (for length & width) and side view (for thickness). "
-        "Identify the OVERALL block dimensions (not hole callouts, not tiny chamfers/angles). "
-        "Rules:\n"
-        "• LENGTH and WIDTH are the two LARGEST linear dimensions on the plan/top view. "
-        "• THICKNESS is the overall dimension on the side view (usually smaller).\n"
-        "• Ignore decimals like 0.03 × 45°, hole tables, jig-grind notes, and small features.\n"
-        "• Return STRICT JSON only:\n"
-        '{ "length": <number>, "width": <number>, "thickness": <number>, "units": "in"|"mm" }\n'
-        "No extra text."
+    system = (
+        "You analyze mechanical drawings. Return overall stock size only."
+    )
+    rules = (
+        "Identify the OVERALL block dimensions of a rectangular plate:\n"
+        "• Use the PLAN/TOP view to pick LENGTH and WIDTH = the two LARGEST linear dimensions that span the outer edges. "
+        "  Prefer baseline dimensions with extension lines/arrows touching the outer rectangle. Ignore interior callouts.\n"
+        "• Use the SIDE view to pick THICKNESS = the overall plate thickness. Ignore counterbores, chamfers (.03 x 45°), taps, and small offsets.\n"
+        "• Prefer whole-inch or 2-decimal values when close candidates exist (e.g., 15.50 over 15.49 if both appear).\n"
+        "• Units are almost always inches if numbers look like 12.00, 15.50, 2.00; otherwise detect mm if clearly labeled.\n"
+        "• Return STRICT JSON ONLY:\n"
+        '{"length": <number>, "width": <number>, "thickness": <number>, "units": "in"|"mm"}\n'
+        "No commentary."
     )
 
-    messages = [{
-        "role": "user",
-        "content": [
-            {"type": "text", "text": prompt},
-            {"type": "text", "text": "Full sheet for context:"},
-            {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{b_full}"}},
-            {"type": "text", "text": "Plan/top view crop:"},
-            {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{b_plan}"}},
-            {"type": "text", "text": "Side view crop:"},
-            {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{b_side}"}},
-        ]
-    }]
+    messages = [
+        {"role": "system", "content": system},
+        {
+            "role": "user",
+            "content": [
+                {"type": "text", "text": rules},
+                {"type": "text", "text": "Full sheet (context only):"},
+                {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{b_full}"}},
+                {"type": "text", "text": "Plan/top view crop (choose LENGTH & WIDTH from this view):"},
+                {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{b_plan}"}},
+                {"type": "text", "text": "Side view crop (choose THICKNESS from this view):"},
+                {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{b_side}"}},
+            ],
+        },
+    ]
 
     resp = llm.create_chat_completion(messages=messages, temperature=0)
     txt = (resp["choices"][0]["message"]["content"] or "").strip()
     m = re.search(r"\{.*\}", txt, flags=re.S)
-    if not m:
-        return None
+    data = None
+    if m:
+        try:
+            data = json.loads(m.group(0))
+        except Exception:
+            data = None
+
+    # Post-check: if JSON missing or obviously wrong, fall back to numeric evidence.
+    # Plan: take two largest >= 10.0 (sheet shows things like 12.00, 13.50, 15.50).
+    # Side: take the largest in [0.25, 3.50] as thickness (common plate range).
+    if not data or any(k not in data for k in ("length", "width", "thickness")):
+        data = {}
+
     try:
-        data = json.loads(m.group(0))
-        for k in ("length", "width", "thickness"):
-            float(data[k])
-        data["units"] = ("mm" if str(data.get("units", "")).lower().startswith("mm") else "in")
-        return data
+        L, W, T = float(data.get("length", 0)), float(data.get("width", 0)), float(data.get("thickness", 0))
     except Exception:
+        L, W, T = 0.0, 0.0, 0.0
+
+    def _looks_plausible(L, W, T):
+        return (max(L, W) >= 12.0 and min(L, W) >= 8.0 and 0.25 <= T <= 3.5)
+
+    if not _looks_plausible(L, W, T):
+        plan_nums = _extract_numbers_from_img(llm, plan_img)
+        side_nums = _extract_numbers_from_img(llm, side_img)
+
+        big = sorted([x for x in plan_nums if x >= 10.0], reverse=True)
+        if len(big) < 2:
+            big = sorted(plan_nums, reverse=True)[:2]
+        if len(big) >= 2:
+            L, W = big[0], big[1]
+
+        t_candidates = [x for x in side_nums if 0.25 <= x <= 3.50]
+        if t_candidates:
+            T = max(t_candidates)
+        elif side_nums:
+            T = sorted(side_nums)[0]
+
+        if L and W and T:
+            data = {"length": float(L), "width": float(W), "thickness": float(T), "units": "in"}
+
+    # final sanity
+    if not data or any(k not in data for k in ("length", "width", "thickness", "units")):
         return None
+    return data
 
 
 def _vlm_local_transcribe_all(llm, image):
