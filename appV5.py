@@ -15854,34 +15854,5 @@ class App(tk.Tk):
             if not already_repricing:
                 self._reprice_in_progress = False
 
-def main(argv: Sequence[str] | None = None) -> int:
-    """Entry point so ``python appV5.py`` mirrors the CLI launcher."""
-
-    from cad_quoter.app.cli import main as _cli_main
-
-    if typing.TYPE_CHECKING:
-        from cad_quoter.pricing import (
-            PricingEngine as _PricingEngine,
-            create_default_registry as _create_default_registry,
-        )
-    else:  # pragma: no cover - executed at runtime
-        from cad_quoter.pricing import (
-            PricingEngine as _PricingEngine,
-            create_default_registry as _create_default_registry,
-        )
-
-    return _cli_main(
-        argv,
-        app_cls=App,
-        pricing_engine_cls=_PricingEngine,
-        pricing_registry_factory=_create_default_registry,
-        app_env=APP_ENV,
-        env_setter=lambda env: globals().__setitem__("APP_ENV", env),
-    )
-
-
-if __name__ == "__main__":  # pragma: no cover - manual invocation
-    sys.exit(main())
-
 # Emit chart-debug key lines at most once globally per run
 _PRINTED_CHART_DEBUG_KEYS = False

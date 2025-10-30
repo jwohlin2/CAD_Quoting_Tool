@@ -149,7 +149,23 @@ def main(
     return 0
 
 
-__all__ = ["build_arg_parser", "main"]
+def run_default_app(argv: Optional[Sequence[str]] = None) -> int:
+    """Launch the default desktop application using the CLI harness."""
+
+    from cad_quoter.pricing import PricingEngine, create_default_registry
+    import appV5 as app_module
+
+    return main(
+        argv,
+        app_cls=app_module.App,
+        pricing_engine_cls=PricingEngine,
+        pricing_registry_factory=create_default_registry,
+        app_env=app_module.APP_ENV,
+        env_setter=lambda env: setattr(app_module, "APP_ENV", env),
+    )
+
+
+__all__ = ["build_arg_parser", "main", "run_default_app"]
 
 
 if __name__ == "__main__":  # pragma: no cover - manual invocation
