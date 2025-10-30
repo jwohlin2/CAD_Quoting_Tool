@@ -7162,7 +7162,6 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
     machine_summary_total = _safe_float(display_machine, 0.0)
 
     if isinstance(breakdown, dict):
-        breakdown["pass_through_total"] = pass_through_total
         breakdown["total_direct_costs"] = total_direct_costs_value
         breakdown["total_labor_cost"] = round(labor_summary_total, 2)
         if vendor_items_total:
@@ -9015,13 +9014,6 @@ def compute_quote_from_df(  # type: ignore[reportGeneralTypeIssues]
         material_total_for_why = float(material_display_amount)
         material_net_cost = float(material_total_direct_cost)
 
-    def _pass_through_total_for_render(
-        container: Mapping[str, Any] | None,
-    ) -> float:
-        if not isinstance(container, _MappingABC):
-            return 0.0
-        return _safe_float(container.get("pass_through_total"))
-
     def _bucket_minutes_detail_for_render_from(
         container: Mapping[str, Any] | None,
     ) -> dict[str, Any]:
@@ -9036,10 +9028,6 @@ def compute_quote_from_df(  # type: ignore[reportGeneralTypeIssues]
             except Exception:
                 return {str(key): raw_value[key] for key in raw_value.keys()}
         return {}
-
-    pass_through_total_for_render = _pass_through_total_for_render(
-        breakdown if isinstance(breakdown, _MappingABC) else None
-    )
 
     bucket_minutes_detail_for_render = _bucket_minutes_detail_for_render_from(
         breakdown if isinstance(breakdown, _MappingABC) else None
