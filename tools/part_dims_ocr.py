@@ -111,6 +111,55 @@ def _img_b64(img):
     return base64.b64encode(buf.getvalue()).decode("ascii")
 
 
+_NUMTOK = re.compile(r"\d+\s*\d+/\d+|\d+[.,]\d+|\.\d+|\d+")
+
+
+def _parse_num(tok: str) -> float:
+    tok = tok.replace(",", "").strip()
+    m = re.match(r"^(\d+)\s+(\d+)/(\d+)$", tok)
+    if m:
+        a, b, c = m.groups()
+        return float(a) + float(b) / float(c)
+    if re.match(r"^\d+/\d+$", tok):
+        a, b = tok.split("/")
+        return float(a) / float(b)
+    return float(tok)
+
+
+def _extract_numbers_from_img(llm, pil_img) -> list[float]:
+    b64 = _img_b64(pil_img)
+    resp = llm.create_chat_completion(messages=[{
+        "role": "user",
+        "content": [
+            {
+                "type": "text",
+                "text": (
+                    "From this CAD view, output ONLY numeric dimensions you can read, separated by spaces. "
+                    "No words, no units, no angles."
+                ),
+            },
+            {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{b64}"}},
+        ],
+    }], temperature=0)
+    txt = (resp["choices"][0]["message"]["content"] or "")
+    return [_parse_num(t) for t in _NUMTOK.findall(txt)]
+
+
+def _pick_dims(plan_nums: list[float], side_nums: list[float]) -> tuple[float, float, float] | None:
+    P = sorted([x for x in plan_nums if x >= 10.0], reverse=True)
+    if len(P) < 2:
+        P = sorted(plan_nums, reverse=True)[:2]
+    if len(P) < 2:
+        return None
+    L, W = P[0], P[1]
+
+    Tcand = [x for x in side_nums if 0.25 <= x <= 3.00]
+    T = max(Tcand) if Tcand else (sorted(side_nums)[0] if side_nums else None)
+    if T is None:
+        return None
+    return (L, W, T)
+
+
 def _qwen_extract_block_dims_local(llm, full_img, plan_img, side_img) -> dict | None:
     """Ask Qwen2.5-VL (local) to output strict JSON for L/W/T."""
 
@@ -238,7 +287,43 @@ def _vlm_local_process_render(img_path: str,
 
         llm = _load_qwen_local(vlm_local_model, vlm_local_mmproj)
         data = _qwen_extract_block_dims_local(llm, img, plan_img, side_img)
+
+        def _looks_like_default(triple: Tuple[float, float, float]) -> bool:
+            L, W, T = triple
+            return (
+                abs(L - 12.0) < 1e-3
+                and abs(W - 8.0) < 1e-3
+                and abs(T - 2.0) < 1e-3
+            )
+
+        need_heuristic = not data
+        parsed_dims: Optional[Tuple[float, float, float]] = None
         if data:
+            try:
+                parsed_dims = (float(data["length"]), float(data["width"]), float(data["thickness"]))
+            except Exception:
+                parsed_dims = None
+                need_heuristic = True
+            else:
+                if _looks_like_default(parsed_dims):
+                    need_heuristic = True
+
+        guess: Optional[Tuple[float, float, float]] = None
+        if need_heuristic:
+            plan_nums = _extract_numbers_from_img(llm, plan_img)
+            side_nums = _extract_numbers_from_img(llm, side_img)
+            guess = _pick_dims(plan_nums, side_nums)
+            if guess and verbose:
+                L, W, T = guess
+                print(f"[dims-ocr] heuristic -> SIZE: {L} x {W} x {T} in")
+
+        if guess:
+            L, W, T = guess
+            text = f"SIZE: {L} x {W} x {T} in"
+            _emit_ocr_text(emit_ocr, text)
+            return text, warnings
+
+        if data and parsed_dims:
             text = f"SIZE: {data['length']} x {data['width']} x {data['thickness']} {data['units']}"
             if verbose:
                 print("[dims-ocr] VLM JSON ->", text)
