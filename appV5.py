@@ -2611,14 +2611,6 @@ from cad_quoter.rates import LABOR_RATE_KEYS, MACHINE_RATE_KEYS, two_bucket_to_f
 from cad_quoter.vendors.mcmaster_stock import lookup_sku_and_price_for_mm
 
 SCRAP_RECOVERY_DEFAULT = _materials.SCRAP_RECOVERY_DEFAULT
-
-
-def _fail_live_price(*_args: Any, **_kwargs: Any) -> None:
-    """Sentinel used by tests to simulate Wieland API failures."""
-
-    raise RuntimeError("live material pricing is unavailable")
-
-
 def _jsonify_debug_value(value: Any, depth: int = 0, max_depth: int = 6) -> Any:
     """Proxy to :func:`cad_quoter.utils.debug_tables._jsonify_debug_value`."""
 
@@ -2630,15 +2622,6 @@ def _jsonify_debug_summary(summary: Mapping[str, Any]) -> dict[str, Any]:
 
     return _debug_jsonify_summary(summary)
 
-
-try:
-    import builtins as _builtins
-
-    _builtins_any = typing.cast(Any, _builtins)
-    if getattr(_builtins_any, "_fail_live_price", None) is None:  # pragma: no cover - test shim
-        setattr(_builtins_any, "_fail_live_price", _fail_live_price)
-except Exception:  # pragma: no cover - defensive
-    pass
 
 _normalize_lookup_key = normalize_material_key
 
