@@ -513,6 +513,8 @@ def _collect_ops_entries_for_display(
 
     entries: list[dict[str, Any]] = []
     seen_keys: set[tuple[str, str, int, str]] = set()
+    text_rows: list[str] = []
+    text_seen: set[str] = set()
 
     def _extend(candidate: Iterable[Any] | None) -> None:
         if not candidate:
@@ -532,6 +534,48 @@ def _collect_ops_entries_for_display(
             seen_keys.add(key)
             entries.append(normalized)
 
+    def _append_text(value: Any) -> None:
+        if value is None:
+            return
+        text_value = str(value)
+        if not text_value:
+            return
+        for segment in text_value.splitlines():
+            cleaned = _sanitize_render_text(segment).strip()
+            if cleaned and cleaned not in text_seen:
+                text_seen.add(cleaned)
+                text_rows.append(cleaned)
+
+    def _extend_text_rows(candidate: Iterable[Any] | None) -> None:
+        if not candidate:
+            return
+        for raw in candidate:
+            if raw is None:
+                continue
+            if isinstance(raw, str):
+                _append_text(raw)
+                continue
+            if isinstance(raw, (bytes, bytearray)):
+                try:
+                    decoded = raw.decode()
+                except Exception:
+                    decoded = str(raw)
+                _append_text(decoded)
+                continue
+            if isinstance(raw, _MappingABC):
+                nested = raw.get("lines")
+                if isinstance(nested, Iterable) and not isinstance(nested, (str, bytes, bytearray)):
+                    _extend_text_rows(nested)
+                for key in ("line", "text", "value", "raw", "label"):
+                    value = raw.get(key)
+                    if isinstance(value, str):
+                        _append_text(value)
+                continue
+            if isinstance(raw, Sequence):
+                _extend_text_rows(raw)
+                continue
+            _append_text(raw)
+
     if isinstance(geo_map, _MappingABC):
         hole_table_ops = geo_map.get("hole_table_ops")
         if isinstance(hole_table_ops, Sequence):
@@ -546,7 +590,6 @@ def _collect_ops_entries_for_display(
     if fallback_rows:
         _extend(fallback_rows)
 
-    text_rows: list[str] = []
     if isinstance(geo_map, _MappingABC):
         hole_table_payload = geo_map.get("hole_table")
         if isinstance(hole_table_payload, _MappingABC):
@@ -4064,6 +4107,7 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
     narrative = result.get("narrative") or breakdown.get("narrative")
     why_parts: list[str] = []
     why_lines: list[str] = []
+    explanation_lines: list[str] = []
     if narrative:
         if isinstance(narrative, str):
             parts = [seg.strip() for seg in _RE_SPLIT(r"(?<=\.)\s+", narrative) if seg.strip()]
