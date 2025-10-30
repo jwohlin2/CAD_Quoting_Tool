@@ -46,7 +46,7 @@ import unicodedata
 import urllib.error
 import urllib.request
 from dataclasses import dataclass
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, Iterable, List, Optional, Tuple
 
 import matplotlib
 
@@ -77,6 +77,201 @@ _VLM_LOCAL_INSTANCE = None
 _VLM_LOCAL_KEY: Optional[Tuple[str, str, int]] = None
 
 
+def _load_qwen_local(model_path: str, mmproj_path: str, n_ctx: int = 4096):
+    from llama_cpp import Llama  # pip install llama-cpp-python
+
+    global _VLM_LOCAL_INSTANCE, _VLM_LOCAL_KEY
+
+    if not model_path or not mmproj_path:
+        raise RuntimeError("Provide --vlm-local-model and --vlm-local-mmproj for vlm_local backend.")
+
+    key = (str(Path(model_path).resolve()), str(Path(mmproj_path).resolve()), int(n_ctx))
+    if _VLM_LOCAL_INSTANCE is not None and _VLM_LOCAL_KEY == key:
+        return _VLM_LOCAL_INSTANCE
+
+    llm = Llama(model_path=key[0], mmproj=key[1], n_ctx=key[2], verbose=False)
+    _VLM_LOCAL_INSTANCE = llm
+    _VLM_LOCAL_KEY = key
+    return llm
+
+
+def _crop_frac(img, box_str: str):
+    # box_str like "0,0,0.72,1.0"
+    l, t, r, b = [float(x) for x in box_str.split(",")]
+    W, H = img.size
+    return img.crop((int(l * W), int(t * H), int(r * W), int(b * H)))
+
+
+def _img_b64(img):
+    import io
+
+    buf = io.BytesIO()
+    img.save(buf, format="PNG")
+    return base64.b64encode(buf.getvalue()).decode("ascii")
+
+
+def _qwen_extract_block_dims_local(llm, full_img, plan_img, side_img) -> dict | None:
+    """Ask Qwen2.5-VL (local) to output strict JSON for L/W/T."""
+
+    b_full = _img_b64(full_img)
+    b_plan = _img_b64(plan_img)
+    b_side = _img_b64(side_img)
+
+    prompt = (
+        "You are reading a mechanical drawing of a rectangular block shown in two views: "
+        "plan/top view (for length & width) and side view (for thickness). "
+        "Identify the OVERALL block dimensions (not hole callouts, not tiny chamfers/angles). "
+        "Rules:\n"
+        "• LENGTH and WIDTH are the two LARGEST linear dimensions on the plan/top view. "
+        "• THICKNESS is the overall dimension on the side view (usually smaller).\n"
+        "• Ignore decimals like 0.03 × 45°, hole tables, jig-grind notes, and small features.\n"
+        "• Return STRICT JSON only:\n"
+        '{ "length": <number>, "width": <number>, "thickness": <number>, "units": "in"|"mm" }\n'
+        "No extra text."
+    )
+
+    messages = [{
+        "role": "user",
+        "content": [
+            {"type": "text", "text": prompt},
+            {"type": "text", "text": "Full sheet for context:"},
+            {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{b_full}"}},
+            {"type": "text", "text": "Plan/top view crop:"},
+            {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{b_plan}"}},
+            {"type": "text", "text": "Side view crop:"},
+            {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{b_side}"}},
+        ]
+    }]
+
+    resp = llm.create_chat_completion(messages=messages, temperature=0)
+    txt = (resp["choices"][0]["message"]["content"] or "").strip()
+    m = re.search(r"\{.*\}", txt, flags=re.S)
+    if not m:
+        return None
+    try:
+        data = json.loads(m.group(0))
+        for k in ("length", "width", "thickness"):
+            float(data[k])
+        data["units"] = ("mm" if str(data.get("units", "")).lower().startswith("mm") else "in")
+        return data
+    except Exception:
+        return None
+
+
+def _vlm_local_transcribe_all(llm, image):
+    b64 = _img_b64(image)
+    resp = llm.create_chat_completion(messages=[{
+        "role": "user",
+        "content": [
+            {"type": "text", "text": (
+                "Transcribe all visible numeric dimensions from this drawing (just the numbers with decimals or fractions). "
+                "List them separated by spaces. No words, no comments."
+            )},
+            {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{b64}"}},
+        ],
+    }], temperature=0)
+    return (resp["choices"][0]["message"]["content"] or "")
+
+
+def _emit_images_with_crops(emit_image: str, full_img, plan_img, side_img) -> None:
+    if not emit_image:
+        return
+    try:
+        full_path = emit_image if emit_image.lower().endswith(".png") else emit_image + "_full.png"
+        full_img.save(full_path)
+        plan_img.save(emit_image + "_plan.png")
+        side_img.save(emit_image + "_side.png")
+    except Exception:
+        pass
+
+
+def _emit_ocr_text(emit_ocr: str, text: str) -> None:
+    if not emit_ocr or not text:
+        return
+    try:
+        with open(emit_ocr, "w", encoding="utf-8") as f:
+            f.write(text)
+        print(f"[dims-ocr] saved OCR/VLM text to {emit_ocr}")
+    except Exception:
+        pass
+
+
+def _fallback_dims_from_text(nums: List[float]) -> Optional[Tuple[float, float, float]]:
+    if len(nums) < 3:
+        return None
+
+    uniq: List[float] = []
+    for val in sorted(nums, reverse=True):
+        if not any(abs(val - existing) < 1e-3 for existing in uniq):
+            uniq.append(val)
+        if len(uniq) >= 3:
+            break
+
+    if len(uniq) < 3:
+        return None
+
+    L, W, T = uniq[0], uniq[1], uniq[2]
+    if W < T:
+        W, T = T, W
+    return (L, W, T)
+
+
+def _vlm_local_process_render(img_path: str,
+                              plan_crop: str,
+                              side_crop: str,
+                              vlm_local_model: str,
+                              vlm_local_mmproj: str,
+                              emit_image: str,
+                              emit_ocr: str,
+                              verbose: bool) -> Tuple[str, List[str]]:
+    warnings: List[str] = []
+    if Image is None:
+        raise RuntimeError("Pillow is required for VLM local rendering.")
+
+    with Image.open(img_path) as img:
+        img.load()
+        plan_img = _crop_frac(img, plan_crop).copy()
+        side_img = _crop_frac(img, side_crop).copy()
+
+        _emit_images_with_crops(emit_image, img, plan_img, side_img)
+
+        llm = _load_qwen_local(vlm_local_model, vlm_local_mmproj)
+        data = _qwen_extract_block_dims_local(llm, img, plan_img, side_img)
+        if data:
+            text = f"SIZE: {data['length']} x {data['width']} x {data['thickness']} {data['units']}"
+            if verbose:
+                print("[dims-ocr] VLM JSON ->", text)
+            _emit_ocr_text(emit_ocr, text)
+            return text, warnings
+
+        txt_nums = _vlm_local_transcribe_all(llm, img)
+        if verbose:
+            print("[dims-ocr] OCR nums preview:", txt_nums[:200])
+        nums: List[float] = []
+        for token in re.findall(r"\d+\s*\d+/\d+|\d+[.,]\d+|\.\d+|\d+", txt_nums):
+            token = token.replace(",", "")
+            if re.match(r"^\d+\s+\d+/\d+$", token):
+                a, b, c = re.match(r"^(\d+)\s+(\d+)/(\d+)$", token).groups()
+                val = float(a) + float(b) / float(c)
+            elif re.match(r"^\d+/\d+$", token):
+                a, b = token.split("/")
+                val = float(a) / float(b)
+            else:
+                val = float(token)
+            nums.append(val)
+
+        guess = _fallback_dims_from_text(nums)
+        if guess:
+            L, W, T = guess
+            units = "in"
+            text = f"SIZE: {L} x {W} x {T} {units}"
+            _emit_ocr_text(emit_ocr, text)
+            return text, warnings
+
+        if txt_nums:
+            _emit_ocr_text(emit_ocr, txt_nums)
+        warnings.append("No dimension triples found.")
+        return "", warnings
 def _detect_default_input() -> Optional[str]:
     """Best-effort to locate a sample input so CLI can run without flags."""
 
@@ -240,39 +435,6 @@ def _load_local_llm():
 def _img_to_b64(path: str) -> str:
     with open(path, "rb") as f:
         return base64.b64encode(f.read()).decode("ascii")
-
-
-def _vlm_local_load(model_path: str, mmproj_path: str, n_ctx: int = 4096):
-    """
-    Load Qwen2.5-VL locally with llama-cpp-python (no server).
-    Requires llama-cpp-python installed and your GGUF + mmproj GGUF files.
-    """
-
-    global _VLM_LOCAL_INSTANCE, _VLM_LOCAL_KEY
-
-    try:
-        from llama_cpp import Llama  # type: ignore
-    except Exception as e:
-        raise RuntimeError("llama-cpp-python is required: pip install llama-cpp-python") from e
-
-    if not model_path or not mmproj_path:
-        raise RuntimeError("Provide --vlm-local-model and --vlm-local-mmproj for vlm_local backend.")
-
-    key = (str(Path(model_path).resolve()), str(Path(mmproj_path).resolve()), int(n_ctx))
-    if _VLM_LOCAL_INSTANCE is not None and _VLM_LOCAL_KEY == key:
-        return _VLM_LOCAL_INSTANCE
-
-    llm = Llama(
-        model_path=model_path,
-        mmproj=mmproj_path,  # critical for vision models
-        n_ctx=n_ctx,
-        logits_all=False,
-        verbose=False,
-    )
-
-    _VLM_LOCAL_INSTANCE = llm
-    _VLM_LOCAL_KEY = key
-    return llm
 
 
 def _vlm_local_transcribe_image(llm, image_path: str) -> str:
@@ -620,7 +782,7 @@ def _perform_ocr_on_image_path(
 ) -> str:
     backend = (ocr_backend or "tesseract").lower()
     if backend == "vlm_local":
-        llm = _vlm_local_load(vlm_local_model, vlm_local_mmproj)
+        llm = _load_qwen_local(vlm_local_model, vlm_local_mmproj)
         if vlm_mode == "extract":
             data = _vlm_local_extract_dims(llm, img_path)
             if data:
@@ -659,6 +821,8 @@ def _get_text_from_input(path: str,
                          vlm_mode: str = "transcribe",
                          vlm_local_model: str = "",
                          vlm_local_mmproj: str = "",
+                         plan_crop: str = "0,0,0.72,1.0",
+                         side_crop: str = "0.72,0,1.0,1.0",
                          emit_image: str = "",
                          emit_ocr: str = "",
                          verbose: bool = False) -> Tuple[str, List[str]]:
@@ -681,46 +845,40 @@ def _get_text_from_input(path: str,
             dxf_out = _run_oda_to_dxf(oda_exe, path, tmpdir, out_ver="ACAD2018")
             img_path = os.path.join(tmpdir, "page.png")
             _render_dxf_to_image(dxf_out, img_path, dpi=600)
-            if emit_image:
-                try:
-                    shutil.copyfile(img_path, emit_image)
-                    print(f"[dims-ocr] saved render to {emit_image}")
-                except Exception:
-                    pass
             backend = (ocr_backend or "tesseract").lower()
             if backend == "vlm_local":
-                llm = _vlm_local_load(vlm_local_model, vlm_local_mmproj)
-                if vlm_mode == "extract":
-                    data = _vlm_local_extract_dims(llm, img_path)
-                    if data:
-                        units = (data.get("units") or "in").lower()
-                        L = float(data.get("length", 0))
-                        W = float(data.get("width", 0))
-                        T = float(data.get("thickness", 0))
-                        text = f"SIZE: {L} x {W} x {T} {units}"
-                    else:
-                        text = _vlm_local_transcribe_image(llm, img_path)
-                else:
-                    text = _vlm_local_transcribe_image(llm, img_path)
-                txt = _norm(text)
-            else:
-                txt = _perform_ocr_on_image_path(
+                text, local_warnings = _vlm_local_process_render(
                     img_path,
-                    ocr_backend,
-                    vlm_mode,
-                    warnings,
-                    vlm_endpoint,
-                    vlm_model,
+                    plan_crop,
+                    side_crop,
                     vlm_local_model,
                     vlm_local_mmproj,
+                    emit_image,
+                    emit_ocr,
+                    verbose,
                 )
+                warnings.extend(local_warnings)
+                return (text, warnings)
+
+            if emit_image and Image is not None:
+                with Image.open(img_path) as img:
+                    img.load()
+                    plan_img = _crop_frac(img, plan_crop).copy()
+                    side_img = _crop_frac(img, side_crop).copy()
+                    _emit_images_with_crops(emit_image, img, plan_img, side_img)
+
+            txt = _perform_ocr_on_image_path(
+                img_path,
+                ocr_backend,
+                vlm_mode,
+                warnings,
+                vlm_endpoint,
+                vlm_model,
+                vlm_local_model,
+                vlm_local_mmproj,
+            )
             if emit_ocr:
-                try:
-                    with open(emit_ocr, "w", encoding="utf-8") as f:
-                        f.write(txt)
-                    print(f"[dims-ocr] saved OCR/VLM text to {emit_ocr}")
-                except Exception:
-                    pass
+                _emit_ocr_text(emit_ocr, txt)
             if verbose:
                 print("[dims-ocr] OCR preview:", _norm(txt)[:500].replace("\n", " ⏎ "))
             return (txt, warnings)
@@ -730,46 +888,40 @@ def _get_text_from_input(path: str,
         with tempfile.TemporaryDirectory(prefix="dxf_img_") as tmpdir:
             img_path = os.path.join(tmpdir, "page.png")
             _render_dxf_to_image(path, img_path, dpi=600)
-            if emit_image:
-                try:
-                    shutil.copyfile(img_path, emit_image)
-                    print(f"[dims-ocr] saved render to {emit_image}")
-                except Exception:
-                    pass
             backend = (ocr_backend or "tesseract").lower()
             if backend == "vlm_local":
-                llm = _vlm_local_load(vlm_local_model, vlm_local_mmproj)
-                if vlm_mode == "extract":
-                    data = _vlm_local_extract_dims(llm, img_path)
-                    if data:
-                        units = (data.get("units") or "in").lower()
-                        L = float(data.get("length", 0))
-                        W = float(data.get("width", 0))
-                        T = float(data.get("thickness", 0))
-                        text = f"SIZE: {L} x {W} x {T} {units}"
-                    else:
-                        text = _vlm_local_transcribe_image(llm, img_path)
-                else:
-                    text = _vlm_local_transcribe_image(llm, img_path)
-                txt = _norm(text)
-            else:
-                txt = _perform_ocr_on_image_path(
+                text, local_warnings = _vlm_local_process_render(
                     img_path,
-                    ocr_backend,
-                    vlm_mode,
-                    warnings,
-                    vlm_endpoint,
-                    vlm_model,
+                    plan_crop,
+                    side_crop,
                     vlm_local_model,
                     vlm_local_mmproj,
+                    emit_image,
+                    emit_ocr,
+                    verbose,
                 )
+                warnings.extend(local_warnings)
+                return (text, warnings)
+
+            if emit_image and Image is not None:
+                with Image.open(img_path) as img:
+                    img.load()
+                    plan_img = _crop_frac(img, plan_crop).copy()
+                    side_img = _crop_frac(img, side_crop).copy()
+                    _emit_images_with_crops(emit_image, img, plan_img, side_img)
+
+            txt = _perform_ocr_on_image_path(
+                img_path,
+                ocr_backend,
+                vlm_mode,
+                warnings,
+                vlm_endpoint,
+                vlm_model,
+                vlm_local_model,
+                vlm_local_mmproj,
+            )
             if emit_ocr:
-                try:
-                    with open(emit_ocr, "w", encoding="utf-8") as f:
-                        f.write(txt)
-                    print(f"[dims-ocr] saved OCR/VLM text to {emit_ocr}")
-                except Exception:
-                    pass
+                _emit_ocr_text(emit_ocr, txt)
             if verbose:
                 print("[dims-ocr] OCR preview:", _norm(txt)[:500].replace("\n", " ⏎ "))
             return (txt, warnings)
@@ -995,6 +1147,8 @@ def extract_part_dims(input_path: str,
                       vlm_mode: str = "transcribe",
                       vlm_local_model: str = "",
                       vlm_local_mmproj: str = "",
+                      plan_crop: str = "0,0,0.72,1.0",
+                      side_crop: str = "0.72,0,1.0,1.0",
                       emit_image: str = "",
                       emit_ocr: str = "",
                       verbose: bool = False) -> ExtractionResult:
@@ -1014,7 +1168,9 @@ def extract_part_dims(input_path: str,
         vlm_mode: "transcribe" for raw text or "extract" for JSON dimension parsing.
         vlm_local_model: Path to local GGUF vision model.
         vlm_local_mmproj: Path to local mmproj GGUF for the model.
-        emit_image: Optional path to save rendered CAD image for debugging.
+        plan_crop: Fractional crop for the plan/top view (left,top,right,bottom).
+        side_crop: Fractional crop for the side view (left,top,right,bottom).
+        emit_image: Optional prefix to save rendered CAD image + crops for debugging.
         emit_ocr: Optional path to save OCR/VLM text output for debugging.
         verbose: If True, print a short preview of OCR text.
 
@@ -1032,6 +1188,8 @@ def extract_part_dims(input_path: str,
         vlm_mode=vlm_mode,
         vlm_local_model=vlm_local_model,
         vlm_local_mmproj=vlm_local_mmproj,
+        plan_crop=plan_crop,
+        side_crop=side_crop,
         emit_image=emit_image,
         emit_ocr=emit_ocr,
         verbose=verbose,
@@ -1069,9 +1227,7 @@ def extract_part_dims(input_path: str,
 def _cli():
     default_input = _detect_default_input()
     default_oda_exe = _detect_default_oda_exe()
-    default_model_path, default_mmproj_path = _detect_default_vlm_local_assets()
     default_json_out = "dims.json"
-    default_ocr_backend = "vlm_local" if (default_model_path and default_mmproj_path) else "tesseract"
 
     p = argparse.ArgumentParser(
         description="Extract part L/W/T from drawing via OCR (with optional LLM arbitration)."
@@ -1090,17 +1246,18 @@ def _cli():
                                                 "Alternatively set ODA_CONVERTER_EXE env var or put it on PATH.")
     p.add_argument("--oda-format", choices=["PDF","TIFF","PNG"], default="PDF",
                    help="ODA output format before OCR (default PDF).")
-    p.add_argument("--ocr-backend", choices=["tesseract", "vlm", "vlm_local"], default=default_ocr_backend,
-                   help="tesseract (default), vlm (OpenAI-compatible endpoint), or vlm_local (llama.cpp in-process).")
+    p.add_argument("--ocr-backend", choices=["vlm_local"], default="vlm_local")
     p.add_argument("--vlm-endpoint", default="http://127.0.0.1:8080/v1", help="Only for --ocr-backend vlm.")
     p.add_argument("--vlm-model", default="qwen2.5-vl-7b", help="Only for --ocr-backend vlm.")
-    p.add_argument("--vlm-local-model", default=default_model_path or "", help="Path to GGUF, e.g., qwen2.5-vl-7b-instruct-q4_k_m.gguf")
-    p.add_argument("--vlm-local-mmproj", default=default_mmproj_path or "", help="Path to mmproj GGUF, e.g., mmproj-Qwen2.5-VL-7B-Instruct-f16.gguf")
+    p.add_argument("--vlm-local-model", required=True, help="Path to qwen2.5-vl-*.gguf")
+    p.add_argument("--vlm-local-mmproj", required=True, help="Path to mmproj-*.gguf")
     p.add_argument("--vlm-mode", choices=["transcribe", "extract"], default="transcribe",
                    help="Return raw text (transcribe) or JSON dims (extract). Works for vlm and vlm_local.")
-    p.add_argument("--emit-image", default="", help="If set, save the rendered PNG/TIFF here for debugging.")
+    p.add_argument("--emit-image", default="", help="Save rendered PNG/crops here (prefix).")
     p.add_argument("--emit-ocr", default="", help="If set, save the OCR/VLM text here for debugging.")
     p.add_argument("--verbose", action="store_true", help="Print a short preview of OCR text.")
+    p.add_argument("--plan-crop", default="0,0,0.72,1.0", help="left,top,right,bottom as fractions (plan/top view)")
+    p.add_argument("--side-crop", default="0.72,0,1.0,1.0", help="left,top,right,bottom as fractions (side view)")
     args = p.parse_args()
 
     input_path = args.input or default_input
@@ -1128,6 +1285,8 @@ def _cli():
             vlm_mode=args.vlm_mode,
             vlm_local_model=args.vlm_local_model,
             vlm_local_mmproj=args.vlm_local_mmproj,
+            plan_crop=args.plan_crop,
+            side_crop=args.side_crop,
             emit_image=args.emit_image,
             emit_ocr=args.emit_ocr,
             verbose=args.verbose,
