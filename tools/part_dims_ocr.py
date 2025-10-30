@@ -92,6 +92,84 @@ def _detect_default_input() -> Optional[str]:
 
     return None
 
+def _detect_default_oda_exe() -> Optional[str]:
+    """Locate a suitable default ODA File Converter executable."""
+
+    env_path = os.getenv("ODA_FILE_CONVERTER")
+    if env_path:
+        exe = Path(env_path).expanduser()
+        if exe.is_file():
+            return str(exe)
+
+    candidates = [
+        Path("C:/Program Files/ODA/OdaFileConverter.exe"),
+        Path("C:/Program Files (x86)/ODA/OdaFileConverter.exe"),
+    ]
+    for exe in candidates:
+        if exe.is_file():
+            return str(exe)
+
+    return None
+
+def _detect_default_vlm_local_assets() -> tuple[Optional[str], Optional[str]]:
+    """Locate default local VLM model + mmproj artefacts if present."""
+
+    env_model = os.getenv("VLM_LOCAL_MODEL")
+    env_mmproj = os.getenv("VLM_LOCAL_MMPROJ")
+
+    def _normalize(candidate: Optional[str]) -> Optional[str]:
+        if not candidate:
+            return None
+        path = Path(candidate).expanduser()
+        try:
+            return str(path.resolve())
+        except Exception:
+            return str(path)
+
+    model_path = _normalize(env_model)
+    mmproj_path = _normalize(env_mmproj)
+
+    repo_root = Path(__file__).resolve().parent.parent
+    models_dir = repo_root / "models"
+
+    def _first_existing(paths: Iterable[Path]) -> Optional[str]:
+        for cand in paths:
+            if cand.is_file():
+                return str(cand.resolve())
+        return None
+
+    if not model_path and models_dir.is_dir():
+        preferred_models = [
+            models_dir / "qwen2.5-vl-7b-instruct-q4_k_m.gguf",
+            models_dir / "Qwen2.5-VL-7B-Instruct-q4_k_m.gguf",
+            models_dir / "Qwen2.5-VL-3B-Instruct-Q4_K_M.gguf",
+        ]
+        model_path = _first_existing(preferred_models)
+        if not model_path:
+            for cand in sorted(models_dir.glob("*.gguf")):
+                name_lower = cand.name.lower()
+                if "mmproj" in name_lower:
+                    continue
+                if "vl" in name_lower:
+                    model_path = str(cand.resolve())
+                    break
+
+    if not mmproj_path and models_dir.is_dir():
+        preferred_mmproj = [
+            models_dir / "mmproj-Qwen2.5-VL-7B-Instruct-f16.gguf",
+            models_dir / "Qwen2.5-VL-7B-Instruct-mmproj-f16.gguf",
+            models_dir / "mmproj-Qwen2.5-VL-3B-Instruct-f16.gguf",
+            models_dir / "Qwen2.5-VL-3B-Instruct-mmproj-f16.gguf",
+        ]
+        mmproj_path = _first_existing(preferred_mmproj)
+        if not mmproj_path:
+            for cand in sorted(models_dir.glob("*.gguf")):
+                if "mmproj" in cand.name.lower():
+                    mmproj_path = str(cand.resolve())
+                    break
+
+    return model_path, mmproj_path
+
 
 def _iter_model_candidates() -> List[Path]:
     """Return possible GGUF model paths (env + ./models directory)."""
@@ -893,6 +971,11 @@ def extract_part_dims(input_path: str,
 
 def _cli():
     default_input = _detect_default_input()
+    default_oda_exe = _detect_default_oda_exe()
+    default_model_path, default_mmproj_path = _detect_default_vlm_local_assets()
+    default_json_out = "dims.json"
+    default_ocr_backend = "vlm_local" if (default_model_path and default_mmproj_path) else "tesseract"
+
     p = argparse.ArgumentParser(
         description="Extract part L/W/T from drawing via OCR (with optional LLM arbitration)."
     )
@@ -905,17 +988,17 @@ def _cli():
     p.add_argument("--units", choices=["auto", "in", "mm"], default="auto", help="Units preference (default auto).")
     p.add_argument("--prefer-stock", action="store_true", help="Bias lines starting with STOCK.")
     p.add_argument("--use-llm", action="store_true", help="If multiple candidates, ask LLM to pick best (requires OPENAI_API_KEY/local model).")
-    p.add_argument("--json-out", default="", help="Optional: write result JSON here.")
-    p.add_argument("--oda-exe", default="", help="Path to ODA File Converter executable. "
+    p.add_argument("--json-out", default=default_json_out, help="Optional: write result JSON here.")
+    p.add_argument("--oda-exe", default=default_oda_exe or "", help="Path to ODA File Converter executable. "
                                                 "Alternatively set ODA_CONVERTER_EXE env var or put it on PATH.")
     p.add_argument("--oda-format", choices=["PDF","TIFF","PNG"], default="PDF",
                    help="ODA output format before OCR (default PDF).")
-    p.add_argument("--ocr-backend", choices=["tesseract", "vlm", "vlm_local"], default="tesseract",
+    p.add_argument("--ocr-backend", choices=["tesseract", "vlm", "vlm_local"], default=default_ocr_backend,
                    help="tesseract (default), vlm (OpenAI-compatible endpoint), or vlm_local (llama.cpp in-process).")
     p.add_argument("--vlm-endpoint", default="http://127.0.0.1:8080/v1", help="Only for --ocr-backend vlm.")
     p.add_argument("--vlm-model", default="qwen2.5-vl-7b", help="Only for --ocr-backend vlm.")
-    p.add_argument("--vlm-local-model", default="", help="Path to GGUF, e.g., qwen2.5-vl-7b-instruct-q4_k_m.gguf")
-    p.add_argument("--vlm-local-mmproj", default="", help="Path to mmproj GGUF, e.g., mmproj-Qwen2.5-VL-7B-Instruct-f16.gguf")
+    p.add_argument("--vlm-local-model", default=default_model_path or "", help="Path to GGUF, e.g., qwen2.5-vl-7b-instruct-q4_k_m.gguf")
+    p.add_argument("--vlm-local-mmproj", default=default_mmproj_path or "", help="Path to mmproj GGUF, e.g., mmproj-Qwen2.5-VL-7B-Instruct-f16.gguf")
     p.add_argument("--vlm-mode", choices=["transcribe", "extract"], default="transcribe",
                    help="Return raw text (transcribe) or JSON dims (extract). Works for vlm and vlm_local.")
     args = p.parse_args()
