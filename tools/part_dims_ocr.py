@@ -144,6 +144,8 @@ def _qwen_extract_block_dims_no_crops(llm, full_img) -> dict | None:
     rules = (
         "You are reading a CAD drawing of a rectangular plate shown in multiple views. "
         "Identify the OVERALL STOCK SIZE:\n"
+        "Do not assume the block is large; many parts are small (e.g., 2.50 × 8.72 × 0.5005 inches). "
+        "Pick values from this image only.\n"
         "• LENGTH and WIDTH: choose the two LARGEST baseline dimensions that span the outer edges "
         "  of the plan/top view (ignore interior hole callouts and small features like .03 x 45°).\n"
         "• THICKNESS: choose the overall slab thickness from a side view (ignore chamfers, counterbores, taps).\n"
@@ -177,20 +179,49 @@ def _qwen_extract_block_dims_no_crops(llm, full_img) -> dict | None:
     except Exception:
         L = W = T = 0
 
-    def plausible(length: float, width: float, thickness: float) -> bool:
-        return (max(length, width) >= 12.0 and min(length, width) >= 8.0 and 0.40 <= thickness <= 3.50)
+    def plausible(L, W, T):
+        # Dynamic sanity: thickness must be smallish, L/W must be > T by a margin
+        if T <= 0 or max(L, W) <= 0:
+            return False
+        # Typical plate thickness (in) up to a few inches; allow thin stock
+        if not (0.05 <= T <= 6.0):
+            return False
+        # L/W should be at least 2.5× thicker than T, and not both tiny
+        if min(L, W) <= T * 2.5:
+            return False
+        return True
 
+    # --- numeric evidence over the FULL image (no crops) ---
     if not plausible(L, W, T):
         nums = _extract_numbers_from_img(llm, full_img)
-        lw = sorted([x for x in nums if x >= 10.0], reverse=True) or sorted(nums, reverse=True)
-        if len(lw) >= 2:
-            L, W = lw[0], lw[1]
-        tiny = {0.03, 0.04, 0.06, 0.08, 0.09, 0.10, 0.12, 0.19, 0.25, 0.375}
-        tc = [x for x in nums if 0.40 <= x <= 3.50 and x not in tiny]
-        if tc:
-            T = max(tc, key=lambda v: (-abs(v - round(v, 2)), v))
-        elif nums:
-            T = min(nums)
+
+        # Filter out obvious non-dimension "tiny features"
+        tiny_bad = {0.01, 0.02, 0.03, 0.04, 0.05, 0.06, 0.08, 0.09, 0.10, 0.12, 0.19, 0.25, 0.375}
+        nums = [x for x in nums if x not in tiny_bad]
+
+        # Step 1: choose thickness first (largest in a plausible thin range)
+        t_candidates = [x for x in nums if 0.05 <= x <= 6.0]
+        if t_candidates:
+            # prefer "roundish" two-decimal values (2.00, 0.50, 0.5005, etc.)
+            T = max(t_candidates, key=lambda v: (-abs(v - round(v, 3)), v))
+        else:
+            T = 0.5 if nums else 0.5  # weak fallback
+
+        # Step 2: choose L/W as the two largest dimensions that are clearly > T
+        # require at least ~3× thicker (blocks/plates) OR >= 1.0 in absolute
+        lw_floor = max(T * 3.0, 1.0)
+        lw_candidates = sorted([x for x in nums if x >= lw_floor], reverse=True)
+
+        # If nothing qualifies (very small parts), just take top-2 numbers > T
+        if len(lw_candidates) < 2:
+            lw_candidates = sorted([x for x in nums if x > T], reverse=True)
+
+        if len(lw_candidates) >= 2:
+            L, W = lw_candidates[0], lw_candidates[1]
+
+        # As a last resort, just pick top-2 from all numbers and the best T we had
+        if (not L or not W) and len(nums) >= 2:
+            L, W = sorted(nums, reverse=True)[:2]
 
         if L and W and T:
             data = {"length": float(L), "width": float(W), "thickness": float(T), "units": "in"}
