@@ -4191,10 +4191,6 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
         process_plan_breakdown.get("bucket_view") if isinstance(process_plan_breakdown, _MappingABC) else None
     )
 
-    # Minutes engine owns the canonical bucket display. Planner output is still captured
-    # for summaries, but it must not overwrite the breakdown used for pricing.
-    planner_bucket_display_map: dict[str, dict[str, Any]] = {}
-
     bucket_rollup_map: dict[str, dict[str, Any]] = {}
     raw_rollup = breakdown.get("planner_bucket_rollup")
     if isinstance(raw_rollup, _MappingABC):
