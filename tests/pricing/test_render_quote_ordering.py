@@ -345,22 +345,20 @@ def test_render_payload_obeys_pricing_math_guards() -> None:
     )
     assert math.isclose(subtotal_before_margin, direct_costs_reported + labor_sum, abs_tol=0.01)
 
-    breakdown_after = result["breakdown"]
-    totals = breakdown_after.get("totals", {})
-    subtotal_from_totals = float(totals.get("with_expedite", 0.0))
-    direct_total = float(breakdown_after.get("total_direct_costs", 0.0))
-    labor_total = float(breakdown_after.get("total_labor_cost", 0.0))
-    margin_pct = float(breakdown_after.get("applied_pcts", {}).get("MarginPct", 0.0))
+    totals_declared = breakdown.get("totals", {})
+    subtotal_from_totals = float(totals_declared.get("with_expedite", 0.0))
+    direct_total_declared = float(totals_declared.get("direct_costs", 0.0))
+    labor_total_declared = float(totals_declared.get("labor_cost", 0.0))
+    margin_pct = float(breakdown.get("applied_pcts", {}).get("MarginPct", 0.0))
     final_price_per_part = summary_amounts.get("Final Price per Part", 0.0)
-    final_price = float(result.get("price", 0.0))
-    assert math.isclose(final_price_per_part, final_price, abs_tol=0.01)
 
     assert math.isclose(subtotal_from_totals, subtotal_before_margin, abs_tol=0.01)
-    assert math.isclose(direct_total, direct_costs_reported, abs_tol=0.01)
-    assert math.isclose(labor_total, labor_sum, abs_tol=0.01)
+    assert math.isclose(direct_total_declared, direct_costs_reported, abs_tol=0.01)
+    assert math.isclose(labor_total_declared, labor_sum, abs_tol=0.01)
 
     expected_final = round(subtotal_before_margin * (1 + margin_pct), 2)
-    assert math.isclose(final_price, expected_final, abs_tol=0.01)
+    assert math.isclose(final_price_per_part, expected_final, abs_tol=0.01)
+    assert math.isclose(float(result.get("price", 0.0)), expected_final, abs_tol=0.01)
 
 
 def test_explain_quote_reports_drilling_minutes_from_removal_card() -> None:

@@ -281,8 +281,6 @@ class PlannerBucketRenderState:
     table_rows: list[tuple[str, float, float, float, float]] = field(default_factory=list)
     label_to_canon: dict[str, str] = field(default_factory=dict)
     canon_to_display_label: dict[str, str] = field(default_factory=dict)
-    detail_lookup: dict[str, str] = field(default_factory=dict)
-    labor_costs_display: dict[str, float] = field(default_factory=dict)
     hour_entries: dict[str, tuple[float, bool]] = field(default_factory=dict)
     display_labor_total: float = 0.0
     display_machine_total: float = 0.0
@@ -577,7 +575,6 @@ def _build_planner_bucket_render_state(
         state.table_rows.append((label, hours_val, labor_val, machine_val, total_val))
         state.label_to_canon[label] = canon_key
         state.canon_to_display_label.setdefault(canon_key, label)
-        state.labor_costs_display[label] = total_val
         state.display_labor_total += labor_raw
         state.display_machine_total += machine_raw
         state.hour_entries[label] = (hours_val, True)
@@ -614,8 +611,6 @@ def _build_planner_bucket_render_state(
                 detail_text = f"{detail_text}; {split_detail_line}"
             else:
                 detail_text = split_detail_line
-        if detail_text not in (None, ""):
-            state.detail_lookup[label] = str(detail_text)
 
     for canon_key, metrics in state.canonical_summary.items():
         state.bucket_minutes_detail[canon_key] = _safe_float(
@@ -1339,7 +1334,7 @@ def _prepare_bucket_view(raw_view: Mapping[str, Any] | None) -> dict[str, Any]:
         bucket["machine$"] += machine
 
     cleaned: dict[str, dict[str, float]] = {}
-    totals = {"minutes": 0.0, "labor$": 0.0, "machine$": 0.0, "total$": 0.0}
+    bucket_sums = {"minutes": 0.0, "labor$": 0.0, "machine$": 0.0, "total$": 0.0}
 
     for canon, metrics in folded.items():
         minutes = round(float(metrics.get("minutes", 0.0)), 2)
@@ -1362,14 +1357,14 @@ def _prepare_bucket_view(raw_view: Mapping[str, Any] | None) -> dict[str, Any]:
             "total$": total,
         }
 
-        totals["minutes"] += minutes
-        totals["labor$"] += labor
-        totals["machine$"] += machine
-        totals["total$"] += total
+        bucket_sums["minutes"] += minutes
+        bucket_sums["labor$"] += labor
+        bucket_sums["machine$"] += machine
+        bucket_sums["total$"] += total
 
     prepared["buckets"] = cleaned
     prepared["order"] = _preferred_order_then_alpha(cleaned.keys())
-    prepared["totals"] = {key: round(value, 2) for key, value in totals.items()}
+    prepared["totals"] = {key: round(value, 2) for key, value in bucket_sums.items()}
 
     return prepared
 

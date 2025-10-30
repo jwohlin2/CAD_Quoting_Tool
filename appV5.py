@@ -3154,15 +3154,14 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
     bucket_alias_map: dict[str, str] = {}
     applied_process: dict[str, Any] = {}
     rates_raw    = breakdown.get("rates", {}) or {}
-    if isinstance(rates_raw, _MutableMappingABC):
-        rates = rates_raw
-    elif isinstance(rates_raw, _MappingABC):
-        rates = dict(rates_raw)
+    if isinstance(rates_raw, _MappingABC):
+        rates_provided = dict(rates_raw)
     else:
         try:
-            rates = dict(rates_raw or {})
+            rates_provided = dict(rates_raw or {})
         except Exception:
-            rates = {}
+            rates_provided = {}
+    rates_overrides: dict[str, Any] = {}
 
     def _coerce_rate_value(value: Any) -> float:
         try:
@@ -3177,33 +3176,39 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
         if cfg_labor_rate_value <= 0.0:
             cfg_labor_rate_value = 45.0
 
-    if "ShopRate" not in rates:
-        fallback_shop = _coerce_rate_value(rates.get("MillingRate"))
-        rates.setdefault("ShopRate", fallback_shop)
-    shop_rate_val = _coerce_rate_value(rates.get("ShopRate"))
+    shop_rate_val: float
+    if "ShopRate" in rates_provided:
+        shop_rate_val = _coerce_rate_value(rates_provided.get("ShopRate"))
+    else:
+        fallback_shop = _coerce_rate_value(rates_provided.get("MillingRate"))
+        shop_rate_val = fallback_shop
+        rates_overrides["ShopRate"] = shop_rate_val
 
-    if "EngineerRate" not in rates:
-        engineer_fallback = _coerce_rate_value(rates.get("MillingRate"))
+    engineer_rate_val: float
+    if "EngineerRate" in rates_provided:
+        engineer_rate_val = _coerce_rate_value(rates_provided.get("EngineerRate"))
+    else:
+        engineer_fallback = _coerce_rate_value(rates_provided.get("MillingRate"))
         if engineer_fallback <= 0 and shop_rate_val > 0:
             engineer_fallback = shop_rate_val
-        rates.setdefault("EngineerRate", engineer_fallback)
-    engineer_rate_val = _coerce_rate_value(rates.get("EngineerRate"))
+        engineer_rate_val = engineer_fallback
+        rates_overrides["EngineerRate"] = engineer_rate_val
 
-    labor_rate_value = _coerce_rate_value(rates.get("LaborRate"))
+    labor_rate_value = _coerce_rate_value(rates_provided.get("LaborRate"))
     if labor_rate_value <= 0:
-        labor_rate_value = _coerce_rate_value(rates.get("ShopLaborRate"))
+        labor_rate_value = _coerce_rate_value(rates_provided.get("ShopLaborRate"))
     if labor_rate_value <= 0:
         labor_rate_value = 85.0
     if separate_labor_cfg and cfg_labor_rate_value > 0.0:
         labor_rate_value = cfg_labor_rate_value
-    rates["LaborRate"] = labor_rate_value
+    rates_overrides["LaborRate"] = labor_rate_value
 
-    machine_rate_value = _coerce_rate_value(rates.get("MachineRate"))
+    machine_rate_value = _coerce_rate_value(rates_provided.get("MachineRate"))
     if machine_rate_value <= 0:
-        machine_rate_value = _coerce_rate_value(rates.get("ShopMachineRate"))
+        machine_rate_value = _coerce_rate_value(rates_provided.get("ShopMachineRate"))
     if machine_rate_value <= 0:
         machine_rate_value = 90.0
-    rates["MachineRate"] = machine_rate_value
+    rates_overrides["MachineRate"] = machine_rate_value
 
     cfg_programmer_rate: float | None = None
     if cfg and getattr(cfg, "separate_machine_labor", False):
@@ -3215,26 +3220,12 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
         programmer_rate_value = float(cfg_programmer_rate)
         programming_rate_value = float(cfg_programmer_rate)
     else:
-        if "ProgrammerRate" not in rates:
-            programmer_fallback = (
-                engineer_rate_val if engineer_rate_val > 0 else _coerce_rate_value(rates.get("MillingRate"))
-            )
-            if programmer_fallback <= 0 and shop_rate_val > 0:
-                programmer_fallback = shop_rate_val
-            if programmer_fallback <= 0:
-                programmer_fallback = _coerce_rate_value(rates.get("LaborRate"))
-            if programmer_fallback <= 0:
-                programmer_fallback = 90.0
-            if programmer_fallback > 0:
-                programmer_fallback = max(programmer_fallback, 90.0)
-            rates.setdefault("ProgrammerRate", programmer_fallback)
-
-        programmer_rate_value = _coerce_rate_value(rates.get("ProgrammerRate"))
+        programmer_rate_value = _coerce_rate_value(rates_provided.get("ProgrammerRate"))
         if programmer_rate_value <= 0:
             programmer_rate_value = (
                 engineer_rate_val
                 if engineer_rate_val > 0
-                else _coerce_rate_value(rates.get("MillingRate"))
+                else _coerce_rate_value(rates_provided.get("MillingRate"))
             )
         if programmer_rate_value <= 0 and shop_rate_val > 0:
             programmer_rate_value = shop_rate_val
@@ -3245,7 +3236,7 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
         if programmer_rate_value > 0:
             programmer_rate_value = max(programmer_rate_value, 90.0)
 
-        programming_rate_value = _coerce_rate_value(rates.get("ProgrammingRate"))
+        programming_rate_value = _coerce_rate_value(rates_provided.get("ProgrammingRate"))
         if programming_rate_value <= 0:
             programming_rate_value = programmer_rate_value
         if programming_rate_value <= 0:
@@ -3255,19 +3246,19 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
         if programming_rate_value > 0:
             programming_rate_value = max(programming_rate_value, 90.0)
 
-    rates["ProgrammerRate"] = programmer_rate_value
-    rates["ProgrammingRate"] = programming_rate_value
+    rates_overrides["ProgrammerRate"] = programmer_rate_value
+    rates_overrides["ProgrammingRate"] = programming_rate_value
 
-    inspector_rate_value = _coerce_rate_value(rates.get("InspectorRate"))
+    inspector_rate_value = _coerce_rate_value(rates_provided.get("InspectorRate"))
     if inspector_rate_value <= 0:
         inspector_rate_value = labor_rate_value
     if inspector_rate_value <= 0:
         inspector_rate_value = 85.0
     if inspector_rate_value > 0:
         inspector_rate_value = max(inspector_rate_value, 85.0)
-    rates["InspectorRate"] = inspector_rate_value
+    rates_overrides["InspectorRate"] = inspector_rate_value
 
-    inspection_rate_value = _coerce_rate_value(rates.get("InspectionRate"))
+    inspection_rate_value = _coerce_rate_value(rates_provided.get("InspectionRate"))
     if inspection_rate_value <= 0:
         inspection_rate_value = inspector_rate_value
     if inspection_rate_value <= 0:
@@ -3276,12 +3267,9 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
         inspection_rate_value = 85.0
     if inspection_rate_value > 0:
         inspection_rate_value = max(inspection_rate_value, 85.0)
-    rates["InspectionRate"] = inspection_rate_value
+    rates_overrides["InspectionRate"] = inspection_rate_value
 
-    rates.setdefault("LaborRate", 85.0)
-    rates.setdefault("MachineRate", 90.0)
-    rates.setdefault("ProgrammingRate", rates.get("ProgrammerRate", rates["LaborRate"]))
-    rates.setdefault("InspectionRate", rates.get("InspectorRate", rates["LaborRate"]))
+    rates = {**rates_provided, **rates_overrides}
 
     fallback_two_bucket_rates = _normalized_two_bucket_rates(rates)
     fallback_flat_rates = two_bucket_to_flat(fallback_two_bucket_rates)
@@ -3449,7 +3437,6 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
             amortized_nre_total += float(value or 0.0)
         except Exception:
             continue
-    labor_costs_display: dict[str, float] = {}
     prog_hr: float = 0.0
     direct_cost_details = breakdown.get("direct_cost_details", {}) or {}
     material_net_cost: float | None = None
@@ -3819,6 +3806,7 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
 
         label = {
             "programming": "Programming (amortized)",
+            "programming_amortized": "Programming (amortized)",
             "milling": "Milling",
             "drilling": "Drilling",
             "tapping": "Tapping",
@@ -3826,8 +3814,10 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
             "spot_drill": "Spot-Drill",
             "jig_grind": "Jig-Grind",
             "inspection": "Inspection",
+            "fixture_build_amortized": "Fixture Build (amortized)",
         }
         order = [
+            "programming_amortized",
             "programming",
             "milling",
             "drilling",
@@ -3836,6 +3826,7 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
             "spot_drill",
             "jig_grind",
             "inspection",
+            "fixture_build_amortized",
         ]
 
         lines.append("Process & Labor Costs")
@@ -3853,6 +3844,112 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
         lines.append(" " * 66 + "-------")
         lines.append(f"  Total{' '*58}${total_cost:>10,.2f}")
         lines.append("")
+
+    def _is_extra_segment(segment: str) -> bool:
+        try:
+            return bool(EXTRA_DETAIL_RE.match(str(segment)))
+        except Exception:
+            return False
+
+    def _merge_detail(existing: str | None, new_bits: list[str]) -> str | None:
+        segments: list[str] = []
+        seen: set[str] = set()
+        for bit in new_bits:
+            seg = str(bit).strip()
+            if not seg or _is_extra_segment(seg):
+                continue
+            if seg not in seen:
+                segments.append(seg)
+                seen.add(seg)
+        if existing:
+            for segment in _RE_SPLIT(r";\s*", str(existing)):
+                seg = segment.strip()
+                if not seg or EXTRA_DETAIL_RE.match(seg):
+                    continue
+                if seg not in seen:
+                    segments.append(seg)
+                    seen.add(seg)
+        if segments:
+            return "; ".join(segments)
+        if existing:
+            filtered_existing: list[str] = []
+            for segment in _RE_SPLIT(r";\s*", str(existing)):
+                seg = segment.strip()
+                if not seg or EXTRA_DETAIL_RE.match(seg):
+                    continue
+                filtered_existing.append(seg)
+            if filtered_existing:
+                return "; ".join(filtered_existing)
+            return str(existing).strip()
+        return None
+
+    def add_process_notes(key: str, indent: str = "    "):
+        canon_key = _canonical_bucket_key(key)
+        stored_hours = 0.0
+        stored_rate = 0.0
+        stored_cost = 0.0
+        if canon_key:
+            summary_entry = canonical_bucket_summary.get(canon_key)
+            if isinstance(summary_entry, _MappingABC):
+                stored_hours = _safe_float(summary_entry.get("hours"), default=0.0)
+                if stored_hours <= 0.0:
+                    minutes_val = _safe_float(summary_entry.get("minutes"), default=0.0)
+                    if minutes_val > 0.0:
+                        stored_hours = minutes_val / 60.0
+                stored_cost = _safe_float(summary_entry.get("total"), default=0.0)
+                if stored_hours > 0.0 and stored_cost > 0.0:
+                    stored_rate = stored_cost / stored_hours
+
+        meta = _lookup_process_meta(process_meta, key) or {}
+        hr_val = stored_hours
+        if hr_val <= 0:
+            try:
+                hr_val = float(meta.get("hr", 0.0) or 0.0)
+            except Exception:
+                hr_val = 0.0
+        if hr_val <= 0:
+            try:
+                minutes_val = float(meta.get("minutes", 0.0) or 0.0)
+            except Exception:
+                minutes_val = 0.0
+            if minutes_val > 0:
+                hr_val = minutes_val / 60.0
+        meta_rate = 0.0
+        if meta:
+            try:
+                meta_rate = float(meta.get("rate", 0.0) or 0.0)
+            except Exception:
+                meta_rate = 0.0
+        if meta_rate > 0:
+            rate_float = meta_rate
+        else:
+            rate_float = stored_rate
+            if rate_float <= 0:
+                rate_val = meta.get("rate") if meta else None
+                try:
+                    rate_float = float(rate_val or 0.0)
+                except Exception:
+                    rate_float = 0.0
+        if rate_float <= 0 and stored_cost > 0 and hr_val > 0:
+            rate_float = stored_cost / hr_val
+        if rate_float <= 0:
+            rate_key = _rate_key_for_bucket(str(key))
+            if rate_key:
+                try:
+                    rate_float = float(rates.get(rate_key, 0.0) or 0.0)
+                except Exception:
+                    rate_float = 0.0
+        try:
+            base_extra_val = float(meta.get("base_extra", 0.0) or 0.0)
+        except Exception:
+            base_extra_val = 0.0
+
+        if hr_val > 0:
+            write_line(_hours_with_rate_text(hr_val, rate_float), indent)
+        elif base_extra_val > 0 and rate_float > 0:
+            inferred_hours = base_extra_val / rate_float
+            if inferred_hours > 0:
+                write_line(_hours_with_rate_text(inferred_hours, rate_float), indent)
 
     def add_pass_basis(key: str, indent: str = "    "):
         basis_map = breakdown.get("pass_basis", {}) or {}
@@ -4267,56 +4364,6 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
     blank_len = max(required_blank[0], required_blank[1]) if required_blank[0] > 0 and required_blank[1] > 0 else 0.0
     blank_wid = min(required_blank[0], required_blank[1]) if required_blank[0] > 0 and required_blank[1] > 0 else 0.0
 
-    def _blank_has_dims(candidate: Mapping[str, Any] | None) -> bool:
-        if not isinstance(candidate, _MappingABC):
-            return False
-        return bool(
-            _coerce_positive_float(candidate.get("w"))
-            and _coerce_positive_float(candidate.get("h"))
-        )
-
-    def _apply_blank_hint(container: Mapping[str, Any] | None) -> None:
-        if not isinstance(container, _MutableMappingABC):
-            return
-        if required_blank[0] <= 0 or required_blank[1] <= 0:
-            return
-        hint_payload: dict[str, Any] = {"w": float(required_blank[0]), "h": float(required_blank[1])}
-        if required_blank[2] > 0:
-            hint_payload["t"] = float(required_blank[2])
-        existing_blank = container.get("required_blank_in")
-        if not _blank_has_dims(existing_blank):
-            container["required_blank_in"] = dict(hint_payload)
-        existing_bbox = container.get("bbox_in")
-        if not _blank_has_dims(existing_bbox):
-            container.setdefault("bbox_in", dict(hint_payload))
-
-    for context in (
-        geo_context if isinstance(geo_context, _MutableMappingABC) else None,
-        g if isinstance(g, _MutableMappingABC) else None,
-        pricing_geom if isinstance(pricing_geom, _MutableMappingABC) else None,
-    ):
-        _apply_blank_hint(context)
-    for parent in (breakdown, result):
-        if isinstance(parent, _MutableMappingABC):
-            for key in ("geo", "geo_context", "geom"):
-                _apply_blank_hint(parent.get(key))
-
-    for container in (
-        material if isinstance(material, _MutableMappingABC) else None,
-        material_stock_block if isinstance(material_stock_block, _MutableMappingABC) else None,
-    ):
-        _apply_blank_hint(container)
-
-    if blank_len > 0 and isinstance(material_stock_block, _MutableMappingABC):
-        if _coerce_positive_float(material_stock_block.get("required_blank_len_in")) is None:
-            material_stock_block["required_blank_len_in"] = float(blank_len)
-        if _coerce_positive_float(material_stock_block.get("required_blank_wid_in")) is None:
-            material_stock_block["required_blank_wid_in"] = float(blank_wid)
-        if required_blank[2] > 0 and _coerce_positive_float(
-            material_stock_block.get("required_blank_thk_in")
-        ) is None:
-            material_stock_block["required_blank_thk_in"] = float(required_blank[2])
-
     required_blank_len = float(blank_len) if blank_len > 0 else 0.0
     required_blank_wid = float(blank_wid) if blank_wid > 0 else 0.0
 
@@ -4423,12 +4470,23 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
                 else None
             )
 
-            if (need_len is None or need_len <= 0) and required_blank_len > 0:
-                need_len = float(required_blank_len)
-            if (need_wid is None or need_wid <= 0) and required_blank_wid > 0:
-                need_wid = float(required_blank_wid)
-            if (need_thk is None or need_thk <= 0) and required_blank[2] > 0:
-                need_thk = float(required_blank[2])
+            blank_w, blank_h, blank_thk = required_blank
+            if need_len is None or need_len <= 0:
+                if blank_w > 0 and blank_h > 0:
+                    need_len = float(max(blank_w, blank_h))
+                elif blank_w > 0:
+                    need_len = float(blank_w)
+                elif blank_h > 0:
+                    need_len = float(blank_h)
+            if need_wid is None or need_wid <= 0:
+                if blank_w > 0 and blank_h > 0:
+                    need_wid = float(min(blank_w, blank_h))
+                elif blank_w > 0 and (need_len is None or need_len != blank_w):
+                    need_wid = float(blank_w)
+                elif blank_h > 0 and (need_len is None or need_len != blank_h):
+                    need_wid = float(blank_h)
+            if (need_thk is None or need_thk <= 0) and blank_thk > 0:
+                need_thk = float(blank_thk)
 
             stock_len_val = _coerce_float_or_none(
                 material_stock_block.get("stock_L_in")
@@ -4447,6 +4505,8 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
             )
 
             picked_stock: dict[str, Any] | None = None
+            picked_part_number: str | None = None
+            picked_source_hint: str | None = None
             material_lookup_for_pick = normalized_material_key or ""
             if not material_lookup_for_pick and material_display_label:
                 material_lookup_for_pick = _normalize_lookup_key(material_display_label)
@@ -4465,41 +4525,11 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
                 stock_wid_val = float(picked_stock.get("wid_in") or 0.0)
                 stock_thk_val = float(picked_stock.get("thk_in") or 0.0)
                 part_number = picked_stock.get("mcmaster_part")
+                if part_number:
+                    picked_part_number = str(part_number)
                 source_hint = picked_stock.get("source") or "mcmaster-catalog"
-                if isinstance(material_stock_block, _MutableMappingABC):
-                    material_stock_block["stock_L_in"] = float(stock_len_val)
-                    material_stock_block["stock_W_in"] = float(stock_wid_val)
-                    material_stock_block["stock_T_in"] = float(stock_thk_val)
-                    material_stock_block["stock_source_tag"] = source_hint
-                    material_stock_block["source"] = source_hint
-                    if part_number:
-                        material_stock_block["mcmaster_part"] = part_number
-                        material_stock_block["part_no"] = part_number
-                        if not material_stock_block.get("stock_price_source"):
-                            material_stock_block["stock_price_source"] = "mcmaster_api"
-                if isinstance(material, _MutableMappingABC):
-                    material["stock_source_tag"] = source_hint
-                    material["source"] = source_hint
-                    if part_number:
-                        material["mcmaster_part"] = part_number
-                        material["part_no"] = part_number
-                        if not material.get("stock_price_source"):
-                            material["stock_price_source"] = (
-                                material_stock_block.get("stock_price_source")
-                                if isinstance(material_stock_block, _MappingABC)
-                                else "mcmaster_api"
-                            )
-                if isinstance(result, _MutableMappingABC):
-                    if part_number:
-                        result["mcmaster_part"] = part_number
-                        result["part_no"] = part_number
-                        if not result.get("stock_price_source"):
-                            result["stock_price_source"] = (
-                                material_stock_block.get("stock_price_source")
-                                if isinstance(material_stock_block, _MappingABC)
-                                else "mcmaster_api"
-                            )
-                    result["stock_source"] = source_hint
+                if source_hint:
+                    picked_source_hint = str(source_hint)
             elif (
                 material_lookup_for_pick
                 and "mic6" in material_lookup_for_pick.lower()
@@ -4546,11 +4576,29 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
                 source_tag = source_tag.strip()
                 if not source_tag:
                     source_tag = None
+            if not source_tag and picked_source_hint:
+                source_tag = picked_source_hint
 
             if stock_len_val and stock_wid_val and stock_thk_val:
                 part_label = ""
-                if isinstance(result, Mapping):
-                    part_label = str(result.get("mcmaster_part") or "").strip()
+                if picked_part_number:
+                    part_label = picked_part_number.strip()
+                else:
+                    for container in (
+                        material_stock_block,
+                        material,
+                        result,
+                    ):
+                        if not isinstance(container, _MappingABC):
+                            continue
+                        part_candidate = (
+                            container.get("mcmaster_part")
+                            or container.get("part_no")
+                        )
+                        if part_candidate:
+                            part_label = str(part_candidate).strip()
+                            if part_label:
+                                break
                 part_display = part_label or "—"
                 stock_line = (
                     "  Rounded to catalog: "
@@ -4596,24 +4644,6 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
             )
             total_material_cost = material_cost_components["total_usd"]
             material_net_cost = material_cost_components["net_usd"]
-            if total_material_cost is not None:
-                try:
-                    material_block["total_material_cost"] = total_material_cost
-                except Exception:
-                    pass
-                try:
-                    material_record = breakdown.get("material") if isinstance(breakdown, _MappingABC) else None
-                    if isinstance(material_record, _MutableMappingABC):
-                        material_record["total_material_cost"] = float(total_material_cost)
-                    elif isinstance(material_record, _MappingABC):
-                        updated_material = dict(material_record)
-                        updated_material["total_material_cost"] = float(total_material_cost)
-                        if isinstance(breakdown, _MutableMappingABC):
-                            breakdown["material"] = updated_material
-                    elif isinstance(breakdown, _MutableMappingABC):
-                        breakdown["material"] = {"total_material_cost": float(total_material_cost)}
-                except Exception:
-                    pass
             net_mass_val = _coerce_float_or_none(net_mass_g)
             effective_mass_source = material.get("effective_mass_g")
             effective_mass_val = _coerce_float_or_none(effective_mass_source)
@@ -4701,12 +4731,8 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
 
             if scrap_mass_val is not None:
                 scrap_credit_mass_lb = float(scrap_mass_val) / 1000.0 * LB_PER_KG
-                material_detail_for_breakdown["scrap_credit_mass_lb"] = (
-                    scrap_credit_mass_lb
-                )
             else:
                 scrap_credit_mass_lb = None
-                material_detail_for_breakdown.pop("scrap_credit_mass_lb", None)
 
             legacy_weight_lines: list[str] = []
             if (starting_mass_val and starting_mass_val > 0) or show_zeros:
@@ -4987,15 +5013,6 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
             if detail_lines:
                 append_lines(detail_lines)
             mc: Mapping[str, Any] | None = material_cost_components
-            if not mc:
-                try:
-                    mc = _material_cost_components(
-                        material_block,
-                        overrides=material_overrides,
-                        cfg=cfg,
-                    )
-                except Exception:
-                    mc = None
             if mc:
                 stock_piece_val = mc.get("stock_piece_usd")
                 if stock_piece_val is not None:
@@ -5051,12 +5068,13 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
                 row("Total Material Cost :", total_material_cost, indent="  ")
             _push(lines, "")
 
-    rates.setdefault("LaborRate", 85.0)
-    rates.setdefault(
-        "ProgrammingRate", float(rates.get("ProgrammerRate") or rates["LaborRate"])
-    )
+    rates = {**{"LaborRate": 85.0}, **rates}
+    if _coerce_rate_value(rates.get("ProgrammingRate")) <= 0:
+        rates = {
+            **rates,
+            "ProgrammingRate": float(rates.get("ProgrammerRate") or rates["LaborRate"]),
+        }
 
-    nre = breakdown.setdefault("nre", {})
     prog_hr = float(nre.get("programming_hr") or 0.0)
     if prog_hr > 0 and float(nre.get("programming_cost") or 0.0) == 0.0:
         if cfg and getattr(cfg, "separate_machine_labor", False):
@@ -5570,10 +5588,8 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
     canonical_bucket_order: list[str] = []
     canonical_bucket_summary: dict[str, dict[str, float]] = {}
     bucket_table_rows: list[tuple[str, float, float, float, float]] = []
-    detail_lookup: dict[str, str] = {}
     label_to_canon: dict[str, str] = {}
     canon_to_display_label: dict[str, str] = {}
-    process_cost_row_details: dict[str, tuple[float, float, float]] = {}
     class _BucketRowSpec(typing.NamedTuple):
         label: str
         hours: float
@@ -5586,7 +5602,6 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
 
     bucket_row_specs: list[_BucketRowSpec] = []
 
-    labor_costs_display.clear()
     hour_summary_entries.clear()
     display_labor_for_ladder = 0.0
     display_machine = 0.0
@@ -5903,15 +5918,10 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
     # Planner totals reconciliation previously compared bucket rows against legacy
     # planner aggregates. Those comparisons produced noisy warnings and are no
     # longer useful now that rendering is sourced directly from bucket data.
-    detail_lookup.update(bucket_state.detail_lookup)
     label_to_canon.update(bucket_state.label_to_canon)
     canon_to_display_label.update(bucket_state.canon_to_display_label)
     label_to_canon.update(bucket_label_map)
     canon_to_display_label.update(bucket_canon_label_map)
-    labor_costs_display.update(bucket_state.labor_costs_display)
-    if bucket_table_rows:
-        for label, _, _, _, total_val in bucket_table_rows:
-            labor_costs_display[label] = total_val
     if bucket_table_rows:
         display_labor_for_ladder = display_labor_from_rows
         display_machine = display_machine_from_rows
@@ -5947,13 +5957,7 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
     proc_total = 0.0
     amortized_nre_total = 0.0
 
-    def _add_labor_cost_line(
-        label: str,
-        amount: Any,
-        *,
-        process_key: str | None = None,
-        detail_bits: Iterable[Any] | None = None,
-    ) -> None:
+    def _add_labor_cost_line(label: str, amount: Any) -> None:
         nonlocal proc_total
         try:
             numeric_amount = float(amount or 0.0)
@@ -5980,7 +5984,6 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
             total_programming_hours_local = 0.0
             accumulate_from_detail = True
 
-        detail_args: list[str] = []
         detail_hours = 0.0
 
         prog_hr_detail = _safe_float(programming_detail_local.get("prog_hr"))
@@ -5988,24 +5991,12 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
             if accumulate_from_detail:
                 total_programming_hours_local += prog_hr_detail
             detail_hours += prog_hr_detail
-            detail_args.append(
-                f"- Programmer (lot): {_hours_with_rate_text(prog_hr_detail, programmer_rate)}"
-            )
 
         eng_hr_detail = _safe_float(programming_detail_local.get("eng_hr"))
         if eng_hr_detail > 0:
             if accumulate_from_detail:
                 total_programming_hours_local += eng_hr_detail
             detail_hours += eng_hr_detail
-            detail_args.append(
-                f"- Engineering (lot): {_hours_with_rate_text(eng_hr_detail, programmer_rate)}"
-            )
-
-        remaining_hours = max(total_programming_hours_local - detail_hours, 0.0)
-        if remaining_hours > 0:
-            detail_args.append(
-                f"Additional programming {fmt_hours(remaining_hours)} @ ${programmer_rate:.2f}/hr"
-            )
 
         if total_programming_hours_local <= 0:
             total_programming_hours_local = total_programming_hours
@@ -6031,10 +6022,6 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
                 labor_cost_totals[PROGRAMMING_PER_PART_LABEL] = prog_pp
             except Exception:
                 pass
-            if qty > 1:
-                detail_args.append(f"Amortized across {qty} pcs")
-            if detail_args:
-                detail_lookup[PROGRAMMING_PER_PART_LABEL] = "; ".join(detail_args)
             additions["programming_amortized"] = (prog_pp, programming_minutes)
             amortized_nre_total += prog_pp
             if "programming_amortized" not in canonical_bucket_summary:
@@ -6055,27 +6042,13 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
             except Exception:
                 fix_pp = 0.0
         if fix_pp > 0:
-            detail_args = []
             fixture_detail = nre_detail.get("fixture", {}) if isinstance(nre_detail, dict) else {}
             fixture_build_hr_detail = _safe_float(fixture_detail.get("build_hr"))
             if fixture_build_hr_detail > 0:
                 fixture_minutes += (fixture_build_hr_detail / qty_divisor) * 60.0
-                fixture_rate_detail = _resolve_rate_with_fallback(
-                    fixture_detail.get("build_rate"),
-                    "FixtureBuildRate",
-                    "ShopRate",
-                )
-                detail_args.append(
-                    f"- Build labor (lot): {_hours_with_rate_text(fixture_build_hr_detail, fixture_rate_detail)}"
-                )
             soft_jaw_hr = _safe_float(fixture_detail.get("soft_jaw_hr"))
             if soft_jaw_hr and soft_jaw_hr > 0:
                 fixture_minutes += (soft_jaw_hr / qty_divisor) * 60.0
-                detail_args.append(f"Soft jaw prep {fmt_hours(soft_jaw_hr)}")
-            if qty > 1:
-                detail_args.append(f"Amortized across {qty} pcs")
-            if detail_args:
-                detail_lookup["Fixture Build (amortized)"] = "; ".join(detail_args)
             additions["fixture_build_amortized"] = (fix_pp, fixture_minutes)
             amortized_nre_total += fix_pp
             if "fixture_build_amortized" not in canonical_bucket_summary:
@@ -6291,11 +6264,8 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
     process_table = _ProcessCostTableRecorder(
         cfg=cfg,
         bucket_state=bucket_state,
-        detail_lookup=detail_lookup,
         label_to_canon=label_to_canon,
         canon_to_display_label=canon_to_display_label,
-        process_cost_row_details=process_cost_row_details,
-        labor_costs_display=labor_costs_display,
         add_labor_cost_line=_add_labor_cost_line,
         process_meta=process_meta,
     )
@@ -6472,8 +6442,6 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
                 row_hr = billed_hr
                 row_rate = drill_rate
                 row_cost = billed_cost
-                process_cost_row_details["drilling"] = (billed_hr, drill_rate, billed_cost)
-                labor_costs_display[drilling_row.name] = billed_cost
                 process_costs_for_render["drilling"] = billed_cost
 
             card_hr = round(card_minutes_billed / 60.0, 2)
@@ -6492,13 +6460,7 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
                 else:
                     process_table.update_row("drilling", hours=row_hr)
                 drilling_row.hours = row_hr
-                process_cost_row_details["drilling"] = (
-                    row_hr,
-                    row_rate,
-                    row_cost,
-                )
                 process_costs_for_render["drilling"] = row_cost
-                labor_costs_display[drilling_row.name] = row_cost
                 drilling_row.total = row_cost
 
             drilling_meta_for_guard = None
@@ -6604,12 +6566,12 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
                 continue
             if spec.label in printed_bucket_labels:
                 continue
-            _add_labor_cost_line(spec.label, spec.total, process_key=canon_key)
+            _add_labor_cost_line(spec.label, spec.total)
             printed_bucket_labels.add(spec.label)
         for spec in ordered_specs:
             if spec.label in printed_bucket_labels:
                 continue
-            _add_labor_cost_line(spec.label, spec.total, process_key=spec.canon_key)
+            _add_labor_cost_line(spec.label, spec.total)
             printed_bucket_labels.add(spec.label)
         for label in printed_bucket_labels:
             labor_cost_totals.pop(label, None)
@@ -6633,8 +6595,7 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
         display_label = str(label)
         canon_to_display_label[canon_key] = display_label
         label_to_canon[display_label] = canon_key
-        _add_labor_cost_line(display_label, amount_val, process_key=canon_key)
-        labor_costs_display[display_label] = amount_val
+        _add_labor_cost_line(display_label, amount_val)
         misc_total += amount_val
 
     hour_summary_entries.clear()
@@ -6818,42 +6779,6 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
         else:
             _record_hour_entry(label, round(hours_val, 2))
             seen_hour_labels.add(label)
-
-    if planner_mode:
-        buckets_for_hours = (
-            bucket_view_struct.get("buckets")
-            if isinstance(bucket_view_struct, _MappingABC)
-            else None
-        )
-        if not isinstance(buckets_for_hours, _MappingABC):
-            buckets_for_hours = {}
-
-        pl_lab = 0.0
-        pl_mac = 0.0
-        total_planner_hours = 0.0
-        for raw_key, info in buckets_for_hours.items():
-            if not isinstance(info, _MappingABC):
-                continue
-            minutes_val = _safe_float(info.get("minutes"), default=0.0)
-            if minutes_val <= 0.0:
-                continue
-            hours_val = minutes_val / 60.0
-            total_planner_hours += hours_val
-            canon_key = _canonical_bucket_key(raw_key)
-            norm_key = canon_key or _norm(raw_key)
-            if norm_key in LABORISH:
-                pl_lab += hours_val
-            else:
-                pl_mac += hours_val
-
-        residual_machine = total_planner_hours - pl_lab
-        if residual_machine < 0.0:
-            residual_machine = 0.0
-        if abs(pl_mac - residual_machine) > 0.01:
-            pl_mac = residual_machine
-
-        planner_total_hr = round(max(total_planner_hours, pl_lab + pl_mac), 2)
-        # Planner-specific summaries are now handled through the bucket table.
 
     if (not planner_mode) or len(hour_summary_entries) == planner_entry_baseline:
         if charged_hour_entries:
@@ -7373,11 +7298,6 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
         if vendor_items_total:
             breakdown["vendor_items_total"] = float(round(vendor_items_total, 2))
 
-    if isinstance(totals, dict):
-        totals["labor$"] = round(labor_summary_total, 2)
-        totals["machine$"] = round(machine_summary_total, 2)
-        totals["directs$"] = round(directs_total_value, 2)
-
     if 0 <= pass_through_header_index < len(lines):
         header_text = f"Pass-Through & Direct Costs (Total: {fmt_money(directs_total_value, currency)})"
         lines[pass_through_header_index] = header_text
@@ -7475,8 +7395,6 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
         display_machine = float(display_machine) + float(machine_gap)
         if display_machine < 0:
             display_machine = 0.0
-    if isinstance(totals, dict):
-        totals["labor_cost"] = computed_total_labor_cost
     if 0 <= total_labor_row_index < len(lines):
         replace_line(
             total_labor_row_index,
@@ -7609,11 +7527,6 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
         ladder_directs = ladder_directs_override
 
     computed_total_labor_cost = ladder_labor
-    if isinstance(breakdown, dict):
-        breakdown["total_labor_cost"] = round(ladder_labor, 2)
-    if isinstance(totals, dict):
-        totals["labor_cost"] = ladder_labor
-
     final_per_part = round(machine_labor_total + nre_per_part + ladder_directs, 2)
     ladder_subtotal = final_per_part
     if 0 <= total_labor_row_index < len(lines):
@@ -7623,20 +7536,10 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
         )
     if not roughly_equal(declared_subtotal, ladder_subtotal, eps=0.01):
         declared_subtotal = ladder_subtotal
-    if isinstance(breakdown, dict):
-        try:
-            breakdown["ladder_subtotal"] = ladder_subtotal
-            if math.isclose(_safe_float(applied_pcts.get("MarginPct"), 0.0), 0.0, abs_tol=1e-6):
-                breakdown["price"] = ladder_subtotal
-        except Exception:
-            pass
-
     printed_subtotal = round(float(declared_subtotal or 0.0), 2)
     if not roughly_equal(ladder_subtotal, printed_subtotal, eps=0.01):
         printed_subtotal = ladder_subtotal
         declared_subtotal = ladder_subtotal
-        if isinstance(totals, dict):
-            totals["subtotal"] = ladder_subtotal
     assert roughly_equal(ladder_labor + ladder_directs, printed_subtotal, eps=0.01)
 
     subtotal = ladder_subtotal
@@ -7805,16 +7708,7 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
     expedite_cost = ladder_totals.get("expedite_cost", 0.0)
     final_price = ladder_totals["with_margin"]
 
-    if isinstance(totals, dict):
-        totals["with_expedite"] = with_expedite
-        totals["with_margin"] = final_price
-        totals["price"] = final_price
-
     price = final_price
-    if isinstance(result, dict):
-        result["price"] = price
-    if isinstance(breakdown, dict):
-        breakdown["final_price"] = final_price
     replace_line(final_price_row_index, _format_row("Final Price per Part:", price))
 
     row("Subtotal (Labor + Directs):", subtotal)
@@ -10107,7 +10001,7 @@ def compute_quote_from_df(  # type: ignore[reportGeneralTypeIssues]
                 ordered.append(key)
                 seen.add(key)
 
-        totals = {"minutes": 0.0, "machine$": 0.0, "labor$": 0.0, "total$": 0.0}
+        bucket_sums = {"minutes": 0.0, "machine$": 0.0, "labor$": 0.0, "total$": 0.0}
         for entry in buckets.values():
             minutes_val = float(_safe_float(entry.get("minutes")))
             machine_val = float(_safe_float(entry.get("machine$")))
@@ -10115,14 +10009,14 @@ def compute_quote_from_df(  # type: ignore[reportGeneralTypeIssues]
             total_val = float(_safe_float(entry.get("total$")))
             if total_val <= 0.0:
                 total_val = machine_val + labor_val
-            totals["minutes"] += minutes_val
-            totals["machine$"] += machine_val
-            totals["labor$"] += labor_val
-            totals["total$"] += total_val
+            bucket_sums["minutes"] += minutes_val
+            bucket_sums["machine$"] += machine_val
+            bucket_sums["labor$"] += labor_val
+            bucket_sums["total$"] += total_val
 
         bucket_view_prepared["buckets"] = buckets
         bucket_view_prepared["order"] = ordered
-        bucket_view_prepared["totals"] = {key: round(val, 2) for key, val in totals.items()}
+        bucket_view_prepared["totals"] = {key: round(val, 2) for key, val in bucket_sums.items()}
         if not using_planner:
             for canon_key, entry in buckets.items():
                 bucket_view_prepared.setdefault(canon_key, entry)
