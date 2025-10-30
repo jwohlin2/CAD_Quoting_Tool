@@ -2909,20 +2909,20 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
         prefer_removal_drilling_hours = True
     else:
         prefer_removal_drilling_hours = bool(prefer_removal_drilling_hours)
-    totals       = breakdown.get("totals", {}) or {}
-    if not isinstance(totals, dict):
+    totals_raw = breakdown.get("totals", {}) or {}
+    if isinstance(totals_raw, _MutableMappingABC):
+        totals = totals_raw
+    else:
         try:
-            totals = dict(totals or {})
+            totals = dict(totals_raw or {})
         except Exception:
             totals = {}
-        breakdown["totals"] = totals
-    else:
-        breakdown["totals"] = totals
+    breakdown["totals"] = totals
     declared_labor_total = float(totals.get("labor_cost", 0.0) or 0.0)
     nre_detail   = breakdown.get("nre_detail", {}) or {}
     nre_raw      = breakdown.get("nre", {}) or {}
-    if isinstance(nre_raw, _MappingABC):
-        nre = dict(nre_raw)
+    if isinstance(nre_raw, _MutableMappingABC):
+        nre = nre_raw
     else:
         try:
             nre = dict(nre_raw or {})
@@ -2930,7 +2930,9 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
             nre = {}
     breakdown["nre"] = nre
     material_raw = breakdown.get("material", {}) or {}
-    if isinstance(material_raw, _MappingABC):
+    if isinstance(material_raw, _MutableMappingABC):
+        material_block = material_raw
+    elif isinstance(material_raw, _MappingABC):
         material_block = dict(material_raw)
     else:  # tolerate legacy iterables or unexpected values
         try:
@@ -2938,7 +2940,9 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
         except Exception:
             material_block = {}
     material_block_new = breakdown.get("material_block") or {}
-    if isinstance(material_block_new, _MappingABC):
+    if isinstance(material_block_new, _MutableMappingABC):
+        material_stock_block = material_block_new
+    elif isinstance(material_block_new, _MappingABC):
         material_stock_block = dict(material_block_new)
     else:
         try:
@@ -2946,7 +2950,9 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
         except Exception:
             material_stock_block = {}
     material_selection_raw = breakdown.get("material_selected") or {}
-    if isinstance(material_selection_raw, _MappingABC):
+    if isinstance(material_selection_raw, _MutableMappingABC):
+        material_selection = material_selection_raw
+    elif isinstance(material_selection_raw, _MappingABC):
         material_selection = dict(material_selection_raw)
     else:
         try:
@@ -3152,13 +3158,19 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
     material_warning_needed = material_warning_summary
     drilling_meta = breakdown.get("drilling_meta", {}) or {}
     process_costs_raw = breakdown.get("process_costs", {}) or {}
-    process_costs = (
-        dict(process_costs_raw)
-        if isinstance(process_costs_raw, _MappingABC)
-        else dict(process_costs_raw or {})
-    )
+    if isinstance(process_costs_raw, _MutableMappingABC):
+        process_costs = process_costs_raw
+    elif isinstance(process_costs_raw, _MappingABC):
+        process_costs = dict(process_costs_raw)
+    else:
+        try:
+            process_costs = dict(process_costs_raw or {})
+        except Exception:
+            process_costs = {}
     pass_through_raw = breakdown.get("pass_through", {}) or {}
-    if isinstance(pass_through_raw, _MappingABC):
+    if isinstance(pass_through_raw, _MutableMappingABC):
+        pass_through = pass_through_raw
+    elif isinstance(pass_through_raw, _MappingABC):
         pass_through = dict(pass_through_raw)
     else:
         try:
@@ -3166,8 +3178,13 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
         except Exception:
             pass_through = {}
     applied_pcts_raw = breakdown.get("applied_pcts", {}) or {}
-    if isinstance(applied_pcts_raw, dict):
+    if isinstance(applied_pcts_raw, _MutableMappingABC):
         applied_pcts = applied_pcts_raw
+    elif isinstance(applied_pcts_raw, _MappingABC):
+        try:
+            applied_pcts = dict(applied_pcts_raw)
+        except Exception:
+            applied_pcts = {}
     else:
         try:
             applied_pcts = dict(applied_pcts_raw or {})
@@ -3180,7 +3197,9 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
     bucket_alias_map: dict[str, str] = {}
     applied_process: dict[str, Any] = {}
     rates_raw    = breakdown.get("rates", {}) or {}
-    if isinstance(rates_raw, _MappingABC):
+    if isinstance(rates_raw, _MutableMappingABC):
+        rates = rates_raw
+    elif isinstance(rates_raw, _MappingABC):
         rates = dict(rates_raw)
     else:
         try:
