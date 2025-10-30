@@ -4047,8 +4047,6 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
         _push(lines, MATERIAL_WARNING_LABEL)
     _push(lines, "")
 
-    if isinstance(result, _MutableMappingABC):
-        result.setdefault("app_meta", {})
 
     def render_drill_debug(entries: Sequence[str]) -> None:
         _push(lines, "Drill Debug")
@@ -4084,7 +4082,6 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
         if lines and lines[-1] != "":
             _push(lines, "")
 
-    app_meta = result.setdefault("app_meta", {})
     # Only surface drill debug when LLM debug is enabled for this quote.
     if drill_debug_entries and llm_debug_enabled_flag:
         # Order so legacy per-bin “OK …” lines appear first, then tables/summary.
