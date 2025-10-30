@@ -2892,18 +2892,6 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
         if isinstance(overrides_candidate, _MappingABC):
             state_overrides = overrides_candidate
 
-    # Force drill debug output to render by enabling the LLM debug flag for this run.
-    app_meta_container = result.get("app_meta")
-    if isinstance(app_meta_container, dict):
-        target_app_meta = app_meta_container
-    elif isinstance(app_meta_container, _MappingABC):
-        target_app_meta = dict(app_meta_container)
-        result["app_meta"] = target_app_meta
-    else:
-        target_app_meta = {}
-        result["app_meta"] = target_app_meta
-    target_app_meta["llm_debug_enabled"] = True
-
     prefer_removal_drilling_hours = getattr(cfg, "prefer_removal_drilling_hours", True)
     if prefer_removal_drilling_hours is None:
         prefer_removal_drilling_hours = True
@@ -3633,37 +3621,43 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
         return False
 
     # Define before first use to avoid closure-order issues
-    def _extract_llm_debug_override(container: Mapping[str, Any] | None) -> bool | None:
+    def _coerce_debug_override(value: Any) -> bool | None:
+        if isinstance(value, bool):
+            return value
+        if isinstance(value, (int, float)):
+            return bool(value)
+        if isinstance(value, str):
+            lowered = value.strip().lower()
+            if lowered in {"1", "true", "t", "yes", "y", "on"}:
+                return True
+            if lowered in {"0", "false", "f", "no", "n", "off", ""}:
+                return False
+            return None
+        return None
+
+    def _resolve_llm_debug_override(container: Mapping[str, Any] | None) -> bool | None:
         if not isinstance(container, _MappingABC):
             return None
-        if "llm_debug_enabled" in container:
-            value = container.get("llm_debug_enabled")
-            if isinstance(value, bool):
-                return value
-            if isinstance(value, (int, float)):
-                return bool(value)
-            if isinstance(value, str):
-                lowered = value.strip().lower()
-                if lowered in {"1", "true", "t", "yes", "y", "on"}:
-                    return True
-                if lowered in {"0", "false", "f", "no", "n", "off", ""}:
-                    return False
-                return None
-            return bool(value)
-        for meta_key in ("app", "app_meta"):
-            meta = container.get(meta_key)
-            override = _extract_llm_debug_override(meta) if isinstance(meta, _MappingABC) else None
-            if override is not None:
-                return override
+        direct = _coerce_debug_override(container.get("llm_debug_enabled"))
+        if direct is not None:
+            return direct
+        app_meta = container.get("app_meta")
+        if isinstance(app_meta, _MappingABC):
+            meta_override = _coerce_debug_override(app_meta.get("llm_debug_enabled"))
+            if meta_override is not None:
+                return meta_override
         return None
 
     llm_debug_enabled_flag = bool(APP_ENV.llm_debug_enabled)
 
-    for source in (result, breakdown):
-        override = _extract_llm_debug_override(source if isinstance(source, _MappingABC) else None)
-        if override is not None:
-            llm_debug_enabled_flag = override
-            break
+    if not llm_debug_enabled_flag:
+        for source in (result, breakdown):
+            override = _resolve_llm_debug_override(
+                source if isinstance(source, _MappingABC) else None
+            )
+            if override is not None:
+                llm_debug_enabled_flag = override
+                break
 
     # ---- header --------------------------------------------------------------
     doc_builder = QuoteDocRecorder(divider)
@@ -3710,16 +3704,8 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
         for segment in (s.strip() for s in sanitized_detail.split(";")):
             write_wrapped(segment, indent)
 
-    bucket_diag_env = os.getenv("SHOW_BUCKET_DIAGNOSTICS")
-    show_bucket_diagnostics_flag = _is_truthy_flag(bucket_diag_env) or bool(
-        SHOW_BUCKET_DIAGNOSTICS_OVERRIDE
-    )
-
     def render_bucket_table(rows: Sequence[tuple[str, float, float, float, float]]):
         if not rows:
-            return
-
-        if not show_bucket_diagnostics_flag:
             return
 
         headers = ("Bucket", "Hours", "Labor $", "Machine $", "Total $")

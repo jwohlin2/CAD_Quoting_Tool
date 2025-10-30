@@ -389,6 +389,9 @@ def _dummy_quote_payload(*, debug_enabled: bool = False) -> dict:
         breakdown = payload.get("breakdown")
         if isinstance(breakdown, dict):
             breakdown.pop("drill_debug", None)
+    else:
+        app_meta = payload.setdefault("app_meta", {})
+        app_meta["llm_debug_enabled"] = True
     return payload
 
 
