@@ -535,7 +535,7 @@ def test_quick_breakdown_sanity_checks() -> None:
 
     calc = (
         float(breakdown["bucket_view"]["totals"]["total$"])
-        + float(breakdown["nre"]["programming_per_part"])
+        + float(breakdown["nre"].get("programming_per_part", 0.0) or 0.0)
         + float(breakdown["total_direct_costs"])
     )
     assert math.isclose(float(breakdown["price"]), calc, abs_tol=0.01)
