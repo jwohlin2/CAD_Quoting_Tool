@@ -2986,27 +2986,14 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
         if isinstance(baseline_candidate, _MappingABC):
             baseline = baseline_candidate
 
-    pricing: dict[str, Any]
-    pricing_obj: Mapping[str, Any] | None = None
+    pricing: Mapping[str, Any] = {}
     for container in (breakdown, result):
-        if not isinstance(container, _MutableMappingABC):
+        if not isinstance(container, _MappingABC):
             continue
         candidate = container.get("pricing")
-        if isinstance(candidate, _MutableMappingABC):
-            pricing_obj = candidate
-            break
         if isinstance(candidate, _MappingABC):
-            pricing_obj = dict(candidate)
-            container["pricing"] = pricing_obj
+            pricing = typing.cast(Mapping[str, Any], candidate)
             break
-    if pricing_obj is None:
-        pricing = {}
-    else:
-        pricing = dict(pricing_obj) if not isinstance(pricing_obj, dict) else pricing_obj
-    if isinstance(breakdown, _MutableMappingABC):
-        breakdown["pricing"] = pricing
-    if isinstance(result, _MutableMappingABC):
-        result["pricing"] = pricing
     normalized_material_key = str(
         material_selection.get("material_lookup")
         or material_selection.get("normalized_material_key")
@@ -4291,22 +4278,17 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
 
     # Prep material pricing/mass estimates so the renderer and downstream
     # consumers see consistent values even when geometry inputs are sparse.
-    mat_info = pricing.setdefault("material", {}) if isinstance(pricing, dict) else {}
-    if not isinstance(mat_info, dict):
-        try:
-            mat_info = dict(mat_info or {})
-        except Exception:
-            mat_info = {}
-        if isinstance(pricing, dict):
-            pricing["material"] = mat_info
-    pricing_geom = pricing.get("geom") if isinstance(pricing, dict) else None
-    if not isinstance(pricing_geom, _MappingABC):
-        pricing_geom = pricing.get("geo") if isinstance(pricing, dict) else None
-    if not isinstance(pricing_geom, _MappingABC):
+    pricing_geom: Mapping[str, Any] | None = None
+    if isinstance(pricing, _MappingABC):
+        candidate_geom = pricing.get("geom")
+        if isinstance(candidate_geom, _MappingABC):
+            pricing_geom = candidate_geom
+        else:
+            candidate_geo = pricing.get("geo")
+            if isinstance(candidate_geo, _MappingABC):
+                pricing_geom = candidate_geo
+    if pricing_geom is None:
         pricing_geom = g if isinstance(g, _MappingABC) else {}
-    ml = str((pricing_geom or {}).get("material_lookup") or "").lower()
-
-    DENSITY_G_CC = {"aluminum": 2.70, "tool_steel": 7.85, "stainless": 7.90, "titanium": 4.5}
     mat_total_val = None
     if isinstance(material_stock_block, dict):
         mat_total_val = _coerce_float_or_none(
@@ -4327,33 +4309,8 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
             material["material_cost"] = mat_total
             if isinstance(material_stock_block, dict):
                 material_stock_block["total_material_cost"] = mat_total
-    if isinstance(mat_info, dict) and mat_total > 0:
-        mat_info["material_cost"] = float(mat_total)
-        if isinstance(material, dict):
-            for key in (
-                "mass_g",
-                "starting_mass_g_est",
-                "net_mass_g",
-                "scrap_mass_g",
-                "unit_price_usd_per_lb",
-                "source",
-            ):
-                if key in material:
-                    mat_info[key] = material[key]
     if isinstance(material, dict) and mat_total > 0:
         material["material_cost"] = float(mat_total)
-
-    if isinstance(pricing, dict):
-        directs = pricing.setdefault("direct_costs", {})
-        if not isinstance(directs, dict):
-            try:
-                directs = dict(directs or {})
-            except Exception:
-                directs = {}
-            pricing["direct_costs"] = directs
-        directs["material"] = float(mat_total)
-        if _coerce_float_or_none(pricing.get("total_direct_costs")) is None:
-            pricing["total_direct_costs"] = float(sum(directs.values()))
 
     def _lookup_blank(container: Mapping[str, Any] | None) -> Mapping[str, Any] | None:
         if not isinstance(container, _MappingABC):
@@ -5126,8 +5083,6 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
                     if T_disp_val is not None:
                         T_disp = f"{float(T_disp_val):.3f}"
                     stock_line = f"— × — × {T_disp} in"
-            if isinstance(mat_info, dict):
-                mat_info["stock_size_display"] = stock_line
             _push(lines, f"  Stock used: {stock_line}")
             if detail_lines:
                 append_lines(detail_lines)
@@ -7321,16 +7276,15 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
     if material_entries_have_label and material_display_amount <= 0.0:
         material_warning_needed = True
     direct_costs_map: dict[Any, Any]
-    if isinstance(pricing, dict):
-        direct_costs_map = pricing.setdefault("direct_costs", {})
-        if not isinstance(direct_costs_map, dict):
-            try:
-                direct_costs_map = dict(direct_costs_map or {})
-            except Exception:
-                direct_costs_map = {}
-            pricing["direct_costs"] = direct_costs_map
-    else:
+    direct_costs_source: Mapping[Any, Any] | None = None
+    if isinstance(pricing, _MappingABC):
+        candidate_directs = pricing.get("direct_costs")
+        if isinstance(candidate_directs, _MappingABC):
+            direct_costs_source = typing.cast(Mapping[Any, Any], candidate_directs)
+    if direct_costs_source is None:
         direct_costs_map = {}
+    else:
+        direct_costs_map = dict(direct_costs_source)
 
     def _assign_direct_value(raw_key: Any, amount: Any) -> None:
         try:
@@ -7523,9 +7477,6 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
         totals["labor$"] = round(labor_summary_total, 2)
         totals["machine$"] = round(machine_summary_total, 2)
         totals["directs$"] = round(directs_total_value, 2)
-
-    if isinstance(pricing, dict):
-        pricing["total_direct_costs"] = total_direct_costs_value
 
     if 0 <= pass_through_header_index < len(lines):
         header_text = f"Pass-Through & Direct Costs (Total: {fmt_money(directs_total_value, currency)})"
@@ -7770,8 +7721,6 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
             total_labor_row_index,
             _format_row(total_labor_label, ladder_labor),
         )
-    if isinstance(pricing, dict):
-        pricing["ladder_subtotal"] = ladder_subtotal
     if not roughly_equal(declared_subtotal, ladder_subtotal, eps=0.01):
         declared_subtotal = ladder_subtotal
     if isinstance(breakdown, dict):
