@@ -3277,7 +3277,6 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
             rates[key] = float(fallback_value)
     params       = breakdown.get("params", {}) or {}
     nre_cost_details = breakdown.get("nre_cost_details", {}) or {}
-    labor_cost_details_input_raw = breakdown.get("labor_cost_details", {}) or {}
     suppress_planner_details_due_to_drift = bool(
         breakdown.get("suppress_planner_details_due_to_drift")
     )
@@ -3400,40 +3399,6 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
         net_component = _coerce_float_or_none(material_cost_components.get("net_usd"))
         if net_component is not None:
             material_component_net = float(net_component)
-
-    def _merge_detail_text(existing: str | None, new_value: Any) -> str:
-        segments: list[str] = []
-        seen: set[str] = set()
-        for candidate in (existing, new_value):
-            if candidate is None:
-                continue
-            # Split on semicolons and trim whitespace
-            for segment in str(candidate).split(";"):
-                seg = segment.strip()
-                if not seg:
-                    continue
-                if EXTRA_DETAIL_RE.match(seg):
-                    continue
-                if seg not in seen:
-                    segments.append(seg)
-                    seen.add(seg)
-        if segments:
-            return "; ".join(segments)
-        if existing is None and new_value is None:
-            return ""
-        if new_value is None:
-            return existing or ""
-        return str(new_value)
-
-    labor_cost_details_input: dict[str, str] = {}
-    for raw_label, raw_detail in labor_cost_details_input_raw.items():
-        canonical_label, _ = _canonical_amortized_label(raw_label)
-        if not canonical_label:
-            canonical_label = str(raw_label)
-        merged = _merge_detail_text(labor_cost_details_input.get(canonical_label), raw_detail)
-        labor_cost_details_input[canonical_label] = merged
-
-    labor_cost_details: dict[str, str] = dict(labor_cost_details_input)
 
     labor_cost_totals_raw = breakdown.get("labor_costs", {}) or {}
     labor_cost_totals: dict[str, float] = {}
@@ -5594,8 +5559,6 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
     bucket_state = _build_planner_bucket_render_state(
         bucket_view_struct,
         label_overrides=label_overrides,
-        labor_cost_details=labor_cost_details,
-        labor_cost_details_input=labor_cost_details_input,
         process_costs_canon=process_costs_canon,
         rates=rates,
         removal_drilling_hours=removal_drilling_hours_precise,
