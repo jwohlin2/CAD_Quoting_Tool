@@ -149,86 +149,161 @@ def _insunits_to_inch_factor(doc) -> float:
 
 def _float_from_text(s: str) -> Optional[float]:
     try:
-        return float(s.strip().replace(",", ""))
+        return float(str(s).strip().replace(",", ""))
     except Exception:
         return None
 
 
 def _max_ordinate_xy(msp) -> Tuple[Optional[float], Optional[float]]:
     """
-    Try to read X/Y-ordinate values from DIMENSION entities.
-    Works without ezdxf.addons; if we can't confidently detect axis, we return (None, None)
-    so the caller will fall back to the AABB path.
+    Get max X and max Y from ORDinate DIMENSIONs.
+    Strategy:
+      - Identify ORDinate by bit 64 in dim.dxf.dimtype.
+      - Axis hint: many CADs store X/Y axis in dxf.azin (0=X, 1=Y). If missing, we guess by the leader vector.
+      - Value: prefer dim.dxf.text (if numeric), else dim.get_measurement(), else scan virtual_entities() for TEXT/MTEXT.
+    Returns (max_x, max_y) in drawing units, or (None, None) if not found.
     """
     max_x = None
     max_y = None
+
     for dim in msp.query("DIMENSION"):
-        # Ordinate test: bit 64 set in dimtype
         try:
-            dimtype = int(dim.dxf.dimtype)
+            dt = int(dim.dxf.dimtype)
         except Exception:
             continue
-        is_ordinate = bool(dimtype & 64)
-        if not is_ordinate:
+
+        # ORDinate bit is 64
+        if not (dt & 64):
             continue
 
-        # Try to get the displayed numeric value
-        val = None
+        # axis: 0 = X-ordinate, 1 = Y-ordinate (AM/AutoCAD stores this in AZIN sometimes)
+        axis = getattr(dim.dxf, "azin", None)  # may not exist
+
+        # value from explicit text?
         txt = (dim.dxf.text or "").strip()
+        val = None
         if txt and txt != "<>":
-            m = re.search(r'([-+]?\d+(?:\.\d+)?)', txt)
+            m = re.search(r"([-+]?\d+(?:\.\d+)?)", txt)
             if m:
-                try:
-                    val = float(m.group(1))
-                except Exception:
-                    val = None
+                val = _float_from_text(m.group(1))
+
+        # try measurement
         if val is None:
             try:
-                # some ezdxf versions support this for ordinate too
                 val = float(dim.get_measurement())
             except Exception:
-                pass
+                val = None
+
+        # last resort: look inside the rendered/virtual block
         if val is None:
-            # Last resort: scan virtual entities for TEXT/MTEXT showing the number
             try:
                 for e in dim.virtual_entities():
                     if e.dxftype() in ("TEXT", "MTEXT"):
                         s = e.dxf.text if e.dxftype() == "TEXT" else e.plain_text()
-                        m2 = re.search(r'([-+]?\d+(?:\.\d+)?)', s or "")
+                        m2 = re.search(r"([-+]?\d+(?:\.\d+)?)", s)
                         if m2:
-                            try:
-                                val = float(m2.group(1))
-                                break
-                            except Exception:
-                                pass
+                            val = _float_from_text(m2.group(1))
+                            break
             except Exception:
                 pass
+
         if val is None:
             continue
 
-        # Axis detection without addons: many drawings store 0=X,1=Y in AZIN (AM_ ordinate)
-        axis_flag = getattr(dim.dxf, "azin", None)  # 0 = X-ordinate, 1 = Y-ordinate (if present)
-        if axis_flag == 0:
+        # If axis unknown, try to infer: compare the absolute of extension vector components if available
+        if axis is None:
+            try:
+                # tip: many ORD dims use defpoint/defpoint2; the bigger delta usually indicates the axis
+                p1 = dim.dxf.defpoint
+                p2 = getattr(dim.dxf, "defpoint2", None)
+                if p2:
+                    dx, dy = abs(p2[0] - p1[0]), abs(p2[1] - p1[1])
+                    axis = 0 if dx >= dy else 1
+            except Exception:
+                axis = 0  # default to X if we can’t tell
+
+        if axis == 0:
             max_x = val if max_x is None else max(max_x, val)
-        elif axis_flag == 1:
-            max_y = val if max_y is None else max(max_y, val)
         else:
-            # Unknown axis -> give up gracefully; let AABB handle it
-            return None, None
+            max_y = val if max_y is None else max(max_y, val)
+
     return max_x, max_y
 
 
-def _aabb_size(
-    msp,
-    include: Optional[Iterable[str]] = None,
-    exclude: Optional[Iterable[str]] = None,
-) -> Tuple[Optional[float], Optional[float], Optional[float]]:
+def _max_linear_hw(msp) -> tuple[Optional[float], Optional[float]]:
     """
-    Compute AABB over likely 'part' geometry.
-    - Includes LINE, LWPOLYLINE, POLYLINE, ARC, CIRCLE, ELLIPSE, SPLINE, SOLID, TRACE, INSERT (expanded)
-    - Excludes DIMENSION, TEXT, MTEXT, TABLE, HATCH by default (can be tuned)
-    - Honors layer include/exclude filters if provided
+    Scan non-ordinate DIMENSIONs and return (max_horizontal, max_vertical) in drawing units.
+    Heuristics:
+      - Use dim.get_measurement() when available.
+      - Determine orientation by angle when possible; otherwise by extents of defpoints.
+      - Ignore obviously tiny notes (< 0.05 in) to avoid arrows and small callouts.
     """
+
+    max_h: Optional[float] = None
+    max_v: Optional[float] = None
+
+    for dim in msp.query("DIMENSION"):
+        try:
+            dt = int(dim.dxf.dimtype)
+        except Exception:
+            continue
+
+        # keep only LINEAR/ALIGNED; skip ORDINATE/ANGULAR/RADIUS/DIAMETER/etc.
+        base = dt & 7           # DXF base type: 0=linear(rotated), 1=aligned, 6=ordinate
+        if base not in (0, 1):
+            continue
+
+        val: Optional[float] = None
+        try:
+            val = float(dim.get_measurement())
+        except Exception:
+            pass
+
+        if val is None:
+            txt = (dim.dxf.text or "").strip()
+            if txt and txt != "<>":
+                m = re.search(r"([-+]?\d+(?:\.\d+)?)", txt)
+                if m:
+                    try:
+                        val = float(m.group(1))
+                    except Exception:
+                        pass
+
+        if val is None or val < 0.05:
+            continue
+
+        angle = getattr(dim.dxf, "angle", None)
+        orient: Optional[str] = None  # 'H' or 'V'
+
+        if angle is not None:
+            try:
+                a = abs(float(angle)) % 180.0
+                orient = "H" if a <= 45 or a >= 135 else "V"
+            except Exception:
+                orient = None
+        else:
+            try:
+                p1 = dim.dxf.defpoint
+                p2 = getattr(dim.dxf, "defpoint2", None)
+                if p2:
+                    dx = abs(p2[0] - p1[0])
+                    dy = abs(p2[1] - p1[1])
+                    orient = "H" if dx >= dy else "V"
+            except Exception:
+                orient = None
+
+        if orient == "H":
+            max_h = val if max_h is None else max(max_h, val)
+        elif orient == "V":
+            max_v = val if max_v is None else max(max_v, val)
+        else:
+            max_h = val if max_h is None else max(max_h, val)
+            max_v = val if max_v is None else max(max_v, val)
+
+    return max_h, max_v
+
+
+def _aabb_size(msp, include=None, exclude=None):
     from ezdxf.math import BoundingBox
 
     geom_types = {
@@ -245,55 +320,48 @@ def _aabb_size(
     }
     anno_types = {"DIMENSION", "TEXT", "MTEXT", "TABLE", "HATCH"}
 
-    bbox = BoundingBox()
-
-    def _layer_ok(ent) -> bool:
+    def layer_ok(ent) -> bool:
         layer = (ent.dxf.layer or "").upper()
         if include:
-            if all(layer.upper() != pat.upper() for pat in include):
+            if layer.upper() not in {s.upper() for s in include}:
                 return False
-        if exclude:
-            if any(layer.upper() == pat.upper() for pat in exclude):
-                return False
-        # heuristic: skip common annotation layers if not explicitly included
+        if exclude and layer.upper() in {s.upper() for s in exclude}:
+            return False
+        # heuristic: skip common annotation layers unless explicitly included
         if not include and layer.startswith(("AM_", "DEFPOINTS", "DIM", "ANNOT", "TITLE", "BORDER", "FRAME")):
             return False
         return True
 
-    # 1) add entities
+    bb = BoundingBox()
     for e in msp:
         kind = e.dxftype()
-        if kind in anno_types:
+        if kind in anno_types or kind not in geom_types:
             continue
-        if kind not in geom_types:
-            continue
-        if not _layer_ok(e):
+        if not layer_ok(e):
             continue
         try:
             if kind == "INSERT":
-                # expand block references
                 for ve in e.virtual_entities():
-                    if _layer_ok(ve):
-                        bbox.extend(ve.bbox())  # ezdxf ≥ 1.0
+                    if layer_ok(ve):
+                        bb.extend(ve.bbox())
             else:
-                bbox.extend(e.bbox())
+                bb.extend(e.bbox())
         except Exception:
-            # last resort: accumulate explicit vertex points if available
             try:
-                bbox.extend(list(e.vertices()))
+                bb.extend(list(e.vertices()))
             except Exception:
                 pass
 
-    if not bbox.has_data:
+    if not bb.has_data:
         return None, None, None
 
-    (xmin, ymin, zmin), (xmax, ymax, zmax) = bbox.extmin, bbox.extmax
-    dx, dy, dz = (xmax - xmin), (ymax - ymin), (zmax - zmin)
-    # guard against garbage zeros
-    dx = dx if dx > 1e-6 else None
-    dy = dy if dy > 1e-6 else None
-    dz = dz if dz > 1e-6 else None
-    return dx, dy, dz
+    (xmin, ymin, zmin), (xmax, ymax, zmax) = bb.extmin, bb.extmax
+    dx, dy, dz = xmax - xmin, ymax - ymin, zmax - zmin
+    return (
+        dx if dx > 1e-6 else None,
+        dy if dy > 1e-6 else None,
+        dz if dz > 1e-6 else None,
+    )
 
 
 def infer_part_dims(
@@ -322,23 +390,51 @@ def infer_part_dims(
         ox, oy = _max_ordinate_xy(msp)
     except Exception as e:
         print(f"[part-dims] ordinate read failed: {e}")
-    L: Optional[float] = None
-    W: Optional[float] = None
+    lh = lv = None
+    try:
+        lh, lv = _max_linear_hw(msp)
+    except Exception as e:
+        print(f"[part-dims] linear read failed: {e}")
+    dx = dy = dz = None
+    try:
+        dx, dy, dz = _aabb_size(msp, include=layer_include, exclude=layer_exclude)
+    except Exception as e:
+        print(f"[part-dims] aabb read failed: {e}")
+
     source: Optional[str] = None
 
-    if ox is not None and oy is not None:
-        L, W = sorted([ox * f, oy * f], reverse=True)
-        source = "dimensions"
-        print(f"[part-dims] using ordinate dimensions: L={L:.4f} in, W={W:.4f} in")
+    def _clip(vals, ref):
+        if ref is None:
+            return [v for v in vals if v is not None]
+        limit = 1.5 * ref
+        return [v for v in vals if (v is not None and v <= limit)]
 
-    dx = dy = dz = None
+    cand_w_all = [ox, lh, dx]
+    cand_h_all = [oy, lv, dy]
 
-    if L is None or W is None:
-        dx, dy, dz = _aabb_size(msp, include=layer_include, exclude=layer_exclude)
-        if dx and dy:
-            L, W = sorted([dx * f, dy * f], reverse=True)
-            source = source or "aabb"
-            print(f"[part-dims] using AABB dimensions: L={L:.4f} in, W={W:.4f} in")
+    cand_w = _clip(cand_w_all, dx)
+    cand_h = _clip(cand_h_all, dy)
+
+    width_units = max(cand_w) if cand_w else None
+    height_units = max(cand_h) if cand_h else None
+
+    L: Optional[float] = None
+    W: Optional[float] = None
+
+    if width_units is not None and height_units is not None:
+        width_in = width_units * f
+        height_in = height_units * f
+        L, W = (height_in, width_in) if height_in >= width_in else (width_in, height_in)
+        parts = [
+            ("ord", (ox is not None or oy is not None)),
+            ("lin", (lh is not None or lv is not None)),
+            ("aabb", (dx is not None or dy is not None)),
+        ]
+        source = "+".join(s for s, ok in parts if ok) or None
+        src_label = source or "unknown"
+        print(f"[part-dims] fused dimensions: L={L:.4f} in, W={W:.4f} in from {src_label}")
+    else:
+        L = W = None
 
     # thickness after text parse (with strict keywords)
     T: Optional[float] = None

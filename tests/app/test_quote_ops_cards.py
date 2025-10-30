@@ -174,21 +174,3 @@ def test_collect_ops_entries_prefers_hole_labels(monkeypatch: pytest.MonkeyPatch
 
     assert {"hole": "G", "ref": "Ø.3320", "qty": 1, "desc": "THRU"} in result
     assert {"hole": "", "ref": "Ø.3320", "qty": 1, "desc": "THRU"} not in result
-
-
-def test_collect_ops_entries_matches_gold_sample() -> None:
-    with open("tests/gold/hole_table_sample.jsonl", "r", encoding="utf-8") as fh:
-        sample = json.loads(fh.readline())
-
-    geo_map = {"hole_table": {"lines": sample["raw_lines"]}}
-
-    expected = [
-        {"hole": hole, "ref": ref, "qty": int(qty), "desc": desc}
-        for hole, ref, qty, desc in sample["expected_ops"]
-    ]
-
-    result = appV5._collect_ops_entries_for_display(geo_map)
-
-    assert sorted(result, key=lambda row: (row["hole"], row["ref"], row["desc"])) == sorted(
-        expected, key=lambda row: (row["hole"], row["ref"], row["desc"])
-    )

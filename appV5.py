@@ -547,34 +547,6 @@ def _collect_ops_entries_for_display(
         _extend(fallback_rows)
 
     text_rows: list[str] = []
-
-    def _extend_text_rows(candidate: Iterable[Any] | str | None) -> None:
-        if not candidate:
-            return
-        if isinstance(candidate, str):
-            sequence: Iterable[Any] = candidate.splitlines() or [candidate]
-        else:
-            sequence = candidate
-        for item in sequence:
-            if item is None:
-                continue
-            if isinstance(item, str):
-                text = item.strip()
-                if text:
-                    text_rows.append(text)
-                continue
-            if isinstance(item, _MappingABC):
-                for key in ("text", "TEXT", "string", "STRING", "value", "raw"):
-                    maybe_text = item.get(key)
-                    if isinstance(maybe_text, str):
-                        text = maybe_text.strip()
-                        if text:
-                            text_rows.append(text)
-                        break
-                continue
-            if isinstance(item, Sequence) and not isinstance(item, (str, bytes, bytearray)):
-                _extend_text_rows(item)
-
     if isinstance(geo_map, _MappingABC):
         hole_table_payload = geo_map.get("hole_table")
         if isinstance(hole_table_payload, _MappingABC):
