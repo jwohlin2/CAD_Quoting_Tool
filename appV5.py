@@ -2879,6 +2879,7 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
         state_payload = result.get("quote_state")
 
     quote_state_obj: QuoteState | None = None
+    state_overrides: Mapping[str, Any] | None = None
     if isinstance(state_payload, QuoteState):
         quote_state_obj = state_payload
     elif isinstance(state_payload, _MappingABC):
@@ -2886,29 +2887,10 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
             quote_state_obj = QuoteState.from_dict(typing.cast(Mapping[str, Any], state_payload))
         except Exception:
             quote_state_obj = None
-
     if quote_state_obj is not None:
-        reprice_with_effective(quote_state_obj)
-        effective_snapshot = dict(getattr(quote_state_obj, "effective", {}) or {})
-        effective_sources_snapshot = dict(
-            getattr(quote_state_obj, "effective_sources", {}) or {}
-        )
-
-        decision_state_obj = (
-            result.get("decision_state") if isinstance(result, _MappingABC) else None
-        )
-        if isinstance(decision_state_obj, _MutableMappingABC):
-            decision_state_obj["effective"] = effective_snapshot
-            decision_state_obj["effective_sources"] = effective_sources_snapshot
-        elif isinstance(decision_state_obj, _MappingABC):
-            decision_state_copy: dict[str, Any] = dict(decision_state_obj)
-            decision_state_copy["effective"] = effective_snapshot
-            decision_state_copy["effective_sources"] = effective_sources_snapshot
-            if isinstance(result, _MutableMappingABC):
-                result["decision_state"] = decision_state_copy
-
-        if isinstance(result, _MutableMappingABC):
-            result["quote_state"] = quote_state_obj.to_dict()
+        overrides_candidate = getattr(quote_state_obj, "user_overrides", None)
+        if isinstance(overrides_candidate, _MappingABC):
+            state_overrides = overrides_candidate
 
     # Force drill debug output to render by enabling the LLM debug flag for this run.
     app_meta_container = result.get("app_meta")
@@ -3008,6 +2990,8 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
             if isinstance(candidate, _MappingABC):
                 material_overrides = candidate
                 break
+    if material_overrides is None and isinstance(state_overrides, _MappingABC):
+        material_overrides = state_overrides
 
     baseline: Mapping[str, Any] = {}
     decision_state = result.get("decision_state") if isinstance(result, _MappingABC) else None
@@ -3021,6 +3005,10 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
             baseline = baseline_candidate
     if not baseline and isinstance(breakdown, _MappingABC):
         baseline_candidate = breakdown.get("baseline")
+        if isinstance(baseline_candidate, _MappingABC):
+            baseline = baseline_candidate
+    if not baseline and quote_state_obj is not None:
+        baseline_candidate = getattr(quote_state_obj, "baseline", None)
         if isinstance(baseline_candidate, _MappingABC):
             baseline = baseline_candidate
 

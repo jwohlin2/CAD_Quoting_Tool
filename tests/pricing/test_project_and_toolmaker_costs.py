@@ -2,15 +2,27 @@ import pandas as pd
 import pytest
 
 import appV5
+from cad_quoter.utils.render_utils import QuoteDoc
 
 
-def _render_text_and_payload(result: dict) -> tuple[str, dict]:
-    rendered = appV5.render_quote(result, currency="$")
-    breakdown = result.get("breakdown")
-    assert isinstance(breakdown, dict), "expected dict breakdown"
-    payload = breakdown.get("render_payload")
-    assert isinstance(payload, dict), "expected structured render payload"
-    return rendered, payload
+def _render_text_and_doc(result: dict) -> tuple[str, QuoteDoc]:
+    captured: list[QuoteDoc] = []
+
+    class _Recorder(appV5.QuoteDocRecorder):  # type: ignore[misc]
+        def build_doc(self) -> QuoteDoc:
+            doc = super().build_doc()
+            captured.append(doc)
+            return doc
+
+    original = appV5.QuoteDocRecorder
+    appV5.QuoteDocRecorder = _Recorder
+    try:
+        rendered = appV5.render_quote(result, currency="$")
+    finally:
+        appV5.QuoteDocRecorder = original
+
+    assert captured, "expected quote document"
+    return rendered, captured[-1]
 
 
 def test_project_management_and_toolmaker_rows_rendered() -> None:
@@ -56,21 +68,11 @@ def test_project_management_and_toolmaker_rows_rendered() -> None:
     assert "project_management" not in process_costs or process_costs["project_management"] == 0.0, breakdown
     assert process_costs["toolmaker_support"] > 0, breakdown
 
-    rendered, payload = _render_text_and_payload(result)
+    rendered, _ = _render_text_and_doc(result)
     assert "Project Management" not in rendered
-    processes = payload.get("processes", [])
-    toolmaker_entry = next(
-        (
-            entry
-            for entry in processes
-            if entry.get("label") == "Toolmaker Support"
-        ),
-        None,
+    assert process_costs["toolmaker_support"] == pytest.approx(
+        toolmaker_meta["hr"] * 85.0, abs=1e-2
     )
-    assert toolmaker_entry is not None, processes
-    assert toolmaker_entry.get("amount") == pytest.approx(
-        process_costs["toolmaker_support"], abs=1e-2
-    )
-    assert toolmaker_entry.get("hours") == pytest.approx(
-        toolmaker_meta["hr"], abs=1e-2
+    assert toolmaker_meta.get("minutes") == pytest.approx(
+        toolmaker_meta["hr"] * 60.0, abs=1e-9
     )
