@@ -39,13 +39,17 @@ import math
 import os
 import re
 from pathlib import Path
-import shutil
-import subprocess
+import shutil, subprocess
 import sys
 import tempfile
 import unicodedata
 from dataclasses import dataclass
 from typing import List, Tuple, Optional, Dict, Any
+
+import matplotlib
+
+matplotlib.use("Agg")  # headless
+import matplotlib.pyplot as plt
 
 # Optional imports
 try:
@@ -273,134 +277,120 @@ def _which_oda(oda_exe_cli: Optional[str] = None) -> Optional[str]:
     return None
 
 
-def _run_oda_convert(
-    oda_exe: str,
-    in_path: str,
-    out_dir: str,
-    out_format: str = "PDF",
-    in_ver: str = "ACAD2018",
-    out_ver: str = "ACAD2018",
-    audit: int = 0,
-    recover: int = 0,
-) -> str:
-    """
-    Call ODA File Converter. ODA expects *directories* for in/out.
-    We put the single DWG/DXF into a temp input dir, run the converter,
-    and return the resulting file path (PDF/TIFF/PNG).
-    """
+def _run_oda_to_dxf(oda_exe: str, in_path: str, out_dir: str,
+                    out_ver: str = "ACAD2018",
+                    recurse: int = 0,
+                    audit: int = 0) -> str:
     if not os.path.exists(oda_exe):
         raise FileNotFoundError(f"ODA File Converter not found: {oda_exe}")
 
-    # Prepare temp input dir containing our single file
     tmp_in = os.path.join(out_dir, "_oda_in")
     os.makedirs(tmp_in, exist_ok=True)
     base = os.path.basename(in_path)
     src = os.path.join(tmp_in, base)
     shutil.copy2(in_path, src)
 
-    # Output directory (ODA writes converted files here)
     tmp_out = os.path.join(out_dir, "_oda_out")
     os.makedirs(tmp_out, exist_ok=True)
-
-    # Build command:
-    # ODAFileConverter <in_dir> <out_dir> <in_ver> <out_ver> <audit> <recover> <filter> <out_type>
-    filter_pattern = "*.dwg" if in_path.lower().endswith(".dwg") else "*.dxf"
-    out_type = out_format.upper()  # e.g., PDF, TIFF, PNG, BMP, JPG
 
     cmd = [
         oda_exe,
         tmp_in,
         tmp_out,
-        in_ver,
-        out_ver,
+        out_ver,          # Output_version (e.g., ACAD2018)
+        "DXF",            # Output File type (DWG|DXF|DXB) -- images NOT supported here
+        str(int(bool(recurse))),
         str(int(bool(audit))),
-        str(int(bool(recover))),
-        filter_pattern,
-        out_type,
+        base,             # filter: render this file only
     ]
+    subprocess.run(cmd, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
 
-    # Run
+    name_wo, _ = os.path.splitext(base)
+    out_dxf = os.path.join(tmp_out, name_wo + ".dxf")
+    if not os.path.exists(out_dxf):
+        # Fallback: find any DXF with same base
+        cands = [os.path.join(tmp_out, f) for f in os.listdir(tmp_out)
+                 if f.lower().startswith(name_wo.lower()) and f.lower().endswith(".dxf")]
+        if not cands:
+            raise RuntimeError("ODA conversion produced no DXF.")
+        out_dxf = cands[0]
+    return out_dxf
+
+
+# ---------- DXF -> PNG/TIFF rendering via ezdxf ----------
+
+def _render_dxf_to_image(dxf_path: str, out_path: str, dpi: int = 300) -> str:
+    """
+    Render a DXF modelspace to a raster image (PNG/TIFF) using ezdxf's drawing add-on.
+    Returns the path to the written image.
+    """
     try:
-        subprocess.run(cmd, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-    except subprocess.CalledProcessError as e:
-        raise RuntimeError(f"ODA conversion failed: {e.stderr.decode(errors='ignore') or e.stdout.decode(errors='ignore')}")
+        import ezdxf
+        from ezdxf.addons.drawing import RenderContext, Frontend
+        from ezdxf.addons.drawing.matplotlib import MatplotlibBackend
+    except Exception as e:
+        raise RuntimeError("ezdxf (and its drawing add-on) + matplotlib are required. pip install ezdxf matplotlib") from e
 
-    # Find produced file
-    name_wo_ext, _ = os.path.splitext(base)
-    # ODA often appends extension based on chosen out_format
-    candidates = []
-    if out_format.upper() == "PDF":
-        candidates.append(os.path.join(tmp_out, name_wo_ext + ".pdf"))
-    elif out_format.upper() in ("TIFF", "TIF"):
-        # Could be multi-page: name_wo_ext.tif or name_wo_ext_1.tif, etc.
-        for fname in os.listdir(tmp_out):
-            if fname.lower().startswith(name_wo_ext.lower()) and fname.lower().endswith((".tif", ".tiff")):
-                candidates.append(os.path.join(tmp_out, fname))
-    elif out_format.upper() in ("PNG", "BMP", "JPG", "JPEG"):
-        for fname in os.listdir(tmp_out):
-            if fname.lower().startswith(name_wo_ext.lower()) and fname.lower().endswith(("."+out_format.lower(),)):
-                candidates.append(os.path.join(tmp_out, fname))
-    else:
-        # Default: scan for anything with our base name
-        for fname in os.listdir(tmp_out):
-            if fname.lower().startswith(name_wo_ext.lower()):
-                candidates.append(os.path.join(tmp_out, fname))
+    doc = ezdxf.readfile(dxf_path)
+    msp = doc.modelspace()
 
-    if not candidates:
-        # Fallback: pick the first file in out dir
-        outs = [os.path.join(tmp_out, f) for f in os.listdir(tmp_out)]
-        if not outs:
-            raise RuntimeError("ODA conversion produced no files.")
-        candidates = outs
+    # Create a borderless figure
+    fig = plt.figure(figsize=(8, 8), dpi=dpi)
+    ax = fig.add_axes([0, 0, 1, 1])
+    ctx = RenderContext(doc)
+    backend = MatplotlibBackend(ax)
+    Frontend(ctx, backend).draw_layout(msp, finalize=True)
 
-    # Return first candidate (PDF preferred if multiple)
-    candidates.sort()
-    return candidates[0]
+    # Fit the drawing nicely
+    ax.autoscale(True)
+    ax.set_aspect("equal")
+    ax.axis("off")
+
+    fig.savefig(out_path, dpi=dpi, bbox_inches="tight", pad_inches=0)
+    plt.close(fig)
+    return out_path
 
 
 def _get_text_from_input(path: str,
                          oda_exe_cli: Optional[str] = None,
                          oda_format: str = "PDF") -> Tuple[str, List[str]]:
-    """
-    Returns (text, warnings). If input is DWG/DXF, uses ODA File Converter to render to
-    PDF or image first, then OCRs the result. For PDF/image inputs, OCRs directly.
-    """
+    """Return OCR text + warnings for CAD/PDF/image inputs."""
     warnings: List[str] = []
     if not os.path.exists(path):
         raise FileNotFoundError(path)
     ext = os.path.splitext(path)[1].lower()
-    texts: List[str] = []
 
-    # DWG/DXF: render via ODA to PDF/TIFF/PNG, then OCR that artifact
-    if ext in (".dwg", ".dxf"):
+    # DWG: DWG -> DXF (ODA) -> PNG -> OCR
+    if ext == ".dwg":
         oda_exe = _which_oda(oda_exe_cli)
         if not oda_exe:
             raise RuntimeError(
                 "ODA File Converter not found.\n"
                 "Provide --oda-exe path, or set ODA_CONVERTER_EXE env var, "
-                "or add OdaFileConverter.exe to your PATH."
+                "or add OdaFileConverter.exe to PATH."
             )
-        with tempfile.TemporaryDirectory(prefix="oda_ocr_") as tmpdir:
-            out_path = _run_oda_convert(oda_exe, path, tmpdir, out_format=oda_format)
-            out_ext = os.path.splitext(out_path)[1].lower()
-            if out_ext == ".pdf":
-                if convert_from_path is None:
-                    raise RuntimeError("pdf2image not available to render ODA PDF.")
-                pages = convert_from_path(out_path, dpi=300)
-                if not pages:
-                    warnings.append("No pages rendered from ODA PDF.")
-                for p in pages:
-                    img = _preprocess_image(p) if Image else p
-                    txt = _ocr_image(img)
-                    texts.append(txt)
-            else:
-                # Single raster (TIFF/PNG/BMP/JPG)
-                if Image is None:
-                    raise RuntimeError("Pillow not installed to load ODA-rendered image.")
-                img = Image.open(out_path)
-                img = _preprocess_image(img)
-                texts.append(_ocr_image(img))
-        return ("\n".join(texts), warnings)
+        if Image is None or pytesseract is None:
+            raise RuntimeError("Pillow + pytesseract required for OCR.")
+        with tempfile.TemporaryDirectory(prefix="oda_img_") as tmpdir:
+            dxf_out = _run_oda_to_dxf(oda_exe, path, tmpdir, out_ver="ACAD2018")
+            img_path = os.path.join(tmpdir, "page.png")
+            _render_dxf_to_image(dxf_out, img_path, dpi=300)
+            img = Image.open(img_path)
+            img = _preprocess_image(img)
+            txt = _ocr_image(img)
+            return (txt, warnings)
+
+    # DXF: DXF -> PNG -> OCR (same renderer)
+    if ext == ".dxf":
+        if Image is None or pytesseract is None:
+            raise RuntimeError("Pillow + pytesseract required for OCR.")
+        with tempfile.TemporaryDirectory(prefix="dxf_img_") as tmpdir:
+            img_path = os.path.join(tmpdir, "page.png")
+            _render_dxf_to_image(path, img_path, dpi=300)
+            img = Image.open(img_path)
+            img = _preprocess_image(img)
+            txt = _ocr_image(img)
+            return (txt, warnings)
 
     # Native PDF
     if ext == ".pdf":
@@ -409,6 +399,7 @@ def _get_text_from_input(path: str,
         pages = _render_pdf_to_images(path)
         if not pages:
             warnings.append("No pages rendered from PDF.")
+        texts: List[str] = []
         for p in pages:
             img = _preprocess_image(p) if Image else p
             txt = _ocr_image(img)
@@ -420,8 +411,8 @@ def _get_text_from_input(path: str,
         raise RuntimeError("Pillow not installed to load images.")
     img = Image.open(path)
     img = _preprocess_image(img)
-    texts.append(_ocr_image(img))
-    return ("\n".join(texts), warnings)
+    txt = _ocr_image(img)
+    return (txt, warnings)
 
 # ---------- Regex candidates ----------
 
