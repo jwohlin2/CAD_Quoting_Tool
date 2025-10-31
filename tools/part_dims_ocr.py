@@ -75,6 +75,124 @@ except Exception:
 
 # ---------------------------------------------------------------------------
 
+HOLE_TABLE_HDRS = ("HOLE TABLE", "LIST OF COORDINATES", "DESCRIPTION")
+
+
+def _strip_tables(text: str) -> str:
+    out = text
+    for hdr in HOLE_TABLE_HDRS:
+        pat = rf"(?:^|\n)[ \t]*{re.escape(hdr)}.*?(?=\n\s*\n|$\Z)"
+        out = re.sub(pat, "", out, flags=re.IGNORECASE | re.DOTALL)
+    return out
+
+
+def _remove_fastener_numbers(text: str) -> str:
+    t = re.sub(r"(?<=#)\d{1,2}-\d{2}", " ", text)
+    t = re.sub(r"\b\d{1,2}-\d{2}\b", " ", t)
+    t = re.sub(r"\b[1-9]/\d{1,2}\b", " ", t)
+    return t
+
+
+_num_pat = re.compile(r"(?<![#/\-])\b\d+(?:\.\d+)?\b")
+
+
+def _extract_numeric_tokens(text: str):
+    return [float(m.group(0)) for m in _num_pat.finditer(text)]
+
+
+def _has_decimal(x: float) -> bool:
+    s = f"{x}"
+    return "." in s and len(s.split(".")[1]) >= 1
+
+
+def _likely_thickness(x: float) -> bool:
+    return 0.05 <= x <= 6.0
+
+
+def _prefer_plate_thickness(vals):
+    def t_key(v):
+        frac = str(v).split(".")[1] if "." in str(v) else ""
+        dec_score = -len(frac)
+        half_score = -abs((v * 10000) % 50)
+        return (dec_score, half_score, v)
+
+    return max(vals, key=t_key)
+
+
+def _plausible(L, W, T):
+    if T is None or L is None or W is None:
+        return False
+    if T <= 0 or L <= 0 or W <= 0:
+        return False
+    if not _likely_thickness(T):
+        return False
+    if min(L, W) <= T * 3.0:
+        return False
+    return True
+
+
+def _safe_float(val) -> Optional[float]:
+    try:
+        return float(val)
+    except (TypeError, ValueError):
+        return None
+
+
+def _gate_vlm_dims(data: Dict[str, Any], clean_text: str, text_nums: List[float]) -> Tuple[Optional[float], Optional[float], Optional[float], str, str, Dict[str, Any]]:
+    units_raw = data.get("units", "in")
+    try:
+        units = str(units_raw or "in").strip() or "in"
+    except Exception:
+        units = "in"
+
+    json_L = _safe_float(data.get("length"))
+    json_W = _safe_float(data.get("width"))
+    json_T = _safe_float(data.get("thickness"))
+
+    json_ok = _plausible(json_L, json_W, json_T)
+
+    L2 = W2 = T2 = None
+    if text_nums:
+        t_candidates = [x for x in text_nums if _likely_thickness(x)]
+        if t_candidates:
+            T2 = _prefer_plate_thickness(t_candidates)
+
+        floor = max(1.0, (T2 or 0) * 3.0)
+        pool_dec = sorted([x for x in text_nums if x >= floor and _has_decimal(x)], reverse=True)
+        pool_any = sorted([x for x in text_nums if x >= floor], reverse=True)
+        pool = pool_dec or pool_any
+        if len(pool) >= 2:
+            L2, W2 = pool[0], pool[1]
+
+    text_ok = _plausible(L2, W2, T2)
+
+    def _value_in_text(val: Optional[float]) -> bool:
+        if val is None:
+            return False
+        if any(abs(val - t) < 1e-6 for t in text_nums):
+            return True
+        return f"{val}" in clean_text
+
+    json_in_text = all(_value_in_text(v) for v in (json_L, json_W, json_T))
+
+    if (not json_ok or not json_in_text) and text_ok:
+        L, W, T = L2, W2, T2
+        source = "text_override"
+    else:
+        L, W, T = json_L, json_W, json_T
+        source = "vlm_json"
+
+    if L is not None and W is not None and L < W:
+        L, W = W, L
+
+    debug_block = {
+        "json_candidate": {"L": json_L, "W": json_W, "T": json_T},
+        "text_candidates_sample": sorted(list({float(x) for x in text_nums}))[:50],
+        "decision_source": source,
+    }
+
+    return L, W, T, units, source, debug_block
+
 
 def _file_fingerprint(path: str) -> str:
     p = pathlib.Path(path)
@@ -288,24 +406,60 @@ def _vlm_local_process_render(img_path: str,
 
         _emit_rendered_image(emit_image, full_img)
 
+        full_text = _vlm_local_transcribe_image(llm, img_path)
+        if verbose and full_text:
+            preview = _norm(full_text)[:200]
+            print("[dims-ocr] VLM transcription preview ->", preview)
+        _emit_ocr_text(emit_ocr, full_text, source_input)
+
+        raw_text = full_text or ""
+        clean_text = _remove_fastener_numbers(_strip_tables(raw_text))
+        text_nums = _extract_numeric_tokens(clean_text)
+
         data = _qwen_extract_block_dims_no_crops(llm, full_img)
         if data:
-            text = f"SIZE: {data['length']} x {data['width']} x {data['thickness']} {data['units']}"
+            L, W, T, units, source, debug_block = _gate_vlm_dims(data, clean_text, text_nums)
+
+            if L is not None:
+                data["length"] = float(L)
+            if W is not None:
+                data["width"] = float(W)
+            if T is not None:
+                data["thickness"] = float(T)
+            data["units"] = units
+            data["source"] = source
+            data["debug"] = debug_block
+
+            length_val = data.get("length")
+            width_val = data.get("width")
+            thickness_val = data.get("thickness")
+            if length_val is not None and width_val is not None and thickness_val is not None:
+                text_line = f"SIZE: {length_val} x {width_val} x {thickness_val} {units}"
+            else:
+                text_line = _json_dims_to_synthetic_line(data) or ""
+
             if verbose:
-                print("[dims-ocr] VLM JSON ->", text)
-            try:
-                payload = json.dumps(data)
-            except Exception:
-                payload = text
-            _emit_ocr_text(emit_ocr, payload, source_input)
-            return text, warnings
+                print("[dims-ocr] VLM JSON ->", text_line, f"[{source}]")
+
+            if emit_ocr:
+                try:
+                    json_blob = json.dumps(data, indent=2)
+                except Exception:
+                    json_blob = json.dumps(data, default=str)
+                combined = (full_text or "").rstrip()
+                if combined:
+                    combined = f"{combined}\n\n[vlm_json]\n{json_blob}"
+                else:
+                    combined = json_blob
+                _emit_ocr_text(emit_ocr, combined, source_input)
+
+            return text_line, warnings
 
         warnings.append("VLM extraction failed; falling back to transcription.")
-        txt = _vlm_local_transcribe_image(llm, img_path)
-        if verbose:
-            print("[dims-ocr] VLM transcription fallback ->", txt[:200])
-        _emit_ocr_text(emit_ocr, txt, source_input)
-        return txt, warnings
+        if not full_text:
+            full_text = _vlm_local_transcribe_image(llm, img_path)
+        _emit_ocr_text(emit_ocr, full_text, source_input)
+        return full_text, warnings
     finally:
         try:
             del llm
@@ -858,15 +1012,49 @@ def _perform_ocr_on_image_path(
     if backend == "vlm_local":
         llm = _load_qwen_local(vlm_local_model, vlm_local_mmproj)
         try:
+            full_text = _vlm_local_transcribe_image(llm, img_path) or ""
             if vlm_mode == "extract":
+                raw_text = full_text
+                clean_text = _remove_fastener_numbers(_strip_tables(raw_text))
+                text_nums = _extract_numeric_tokens(clean_text)
                 data = _vlm_local_extract_dims(llm, img_path)
                 if data:
-                    synthetic = _json_dims_to_synthetic_line(data)
-                    if synthetic:
-                        return _norm(synthetic)
+                    L, W, T, units, source, debug_block = _gate_vlm_dims(data, clean_text, text_nums)
+                    if L is not None:
+                        data["length"] = float(L)
+                    if W is not None:
+                        data["width"] = float(W)
+                    if T is not None:
+                        data["thickness"] = float(T)
+                    data["units"] = units
+                    data["source"] = source
+                    data["debug"] = debug_block
+
+                    length_val = data.get("length")
+                    width_val = data.get("width")
+                    thickness_val = data.get("thickness")
+                    if length_val is not None and width_val is not None and thickness_val is not None:
+                        text_line = f"SIZE: {length_val} x {width_val} x {thickness_val} {units}"
+                    else:
+                        text_line = _json_dims_to_synthetic_line(data) or ""
+
+                    try:
+                        json_blob = json.dumps(data, indent=2)
+                    except Exception:
+                        json_blob = json.dumps(data, default=str)
+
+                    sections: List[str] = []
+                    if full_text.strip():
+                        sections.append(full_text)
+                    if text_line:
+                        sections.append(text_line)
+                    if json_blob:
+                        sections.append("[vlm_json]")
+                        sections.append(json_blob)
+                    combined_text = "\n\n".join(section for section in sections if section)
+                    return combined_text or text_line or full_text
                 warnings.append("vlm_local extract failed; falling back to transcription.")
-            text = _vlm_local_transcribe_image(llm, img_path)
-            return _norm(text)
+            return full_text
         finally:
             try:
                 del llm
@@ -876,14 +1064,50 @@ def _perform_ocr_on_image_path(
         if not vlm_endpoint:
             raise RuntimeError("Provide --vlm-endpoint for vlm backend.")
         if vlm_mode == "extract":
+            full_text = _vlm_remote_transcribe_image(vlm_endpoint, vlm_model, img_path) or ""
+            raw_text = full_text
+            clean_text = _remove_fastener_numbers(_strip_tables(raw_text))
+            text_nums = _extract_numeric_tokens(clean_text)
             data = _vlm_remote_extract_dims(vlm_endpoint, vlm_model, img_path)
             if data:
-                synthetic = _json_dims_to_synthetic_line(data)
-                if synthetic:
-                    return _norm(synthetic)
+                L, W, T, units, source, debug_block = _gate_vlm_dims(data, clean_text, text_nums)
+                if L is not None:
+                    data["length"] = float(L)
+                if W is not None:
+                    data["width"] = float(W)
+                if T is not None:
+                    data["thickness"] = float(T)
+                data["units"] = units
+                data["source"] = source
+                data["debug"] = debug_block
+
+                length_val = data.get("length")
+                width_val = data.get("width")
+                thickness_val = data.get("thickness")
+                if length_val is not None and width_val is not None and thickness_val is not None:
+                    text_line = f"SIZE: {length_val} x {width_val} x {thickness_val} {units}"
+                else:
+                    text_line = _json_dims_to_synthetic_line(data) or ""
+
+                try:
+                    json_blob = json.dumps(data, indent=2)
+                except Exception:
+                    json_blob = json.dumps(data, default=str)
+
+                sections: List[str] = []
+                if full_text.strip():
+                    sections.append(full_text)
+                if text_line:
+                    sections.append(text_line)
+                if json_blob:
+                    sections.append("[vlm_json]")
+                    sections.append(json_blob)
+                combined_text = "\n\n".join(section for section in sections if section)
+                return combined_text or text_line or full_text
             warnings.append("vlm extract failed; falling back to transcription.")
+            return full_text
         text = _vlm_remote_transcribe_image(vlm_endpoint, vlm_model, img_path)
-        return _norm(text)
+        return text
 
     if Image is None or pytesseract is None:
         raise RuntimeError("Pillow + pytesseract required for OCR.")
