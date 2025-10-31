@@ -120,14 +120,10 @@ def _prefer_plate_thickness(vals):
 
 
 def _plausible(L, W, T):
-    if T is None or L is None or W is None:
-        return False
-    if T <= 0 or L <= 0 or W <= 0:
-        return False
-    if not _likely_thickness(T):
-        return False
-    if min(L, W) <= T * 3.0:
-        return False
+    if None in (L, W, T): return False
+    if T <= 0 or L <= 0 or W <= 0: return False
+    if not _likely_thickness(T): return False
+    if min(L, W) <= T * 3.0: return False
     return True
 
 
@@ -204,9 +200,7 @@ def _gate_vlm_dims(data: Dict[str, Any], clean_text: str, text_nums: List[float]
     return L, W, T, units, source, debug_block
 
 def _cluster(values, tol=0.01):
-    """Group close-by numbers; return list of clusters (mean, members)."""
-    if not values:
-        return []
+    if not values: return []
     vals = sorted(values)
     clusters = [[vals[0]]]
     for v in vals[1:]:
@@ -214,43 +208,30 @@ def _cluster(values, tol=0.01):
             clusters[-1].append(v)
         else:
             clusters.append([v])
-    out = []
-    for c in clusters:
-        out.append((sum(c) / len(c), c))
-    return out
+    return [(sum(c)/len(c), c) for c in clusters]
 
 def _triple_from_evidence(evidence):
-    """
-    Build (L, W, T) from numeric evidence (image ∪ transcript).
-    Heuristics:
-      - T: pick cluster in 0.05..6 with most members; tie-break by more decimals then smaller value.
-      - L/W: pick the two largest values >= max(1.0, 3*T).
-    """
-    if not evidence:
-        return None, None, None
-
-    # 1) thickness candidates & clusters
-    t_vals = [x for x in evidence if 0.05 <= x <= 6.0]
+    if not evidence: return None, None, None
+    # T: densest cluster in plate-ish range, tie-break by decimals then smaller value
+    t_vals = [x for x in evidence if _likely_thickness(x)]
     T = None
     if t_vals:
         clusters = _cluster(t_vals, tol=0.01)
-        # score: (#members, avg decimal places, negative value to prefer smaller)
-        def t_score(avg_and_members):
-            avg, members = avg_and_members
+        def t_score(avg_members):
+            avg, members = avg_members
             decs = [len(str(v).split(".")[1]) if "." in str(v) else 0 for v in members]
             return (len(members), sum(decs)/max(1,len(decs)), -avg)
         T = max(clusters, key=t_score)[0]
-
-    # 2) L/W from remaining big numbers
+    # L/W: two largest clearly bigger than T
     floor = max(1.0, (T or 0) * 3.0)
-    big = sorted([x for x in evidence if x >= floor], reverse=True)
+    big = sorted([x for x in evidence if x >= floor and (_has_decimal(x) or x >= 10.0)], reverse=True)
+    if len(big) < 2:
+        big = sorted([x for x in evidence if x > (T or 0)], reverse=True)
     if len(big) >= 2:
         L, W = big[0], big[1]
-        if L < W:
-            L, W = W, L
+        if L < W: L, W = W, L
     else:
         L = W = None
-
     return L, W, T
 
 def _file_fingerprint(path: str) -> str:
@@ -478,58 +459,47 @@ def _vlm_local_process_render(img_path: str,
             raw_text = ""
         clean_text = _remove_fastener_numbers(_strip_tables(raw_text))
 
+        # ---- BUILD EVIDENCE ----
         nums_text = _extract_numeric_tokens(clean_text)
-        nums_img  = _extract_numbers_from_img(llm, full_img)  # you already have this
+        nums_img  = _extract_numbers_from_img(llm, full_img)
         evidence_nums = sorted({*nums_text, *nums_img})
-        
         print(f"[dims-ocr] Evidence numbers: transcript={len(nums_text)}, image={len(nums_img)}, union={len(evidence_nums)}")
-        
-        # take the VLM JSON
+
+        # ---- GET VLM JSON ----
         data = _qwen_extract_block_dims_no_crops(llm, full_img)
-        
         if not data:
             raise RuntimeError("VLM JSON missing.")
-        
-        L_json, W_json, T_json = data.get("length"), data.get("width"), data.get("thickness")
+        Lj, Wj, Tj = data.get("length"), data.get("width"), data.get("thickness")
         units = data.get("units", "in")
-        
-        # helper: is value present in evidence (with tolerance and string match)
-        def _in_evidence(val: float) -> bool:
-            if val is None:
-                return False
-            if any(abs(val - x) <= 0.01 for x in evidence_nums):
-                return True
-            # This check is unreliable because transcription fails
-            # for fmt in ("{:.5f}", "{:.3f}", "{:.2f}", "{:.1f}", "{}"):
-            #     try:
-            #         if fmt.format(val) in clean_text:
-            #             return True
-            #     except (ValueError, TypeError):
-            #         continue
-            return False
-        
-        json_plausible = _plausible(L_json, W_json, T_json)
-        json_present = all(_in_evidence(v) for v in (L_json, W_json, T_json)) # Still calculate for debug
-        
-        # --- PATCH 3 ---
-        # Trust plausible JSON, as evidence collection (transcription) is unreliable
-        if json_plausible:
-            L, W, T = L_json, W_json, T_json
-            source = "vlm_json"
-        else:
-            # FORCE override from evidence
-            L_e, W_e, T_e = _triple_from_evidence(evidence_nums)
-            if not _plausible(L_e, W_e, T_e):
-                # hard fail: refuse to keep bad JSON
-                raise RuntimeError(
-                    f"Rejecting VLM JSON (present={json_present}, plausible={json_plausible}); "
-                    f"couldn't derive plausible L/W/T from evidence."
-                )
-            L, W, T = L_e, W_e, T_e
-            source = "evidence_override"
-        # --- END PATCH 3 ---
 
-        # normalize
+        def _in_evidence(val: Optional[float]) -> bool:
+            if val is None: return False
+            if any(abs(val - x) <= 0.01 for x in evidence_nums):  # numeric presence
+                return True
+            # string presence in cleaned transcript as a secondary check
+            for fmt in ("{:.5f}", "{:.4f}", "{:.3f}", "{:.2f}", "{:.1f}", "{}"):
+                if fmt.format(val) in clean_text:
+                    return True
+            return False
+
+        json_present   = all(_in_evidence(v) for v in (Lj, Wj, Tj))
+        json_plausible = _plausible(Lj, Wj, Tj)
+
+        # ---- DECIDE ----
+        if json_present and json_plausible:
+            L, W, T = Lj, Wj, Tj
+            source = "vlm_json"
+            print(f"[dims-ocr] accepted VLM JSON: {L} x {W} x {T} ({units})")
+        else:
+            print(f"[dims-ocr] rejecting VLM JSON (present={json_present}, plausible={json_plausible}); deriving from evidence...")
+            Le, We, Te = _triple_from_evidence(evidence_nums)
+            if not _plausible(Le, We, Te):
+                raise RuntimeError(f"Could not derive plausible dims from evidence: {evidence_nums}")
+            L, W, T = Le, We, Te
+            source = "evidence_override"
+            print(f"[dims-ocr] evidence => {L} x {W} x {T} ({units})")
+
+        # normalize L ≥ W
         if L is not None and W is not None and L < W:
             L, W = W, L
         
@@ -540,11 +510,11 @@ def _vlm_local_process_render(img_path: str,
                 "units": units, "confidence": 0.98, "source": source
             },
             "debug": {
-                "json_candidate": {"L": L_json, "W": W_json, "T": T_json},
+                "json_candidate": {"L": Lj, "W": Wj, "T": Tj},
                 "evidence_count": {"text": len(nums_text), "image": len(nums_img)},
                 "evidence_sample": evidence_nums[:50],
                 "decision": source,
-                "json_present_in_evidence": json_present, # Added for clarity
+                "json_present_in_evidence": json_present,
                 "json_plausible": json_plausible,
             },
             "warnings": []
