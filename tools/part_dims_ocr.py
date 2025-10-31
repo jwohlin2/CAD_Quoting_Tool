@@ -169,12 +169,21 @@ def _gate_vlm_dims(data: Dict[str, Any], clean_text: str, text_nums: List[float]
     def _value_in_text(val: Optional[float]) -> bool:
         if val is None:
             return False
-        if any(abs(val - t) < 1e-6 for t in text_nums):
+        # Accept small rounding differences: 2.5 vs 2.5005, 8.72 vs 8.720
+        if any(abs(val - t) <= 0.01 for t in text_nums):
             return True
-        return f"{val}" in clean_text
+        # Also try string matches with common roundings
+        for fmt in ("{:.5f}", "{:.3f}", "{:.2f}", "{:.1f}", "{}"):
+            try:
+                if fmt.format(val) in clean_text:
+                    return True
+            except (ValueError, TypeError):
+                continue
+        return False
 
     json_in_text = all(_value_in_text(v) for v in (json_L, json_W, json_T))
 
+    # If JSON isn't plausible OR its numbers aren't in the evidence, prefer the text/evidence triple.
     if (not json_ok or not json_in_text) and text_ok:
         L, W, T = L2, W2, T2
         source = "text_override"
@@ -188,11 +197,61 @@ def _gate_vlm_dims(data: Dict[str, Any], clean_text: str, text_nums: List[float]
     debug_block = {
         "json_candidate": {"L": json_L, "W": json_W, "T": json_T},
         "text_candidates_sample": sorted(list({float(x) for x in text_nums}))[:50],
+        "json_in_evidence": json_in_text,
         "decision_source": source,
     }
 
     return L, W, T, units, source, debug_block
 
+def _cluster(values, tol=0.01):
+    """Group close-by numbers; return list of clusters (mean, members)."""
+    if not values:
+        return []
+    vals = sorted(values)
+    clusters = [[vals[0]]]
+    for v in vals[1:]:
+        if abs(v - clusters[-1][-1]) <= tol:
+            clusters[-1].append(v)
+        else:
+            clusters.append([v])
+    out = []
+    for c in clusters:
+        out.append((sum(c) / len(c), c))
+    return out
+
+def _triple_from_evidence(evidence):
+    """
+    Build (L, W, T) from numeric evidence (image ∪ transcript).
+    Heuristics:
+      - T: pick cluster in 0.05..6 with most members; tie-break by more decimals then smaller value.
+      - L/W: pick the two largest values >= max(1.0, 3*T).
+    """
+    if not evidence:
+        return None, None, None
+
+    # 1) thickness candidates & clusters
+    t_vals = [x for x in evidence if 0.05 <= x <= 6.0]
+    T = None
+    if t_vals:
+        clusters = _cluster(t_vals, tol=0.01)
+        # score: (#members, avg decimal places, negative value to prefer smaller)
+        def t_score(avg_and_members):
+            avg, members = avg_and_members
+            decs = [len(str(v).split(".")[1]) if "." in str(v) else 0 for v in members]
+            return (len(members), sum(decs)/max(1,len(decs)), -avg)
+        T = max(clusters, key=t_score)[0]
+
+    # 2) L/W from remaining big numbers
+    floor = max(1.0, (T or 0) * 3.0)
+    big = sorted([x for x in evidence if x >= floor], reverse=True)
+    if len(big) >= 2:
+        L, W = big[0], big[1]
+        if L < W:
+            L, W = W, L
+    else:
+        L = W = None
+
+    return L, W, T
 
 def _file_fingerprint(path: str) -> str:
     p = pathlib.Path(path)
@@ -406,66 +465,120 @@ def _vlm_local_process_render(img_path: str,
 
         _emit_rendered_image(emit_image, full_img)
 
-        full_text = _vlm_local_transcribe_image(llm, img_path)
+        full_text = _vlm_local_transcribe_image(llm, full_img) # <-- PATCH 2
         if verbose and full_text:
             preview = _norm(full_text)[:200]
             print("[dims-ocr] VLM transcription preview ->", preview)
         _emit_ocr_text(emit_ocr, full_text, source_input)
 
+        # numeric evidence
         raw_text = full_text or ""
+        # treat "quick brown fox..." as empty (prevents false “evidence”)
+        if raw_text.lower().startswith("the quick brown fox"):
+            raw_text = ""
         clean_text = _remove_fastener_numbers(_strip_tables(raw_text))
-        text_nums = _extract_numeric_tokens(clean_text)
 
+        nums_text = _extract_numeric_tokens(clean_text)
+        nums_img  = _extract_numbers_from_img(llm, full_img)  # you already have this
+        evidence_nums = sorted({*nums_text, *nums_img})
+        
+        print(f"[dims-ocr] Evidence numbers: transcript={len(nums_text)}, image={len(nums_img)}, union={len(evidence_nums)}")
+        
+        # take the VLM JSON
         data = _qwen_extract_block_dims_no_crops(llm, full_img)
-        if data:
-            L, W, T, units, source, debug_block = _gate_vlm_dims(data, clean_text, text_nums)
+        
+        if not data:
+            raise RuntimeError("VLM JSON missing.")
+        
+        L_json, W_json, T_json = data.get("length"), data.get("width"), data.get("thickness")
+        units = data.get("units", "in")
+        
+        # helper: is value present in evidence (with tolerance and string match)
+        def _in_evidence(val: float) -> bool:
+            if val is None:
+                return False
+            if any(abs(val - x) <= 0.01 for x in evidence_nums):
+                return True
+            # This check is unreliable because transcription fails
+            # for fmt in ("{:.5f}", "{:.3f}", "{:.2f}", "{:.1f}", "{}"):
+            #     try:
+            #         if fmt.format(val) in clean_text:
+            #             return True
+            #     except (ValueError, TypeError):
+            #         continue
+            return False
+        
+        json_plausible = _plausible(L_json, W_json, T_json)
+        json_present = all(_in_evidence(v) for v in (L_json, W_json, T_json)) # Still calculate for debug
+        
+        # --- PATCH 3 ---
+        # Trust plausible JSON, as evidence collection (transcription) is unreliable
+        if json_plausible:
+            L, W, T = L_json, W_json, T_json
+            source = "vlm_json"
+        else:
+            # FORCE override from evidence
+            L_e, W_e, T_e = _triple_from_evidence(evidence_nums)
+            if not _plausible(L_e, W_e, T_e):
+                # hard fail: refuse to keep bad JSON
+                raise RuntimeError(
+                    f"Rejecting VLM JSON (present={json_present}, plausible={json_plausible}); "
+                    f"couldn't derive plausible L/W/T from evidence."
+                )
+            L, W, T = L_e, W_e, T_e
+            source = "evidence_override"
+        # --- END PATCH 3 ---
 
-            if L is not None:
-                data["length"] = float(L)
-            if W is not None:
-                data["width"] = float(W)
-            if T is not None:
-                data["thickness"] = float(T)
-            data["units"] = units
-            data["source"] = source
-            data["debug"] = debug_block
+        # normalize
+        if L is not None and W is not None and L < W:
+            L, W = W, L
+        
+        # write result (+ debug)
+        out = {
+            "best": {
+                "length": float(L), "width": float(W), "thickness": float(T),
+                "units": units, "confidence": 0.98, "source": source
+            },
+            "debug": {
+                "json_candidate": {"L": L_json, "W": W_json, "T": T_json},
+                "evidence_count": {"text": len(nums_text), "image": len(nums_img)},
+                "evidence_sample": evidence_nums[:50],
+                "decision": source,
+                "json_present_in_evidence": json_present, # Added for clarity
+                "json_plausible": json_plausible,
+            },
+            "warnings": []
+        }
 
-            length_val = data.get("length")
-            width_val = data.get("width")
-            thickness_val = data.get("thickness")
-            if length_val is not None and width_val is not None and thickness_val is not None:
-                text_line = f"SIZE: {length_val} x {width_val} x {thickness_val} {units}"
+        # --- Re-add return logic ---
+        if L is not None and W is not None and T is not None:
+            text_line = f"SIZE: {L} x {W} x {T} {units}"
+        else:
+            # Fallback to original JSON data if override failed but JSON existed
+            text_line = _json_dims_to_synthetic_line(data) or ""
+
+        if verbose:
+            print("[dims-ocr] VLM JSON ->", text_line, f"[{source}]")
+
+        if emit_ocr:
+            try:
+                # Use the new 'out' dict for the json blob
+                json_blob = json.dumps(out, indent=2)
+            except Exception:
+                json_blob = json.dumps(out, default=str)
+            combined = (full_text or "").rstrip()
+            if combined:
+                combined = f"{combined}\n\n[vlm_json]\n{json_blob}"
             else:
-                text_line = _json_dims_to_synthetic_line(data) or ""
+                combined = json_blob
+            _emit_ocr_text(emit_ocr, combined, source_input)
 
-            if verbose:
-                print("[dims-ocr] VLM JSON ->", text_line, f"[{source}]")
-
-            if emit_ocr:
-                try:
-                    json_blob = json.dumps(data, indent=2)
-                except Exception:
-                    json_blob = json.dumps(data, default=str)
-                combined = (full_text or "").rstrip()
-                if combined:
-                    combined = f"{combined}\n\n[vlm_json]\n{json_blob}"
-                else:
-                    combined = json_blob
-                _emit_ocr_text(emit_ocr, combined, source_input)
-
-            return text_line, warnings
-
-        warnings.append("VLM extraction failed; falling back to transcription.")
-        if not full_text:
-            full_text = _vlm_local_transcribe_image(llm, img_path)
-        _emit_ocr_text(emit_ocr, full_text, source_input)
-        return full_text, warnings
+        return text_line, warnings
     finally:
         try:
             del llm
         except Exception:
             pass
-
 def _detect_default_input() -> Optional[str]:
     """Best-effort to locate a sample input so CLI can run without flags."""
 
@@ -474,10 +587,6 @@ def _detect_default_input() -> Optional[str]:
         candidate = Path(env_path).expanduser()
         if candidate.exists():
             return str(candidate)
-
-    hardwired = Path("D:/CAD_Quoting_Tool/Cad Files/301_redacted.dwg")
-    if hardwired.exists():
-        return str(hardwired)
 
     return None
 
@@ -655,13 +764,13 @@ def _img_to_b64(path: str) -> str:
         return base64.b64encode(f.read()).decode("ascii")
 
 
-def _vlm_local_transcribe_image(llm, image_path: str) -> str:
+def _vlm_local_transcribe_image(llm, pil_img) -> str: # <-- PATCH 2
     """
     Ask the local VLM to transcribe all text from the image.
     Uses OpenAI-style chat with data:image/png;base64 payload (supported by llama.cpp).
     """
 
-    b64 = _img_to_b64(image_path)
+    b64 = _img_b64(pil_img) # <-- PATCH 2
     prompt = "Transcribe ALL legible text exactly as printed in the drawing. Keep line breaks. No commentary."
     resp = llm.create_chat_completion(
         messages=[{
@@ -676,7 +785,7 @@ def _vlm_local_transcribe_image(llm, image_path: str) -> str:
     return (resp["choices"][0]["message"]["content"] or "").strip()
 
 
-def _vlm_local_extract_dims(llm, image_path: str):
+def _vlm_local_extract_dims(llm, pil_img): # <-- PATCH 2
     """
     Ask the local VLM to return STRICT JSON:
     { "length": <num>, "width": <num>, "thickness": <num>, "units": "in|mm",
@@ -686,7 +795,7 @@ def _vlm_local_extract_dims(llm, image_path: str):
     import json as _json
     import re as _re
 
-    b64 = _img_to_b64(image_path)
+    b64 = _img_b64(pil_img) # <-- PATCH 2
     prompt = (
         "You are reading a mechanical drawing. Identify the OVERALL STOCK SIZE / SIZE / BLANK dimensions "
         "used for raw material selection (not feature dimensions). "
@@ -966,7 +1075,14 @@ def _render_dxf_to_image(dxf_path: str, out_png: str, dpi: int = 800):
     """
     from ezdxf.addons.drawing import RenderContext, Frontend
     from ezdxf.addons.drawing.matplotlib import MatplotlibBackend
-    from ezdxf.addons.drawing.config import Configuration, LinePolicy
+    from ezdxf.addons.drawing.config import (
+        BackgroundPolicy,
+        ColorPolicy,
+        Configuration,
+        HatchPolicy,
+        LinePolicy,
+        TextPolicy,
+    )
 
     import ezdxf, matplotlib.pyplot as plt
 
@@ -975,14 +1091,13 @@ def _render_dxf_to_image(dxf_path: str, out_png: str, dpi: int = 800):
 
     # High-contrast config (no layer colors)
     cfg = Configuration(
-        background_color="#FFFFFF",
-        monochrome=True,              # <-- all entities forced to black
-        default_color="#000000",
+        color_policy=ColorPolicy.BLACK,
+        background_policy=BackgroundPolicy.WHITE,
         line_policy=LinePolicy.ACCURATE,
         min_lineweight=0.35,          # bump thin lines
         lineweight_scaling=1.8,       # scale CAD LWs up
-        show_hatches=True,
-        show_text=True,
+        hatch_policy=HatchPolicy.NORMAL,
+        text_policy=TextPolicy.FILLING,
     )
 
     ctx = RenderContext(doc)
@@ -1010,14 +1125,20 @@ def _perform_ocr_on_image_path(
 ) -> str:
     backend = (ocr_backend or "tesseract").lower()
     if backend == "vlm_local":
+        if Image is None:
+            raise RuntimeError("Pillow is required for VLM local rendering.")
         llm = _load_qwen_local(vlm_local_model, vlm_local_mmproj)
         try:
-            full_text = _vlm_local_transcribe_image(llm, img_path) or ""
+            with Image.open(img_path) as img: # <-- PATCH 2
+                img.load()
+                full_img = img.convert("RGB")
+
+            full_text = _vlm_local_transcribe_image(llm, full_img) or "" # <-- PATCH 2
             if vlm_mode == "extract":
                 raw_text = full_text
                 clean_text = _remove_fastener_numbers(_strip_tables(raw_text))
                 text_nums = _extract_numeric_tokens(clean_text)
-                data = _vlm_local_extract_dims(llm, img_path)
+                data = _vlm_local_extract_dims(llm, full_img) # <-- PATCH 2
                 if data:
                     L, W, T, units, source, debug_block = _gate_vlm_dims(data, clean_text, text_nums)
                     if L is not None:
@@ -1505,8 +1626,7 @@ def extract_part_dims(input_path: str,
 # ---------- CLI ----------
 
 def _cli():
-    hardwired_input = str(Path("D:/CAD_Quoting_Tool/Cad Files/301_redacted.dwg"))
-    default_input = _detect_default_input() or hardwired_input
+    default_input = _detect_default_input()
 
     hardwired_oda_exe = str(Path("C:/Program Files/ODA/OdaFileConverter.exe"))
     default_oda_exe = _detect_default_oda_exe() or hardwired_oda_exe
