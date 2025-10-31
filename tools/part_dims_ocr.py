@@ -105,7 +105,18 @@ def _has_decimal(x: float) -> bool:
     return "." in s and len(s.split(".")[1]) >= 1
 
 
-def _likely_thickness(x: float) -> bool:
+def _likely_thickness(x: float, units: str = "in") -> bool:
+    try:
+        u = (units or "in").strip().lower()
+    except Exception:
+        u = "in"
+
+    if x <= 0:
+        return False
+
+    if u in {"mm", "millimeter", "millimeters", "millimetre", "millimetres"}:
+        return 1.0 <= x <= 150.0
+
     return 0.05 <= x <= 6.0
 
 
@@ -119,12 +130,12 @@ def _prefer_plate_thickness(vals):
     return max(vals, key=t_key)
 
 
-def _plausible(L, W, T):
+def _plausible(L, W, T, units: str = "in"):
     if T is None or L is None or W is None:
         return False
     if T <= 0 or L <= 0 or W <= 0:
         return False
-    if not _likely_thickness(T):
+    if not _likely_thickness(T, units):
         return False
     if min(L, W) <= T * 3.0:
         return False
@@ -149,11 +160,11 @@ def _gate_vlm_dims(data: Dict[str, Any], clean_text: str, text_nums: List[float]
     json_W = _safe_float(data.get("width"))
     json_T = _safe_float(data.get("thickness"))
 
-    json_ok = _plausible(json_L, json_W, json_T)
+    json_ok = _plausible(json_L, json_W, json_T, units)
 
     L2 = W2 = T2 = None
     if text_nums:
-        t_candidates = [x for x in text_nums if _likely_thickness(x)]
+        t_candidates = [x for x in text_nums if _likely_thickness(x, units)]
         if t_candidates:
             T2 = _prefer_plate_thickness(t_candidates)
 
@@ -164,7 +175,7 @@ def _gate_vlm_dims(data: Dict[str, Any], clean_text: str, text_nums: List[float]
         if len(pool) >= 2:
             L2, W2 = pool[0], pool[1]
 
-    text_ok = _plausible(L2, W2, T2)
+    text_ok = _plausible(L2, W2, T2, units)
 
     def _value_in_text(val: Optional[float]) -> bool:
         if val is None:
