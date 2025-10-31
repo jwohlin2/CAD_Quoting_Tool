@@ -34,15 +34,18 @@ Dependencies (install as needed):
 from __future__ import annotations
 import argparse
 import base64
+import hashlib
 import io
 import json
 import math
 import os
+import pathlib
 import re
 from pathlib import Path
 import shutil, subprocess
 import sys
 import tempfile
+import time
 import unicodedata
 import urllib.error
 import urllib.request
@@ -70,30 +73,44 @@ try:
 except Exception:
     convert_from_path = None  # type: ignore
 
+# ---------------------------------------------------------------------------
+
+
+def _file_fingerprint(path: str) -> str:
+    p = pathlib.Path(path)
+    try:
+        st = p.stat()
+    except FileNotFoundError:
+        return hashlib.sha1(path.encode()).hexdigest()[:10]
+    h = hashlib.sha1()
+    h.update(path.encode("utf-8"))
+    h.update(str(st.st_size).encode())
+    h.update(str(int(st.st_mtime)).encode())
+    return h.hexdigest()[:10]
+
+
+def _atomic_write_json(obj, out_path: str):
+    tmp = out_path + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump(obj, f, indent=2)
+    os.replace(tmp, out_path)
+
+
+# ---------------------------------------------------------------------------
+
 # Local LLM (llama.cpp) support ----------------
 _LOCAL_LLM = None
 _LOCAL_LLM_PATH: Optional[Path] = None
-
-_VLM_LOCAL_INSTANCE = None
-_VLM_LOCAL_KEY: Optional[Tuple[str, str, int]] = None
 
 
 def _load_qwen_local(model_path: str, mmproj_path: str, n_ctx: int = 4096):
     from llama_cpp import Llama  # pip install llama-cpp-python
 
-    global _VLM_LOCAL_INSTANCE, _VLM_LOCAL_KEY
-
     if not model_path or not mmproj_path:
         raise RuntimeError("Provide --vlm-local-model and --vlm-local-mmproj for vlm_local backend.")
 
     key = (str(Path(model_path).resolve()), str(Path(mmproj_path).resolve()), int(n_ctx))
-    if _VLM_LOCAL_INSTANCE is not None and _VLM_LOCAL_KEY == key:
-        return _VLM_LOCAL_INSTANCE
-
-    llm = Llama(model_path=key[0], mmproj=key[1], n_ctx=key[2], verbose=False)
-    _VLM_LOCAL_INSTANCE = llm
-    _VLM_LOCAL_KEY = key
-    return llm
+    return Llama(model_path=key[0], mmproj=key[1], n_ctx=key[2], verbose=False)
 
 
 def _img_b64(pil_img):
@@ -238,11 +255,14 @@ def _emit_rendered_image(emit_image: str, full_img) -> None:
         pass
 
 
-def _emit_ocr_text(emit_ocr: str, text: str) -> None:
+def _emit_ocr_text(emit_ocr: str, text: str, input_path: str) -> None:
     if not emit_ocr or not text:
         return
     try:
+        _ensure_parent_dir(emit_ocr)
+        header = f"[INPUT] {input_path}\n[STAMP] {time.ctime()}\n\n"
         with open(emit_ocr, "w", encoding="utf-8") as f:
+            f.write(header)
             f.write(text)
         print(f"[dims-ocr] saved OCR/VLM text to {emit_ocr}")
     except Exception:
@@ -254,37 +274,43 @@ def _vlm_local_process_render(img_path: str,
                               vlm_local_mmproj: str,
                               emit_image: str,
                               emit_ocr: str,
-                              verbose: bool) -> Tuple[str, List[str]]:
+                              verbose: bool,
+                              source_input: str) -> Tuple[str, List[str]]:
     warnings: List[str] = []
     if Image is None:
         raise RuntimeError("Pillow is required for VLM local rendering.")
 
     llm = _load_qwen_local(vlm_local_model, vlm_local_mmproj)
+    try:
+        with Image.open(img_path) as img:
+            img.load()
+            full_img = img.convert("RGB")
 
-    with Image.open(img_path) as img:
-        img.load()
-        full_img = img.convert("RGB")
+        _emit_rendered_image(emit_image, full_img)
 
-    _emit_rendered_image(emit_image, full_img)
+        data = _qwen_extract_block_dims_no_crops(llm, full_img)
+        if data:
+            text = f"SIZE: {data['length']} x {data['width']} x {data['thickness']} {data['units']}"
+            if verbose:
+                print("[dims-ocr] VLM JSON ->", text)
+            try:
+                payload = json.dumps(data)
+            except Exception:
+                payload = text
+            _emit_ocr_text(emit_ocr, payload, source_input)
+            return text, warnings
 
-    data = _qwen_extract_block_dims_no_crops(llm, full_img)
-    if data:
-        text = f"SIZE: {data['length']} x {data['width']} x {data['thickness']} {data['units']}"
+        warnings.append("VLM extraction failed; falling back to transcription.")
+        txt = _vlm_local_transcribe_image(llm, img_path)
         if verbose:
-            print("[dims-ocr] VLM JSON ->", text)
+            print("[dims-ocr] VLM transcription fallback ->", txt[:200])
+        _emit_ocr_text(emit_ocr, txt, source_input)
+        return txt, warnings
+    finally:
         try:
-            payload = json.dumps(data)
+            del llm
         except Exception:
-            payload = text
-        _emit_ocr_text(emit_ocr, payload)
-        return text, warnings
-
-    warnings.append("VLM extraction failed; falling back to transcription.")
-    txt = _vlm_local_transcribe_image(llm, img_path)
-    if verbose:
-        print("[dims-ocr] VLM transcription fallback ->", txt[:200])
-    _emit_ocr_text(emit_ocr, txt)
-    return txt, warnings
+            pass
 
 def _detect_default_input() -> Optional[str]:
     """Best-effort to locate a sample input so CLI can run without flags."""
@@ -831,15 +857,21 @@ def _perform_ocr_on_image_path(
     backend = (ocr_backend or "tesseract").lower()
     if backend == "vlm_local":
         llm = _load_qwen_local(vlm_local_model, vlm_local_mmproj)
-        if vlm_mode == "extract":
-            data = _vlm_local_extract_dims(llm, img_path)
-            if data:
-                synthetic = _json_dims_to_synthetic_line(data)
-                if synthetic:
-                    return _norm(synthetic)
-            warnings.append("vlm_local extract failed; falling back to transcription.")
-        text = _vlm_local_transcribe_image(llm, img_path)
-        return _norm(text)
+        try:
+            if vlm_mode == "extract":
+                data = _vlm_local_extract_dims(llm, img_path)
+                if data:
+                    synthetic = _json_dims_to_synthetic_line(data)
+                    if synthetic:
+                        return _norm(synthetic)
+                warnings.append("vlm_local extract failed; falling back to transcription.")
+            text = _vlm_local_transcribe_image(llm, img_path)
+            return _norm(text)
+        finally:
+            try:
+                del llm
+            except Exception:
+                pass
     if backend == "vlm":
         if not vlm_endpoint:
             raise RuntimeError("Provide --vlm-endpoint for vlm backend.")
@@ -900,6 +932,7 @@ def _get_text_from_input(path: str,
                     emit_image,
                     emit_ocr,
                     verbose,
+                    path,
                 )
                 warnings.extend(local_warnings)
                 return (text, warnings)
@@ -920,7 +953,7 @@ def _get_text_from_input(path: str,
                 vlm_local_mmproj,
             )
             if emit_ocr:
-                _emit_ocr_text(emit_ocr, txt)
+                _emit_ocr_text(emit_ocr, txt, path)
             if verbose:
                 print("[dims-ocr] OCR preview:", _norm(txt)[:500].replace("\n", " ⏎ "))
             return (txt, warnings)
@@ -939,6 +972,7 @@ def _get_text_from_input(path: str,
                     emit_image,
                     emit_ocr,
                     verbose,
+                    path,
                 )
                 warnings.extend(local_warnings)
                 return (text, warnings)
@@ -959,7 +993,7 @@ def _get_text_from_input(path: str,
                 vlm_local_mmproj,
             )
             if emit_ocr:
-                _emit_ocr_text(emit_ocr, txt)
+                _emit_ocr_text(emit_ocr, txt, path)
             if verbose:
                 print("[dims-ocr] OCR preview:", _norm(txt)[:500].replace("\n", " ⏎ "))
             return (txt, warnings)
@@ -998,13 +1032,7 @@ def _get_text_from_input(path: str,
                     texts.append(txt)
         combined = "\n".join(texts)
         if emit_ocr:
-            try:
-                _ensure_parent_dir(emit_ocr)
-                with open(emit_ocr, "w", encoding="utf-8") as f:
-                    f.write(combined)
-                print(f"[dims-ocr] saved OCR/VLM text to {emit_ocr}")
-            except Exception:
-                pass
+            _emit_ocr_text(emit_ocr, combined, path)
         if verbose and combined:
             print("[dims-ocr] OCR preview:", _norm(combined)[:500].replace("\n", " ⏎ "))
         return (combined, warnings)
@@ -1029,13 +1057,7 @@ def _get_text_from_input(path: str,
             vlm_local_mmproj,
         )
     if emit_ocr and txt:
-        try:
-            _ensure_parent_dir(emit_ocr)
-            with open(emit_ocr, "w", encoding="utf-8") as f:
-                f.write(txt)
-            print(f"[dims-ocr] saved OCR/VLM text to {emit_ocr}")
-        except Exception:
-            pass
+        _emit_ocr_text(emit_ocr, txt, path)
     if verbose and txt:
         print("[dims-ocr] OCR preview:", _norm(txt)[:500].replace("\n", " ⏎ "))
     return (txt, warnings)
@@ -1285,7 +1307,10 @@ def _cli():
         input_help += f" (default: {default_input})"
     else:
         input_help += " (default: first PDF/image found in 'Cad Files' or 'debug')"
-    json_out_help = f"Optional: write result JSON here (default: {default_json_out})."
+    json_out_help = (
+        "Optional: override the dims JSON output path. "
+        f"Default: debug/<input>_<fingerprint>_dims.json (e.g., {default_json_out})."
+    )
     if default_oda_exe:
         oda_help = (
             f"Path to ODA File Converter executable (default: {default_oda_exe}). "
@@ -1298,10 +1323,12 @@ def _cli():
         "or vlm_local (local llama.cpp). Defaults to vlm_local so you can just run the script."
     )
     emit_image_help = (
-        f"If set, save the rendered PNG/TIFF here for debugging (default: {default_emit_image})."
+        "If set, override the rendered PNG output path. "
+        f"Default: debug/<input>_<fingerprint>_render.png (e.g., {default_emit_image})."
     )
     emit_ocr_help = (
-        f"If set, save the OCR/VLM text here for debugging (default: {default_emit_ocr})."
+        "If set, override the OCR/VLM transcript path. "
+        f"Default: debug/<input>_<fingerprint>_text.txt (e.g., {default_emit_ocr})."
     )
     verbose_help = "Print a short preview of OCR text (default: enabled; use --no-verbose to disable)."
 
@@ -1309,7 +1336,7 @@ def _cli():
     p.add_argument("--units", choices=["auto", "in", "mm"], default="auto", help="Units preference (default auto).")
     p.add_argument("--prefer-stock", action="store_true", help="Bias lines starting with STOCK.")
     p.add_argument("--use-llm", action="store_true", help="If multiple candidates, ask LLM to pick best (requires OPENAI_API_KEY/local model).")
-    p.add_argument("--json-out", default=default_json_out, help=json_out_help)
+    p.add_argument("--json-out", default=None, help=json_out_help)
     p.add_argument("--oda-exe", default=default_oda_exe or "", help=oda_help)
     p.add_argument("--oda-format", choices=["PDF","TIFF","PNG"], default="PDF",
                    help="ODA output format before OCR (default PDF).")
@@ -1320,8 +1347,10 @@ def _cli():
     p.add_argument("--vlm-local-mmproj", default=default_mmproj_path or "", help="Path to mmproj-*.gguf")
     p.add_argument("--vlm-mode", choices=["transcribe", "extract"], default="transcribe",
                    help="Return raw text (transcribe) or JSON dims (extract). Works for vlm and vlm_local.")
-    p.add_argument("--emit-image", default=default_emit_image, help=emit_image_help)
-    p.add_argument("--emit-ocr", default=default_emit_ocr, help=emit_ocr_help)
+    p.add_argument("--emit-image", default=None, help=emit_image_help)
+    p.add_argument("--emit-ocr", default=None, help=emit_ocr_help)
+    p.add_argument("--no-cache", action="store_true", help="Ignore any previous outputs; overwrite.")
+    p.add_argument("--out-dir", default=None, help="Output folder (default: debug).")
     p.add_argument("--verbose", action="store_true", dest="verbose", help=verbose_help)
     p.add_argument("--no-verbose", action="store_false", dest="verbose", help="Disable OCR preview output.")
     p.set_defaults(verbose=True)
@@ -1338,6 +1367,26 @@ def _cli():
         if os.path.normcase(default_norm) == os.path.normcase(input_norm):
             print(f"[dims-ocr] defaulting to input: {input_path}")
 
+    debug_dir = args.out_dir or r"D:\CAD_Quoting_Tool\debug"
+    os.makedirs(debug_dir, exist_ok=True)
+
+    fp = _file_fingerprint(input_path)
+    base = pathlib.Path(input_path).stem
+
+    img_path = args.emit_image or os.path.join(debug_dir, f"{base}_{fp}_render.png")
+    txt_path = args.emit_ocr or os.path.join(debug_dir, f"{base}_{fp}_text.txt")
+    json_path = args.json_out or os.path.join(debug_dir, f"{base}_{fp}_dims.json")
+
+    for candidate in (img_path, txt_path, json_path):
+        _ensure_parent_dir(candidate)
+
+    if args.no_cache:
+        for pth in (img_path, txt_path, json_path):
+            try:
+                os.remove(pth)
+            except FileNotFoundError:
+                pass
+
     try:
         res = extract_part_dims(
             input_path,
@@ -1352,8 +1401,8 @@ def _cli():
             vlm_mode=args.vlm_mode,
             vlm_local_model=args.vlm_local_model,
             vlm_local_mmproj=args.vlm_local_mmproj,
-            emit_image=args.emit_image,
-            emit_ocr=args.emit_ocr,
+            emit_image=img_path,
+            emit_ocr=txt_path,
             verbose=args.verbose,
         )
         out: Dict[str, Any] = {
@@ -1373,13 +1422,21 @@ def _cli():
             ],
             "warnings": res.warnings,
         }
-        if args.json_out:
-            _ensure_parent_dir(args.json_out)
-            with open(args.json_out, "w", encoding="utf-8") as f:
-                json.dump(out, f, indent=2)
-            print(f"[dims] wrote {args.json_out}")
-        else:
-            print(json.dumps(out, indent=2))
+        if res.best is None:
+            raise RuntimeError("Failed to extract dimensions; refusing to reuse old dims.json.")
+        best = res.best
+        if not (best.length and best.width and best.thickness):
+            raise RuntimeError("Failed to extract dimensions; refusing to reuse old dims.json.")
+
+        dims = {
+            "length": best.length,
+            "width": best.width,
+            "thickness": best.thickness,
+            "units": best.units,
+        }
+        _atomic_write_json(dims, json_path)
+        print(f"[dims] wrote {json_path}")
+        print(json.dumps(out, indent=2))
     except Exception as e:
         print(f"[error] {e}", file=sys.stderr)
         sys.exit(2)
