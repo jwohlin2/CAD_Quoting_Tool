@@ -142,18 +142,17 @@ def _qwen_extract_block_dims_no_crops(llm, full_img) -> dict | None:
     """
 
     rules = (
-        "You are reading a CAD drawing of a rectangular plate shown in multiple views. "
-        "Identify the OVERALL STOCK SIZE:\n"
-        "Do not assume the block is large; many parts are small (e.g., 2.50 × 8.72 × 0.5005 inches). "
-        "Pick values from this image only.\n"
-        "• LENGTH and WIDTH: choose the two LARGEST baseline dimensions that span the outer edges "
-        "  of the plan/top view (ignore interior hole callouts and small features like .03 x 45°).\n"
-        "• THICKNESS: choose the overall slab thickness from a side view (ignore chamfers, counterbores, taps).\n"
-        "• Prefer clean two-decimal values (e.g., 15.50, 12.00, 2.00) when close candidates exist.\n"
-        "• Units are inches if numbers look like 12.00/15.50/2.00; otherwise 'mm' if clearly labeled.\n"
-        "• Return STRICT JSON ONLY:\n"
-        '{"length": <number>, "width": <number>, "thickness": <number>, "units": "in"|"mm"}\n'
-        "No commentary."
+        "You are reading a CAD drawing of a rectangular PLATE (two views: plan + side). "
+        "Identify the OVERALL STOCK SIZE used to purchase raw material, not feature dimensions.\n"
+        "Guidelines:\n"
+        "• LENGTH & WIDTH: choose the two dimensions that span the OUTER edges of the plan view "
+        "  (baseline arrows touching the outside rectangle). Ignore interior features (.03×45°, counterbores, taps) "
+        "  and all tables/title blocks.\n"
+        "• THICKNESS: pick the slab thickness from the SIDE view; it is usually a small value (e.g., 0.5005) "
+        "  compared with length/width.\n"
+        "• Do NOT infer from prior context. Use only this image.\n"
+        "Return STRICT JSON ONLY (no prose): "
+        '{"length": <number>, "width": <number>, "thickness": <number>, "units": "in"|"mm"}'
     )
     b64 = _img_b64(full_img)
     resp = llm.create_chat_completion(messages=[{
@@ -183,11 +182,11 @@ def _qwen_extract_block_dims_no_crops(llm, full_img) -> dict | None:
         # Dynamic sanity: thickness must be smallish, L/W must be > T by a margin
         if T <= 0 or max(L, W) <= 0:
             return False
-        # Typical plate thickness (in) up to a few inches; allow thin stock
-        if not (0.05 <= T <= 6.0):
+        # Plates are typically thin vs plan dims
+        if not (0.05 <= T <= 6.0):   # 0.050" .. 6.000"
             return False
-        # L/W should be at least 2.5× thicker than T, and not both tiny
-        if min(L, W) <= T * 2.5:
+        # L/W should clearly exceed T (≥3×), and not be microscopic
+        if min(L, W) <= T * 3.0:
             return False
         return True
 
@@ -195,7 +194,7 @@ def _qwen_extract_block_dims_no_crops(llm, full_img) -> dict | None:
     if not plausible(L, W, T):
         nums = _extract_numbers_from_img(llm, full_img)
 
-        # Filter out obvious non-dimension "tiny features"
+        # Filter out obvious feature dims and tiny notes
         tiny_bad = {0.01, 0.02, 0.03, 0.04, 0.05, 0.06, 0.08, 0.09, 0.10, 0.12, 0.19, 0.25, 0.375}
         nums = [x for x in nums if x not in tiny_bad]
 
@@ -209,7 +208,7 @@ def _qwen_extract_block_dims_no_crops(llm, full_img) -> dict | None:
 
         # Step 2: choose L/W as the two largest dimensions that are clearly > T
         # require at least ~3× thicker (blocks/plates) OR >= 1.0 in absolute
-        lw_floor = max(T * 3.0, 1.0)
+        lw_floor = max(T * 3.0, 1.0)   # clearly bigger than thickness
         lw_candidates = sorted([x for x in nums if x >= lw_floor], reverse=True)
 
         # If nothing qualifies (very small parts), just take top-2 numbers > T
