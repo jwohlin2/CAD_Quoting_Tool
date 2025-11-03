@@ -12,6 +12,7 @@ __all__ = [
     "suggestions",
     "tk_compat",
     "widgets",
+    "main_window",
 ]
 
 _LAZY_SUBMODULES = {name: f"{__name__}.{name}" for name in __all__}
