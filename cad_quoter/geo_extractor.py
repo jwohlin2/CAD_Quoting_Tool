@@ -41,11 +41,8 @@ try:
 except Exception:
     import ezdxf  # type: ignore
 
-# Optional DWG→DXF converter; if missing and input is DWG, we raise a clear error.
-try:
-    from cad_quoter.geometry import convert_dwg_to_dxf  # type: ignore
-except Exception:
-    convert_dwg_to_dxf = None  # type: ignore
+# Optional DWG→DXF converter imported lazily to avoid circular dependencies
+convert_dwg_to_dxf = None  # Will be imported when needed
 
 # Try to use Matrix44 transforms for INSERT.virtual_entities(); if absent, we still work.
 try:
@@ -96,11 +93,17 @@ def open_doc(path: Path):
         return _readfile(path)
 
     if path.suffix.lower() == ".dwg":
-        if convert_dwg_to_dxf is None:
+        # Lazy import to avoid circular dependency
+        try:
+            from cad_quoter.geometry import convert_dwg_to_dxf as _convert
+        except Exception:
+            _convert = None
+
+        if _convert is None:
             raise RuntimeError(
                 "DWG input requires a DWG→DXF converter (convert_dwg_to_dxf not available)."
             )
-        dxf_path = Path(convert_dwg_to_dxf(str(path)))
+        dxf_path = Path(_convert(str(path)))
         return _readfile(dxf_path)
 
     raise ValueError(f"Unsupported file type: {path.suffix}")

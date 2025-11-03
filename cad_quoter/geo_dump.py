@@ -34,10 +34,23 @@ from fractions import Fraction
 from pathlib import Path
 from typing import List, Tuple
 
-from tools.hole_ops import explode_rows_to_operations
-from tools.stock_dims import infer_stock_dims_from_lines, read_texts_from_csv
+# Add parent directory to path for tools imports
+if str(Path(__file__).resolve().parent.parent) not in sys.path:
+    sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+
+try:
+    from tools.hole_ops import explode_rows_to_operations
+    from tools.stock_dims import infer_stock_dims_from_lines, read_texts_from_csv
+except ImportError:
+    # Fallback if tools module isn't available
+    explode_rows_to_operations = None  # type: ignore
+    infer_stock_dims_from_lines = None  # type: ignore
+    read_texts_from_csv = None  # type: ignore
 
 from cad_quoter import geo_extractor
+
+# Repository root (parent of cad_quoter directory)
+REPO_ROOT = Path(__file__).resolve().parent.parent
 
 # ---------- HOLE TABLE helpers ----------
 _UHEX_RE = re.compile(r"\\U\+([0-9A-Fa-f]{4})")
@@ -202,6 +215,117 @@ def _split_descriptions(body_chunks: List[str], diam_list: List[str]) -> List[st
 DEFAULT_SAMPLE_PATH = REPO_ROOT / "Cad Files" / "301_redacted.dxf"
 
 
+def extract_hole_table_from_file(file_path: str | Path) -> List[dict]:
+    """
+    Public API: Extract hole table from a CAD file.
+
+    Args:
+        file_path: Path to DXF or DWG file
+
+    Returns:
+        List of dicts with keys: HOLE, REF_DIAM, QTY, DESCRIPTION
+        Returns empty list if no hole table found.
+
+    Example:
+        >>> holes = extract_hole_table_from_file("301.dxf")
+        >>> for hole in holes:
+        ...     print(hole["HOLE"], hole["REF_DIAM"], hole["QTY"])
+    """
+    file_path = Path(file_path)
+
+    # Open the CAD file
+    doc = geo_extractor.open_doc(file_path)
+
+    # Collect text records from all layouts with deep block exploration
+    text_records = geo_extractor.collect_all_text(doc, max_block_depth=5)
+
+    # Decode unicode characters
+    for r in text_records:
+        if "text" in r and isinstance(r["text"], str):
+            r["text"] = _decode_uplus(r["text"])
+
+    # Find and parse hole table
+    header_chunks, body_chunks = _find_hole_table_chunks(text_records)
+
+    if not header_chunks:
+        return []
+
+    hole_letters, diam_tokens, qtys = _parse_header(header_chunks)
+    descs = _split_descriptions(body_chunks, diam_tokens)
+
+    # Build structured hole data
+    result = []
+    n = min(len(hole_letters), len(diam_tokens), len(qtys))
+    for i in range(n):
+        result.append({
+            "HOLE": hole_letters[i],
+            "REF_DIAM": diam_tokens[i],
+            "QTY": qtys[i],
+            "DESCRIPTION": (descs[i] if i < len(descs) else "").strip(),
+        })
+
+    return result
+
+
+def extract_hole_operations_from_file(file_path: str | Path) -> List[dict]:
+    """
+    Public API: Extract machining operations from hole table in a CAD file.
+
+    This function parses the hole table and breaks it down into atomic
+    machining operations (drill, tap, counterbore, etc.) using hole_ops logic.
+
+    Args:
+        file_path: Path to DXF or DWG file
+
+    Returns:
+        List of dicts with keys: HOLE, REF_DIAM, QTY, OPERATION
+        Returns empty list if no hole table found or hole_ops unavailable.
+
+    Example:
+        >>> ops = extract_hole_operations_from_file("301.dxf")
+        >>> for op in ops:
+        ...     print(f"{op['HOLE']}: {op['OPERATION']}")
+    """
+    if not explode_rows_to_operations:
+        return []  # hole_ops module not available
+
+    file_path = Path(file_path)
+
+    # Open the CAD file
+    doc = geo_extractor.open_doc(file_path)
+
+    # Collect text records from all layouts with deep block exploration
+    text_records = geo_extractor.collect_all_text(doc, max_block_depth=5)
+
+    # Decode unicode characters
+    for r in text_records:
+        if "text" in r and isinstance(r["text"], str):
+            r["text"] = _decode_uplus(r["text"])
+
+    # Find and parse hole table
+    header_chunks, body_chunks = _find_hole_table_chunks(text_records)
+
+    if not header_chunks:
+        return []
+
+    # Explode into operations using hole_ops
+    text_rows = header_chunks + body_chunks
+    ops_rows = explode_rows_to_operations(text_rows)
+
+    # Convert to list of dicts
+    result = []
+    for row in ops_rows:
+        if len(row) >= 4:
+            result.append({
+                "HOLE": row[0],
+                "REF_DIAM": row[1],
+                "QTY": row[2],
+                "OPERATION": row[3],
+            })
+
+    return result
+
+
 def _parse_csv_patterns(s: str | None) -> List[str]:
     if not s:
         return []
@@ -302,24 +426,27 @@ def main() -> int:
     # (Removed DIM-DUMP: no dims_all.csv/jsonl)
 
     # ---- Infer stock dimensions from extracted text ----
-    try:
-        stock_texts = read_texts_from_csv(csv_path)
-    except Exception as exc:
-        print(f"[stock-dims] read failed: {exc}")
+    if read_texts_from_csv and infer_stock_dims_from_lines:
+        try:
+            stock_texts = read_texts_from_csv(csv_path)
+        except Exception as exc:
+            print(f"[stock-dims] read failed: {exc}")
+        else:
+            dims = infer_stock_dims_from_lines(stock_texts)
+            stock_csv = csv_path.parent / "stock_dims.csv"
+            with stock_csv.open("w", newline="", encoding="utf-8") as fh:
+                writer = csv.writer(fh)
+                writer.writerow(["length_in", "width_in", "thickness_in"])
+                if dims:
+                    L, W, T = dims
+                    print(f"[stock-dims] L={L:.3f} in, W={W:.3f} in, T={T:.3f} in")
+                    writer.writerow([f"{L:.6f}", f"{W:.6f}", f"{T:.6f}"])
+                else:
+                    print("[stock-dims] no stock dimensions detected")
+                    writer.writerow(["", "", ""])
+            print(f"[stock-dims] csv={stock_csv}")
     else:
-        dims = infer_stock_dims_from_lines(stock_texts)
-        stock_csv = csv_path.parent / "stock_dims.csv"
-        with stock_csv.open("w", newline="", encoding="utf-8") as fh:
-            writer = csv.writer(fh)
-            writer.writerow(["length_in", "width_in", "thickness_in"])
-            if dims:
-                L, W, T = dims
-                print(f"[stock-dims] L={L:.3f} in, W={W:.3f} in, T={T:.3f} in")
-                writer.writerow([f"{L:.6f}", f"{W:.6f}", f"{T:.6f}"])
-            else:
-                print("[stock-dims] no stock dimensions detected")
-                writer.writerow(["", "", ""])
-        print(f"[stock-dims] csv={stock_csv}")
+        print("[stock-dims] skipped (tools module not available)")
 
     # (Removed part-dims inference: no reading or computing of DIMENSION geometry)
 
@@ -355,13 +482,16 @@ def main() -> int:
             print(f"[HOLE-TABLE] rows={len(out_rows)} csv={hole_csv}")
 
             # Ops: delegate to hole_ops (the source of truth)
-            ops_rows = explode_rows_to_operations(text_rows)
-            ops_csv = csv_path.parent / "hole_table_ops.csv"
-            with ops_csv.open("w", newline="", encoding="utf-8") as fh:
-                w = csv.writer(fh)
-                w.writerow(["HOLE", "REF_DIAM", "QTY", "DESCRIPTION/DEPTH"])
-                w.writerows(ops_rows)
-            print(f"[HOLE-TABLE][ops] rows={len(ops_rows)} csv={ops_csv}")
+            if explode_rows_to_operations:
+                ops_rows = explode_rows_to_operations(text_rows)
+                ops_csv = csv_path.parent / "hole_table_ops.csv"
+                with ops_csv.open("w", newline="", encoding="utf-8") as fh:
+                    w = csv.writer(fh)
+                    w.writerow(["HOLE", "REF_DIAM", "QTY", "DESCRIPTION/DEPTH"])
+                    w.writerows(ops_rows)
+                print(f"[HOLE-TABLE][ops] rows={len(ops_rows)} csv={ops_csv}")
+            else:
+                print("[HOLE-TABLE][ops] skipped (hole_ops module not available)")
         else:
             print("[HOLE-TABLE] none detected")
     except Exception as e:
