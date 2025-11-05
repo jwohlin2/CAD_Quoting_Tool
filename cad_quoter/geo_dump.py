@@ -326,6 +326,83 @@ def extract_hole_operations_from_file(file_path: str | Path) -> List[dict]:
     return result
 
 
+def extract_all_text_from_file(
+    file_path: str | Path,
+    layouts: Optional[List[str]] = None,
+    include_layers: Optional[List[str]] = None,
+    exclude_layers: Optional[List[str]] = None,
+    max_block_depth: int = 5,
+    min_height: float = 0.0,
+) -> List[dict]:
+    """
+    Public API: Extract all text from a CAD file.
+
+    This function reads all text entities (TEXT, MTEXT, TABLE, PROXY_ENTITY, etc.)
+    from a CAD file and returns them with full metadata.
+
+    Args:
+        file_path: Path to DXF or DWG file
+        layouts: Optional list of layout names to scan (default: all layouts)
+        include_layers: Optional regex patterns to include specific layers
+        exclude_layers: Optional regex patterns to exclude specific layers
+        max_block_depth: Maximum depth for recursive block exploration (default: 5)
+        min_height: Minimum text height filter (default: 0.0)
+
+    Returns:
+        List of dicts with keys:
+            - layout: Layout name (e.g., "Model", "Sheet 1")
+            - layer: Layer name
+            - etype: Entity type (e.g., "TEXT", "MTEXT", "PROXYTEXT")
+            - text: The actual text content
+            - x: X coordinate
+            - y: Y coordinate
+            - height: Text height
+            - rotation: Rotation angle in degrees
+            - in_block: Boolean indicating if text is inside a block
+            - depth: Block nesting depth
+            - block_path: List of block names showing the nesting hierarchy
+
+    Example:
+        >>> # Get all text from a file
+        >>> all_text = extract_all_text_from_file("drawing.dxf")
+        >>> for record in all_text:
+        ...     print(f"{record['text']} (on layer {record['layer']})")
+
+        >>> # Get only text from Model space
+        >>> model_text = extract_all_text_from_file("drawing.dxf", layouts=["Model"])
+
+        >>> # Get text excluding certain layers
+        >>> filtered = extract_all_text_from_file(
+        ...     "drawing.dxf",
+        ...     exclude_layers=["DIMENSIONS", "TITLEBLOCK"]
+        ... )
+
+        >>> # Get just the text strings (no metadata)
+        >>> text_only = [r["text"] for r in extract_all_text_from_file("drawing.dxf")]
+    """
+    file_path = Path(file_path)
+
+    # Open the CAD file
+    doc = geo_extractor.open_doc(file_path)
+
+    # Collect text records from all layouts with configurable options
+    text_records = geo_extractor.collect_all_text(
+        doc,
+        layouts=layouts,
+        include_layers=include_layers,
+        exclude_layers=exclude_layers,
+        max_block_depth=max_block_depth,
+        min_height=min_height,
+    )
+
+    # Decode unicode characters (e.g., \U+2205 → Ø)
+    for r in text_records:
+        if "text" in r and isinstance(r["text"], str):
+            r["text"] = _decode_uplus(r["text"])
+
+    return text_records
+
+
 def _parse_csv_patterns(s: str | None) -> List[str]:
     if not s:
         return []
