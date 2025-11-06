@@ -31,6 +31,7 @@ class PartInfo:
     material: str = DEFAULT_MATERIAL  # Default to aluminum MIC6 for McMaster compatibility
     volume: float = 0.0  # cubic inches
     area: float = 0.0    # square inches (L × W)
+    used_default_dimensions: bool = False  # True when fallback dimensions were applied
 
     def __post_init__(self):
         """Calculate derived properties."""
@@ -138,6 +139,8 @@ def extract_part_info_from_plan(
         thickness_override=thickness_override,
     )
 
+    default_dims_used = False
+
     if overrides:
         dims.update(overrides)
         plan.setdefault('extracted_dims', {}).update(overrides)
@@ -148,7 +151,13 @@ def extract_part_info_from_plan(
             if current_value <= 0:
                 dims[key] = default_value
                 extracted_dims[key] = default_value
+                default_dims_used = True
 
+        if default_dims_used:
+            plan.setdefault('extracted_dims_meta', {})[
+                'used_default_dimension_fallbacks'
+            ] = True
+            
     length = _safe_float(dims.get('L', 0.0))
     width = _safe_float(dims.get('W', 0.0))
     thickness = _safe_float(dims.get('T', 0.0))
@@ -160,7 +169,8 @@ def extract_part_info_from_plan(
         length=length,
         width=width,
         thickness=thickness,
-        material=part_material
+        material=part_material,
+        used_default_dimensions=default_dims_used,
     )
 
 

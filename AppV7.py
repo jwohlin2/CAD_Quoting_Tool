@@ -667,14 +667,29 @@ class AppV7:
                     return error_msg
 
             # Calculate desired stock dimensions (part + allowances)
-            desired_length = part_info.length + 0.25
-            desired_width = part_info.width + 0.25
-            desired_thickness = part_info.thickness + 0.125
+            use_allowances = not getattr(part_info, "used_default_dimensions", False)
+            length_allowance = 0.25 if use_allowances else 0.0
+            width_allowance = 0.25 if use_allowances else 0.0
+            thickness_allowance = 0.125 if use_allowances else 0.0
 
-            # Round desired thickness to nearest standard catalog thickness
+            desired_length = part_info.length + length_allowance
+            desired_width = part_info.width + width_allowance
+            desired_thickness = part_info.thickness + thickness_allowance
+
+            # Round desired thickness to nearest standard catalog thickness when allowances are applied
             # McMaster catalog has standard thicknesses: 0.25, 0.375, 0.5, 0.625, 0.75, 1, 1.25, 1.5, 2, 2.25, 2.5, etc.
-            standard_thicknesses = [0.25, 0.3125, 0.375, 0.4375, 0.5, 0.625, 0.75, 0.875, 1.0, 1.25, 1.5, 1.75, 2.0, 2.25, 2.5, 3.0, 3.5, 4.0, 6.0]
-            desired_thickness = min(standard_thicknesses, key=lambda t: abs(t - desired_thickness) if t >= desired_thickness else float('inf'))
+            if use_allowances:
+                standard_thicknesses = [
+                    0.25, 0.3125, 0.375, 0.4375, 0.5, 0.625, 0.75, 0.875,
+                    1.0, 1.25, 1.5, 1.75, 2.0, 2.25, 2.5, 3.0, 3.5, 4.0, 6.0
+                ]
+                desired_thickness = min(
+                    standard_thicknesses,
+                    key=lambda t: (
+                        abs(t - desired_thickness)
+                        if t >= desired_thickness else float('inf')
+                    )
+                )
 
             # Get McMaster catalog stock size and part number
             catalog_csv_path = str(default_catalog_csv())
