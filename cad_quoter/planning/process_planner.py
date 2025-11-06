@@ -732,7 +732,13 @@ def plan_from_cad_file(
         Process plan dict with keys: ops, fixturing, qa, warnings, directs
 
     Example:
-        >>> plan = plan_from_cad_file("301.dxf")
+        >>> plan = plan_from_cad_file(
+        ...     "301.dxf",
+        ...     use_paddle_ocr=False,
+        ...     length_override=24.0,
+        ...     width_override=24.0,
+        ...     thickness_override=2.0,
+        ... )
         >>> for op in plan["ops"]:
         ...     print(f"{op['op']}: {op}")
     """

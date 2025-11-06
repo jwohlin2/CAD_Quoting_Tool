@@ -62,9 +62,9 @@ print(f"   If Aluminum: {al_weight:.2f} lbs (vs Steel: {weight:.2f} lbs)")
 # Test 4: Explicit dimension overrides
 print("\n4. Explicit dimension overrides:")
 override_dims = {
-    "length": 12.5,
-    "width": 4.0,
-    "thickness": 0.75,
+    "length": 24.0,
+    "width": 24.0,
+    "thickness": 2.0,
 }
 
 override_part_info = extract_part_info_from_plan(
