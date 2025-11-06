@@ -200,6 +200,9 @@ class AppV7:
         self.machine_cost_total: Optional[float] = None
         self.labor_cost_total: Optional[float] = None
 
+        # Default profit margin applied to the final price
+        self.margin_rate: float = 0.15
+
         self._create_menu()
         self._create_button_panel()
         self._create_tabs()
@@ -1126,6 +1129,53 @@ class AppV7:
             return f"  {label}:".ljust(30) + "N/A"
         return f"  {label}:".ljust(30) + f"${value:>12,.2f}"
 
+    def _format_quick_margin_line(
+        self, margin: float, total_cost: float, *, is_current: bool = False
+    ) -> str:
+        """Format a single Quick What-If margin line."""
+
+        safe_margin = max(0.0, margin)
+        margin_text = f"{safe_margin:.0%}"
+        if is_current:
+            margin_text += " (current)"
+        final_price = total_cost * (1.0 + safe_margin)
+        return f"  {margin_text:<18}${final_price:>12,.2f}"
+
+    def _build_quick_margin_section(self, total_cost: float, margin_rate: float) -> list[str]:
+        """Return the QUICK WHAT-IFS margin table for the summary output."""
+
+        base_margin = max(0.0, margin_rate)
+        margins = [
+            max(0.0, base_margin - 0.05),
+            base_margin,
+            base_margin + 0.05,
+            base_margin + 0.10,
+        ]
+
+        seen: set[float] = set()
+        lines = [
+            "QUICK WHAT-IFS",
+            "=" * 74,
+            "Margin slider",
+            "  Margin           Final Price",
+        ]
+
+        for margin in margins:
+            key = round(max(0.0, margin), 4)
+            if key in seen:
+                continue
+            seen.add(key)
+            lines.append(
+                self._format_quick_margin_line(
+                    margin,
+                    total_cost,
+                    is_current=abs(margin - base_margin) < 1e-9,
+                )
+            )
+
+        lines.append("")
+        return lines
+
     def generate_quote(self) -> None:
         """Generate the quote."""
         # Collect values from quote editor
@@ -1157,6 +1207,9 @@ class AppV7:
 
         # Add summary
         self.output_text.insert(tk.END, "\n\n" + "=" * 74 + "\n\n")
+
+        margin_rate = self.margin_rate
+        quick_margin_lines: list[str] = []
         summary_lines = [
             "COST SUMMARY",
             "=" * 74,
@@ -1171,9 +1224,9 @@ class AppV7:
                 + (self.machine_cost_total or 0.0)
                 + (self.labor_cost_total or 0.0)
             )
+            quick_margin_lines = self._build_quick_margin_section(total_cost, margin_rate)
             summary_lines.append("-" * 74)
             summary_lines.append(self._format_cost_summary_line("Total Estimated Cost", total_cost))
-            margin_rate = 0.15
             margin_amount = total_cost * margin_rate
             final_cost = total_cost + margin_amount
             summary_lines.append(
@@ -1183,6 +1236,9 @@ class AppV7:
                 )
             )
             summary_lines.append(self._format_cost_summary_line("Final Cost", final_cost))
+
+        if quick_margin_lines:
+            self.output_text.insert(tk.END, "\n".join(quick_margin_lines))
 
         summary_lines.append("")
         self.output_text.insert(tk.END, "\n".join(summary_lines))
