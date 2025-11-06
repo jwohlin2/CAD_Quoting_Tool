@@ -213,6 +213,8 @@ def extract_part_info_from_cad(
         thickness_override=thickness_override,
     )
 
+    effective_use_paddle = use_paddle_ocr and not combined_overrides
+
     plan = plan_from_cad_file(
         cad_file_path,
         use_paddle_ocr=effective_use_paddle,
