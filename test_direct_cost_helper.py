@@ -118,6 +118,56 @@ assert override_part_info_cad.length == override_dims["length"]
 assert override_part_info_cad.width == override_dims["width"]
 assert override_part_info_cad.thickness == override_dims["thickness"]
 
+# Test 5: dims_override mapping (case-insensitive keys)
+print("\n5. dims_override mapping overrides:")
+
+plan_for_mapping_override = plan_from_cad_file(cad_file, verbose=False)
+mapping_overrides = {"Length": 8.0, "width": 5.5, "thk": 0.625}
+
+mapping_part_info = extract_part_info_from_plan(
+    plan_for_mapping_override,
+    "Aluminum 6061-T6",
+    dims_override=mapping_overrides,
+)
+
+print(
+    "   Plan dims_override dimensions: "
+    f"{mapping_part_info.length}\" x {mapping_part_info.width}\" x {mapping_part_info.thickness}\""
+)
+
+assert mapping_part_info.length == mapping_overrides["Length"]
+assert mapping_part_info.width == mapping_overrides["width"]
+assert mapping_part_info.thickness == mapping_overrides["thk"]
+
+plan_dims = plan_for_mapping_override["extracted_dims"]
+assert plan_dims["L"] == mapping_overrides["Length"]
+assert plan_dims["W"] == mapping_overrides["width"]
+assert plan_dims["T"] == mapping_overrides["thk"]
+
+# Test 6: dims_override passed directly to CAD helper
+print("\n6. CAD dims_override mapping overrides:")
+
+_process_planner.extract_dimensions_from_cad = _fail_if_called
+
+try:
+    mapping_part_info_cad = extract_part_info_from_cad(
+        cad_file,
+        material,
+        use_paddle_ocr=True,
+        dims_override=mapping_overrides,
+    )
+finally:
+    _process_planner.extract_dimensions_from_cad = _orig_extract_dimensions
+
+print(
+    "   CAD dims_override dimensions: "
+    f"{mapping_part_info_cad.length}\" x {mapping_part_info_cad.width}\" x {mapping_part_info_cad.thickness}\""
+)
+
+assert mapping_part_info_cad.length == mapping_overrides["Length"]
+assert mapping_part_info_cad.width == mapping_overrides["width"]
+assert mapping_part_info_cad.thickness == mapping_overrides["thk"]
+
 
 print("\n" + "=" * 70)
 print("TEST COMPLETE")
