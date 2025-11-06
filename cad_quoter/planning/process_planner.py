@@ -710,9 +710,11 @@ def plan_from_cad_file(
     if verbose:
         print(f"[PLANNER] Processing: {file_path.name}")
 
+    overrides = _normalize_dim_overrides(dims_override)
+
     # 1. Extract dimensions (L, W, T)
     dims = None
-    if use_paddle_ocr:
+    if use_paddle_ocr and not overrides:
         if verbose:
             print("[PLANNER] Extracting dimensions with PaddleOCR...")
         dims = extract_dimensions_from_cad(file_path)
@@ -723,8 +725,6 @@ def plan_from_cad_file(
         else:
             if verbose:
                 print("[PLANNER] Could not extract dimensions with PaddleOCR")
-
-    overrides = _normalize_dim_overrides(dims_override)
 
     # 2. Extract hole table and operations
     if verbose:

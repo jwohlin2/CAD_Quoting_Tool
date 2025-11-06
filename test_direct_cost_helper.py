@@ -59,7 +59,6 @@ print(f"   Material: {part_info2.material}")
 al_density = get_material_density(part_info2.material)
 al_weight = calculate_material_weight(part_info2.volume, al_density)
 print(f"   If Aluminum: {al_weight:.2f} lbs (vs Steel: {weight:.2f} lbs)")
-
 # Test 4: Explicit dimension overrides
 print("\n4. Explicit dimension overrides:")
 override_dims = {
@@ -85,14 +84,30 @@ assert override_part_info.length == override_dims["length"]
 assert override_part_info.width == override_dims["width"]
 assert override_part_info.thickness == override_dims["thickness"]
 
-override_part_info_cad = extract_part_info_from_cad(
-    cad_file,
-    material,
-    use_paddle_ocr=True,
-    length_override=override_dims["length"],
-    width_override=override_dims["width"],
-    thickness_override=override_dims["thickness"],
-)
+from cad_quoter.planning import process_planner as _process_planner
+
+_orig_extract_dimensions = _process_planner.extract_dimensions_from_cad
+
+
+def _fail_if_called(*args, **kwargs):  # pragma: no cover - defensive assertion
+    raise AssertionError(
+        "extract_dimensions_from_cad should be skipped when overrides are provided"
+    )
+
+
+_process_planner.extract_dimensions_from_cad = _fail_if_called
+
+try:
+    override_part_info_cad = extract_part_info_from_cad(
+        cad_file,
+        material,
+        use_paddle_ocr=True,
+        length_override=override_dims["length"],
+        width_override=override_dims["width"],
+        thickness_override=override_dims["thickness"],
+    )
+finally:
+    _process_planner.extract_dimensions_from_cad = _orig_extract_dimensions
 
 print(
     "   CAD override dimensions: "
@@ -102,6 +117,7 @@ print(
 assert override_part_info_cad.length == override_dims["length"]
 assert override_part_info_cad.width == override_dims["width"]
 assert override_part_info_cad.thickness == override_dims["thickness"]
+
 
 print("\n" + "=" * 70)
 print("TEST COMPLETE")
