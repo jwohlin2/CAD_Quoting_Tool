@@ -1058,54 +1058,58 @@ class AppV7:
 
             self.labor_cost_total = labor_cost
 
-            # Input details
-            report.append("LABOR INPUT DETAILS")
-            report.append("-" * 74)
-            report.append(f"  Total Operations:                {labor_inputs.ops_total:>10}")
-            report.append(f"  Total Holes:                     {labor_inputs.holes_total:>10}")
-            report.append(f"  Tool Changes:                    {labor_inputs.tool_changes:>10}")
-            report.append(f"  Fixturing Complexity:            {labor_inputs.fixturing_complexity:>10} (0=none, 1=light, 2=moderate, 3=complex)")
+            # Input details (hidden by request)
+            # report.append("LABOR INPUT DETAILS")
+            # report.append("-" * 74)
+            # report.append(f"  Total Operations:                {labor_inputs.ops_total:>10}")
+            # report.append(f"  Total Holes:                     {labor_inputs.holes_total:>10}")
+            # report.append(f"  Tool Changes:                    {labor_inputs.tool_changes:>10}")
+            # report.append(
+            #     f"  Fixturing Complexity:            {labor_inputs.fixturing_complexity:>10} (0=none, 1=light, 2=moderate, 3=complex)"
+            # )
 
-            if edm_window_count > 0:
-                report.append(f"  EDM Windows:                     {labor_inputs.edm_window_count:>10}")
-                report.append(f"  EDM Skim Passes:                 {labor_inputs.edm_skim_passes:>10}")
+            # if edm_window_count > 0:
+            #     report.append(f"  EDM Windows:                     {labor_inputs.edm_window_count:>10}")
+            #     report.append(f"  EDM Skim Passes:                 {labor_inputs.edm_skim_passes:>10}")
 
-            if thread_mill > 0:
-                report.append(f"  Thread Mill Operations:          {labor_inputs.thread_mill:>10}")
+            # if thread_mill > 0:
+            #     report.append(f"  Thread Mill Operations:          {labor_inputs.thread_mill:>10}")
 
-            if jig_grind_bore_qty > 0:
-                report.append(f"  Jig Grind Bores:                 {labor_inputs.jig_grind_bore_qty:>10}")
+            # if jig_grind_bore_qty > 0:
+            #     report.append(f"  Jig Grind Bores:                 {labor_inputs.jig_grind_bore_qty:>10}")
 
-            if grind_face_pairs > 0:
-                report.append(f"  Grind Face Pairs:                {labor_inputs.grind_face_pairs:>10}")
+            # if grind_face_pairs > 0:
+            #     report.append(f"  Grind Face Pairs:                {labor_inputs.grind_face_pairs:>10}")
 
-            if tap_rigid > 0:
-                report.append(f"  Rigid Tap Operations:            {labor_inputs.tap_rigid:>10}")
+            # if tap_rigid > 0:
+            #     report.append(f"  Rigid Tap Operations:            {labor_inputs.tap_rigid:>10}")
 
-            if tap_npt > 0:
-                report.append(f"  NPT Tap Operations:              {labor_inputs.tap_npt:>10}")
+            # if tap_npt > 0:
+            #     report.append(f"  NPT Tap Operations:              {labor_inputs.tap_npt:>10}")
 
-            if counterbore_qty > 0:
-                report.append(f"  Counterbore Operations:          {labor_inputs.counterbore_qty:>10}")
+            # if counterbore_qty > 0:
+            #     report.append(f"  Counterbore Operations:          {labor_inputs.counterbore_qty:>10}")
 
-            if counterdrill_qty > 0:
-                report.append(f"  Counterdrill Operations:         {labor_inputs.counterdrill_qty:>10}")
+            # if counterdrill_qty > 0:
+            #     report.append(f"  Counterdrill Operations:         {labor_inputs.counterdrill_qty:>10}")
 
-            if ream_press_dowel > 0:
-                report.append(f"  Press Fit Dowel Reaming:         {labor_inputs.ream_press_dowel:>10}")
+            # if ream_press_dowel > 0:
+            #     report.append(f"  Press Fit Dowel Reaming:         {labor_inputs.ream_press_dowel:>10}")
 
-            if ream_slip_dowel > 0:
-                report.append(f"  Slip Fit Dowel Reaming:          {labor_inputs.ream_slip_dowel:>10}")
+            # if ream_slip_dowel > 0:
+            #     report.append(f"  Slip Fit Dowel Reaming:          {labor_inputs.ream_slip_dowel:>10}")
 
-            if outsource_touches > 0:
-                report.append(f"  Outsource Touches:               {labor_inputs.outsource_touches:>10}")
+            # if outsource_touches > 0:
+            #     report.append(f"  Outsource Touches:               {labor_inputs.outsource_touches:>10}")
 
-            if part_flips > 0:
-                report.append(f"  Part Flips:                      {labor_inputs.part_flips:>10}")
+            # if part_flips > 0:
+            #     report.append(f"  Part Flips:                      {labor_inputs.part_flips:>10}")
 
-            report.append(f"  Inspection Frequency:            {labor_inputs.inspection_frequency:>10.1%}")
+            # report.append(
+            #     f"  Inspection Frequency:            {labor_inputs.inspection_frequency:>10.1%}"
+            # )
 
-            report.append("")
+            # report.append("")
             report.append("=" * 74)
             report.append("")
 
