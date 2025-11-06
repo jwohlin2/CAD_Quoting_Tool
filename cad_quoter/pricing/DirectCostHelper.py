@@ -206,7 +206,7 @@ def extract_part_info_from_cad(
             material = DEFAULT_MATERIAL
 
     # Generate plan from CAD file - uses PaddleOCR by default for dimension extraction
-  combined_overrides = _collect_dimension_overrides(
+    combined_overrides = _collect_dimension_overrides(
         dims_override,
         length_override=length_override,
         width_override=width_override,
