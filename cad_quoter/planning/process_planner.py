@@ -695,8 +695,14 @@ def plan_from_cad_file(
         print("[PLANNER] Extracting hole table...")
     hole_table = extract_hole_table_from_cad(file_path)
     hole_operations = extract_hole_operations_from_cad(file_path)
+    hole_operation_rows = len(hole_operations)
+    hole_operation_qty = _sum_hole_qty(hole_operations)
     if verbose:
-        print(f"[PLANNER] Found {len(hole_table)} unique holes -> {len(hole_operations)} operations")
+        print(
+            "[PLANNER] Found "
+            f"{len(hole_table)} unique holes -> {hole_operation_rows} operations "
+            f"totaling {hole_operation_qty} holes"
+        )
 
     # 3. Extract all text for family detection
     if verbose:
@@ -736,7 +742,8 @@ def plan_from_cad_file(
     if dims:
         plan["extracted_dims"] = {"L": L, "W": W, "T": T}
     plan["extracted_holes"] = len(hole_table)
-    plan["extracted_hole_operations"] = len(hole_operations)
+    plan["extracted_hole_operations"] = hole_operation_qty
+    plan["extracted_hole_operation_rows"] = hole_operation_rows
 
     if verbose:
         print(f"[PLANNER] Plan complete: {len(plan['ops'])} operations")
@@ -813,6 +820,33 @@ def _convert_hole_table_to_hole_sets(hole_table: List[Dict[str, Any]]) -> List[D
         hole_sets.append(hole_entry)
 
     return hole_sets
+
+
+def _sum_hole_qty(rows: Iterable[Dict[str, Any]]) -> int:
+    """Return the total quantity from a collection of hole operation rows."""
+
+    total = 0
+    for row in rows:
+        qty = row.get("QTY", 0)
+        if isinstance(qty, str):
+            qty = qty.strip()
+            if not qty:
+                continue
+            try:
+                qty_val = float(qty)
+            except ValueError:
+                continue
+        elif isinstance(qty, (int, float)):
+            qty_val = qty
+        else:
+            continue
+
+        if qty_val < 0:
+            continue
+
+        total += int(round(qty_val))
+
+    return total
 
 
 def _parse_diameter(ref_diam: str) -> float:
