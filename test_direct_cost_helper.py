@@ -168,6 +168,23 @@ assert mapping_part_info_cad.length == mapping_overrides["Length"]
 assert mapping_part_info_cad.width == mapping_overrides["width"]
 assert mapping_part_info_cad.thickness == mapping_overrides["thk"]
 
+# Test 7: Default dimension fallbacks when plan lacks overrides or extracted values
+print("\n7. Default dimension fallbacks:")
+
+empty_plan = {}
+fallback_part_info = extract_part_info_from_plan(empty_plan)
+
+print(
+    "   Fallback dimensions: "
+    f"{fallback_part_info.length}\" x {fallback_part_info.width}\" x {fallback_part_info.thickness}\""
+)
+print(f"   Used defaults: {fallback_part_info.used_default_dimensions}")
+
+assert fallback_part_info.length == 24.0
+assert fallback_part_info.width == 24.0
+assert fallback_part_info.thickness == 3.0
+assert fallback_part_info.used_default_dimensions is True
+
 
 print("\n" + "=" * 70)
 print("TEST COMPLETE")
