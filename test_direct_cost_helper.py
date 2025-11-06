@@ -1,6 +1,15 @@
 """Test DirectCostHelper functionality."""
 
 from pathlib import Path
+import sys
+import types
+
+# The pricing package imports the McMaster API module, which depends on the
+# third-party ``requests`` package. The test environment used for these examples
+# does not have external network access to install dependencies, so we provide a
+# lightweight stub to satisfy the import without performing any HTTP requests.
+if "requests" not in sys.modules:  # pragma: no cover - defensive guard
+    sys.modules["requests"] = types.ModuleType("requests")
 from cad_quoter.pricing.DirectCostHelper import (
     extract_part_info_from_cad,
     extract_part_info_from_plan,
@@ -50,6 +59,49 @@ print(f"   Material: {part_info2.material}")
 al_density = get_material_density(part_info2.material)
 al_weight = calculate_material_weight(part_info2.volume, al_density)
 print(f"   If Aluminum: {al_weight:.2f} lbs (vs Steel: {weight:.2f} lbs)")
+
+# Test 4: Explicit dimension overrides
+print("\n4. Explicit dimension overrides:")
+override_dims = {
+    "length": 12.5,
+    "width": 4.0,
+    "thickness": 0.75,
+}
+
+override_part_info = extract_part_info_from_plan(
+    plan,
+    "Aluminum 6061-T6",
+    length_override=override_dims["length"],
+    width_override=override_dims["width"],
+    thickness_override=override_dims["thickness"],
+)
+
+print(
+    "   Plan override dimensions: "
+    f"{override_part_info.length}\" x {override_part_info.width}\" x {override_part_info.thickness}\""
+)
+
+assert override_part_info.length == override_dims["length"]
+assert override_part_info.width == override_dims["width"]
+assert override_part_info.thickness == override_dims["thickness"]
+
+override_part_info_cad = extract_part_info_from_cad(
+    cad_file,
+    material,
+    use_paddle_ocr=True,
+    length_override=override_dims["length"],
+    width_override=override_dims["width"],
+    thickness_override=override_dims["thickness"],
+)
+
+print(
+    "   CAD override dimensions: "
+    f"{override_part_info_cad.length}\" x {override_part_info_cad.width}\" x {override_part_info_cad.thickness}\""
+)
+
+assert override_part_info_cad.length == override_dims["length"]
+assert override_part_info_cad.width == override_dims["width"]
+assert override_part_info_cad.thickness == override_dims["thickness"]
 
 print("\n" + "=" * 70)
 print("TEST COMPLETE")
