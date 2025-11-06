@@ -118,6 +118,32 @@ assert override_part_info_cad.length == override_dims["length"]
 assert override_part_info_cad.width == override_dims["width"]
 assert override_part_info_cad.thickness == override_dims["thickness"]
 
+print("\n6a. plan_from_cad_file explicit overrides:")
+
+_process_planner.extract_dimensions_from_cad = _fail_if_called
+
+try:
+    plan_with_explicit_overrides = plan_from_cad_file(
+        cad_file,
+        verbose=False,
+        length_override=override_dims["length"],
+        width_override=override_dims["width"],
+        thickness_override=override_dims["thickness"],
+    )
+finally:
+    _process_planner.extract_dimensions_from_cad = _orig_extract_dimensions
+
+plan_with_explicit_dims = plan_with_explicit_overrides["extracted_dims"]
+
+print(
+    "   Plan explicit overrides dimensions: "
+    f"{plan_with_explicit_dims['L']}\" x {plan_with_explicit_dims['W']}\" x {plan_with_explicit_dims['T']}\""
+)
+
+assert plan_with_explicit_dims["L"] == override_dims["length"]
+assert plan_with_explicit_dims["W"] == override_dims["width"]
+assert plan_with_explicit_dims["T"] == override_dims["thickness"]
+
 # Test 5: dims_override mapping (case-insensitive keys)
 print("\n5. dims_override mapping overrides:")
 

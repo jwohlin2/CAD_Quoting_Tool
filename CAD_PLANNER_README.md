@@ -64,13 +64,15 @@ The `plan_from_cad_file()` function performs these steps automatically:
 
 ## API Reference
 
-### `plan_from_cad_file(file_path, fallback_family="die_plate", use_paddle_ocr=True, verbose=False)`
+### `plan_from_cad_file(file_path, fallback_family="die_plate", use_paddle_ocr=True, verbose=False, *, dims_override=None, length_override=None, width_override=None, thickness_override=None)`
 
 **Parameters:**
 - `file_path`: Path to DXF or DWG file
 - `fallback_family`: Family to use if auto-detection fails (default: `"die_plate"`)
 - `use_paddle_ocr`: Whether to use PaddleOCR for dimensions (default: `True`)
 - `verbose`: Print extraction progress (default: `False`)
+- `dims_override`: Optional mapping for manual `L`, `W`, or `T` overrides (case-insensitive keys)
+- `length_override` / `width_override` / `thickness_override`: Explicit dimension overrides (inches) that take precedence over the mapping
 
 **Returns:** Process plan dict with keys:
 ```python
