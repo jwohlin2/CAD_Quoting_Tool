@@ -669,6 +669,34 @@ def _normalize_dim_overrides(dims_override: Optional[Mapping[str, Any]]) -> Dict
     return overrides
 
 
+def _collect_dimension_overrides(
+    dims_override: Optional[Mapping[str, Any]],
+    *,
+    length_override: Optional[Any] = None,
+    width_override: Optional[Any] = None,
+    thickness_override: Optional[Any] = None,
+) -> Dict[str, float]:
+    """Combine mapping overrides with explicit L/W/T values."""
+
+    overrides = _normalize_dim_overrides(dims_override)
+
+    manual_overrides = {
+        "L": length_override,
+        "W": width_override,
+        "T": thickness_override,
+    }
+
+    for key, raw_value in manual_overrides.items():
+        if raw_value is None:
+            continue
+        try:
+            overrides[key] = float(raw_value)
+        except (TypeError, ValueError):
+            continue
+
+    return overrides
+
+
 def plan_from_cad_file(
     file_path: str | Path,
     fallback_family: str = "die_plate",
@@ -676,6 +704,9 @@ def plan_from_cad_file(
     verbose: bool = False,
     *,
     dims_override: Optional[Mapping[str, Any]] = None,
+    length_override: Optional[Any] = None,
+    width_override: Optional[Any] = None,
+    thickness_override: Optional[Any] = None,
 ) -> Dict[str, Any]:
     """High-level API: Generate process plan directly from a CAD file.
 
@@ -693,12 +724,21 @@ def plan_from_cad_file(
         use_paddle_ocr: Whether to use PaddleOCR for dimensions (default: True)
         verbose: Print extraction progress (default: False)
         dims_override: Optional mapping to manually override L, W, or T in inches
+        length_override: Explicit length override in inches (takes precedence over mapping)
+        width_override: Explicit width override in inches (takes precedence over mapping)
+        thickness_override: Explicit thickness override in inches (takes precedence over mapping)
 
     Returns:
         Process plan dict with keys: ops, fixturing, qa, warnings, directs
 
     Example:
-        >>> plan = plan_from_cad_file("301.dxf")
+        >>> plan = plan_from_cad_file(
+        ...     "301.dxf",
+        ...     use_paddle_ocr=False,
+        ...     length_override=24.0,
+        ...     width_override=24.0,
+        ...     thickness_override=2.0,
+        ... )
         >>> for op in plan["ops"]:
         ...     print(f"{op['op']}: {op}")
     """
@@ -710,7 +750,12 @@ def plan_from_cad_file(
     if verbose:
         print(f"[PLANNER] Processing: {file_path.name}")
 
-    overrides = _normalize_dim_overrides(dims_override)
+    overrides = _collect_dimension_overrides(
+        dims_override,
+        length_override=length_override,
+        width_override=width_override,
+        thickness_override=thickness_override,
+    )
 
     # 1. Extract dimensions (L, W, T)
     dims = None
