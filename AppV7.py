@@ -1124,23 +1124,23 @@ class AppV7:
         # Display in output tab
         self.output_text.delete(1.0, tk.END)
 
-        # Generate direct costs report
-        direct_costs_report = self._generate_direct_costs_report()
-        self.output_text.insert(tk.END, direct_costs_report)
+        # Generate labor hours report first
+        labor_hours_report = self._generate_labor_hours_report()
+        self.output_text.insert(tk.END, labor_hours_report)
 
         # Add separator
         self.output_text.insert(tk.END, "\n\n" + "=" * 74 + "\n\n")
 
-        # Generate machine hours report
+        # Generate machine hours report next
         machine_hours_report = self._generate_machine_hours_report()
         self.output_text.insert(tk.END, machine_hours_report)
 
         # Add separator
         self.output_text.insert(tk.END, "\n\n" + "=" * 74 + "\n\n")
 
-        # Generate labor hours report
-        labor_hours_report = self._generate_labor_hours_report()
-        self.output_text.insert(tk.END, labor_hours_report)
+        # Generate direct costs report last before summary
+        direct_costs_report = self._generate_direct_costs_report()
+        self.output_text.insert(tk.END, direct_costs_report)
 
         # Add summary
         self.output_text.insert(tk.END, "\n\n" + "=" * 74 + "\n\n")
