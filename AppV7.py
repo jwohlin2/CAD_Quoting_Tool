@@ -706,8 +706,13 @@ class AppV7:
             scrap_value = scrap_value_info.get('scrap_value', 0.0)
             scrap_price_per_lb = scrap_value_info.get('scrap_price_per_lb', 0.0)
 
+            tax_amount = 0.0
+            shipping_amount = 0.0
+
             if mcmaster_price is not None:
-                net_cost = mcmaster_price - scrap_value
+                tax_amount = mcmaster_price * 0.07
+                shipping_amount = mcmaster_price * 0.125
+                net_cost = mcmaster_price + tax_amount + shipping_amount - scrap_value
             else:
                 net_cost = 0.0
 
@@ -735,6 +740,10 @@ class AppV7:
 
             # Cost breakdown
             report.append(f"  Stock Piece (McMaster part {mcmaster_part})".ljust(60) + f"{price_str:>14}")
+
+            if mcmaster_price is not None:
+                report.append(f"  Tax".ljust(60) + f"+${tax_amount:>12.2f}")
+                report.append(f"  Shipping".ljust(60) + f"+${shipping_amount:>12.2f}")
 
             if scrap_value > 0:
                 scrap_credit_line = f"  Scrap Credit @ Wieland ${scrap_price_per_lb:.2f}/lb × {scrap_info.scrap_percentage:.1f}%"
