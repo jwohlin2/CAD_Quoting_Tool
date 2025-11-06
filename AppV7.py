@@ -317,7 +317,26 @@ class AppV7:
         # Define all the quote variables from the screenshot
         self.quote_fields = {}
         variables = [
-            ("Material Scrap / Remnant Value", "50", "Enter the estimated scrap or remnant value for this material"),
+            (
+                "Override Length (in)",
+                "",
+                "Optional. Enter a manual part length in inches. Leave blank to use the CAD extracted value.",
+            ),
+            (
+                "Override Width (in)",
+                "",
+                "Optional. Enter a manual part width in inches. Leave blank to use the CAD extracted value.",
+            ),
+            (
+                "Override Thickness (in)",
+                "",
+                "Optional. Enter a manual part thickness in inches. Leave blank to use the CAD extracted value.",
+            ),
+            (
+                "Material Scrap / Remnant Value",
+                "50",
+                "Enter the estimated scrap or remnant value for this material",
+            ),
         ]
 
         row = 0
@@ -353,6 +372,50 @@ class AppV7:
                 CreateToolTip(info_indicator, tooltip_text, wraplength=360)
 
             row += 1
+
+    def _get_quote_field_value(self, label: str) -> str:
+        """Return the current value for a quote field, preferring stored quote vars."""
+        if label in self.quote_vars:
+            return self.quote_vars.get(label, "") or ""
+        field = self.quote_fields.get(label)
+        if field is not None:
+            try:
+                return field.get()
+            except Exception:
+                return ""
+        return ""
+
+    def _collect_dimension_overrides(self) -> dict[str, float]:
+        """Collect any manual dimension overrides entered in the Quote Editor."""
+        label_to_key = {
+            "Override Length (in)": "L",
+            "Override Width (in)": "W",
+            "Override Thickness (in)": "T",
+        }
+        overrides: dict[str, float] = {}
+
+        for label, key in label_to_key.items():
+            raw_value = self._get_quote_field_value(label).strip()
+            if not raw_value:
+                continue
+            try:
+                value = float(raw_value)
+            except ValueError:
+                try:
+                    from fractions import Fraction
+
+                    value = float(Fraction(raw_value))
+                except Exception:
+                    print(f"[AppV7] Ignoring invalid override for {label}: {raw_value}")
+                    continue
+
+            if value <= 0:
+                print(f"[AppV7] Ignoring non-positive override for {label}: {raw_value}")
+                continue
+
+            overrides[key] = value
+
+        return overrides
 
     def _create_output_tab(self) -> None:
         """Create the Output tab with JSON display."""
@@ -465,13 +528,19 @@ class AppV7:
         try:
             from cad_quoter.pricing.DirectCostHelper import extract_part_info_from_cad
             from cad_quoter.pricing.mcmaster_helpers import (
+                collect_available_plate_thicknesses,
+                load_mcmaster_catalog_rows,
                 pick_mcmaster_plate_sku,
-                load_mcmaster_catalog_rows
             )
             from cad_quoter.resources import default_catalog_csv
 
             # Extract part info from CAD file
-            part_info = extract_part_info_from_cad(self.cad_file_path, verbose=True)
+            override_dims = self._collect_dimension_overrides()
+            part_info = extract_part_info_from_cad(
+                self.cad_file_path,
+                verbose=True,
+                override_dims=override_dims or None,
+            )
 
             # Debug: print what was extracted
             print(f"[AppV7] Extracted part_info: L={part_info.length}, W={part_info.width}, T={part_info.thickness}, material={part_info.material}")
@@ -536,7 +605,12 @@ class AppV7:
                     print("[AppV7] Trying fallback dimension extraction from text...")
                     try:
                         from cad_quoter.planning import plan_from_cad_file
-                        plan = plan_from_cad_file(self.cad_file_path, use_paddle_ocr=False, verbose=True)
+                        plan = plan_from_cad_file(
+                            self.cad_file_path,
+                            use_paddle_ocr=False,
+                            verbose=True,
+                            override_dims=override_dims or None,
+                        )
 
                         # Try to extract from text records
                         import re
@@ -607,14 +681,24 @@ class AppV7:
             desired_width = part_info.width + 0.25
             desired_thickness = part_info.thickness + 0.125
 
-            # Round desired thickness to nearest standard catalog thickness
-            # McMaster catalog has standard thicknesses: 0.25, 0.375, 0.5, 0.625, 0.75, 1, 1.25, 1.5, 2, 2.25, 2.5, etc.
-            standard_thicknesses = [0.25, 0.3125, 0.375, 0.4375, 0.5, 0.625, 0.75, 0.875, 1.0, 1.25, 1.5, 1.75, 2.0, 2.25, 2.5, 3.0, 3.5, 4.0, 6.0]
-            desired_thickness = min(standard_thicknesses, key=lambda t: abs(t - desired_thickness) if t >= desired_thickness else float('inf'))
-
             # Get McMaster catalog stock size and part number
             catalog_csv_path = str(default_catalog_csv())
             catalog_rows = load_mcmaster_catalog_rows(catalog_csv_path)
+
+            # Snap desired thickness to the next available catalog thickness
+            catalog_thicknesses = collect_available_plate_thicknesses(catalog_rows)
+            if catalog_thicknesses:
+                original_desired_thickness = desired_thickness
+                snapped_thickness = next(
+                    (t for t in catalog_thicknesses if t >= desired_thickness - 1e-6),
+                    catalog_thicknesses[-1],
+                )
+                if original_desired_thickness - snapped_thickness > 1e-6:
+                    print(
+                        "[AppV7] Desired thickness exceeds catalog range; using maximum available thickness "
+                        f"{catalog_thicknesses[-1]:.4f} in"
+                    )
+                desired_thickness = snapped_thickness
 
             # Try multiple material key variations for better matching
             material_keys_to_try = [
@@ -783,6 +867,8 @@ class AppV7:
                 plan_from_cad_file,
             )
 
+            override_dims = self._collect_dimension_overrides()
+
             # Extract hole operations (expanded format with one row per operation)
             hole_table = extract_hole_operations_from_cad(self.cad_file_path)
 
@@ -790,9 +876,17 @@ class AppV7:
                 return "No hole table found in CAD file."
 
             # Get dimensions from plan (or cached JSON)
-            plan = plan_from_cad_file(self.cad_file_path, verbose=False)
-            dims = plan.get('extracted_dims', {})
-            thickness = dims.get('T', 0)
+            plan = plan_from_cad_file(
+                self.cad_file_path,
+                verbose=False,
+                override_dims=override_dims or None,
+            )
+            dims = dict(plan.get('extracted_dims', {}))
+            if override_dims:
+                dims.update(override_dims)
+            thickness = override_dims.get('T') if override_dims else None
+            if thickness is None:
+                thickness = dims.get('T', 0)
 
             # If thickness is still 0, try to get it from cached JSON
             if thickness == 0:
@@ -925,7 +1019,12 @@ class AppV7:
             from cad_quoter.planning.process_planner import LaborInputs, compute_labor_minutes
 
             # Get the process plan
-            plan = plan_from_cad_file(self.cad_file_path, verbose=False)
+            override_dims = self._collect_dimension_overrides()
+            plan = plan_from_cad_file(
+                self.cad_file_path,
+                verbose=False,
+                override_dims=override_dims or None,
+            )
 
             # Extract operation counts from plan
             ops = plan.get('ops', [])

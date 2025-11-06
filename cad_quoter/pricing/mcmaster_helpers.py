@@ -57,6 +57,37 @@ def _coerce_inches_value(value: Any) -> float | None:
         return None
 
 
+def collect_available_plate_thicknesses(
+    catalog_rows: Sequence[Mapping[str, Any]] | None = None,
+) -> list[float]:
+    """Return sorted unique thicknesses present in the McMaster catalog."""
+
+    rows = (
+        list(catalog_rows)
+        if catalog_rows is not None
+        else load_mcmaster_catalog_rows()
+    )
+    if not rows:
+        return []
+
+    thicknesses = set()
+    for row in rows:
+        if not isinstance(row, Mapping):
+            continue
+        raw_value = (
+            row.get("thickness_in")
+            or row.get("T_in")
+            or row.get("thk_in")
+            or row.get("thickness")
+        )
+        parsed = _coerce_inches_value(raw_value)
+        if parsed is None or parsed <= 0:
+            continue
+        thicknesses.add(float(parsed))
+
+    return sorted(thicknesses)
+
+
 def _pick_mcmaster_plate_sku_impl(
     need_L_in: float,
     need_W_in: float,

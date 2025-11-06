@@ -18,7 +18,7 @@ Notes
 """
 from __future__ import annotations
 from dataclasses import dataclass, field
-from typing import Any, Dict, List, Optional, Tuple, Iterable
+from typing import Any, Dict, List, Optional, Tuple, Iterable, Mapping
 from pathlib import Path
 
 # ---------------------------------------------------------------------------
@@ -638,11 +638,35 @@ def extract_all_text_from_cad(file_path: str | Path) -> List[str]:
         return []
 
 
+def _normalize_override_dims(override_dims: Optional[Mapping[str, Any]]) -> Dict[str, float]:
+    """Normalize dimension overrides to uppercase float values."""
+
+    normalized: Dict[str, float] = {}
+    if not override_dims:
+        return normalized
+
+    for key, value in override_dims.items():
+        if value is None:
+            continue
+
+        key_upper = str(key).strip().upper()
+        if key_upper not in {"L", "W", "T"}:
+            continue
+
+        try:
+            normalized[key_upper] = float(value)
+        except (TypeError, ValueError):
+            continue
+
+    return normalized
+
+
 def plan_from_cad_file(
     file_path: str | Path,
     fallback_family: str = "die_plate",
     use_paddle_ocr: bool = True,
-    verbose: bool = False
+    verbose: bool = False,
+    override_dims: Optional[Mapping[str, Any]] = None,
 ) -> Dict[str, Any]:
     """High-level API: Generate process plan directly from a CAD file.
 
@@ -659,6 +683,7 @@ def plan_from_cad_file(
         fallback_family: Family to use if auto-detection fails (default: "die_plate")
         use_paddle_ocr: Whether to use PaddleOCR for dimensions (default: True)
         verbose: Print extraction progress (default: False)
+        override_dims: Optional manual overrides for L/W/T (applied after OCR)
 
     Returns:
         Process plan dict with keys: ops, fixturing, qa, warnings, directs
@@ -677,18 +702,27 @@ def plan_from_cad_file(
         print(f"[PLANNER] Processing: {file_path.name}")
 
     # 1. Extract dimensions (L, W, T)
-    dims = None
+    dims_map: Dict[str, float] = {}
     if use_paddle_ocr:
         if verbose:
             print("[PLANNER] Extracting dimensions with PaddleOCR...")
         dims = extract_dimensions_from_cad(file_path)
         if dims:
             L, W, T = dims
+            dims_map = {"L": L, "W": W, "T": T}
             if verbose:
                 print(f"[PLANNER] Dimensions: L={L:.3f}\", W={W:.3f}\", T={T:.3f}\"")
         else:
             if verbose:
                 print("[PLANNER] Could not extract dimensions with PaddleOCR")
+
+    overrides = _normalize_override_dims(override_dims)
+    if overrides:
+        dims_map = {**dims_map}
+        dims_map.update(overrides)
+        if verbose:
+            applied = ", ".join(f"{key}={value}" for key, value in overrides.items())
+            print(f"[PLANNER] Applying dimension overrides: {applied}")
 
     # 2. Extract hole table and operations
     if verbose:
@@ -713,8 +747,10 @@ def plan_from_cad_file(
         "hole_sets": hole_sets,
     }
 
-    if dims:
-        L, W, T = dims
+    if dims_map:
+        L = dims_map.get("L", 0.0)
+        W = dims_map.get("W", 0.0)
+        T = dims_map.get("T", 0.0)
         params["plate_LxW"] = (L, W)
         params["T"] = T
     else:
@@ -733,8 +769,12 @@ def plan_from_cad_file(
 
     # Add source info to plan
     plan["source_file"] = str(file_path)
-    if dims:
-        plan["extracted_dims"] = {"L": L, "W": W, "T": T}
+    if dims_map:
+        plan["extracted_dims"] = {
+            "L": dims_map.get("L", 0.0),
+            "W": dims_map.get("W", 0.0),
+            "T": dims_map.get("T", 0.0),
+        }
     plan["extracted_holes"] = len(hole_table)
     plan["extracted_hole_operations"] = len(hole_operations)
 

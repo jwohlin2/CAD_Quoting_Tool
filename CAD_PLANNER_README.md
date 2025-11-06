@@ -64,13 +64,14 @@ The `plan_from_cad_file()` function performs these steps automatically:
 
 ## API Reference
 
-### `plan_from_cad_file(file_path, fallback_family="die_plate", use_paddle_ocr=True, verbose=False)`
+### `plan_from_cad_file(file_path, fallback_family="die_plate", use_paddle_ocr=True, verbose=False, override_dims=None)`
 
 **Parameters:**
 - `file_path`: Path to DXF or DWG file
 - `fallback_family`: Family to use if auto-detection fails (default: `"die_plate"`)
 - `use_paddle_ocr`: Whether to use PaddleOCR for dimensions (default: `True`)
 - `verbose`: Print extraction progress (default: `False`)
+- `override_dims`: Optional `dict` for manually overriding extracted dimensions (keys `L`, `W`, `T`)
 
 **Returns:** Process plan dict with keys:
 ```python
@@ -81,7 +82,7 @@ The `plan_from_cad_file()` function performs these steps automatically:
     "warnings": [...],         # Warnings/notes
     "directs": {...},          # Direct cost flags
     "source_file": "...",      # Input file path
-    "extracted_dims": {...},   # L, W, T (if OCR succeeded)
+    "extracted_dims": {...},   # Final L, W, T (after applying overrides)
     "extracted_holes": 0       # Number of holes found
 }
 ```
