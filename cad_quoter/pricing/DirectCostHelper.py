@@ -2,7 +2,7 @@
 
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Optional, Dict, Any, Tuple, List
+from typing import Optional, Dict, Any, Tuple, List, Mapping
 import os
 
 # ============================================================================
@@ -68,18 +68,45 @@ def extract_part_info_from_plan(
     )
 
 
+def _normalize_dimension_overrides(
+    override_dims: Optional[Mapping[str, Any]]
+) -> Dict[str, float]:
+    """Return uppercase float overrides for L/W/T keys."""
+
+    normalized: Dict[str, float] = {}
+    if not override_dims:
+        return normalized
+
+    for key, value in override_dims.items():
+        if value is None:
+            continue
+
+        key_upper = str(key).strip().upper()
+        if key_upper not in {"L", "W", "T"}:
+            continue
+
+        try:
+            normalized[key_upper] = float(value)
+        except (TypeError, ValueError):
+            continue
+
+    return normalized
+
+
 def extract_part_info_from_cad(
     cad_file_path: str | Path,
     material: Optional[str] = None,
     use_paddle_ocr: bool = True,
     auto_detect_material: bool = True,
-    verbose: bool = False
+    verbose: bool = False,
+    override_dims: Optional[Mapping[str, Any]] = None,
 ) -> PartInfo:
     """
     Extract part size and material directly from CAD file using PaddleOCR.
 
     This function uses PaddleOCR to extract L×W×T dimensions from the CAD file,
-    which provides accurate detection of dimension text annotations.
+    which provides accurate detection of dimension text annotations. Optional
+    overrides can be supplied to replace one or more dimensions after OCR.
 
     Args:
         cad_file_path: Path to CAD file (DXF/DWG)
@@ -87,9 +114,10 @@ def extract_part_info_from_cad(
         use_paddle_ocr: Use PaddleOCR for dimension extraction (default: True)
         auto_detect_material: Auto-detect material from CAD text if not specified (default: True)
         verbose: Print extraction details
+        override_dims: Optional mapping of dimension overrides (keys L/W/T)
 
     Returns:
-        PartInfo with dimensions (extracted via PaddleOCR) and material
+        PartInfo with dimensions (after applying overrides) and material
 
     Example:
         >>> # Auto-detect material from CAD file
@@ -99,6 +127,10 @@ def extract_part_info_from_cad(
 
         >>> # Or specify material explicitly
         >>> part_info = extract_part_info_from_cad("part.dxf", material="P20 Tool Steel")
+
+        >>> # Supply manual overrides (e.g., from UI input)
+        >>> overrides = {"L": 10.0, "W": 8.0, "T": 0.75}
+        >>> part_info = extract_part_info_from_cad("part.dxf", override_dims=overrides)
     """
     from cad_quoter.planning import plan_from_cad_file
 
@@ -119,11 +151,30 @@ def extract_part_info_from_cad(
     plan = plan_from_cad_file(
         cad_file_path,
         use_paddle_ocr=use_paddle_ocr,
-        verbose=verbose
+        verbose=verbose,
+        override_dims=override_dims,
     )
 
     # Extract part info from plan (dimensions come from PaddleOCR)
-    return extract_part_info_from_plan(plan, material)
+    part_info = extract_part_info_from_plan(plan, material)
+
+    overrides = _normalize_dimension_overrides(override_dims)
+    if overrides:
+        if verbose:
+            applied = ", ".join(f"{key}={value}" for key, value in overrides.items())
+            print(f"Applied dimension overrides: {applied}")
+
+        if "L" in overrides:
+            part_info.length = overrides["L"]
+        if "W" in overrides:
+            part_info.width = overrides["W"]
+        if "T" in overrides:
+            part_info.thickness = overrides["T"]
+
+        part_info.volume = part_info.length * part_info.width * part_info.thickness
+        part_info.area = part_info.length * part_info.width
+
+    return part_info
 
 
 def get_part_dimensions(plan: Dict[str, Any]) -> Tuple[float, float, float]:
