@@ -188,7 +188,7 @@ class AppV7:
         self.title = "Compos-AI"
         self.root = tk.Tk()
         self.root.title(self.title)
-        self.root.geometry("800x700")
+        self.root.geometry("900x700")
 
         # Data storage
         self.cad_data = {}
