@@ -11,6 +11,14 @@ import os
 # This is used when no material is specified or auto-detected.
 # Set to "aluminum MIC6" for McMaster catalog compatibility during testing.
 DEFAULT_MATERIAL = "aluminum MIC6"  # <-- CHANGE THIS TO SET DEFAULT MATERIAL
+
+# Default dimension fallbacks (inches) when no overrides or extracted values
+# are available. These ensure reasonable stock assumptions during quoting.
+DEFAULT_DIMENSION_OVERRIDES = {
+    "L": 24.0,
+    "W": 24.0,
+    "T": 3.0,
+}
 # ============================================================================
 
 
@@ -133,6 +141,13 @@ def extract_part_info_from_plan(
     if overrides:
         dims.update(overrides)
         plan.setdefault('extracted_dims', {}).update(overrides)
+    else:
+        extracted_dims = plan.setdefault('extracted_dims', {})
+        for key, default_value in DEFAULT_DIMENSION_OVERRIDES.items():
+            current_value = _safe_float(dims.get(key, 0.0))
+            if current_value <= 0:
+                dims[key] = default_value
+                extracted_dims[key] = default_value
 
     length = _safe_float(dims.get('L', 0.0))
     width = _safe_float(dims.get('W', 0.0))
