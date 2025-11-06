@@ -195,6 +195,11 @@ class AppV7:
         self.quote_vars = {}
         self.cad_file_path: Optional[str] = None
 
+        # Cached totals for summary display
+        self.direct_cost_total: Optional[float] = None
+        self.machine_cost_total: Optional[float] = None
+        self.labor_cost_total: Optional[float] = None
+
         self._create_menu()
         self._create_button_panel()
         self._create_tabs()
@@ -450,6 +455,7 @@ class AppV7:
 
     def _generate_direct_costs_report(self) -> str:
         """Generate formatted direct costs report using DirectCostHelper functions."""
+        self.direct_cost_total = None
         if not self.cad_file_path:
             return "No CAD file loaded. Please load a CAD file first."
 
@@ -737,8 +743,10 @@ class AppV7:
             report.append(" " * 60 + "-" * 14)
 
             if mcmaster_price is not None:
+                self.direct_cost_total = net_cost
                 report.append(f"  Total Material Cost :".ljust(60) + f"${net_cost:>13.2f}")
             else:
+                self.direct_cost_total = None
                 report.append(f"  Total Material Cost :".ljust(60) + "Price N/A")
 
             report.append("")
@@ -746,11 +754,13 @@ class AppV7:
             return "\n".join(report)
 
         except Exception as e:
+            self.direct_cost_total = None
             import traceback
             return f"Error generating direct costs report:\n{str(e)}\n\n{traceback.format_exc()}"
 
     def _generate_machine_hours_report(self) -> str:
         """Generate formatted machine hours report with hole-by-hole breakdown."""
+        self.machine_cost_total = None
         if not self.cad_file_path:
             return "No CAD file loaded. Please load a CAD file first."
 
@@ -883,14 +893,18 @@ class AppV7:
             report.append("=" * 74)
             report.append("")
 
+            self.machine_cost_total = machine_cost
+
             return "\n".join(report)
 
         except Exception as e:
+            self.machine_cost_total = None
             import traceback
             return f"Error generating machine hours report:\n{str(e)}\n\n{traceback.format_exc()}"
 
     def _generate_labor_hours_report(self) -> str:
         """Generate formatted labor hours report using process_planner helpers."""
+        self.labor_cost_total = None
         if not self.cad_file_path:
             return "No CAD file loaded. Please load a CAD file first."
 
@@ -1033,6 +1047,8 @@ class AppV7:
             report.append(f"  TOTAL LABOR COST:                {labor_cost:>10.2f}")
             report.append("")
 
+            self.labor_cost_total = labor_cost
+
             # Input details
             report.append("LABOR INPUT DETAILS")
             report.append("-" * 74)
@@ -1087,8 +1103,15 @@ class AppV7:
             return "\n".join(report)
 
         except Exception as e:
+            self.labor_cost_total = None
             import traceback
             return f"Error generating labor hours report:\n{str(e)}\n\n{traceback.format_exc()}"
+
+    def _format_cost_summary_line(self, label: str, value: Optional[float]) -> str:
+        """Return a formatted cost line or N/A when value is missing."""
+        if value is None:
+            return f"  {label}:".ljust(30) + "N/A"
+        return f"  {label}:".ljust(30) + f"${value:>12,.2f}"
 
     def generate_quote(self) -> None:
         """Generate the quote."""
@@ -1096,6 +1119,7 @@ class AppV7:
         quote_data = {}
         for label, field in self.quote_fields.items():
             quote_data[label] = field.get()
+        self.quote_vars = quote_data
 
         # Display in output tab
         self.output_text.delete(1.0, tk.END)
@@ -1118,14 +1142,27 @@ class AppV7:
         labor_hours_report = self._generate_labor_hours_report()
         self.output_text.insert(tk.END, labor_hours_report)
 
-        # Add separator
+        # Add summary
         self.output_text.insert(tk.END, "\n\n" + "=" * 74 + "\n\n")
+        summary_lines = [
+            "COST SUMMARY",
+            "=" * 74,
+            self._format_cost_summary_line("Direct Cost", self.direct_cost_total),
+            self._format_cost_summary_line("Machine Cost", self.machine_cost_total),
+            self._format_cost_summary_line("Labor Cost", self.labor_cost_total),
+        ]
 
-        # Add quote data
-        self.output_text.insert(tk.END, "QUOTE VARIABLES\n")
-        self.output_text.insert(tk.END, "=" * 74 + "\n")
-        output = json.dumps(quote_data, indent=2)
-        self.output_text.insert(tk.END, output)
+        if None not in (self.direct_cost_total, self.machine_cost_total, self.labor_cost_total):
+            total_cost = (
+                (self.direct_cost_total or 0.0)
+                + (self.machine_cost_total or 0.0)
+                + (self.labor_cost_total or 0.0)
+            )
+            summary_lines.append("-" * 74)
+            summary_lines.append(self._format_cost_summary_line("Total Estimated Cost", total_cost))
+
+        summary_lines.append("")
+        self.output_text.insert(tk.END, "\n".join(summary_lines))
 
         self.notebook.select(self.output_tab)
         self.status_bar.config(text="Quote generated successfully!")
