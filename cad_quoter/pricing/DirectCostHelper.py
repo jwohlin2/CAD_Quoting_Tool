@@ -215,7 +215,7 @@ def extract_part_info_from_cad(
 
     plan = plan_from_cad_file(
         cad_file_path,
-        use_paddle_ocr=use_paddle_ocr,
+        use_paddle_ocr=effective_use_paddle,
         verbose=verbose,
         dims_override=combined_overrides or None,
     )
