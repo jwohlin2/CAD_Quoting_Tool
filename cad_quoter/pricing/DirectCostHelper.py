@@ -157,7 +157,7 @@ def extract_part_info_from_plan(
             plan.setdefault('extracted_dims_meta', {})[
                 'used_default_dimension_fallbacks'
             ] = True
-
+            
     length = _safe_float(dims.get('L', 0.0))
     width = _safe_float(dims.get('W', 0.0))
     thickness = _safe_float(dims.get('T', 0.0))
