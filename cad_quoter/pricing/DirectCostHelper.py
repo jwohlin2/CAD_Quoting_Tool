@@ -68,11 +68,38 @@ def _normalize_dim_overrides(dims_override: Optional[Mapping[str, Any]]) -> Dict
     return normalized
 
 
+def _collect_dimension_overrides(
+    dims_override: Optional[Mapping[str, Any]],
+    length_override: Optional[Any] = None,
+    width_override: Optional[Any] = None,
+    thickness_override: Optional[Any] = None,
+) -> Dict[str, float]:
+    """Combine dictionary and explicit dimension overrides."""
+
+    overrides = _normalize_dim_overrides(dims_override)
+
+    manual_overrides = {
+        "L": length_override,
+        "W": width_override,
+        "T": thickness_override,
+    }
+
+    for key, raw_value in manual_overrides.items():
+        if raw_value is None:
+            continue
+        overrides[key] = _safe_float(raw_value)
+
+    return overrides
+
+
 def extract_part_info_from_plan(
     plan: Dict[str, Any],
     material: Optional[str] = None,
     *,
     dims_override: Optional[Mapping[str, Any]] = None,
+    length_override: Optional[Any] = None,
+    width_override: Optional[Any] = None,
+    thickness_override: Optional[Any] = None,
 ) -> PartInfo:
     """
     Extract part size and material from a process plan.
@@ -81,6 +108,9 @@ def extract_part_info_from_plan(
         plan: Process plan dict (from plan_job or plan_from_cad_file)
         material: Material override (if not provided, uses default)
         dims_override: Optional mapping with manual dimension overrides
+        length_override: Optional explicit length override in inches
+        width_override: Optional explicit width override in inches
+        thickness_override: Optional explicit thickness override in inches
 
     Returns:
         PartInfo with dimensions and material
@@ -93,7 +123,12 @@ def extract_part_info_from_plan(
     """
     # Extract dimensions from plan
     dims = dict(plan.get('extracted_dims', {}))
-    overrides = _normalize_dim_overrides(dims_override)
+    overrides = _collect_dimension_overrides(
+        dims_override,
+        length_override=length_override,
+        width_override=width_override,
+        thickness_override=thickness_override,
+    )
 
     if overrides:
         dims.update(overrides)
@@ -122,6 +157,9 @@ def extract_part_info_from_cad(
     verbose: bool = False,
     *,
     dims_override: Optional[Mapping[str, Any]] = None,
+    length_override: Optional[Any] = None,
+    width_override: Optional[Any] = None,
+    thickness_override: Optional[Any] = None,
 ) -> PartInfo:
     """
     Extract part size and material directly from CAD file using PaddleOCR.
@@ -136,6 +174,9 @@ def extract_part_info_from_cad(
         auto_detect_material: Auto-detect material from CAD text if not specified (default: True)
         verbose: Print extraction details
         dims_override: Optional mapping with manual dimension overrides
+        length_override: Optional explicit length override in inches
+        width_override: Optional explicit width override in inches
+        thickness_override: Optional explicit thickness override in inches
 
     Returns:
         PartInfo with dimensions (extracted via PaddleOCR) and material
@@ -165,15 +206,26 @@ def extract_part_info_from_cad(
             material = DEFAULT_MATERIAL
 
     # Generate plan from CAD file - uses PaddleOCR by default for dimension extraction
+    combined_overrides = _collect_dimension_overrides(
+        dims_override,
+        length_override=length_override,
+        width_override=width_override,
+        thickness_override=thickness_override,
+    )
+
     plan = plan_from_cad_file(
         cad_file_path,
         use_paddle_ocr=use_paddle_ocr,
         verbose=verbose,
-        dims_override=dims_override,
+        dims_override=combined_overrides or None,
     )
 
     # Extract part info from plan (dimensions come from PaddleOCR)
-    return extract_part_info_from_plan(plan, material, dims_override=dims_override)
+    return extract_part_info_from_plan(
+        plan,
+        material,
+        dims_override=combined_overrides or None,
+    )
 
 
 def get_part_dimensions(plan: Dict[str, Any]) -> Tuple[float, float, float]:
