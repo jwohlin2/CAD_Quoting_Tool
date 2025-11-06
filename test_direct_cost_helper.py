@@ -59,7 +59,6 @@ print(f"   Material: {part_info2.material}")
 al_density = get_material_density(part_info2.material)
 al_weight = calculate_material_weight(part_info2.volume, al_density)
 print(f"   If Aluminum: {al_weight:.2f} lbs (vs Steel: {weight:.2f} lbs)")
-
 # Test 4: Explicit dimension overrides
 print("\n4. Explicit dimension overrides:")
 override_dims = {
@@ -118,6 +117,7 @@ print(
 assert override_part_info_cad.length == override_dims["length"]
 assert override_part_info_cad.width == override_dims["width"]
 assert override_part_info_cad.thickness == override_dims["thickness"]
+
 
 print("\n" + "=" * 70)
 print("TEST COMPLETE")
