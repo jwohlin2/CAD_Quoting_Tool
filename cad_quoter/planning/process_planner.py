@@ -848,3 +848,941 @@ def _parse_depth(desc: str) -> Optional[float]:
         except Exception:
             pass
     return None
+
+
+# ---------------------------------------------------------------------------
+# Labor Estimation (merged from LaborOpsHelper.py)
+# ---------------------------------------------------------------------------
+
+@dataclass
+class LaborInputs:
+    """
+    Input parameters for labor minute calculations.
+
+    This dataclass captures all the metrics needed to estimate human labor time
+    across five buckets: Setup, Programming, Machining, Inspection, and Finishing.
+    """
+    # Core tallies
+    ops_total: int = 0
+    holes_total: int = 0
+
+    # Setup drivers (counts)
+    tool_changes: int = 0
+    fixturing_complexity: int = 0  # 0=none, 1=light, 2=moderate, 3=complex
+
+    # Features / special processes
+    edm_window_count: int = 0
+    edm_skim_passes: int = 0
+    thread_mill: int = 0
+    jig_grind_bore_qty: int = 0
+    grind_face_pairs: int = 0
+    deep_holes: int = 0
+    counterbore_qty: int = 0
+    counterdrill_qty: int = 0
+    ream_press_dowel: int = 0
+    ream_slip_dowel: int = 0
+    tap_rigid: int = 0
+    tap_npt: int = 0
+
+    # Logistics / flow
+    outsource_touches: int = 0  # heat treat, coating, etc.
+
+    # Sampling — e.g., every 5th part => 0.2
+    inspection_frequency: float = 0.0
+
+    # Handling
+    part_flips: int = 0
+
+
+def setup_minutes(i: LaborInputs) -> float:
+    """
+    Calculate Setup / Prep labor minutes (base = 10).
+
+    NOTE: part_flips intentionally EXCLUDED from setup and counted in Machining.
+
+    Setup minutes =
+        10
+      + 2·tool_changes
+      + 5·fixturing_complexity
+      + 2·edm_window_count
+      + 1·edm_skim_passes
+      + 3·grind_face_pairs
+      + 2·jig_grind_bore_qty
+      + 1·(tap_rigid + thread_mill)
+      + 2·tap_npt
+      + 1·(ream_press_dowel + ream_slip_dowel)
+      + 1·(counterbore_qty + counterdrill_qty)
+      + 4·outsource_touches
+    """
+    return (
+        10
+        + 2 * i.tool_changes
+        + 5 * i.fixturing_complexity
+        + 2 * i.edm_window_count
+        + 1 * i.edm_skim_passes
+        + 3 * i.grind_face_pairs
+        + 2 * i.jig_grind_bore_qty
+        + 1 * (i.tap_rigid + i.thread_mill)
+        + 2 * i.tap_npt
+        + 1 * (i.ream_press_dowel + i.ream_slip_dowel)
+        + 1 * (i.counterbore_qty + i.counterdrill_qty)
+        + 4 * i.outsource_touches
+    )
+
+
+def programming_minutes(i: LaborInputs) -> float:
+    """
+    Calculate Programming / Prove-out labor minutes.
+
+    Programming minutes =
+        1·holes_total
+      + 2·edm_window_count
+      + 2·thread_mill
+      + 2·jig_grind_bore_qty
+      + 1·deep_holes
+      + 1·grind_face_pairs
+
+    Note: Holes appear here and in Inspection by design. If you consider that
+    "double counting" across buckets, set the `holes_total` term to 0 here.
+    """
+    return (
+        1 * i.holes_total
+        + 2 * i.edm_window_count
+        + 2 * i.thread_mill
+        + 2 * i.jig_grind_bore_qty
+        + 1 * i.deep_holes
+        + 1 * i.grind_face_pairs
+    )
+
+
+def machining_minutes(i: LaborInputs) -> float:
+    """
+    Calculate Machining Steps labor minutes.
+
+    Human time while the machine runs: load, chip clear, coolant checks, tool swaps oversight.
+
+    Machining minutes =
+        0.5·ops_total
+      + 0.2·holes_total
+      + 0.5·tool_changes
+      + 0.5·part_flips      # moved here per user request
+      + 1·deep_holes
+      + 1·edm_window_count
+      + 0.5·edm_skim_passes
+      + 1·grind_face_pairs
+    """
+    return (
+        0.5 * i.ops_total
+        + 0.2 * i.holes_total
+        + 0.5 * i.tool_changes
+        + 0.5 * i.part_flips
+        + 1 * i.deep_holes
+        + 1 * i.edm_window_count
+        + 0.5 * i.edm_skim_passes
+        + 1 * i.grind_face_pairs
+    )
+
+
+def inspection_minutes(i: LaborInputs) -> float:
+    """
+    Calculate Inspection labor minutes (base = 6 minutes).
+
+    Includes hole-driven and feature-driven checks.
+
+    Inspection minutes =
+        6
+      + 1·holes_total
+      + 2·jig_grind_bore_qty
+      + 1·ream_press_dowel
+      + 1·ream_slip_dowel
+      + 0.5·(counterbore_qty + counterdrill_qty)
+      + 1·deep_holes
+      + 2·grind_face_pairs
+      + 1·edm_window_count
+      + inspection_frequency·ops_total
+    """
+    return (
+        6
+        + 1 * i.holes_total
+        + 2 * i.jig_grind_bore_qty
+        + 1 * i.ream_press_dowel
+        + 1 * i.ream_slip_dowel
+        + 0.5 * (i.counterbore_qty + i.counterdrill_qty)
+        + 1 * i.deep_holes
+        + 2 * i.grind_face_pairs
+        + 1 * i.edm_window_count
+        + i.inspection_frequency * i.ops_total
+    )
+
+
+def finishing_minutes(i: LaborInputs) -> float:
+    """
+    Calculate Finishing labor minutes.
+
+    Deburr/edge break, cosmetic touch-ups, clean, bag/label.
+
+    Finishing minutes =
+        0.5·ops_total
+      + 0.2·holes_total
+      + 0.5·(counterbore_qty + counterdrill_qty)
+      + 0.5·(ream_press_dowel + ream_slip_dowel)
+      + 1·grind_face_pairs
+      + 1·outsource_touches
+    """
+    return (
+        0.5 * i.ops_total
+        + 0.2 * i.holes_total
+        + 0.5 * (i.counterbore_qty + i.counterdrill_qty)
+        + 0.5 * (i.ream_press_dowel + i.ream_slip_dowel)
+        + 1 * i.grind_face_pairs
+        + 1 * i.outsource_touches
+    )
+
+
+def compute_labor_minutes(i: LaborInputs) -> Dict[str, Any]:
+    """
+    Calculate labor minutes across all buckets.
+
+    Returns a dict with per-bucket minutes in this order:
+      1) Setup
+      2) Programming
+      3) Machining_Steps
+      4) Inspection
+      5) Finishing
+
+    Plus a Labor_Total field.
+
+    Args:
+        i: LaborInputs dataclass with all the operation counts
+
+    Returns:
+        Dict with 'inputs' (as dict) and 'minutes' (breakdown by bucket)
+
+    Example:
+        >>> from dataclasses import asdict
+        >>> inputs = LaborInputs(ops_total=15, holes_total=22, tool_changes=8)
+        >>> result = compute_labor_minutes(inputs)
+        >>> print(result['minutes']['Labor_Total'])
+    """
+    from dataclasses import asdict
+
+    setup = setup_minutes(i)
+    programming = programming_minutes(i)
+    machining = machining_minutes(i)
+    inspection = inspection_minutes(i)
+    finishing = finishing_minutes(i)
+
+    buckets = {
+        "Setup": setup,
+        "Programming": programming,
+        "Machining_Steps": machining,
+        "Inspection": inspection,
+        "Finishing": finishing,
+    }
+    buckets["Labor_Total"] = sum(buckets.values())
+
+    return {
+        "inputs": asdict(i),
+        "minutes": buckets,
+    }
+
+
+# ---------------------------------------------------------------------------
+# Machine Time Estimation (using speeds_feeds_merged.csv)
+# ---------------------------------------------------------------------------
+
+# Cache for speeds/feeds data
+_SPEEDS_FEEDS_CACHE: Optional[List[Dict[str, Any]]] = None
+
+
+def load_speeds_feeds_data() -> List[Dict[str, Any]]:
+    """
+    Load speeds and feeds data from CSV file.
+
+    Returns cached data if already loaded.
+    """
+    global _SPEEDS_FEEDS_CACHE
+
+    if _SPEEDS_FEEDS_CACHE is not None:
+        return _SPEEDS_FEEDS_CACHE
+
+    import csv
+    from pathlib import Path
+
+    # Find the CSV file
+    csv_path = Path(__file__).resolve().parent.parent / "pricing" / "resources" / "speeds_feeds_merged.csv"
+
+    if not csv_path.exists():
+        print(f"[WARN] Speeds/feeds CSV not found: {csv_path}")
+        _SPEEDS_FEEDS_CACHE = []
+        return _SPEEDS_FEEDS_CACHE
+
+    data = []
+    with open(csv_path, 'r', encoding='utf-8') as f:
+        reader = csv.DictReader(f)
+        for row in reader:
+            # Convert numeric fields
+            for key in ['sfm_start', 'fz_ipr_0_125in', 'fz_ipr_0_25in', 'fz_ipr_0_5in',
+                       'doc_axial_in', 'woc_radial_pct', 'linear_cut_rate_ipm']:
+                if row.get(key) and row[key].strip():
+                    try:
+                        row[key] = float(row[key])
+                    except ValueError:
+                        row[key] = None
+                else:
+                    row[key] = None
+            data.append(row)
+
+    _SPEEDS_FEEDS_CACHE = data
+    return data
+
+
+def get_speeds_feeds(material: str, operation: str) -> Optional[Dict[str, Any]]:
+    """
+    Look up speeds and feeds for a material and operation.
+
+    Falls back to GENERIC if specific material not found.
+
+    Args:
+        material: Material name (e.g., "Aluminum 6061-T6", "P20 Tool Steel")
+        operation: Operation type (e.g., "Drill", "Endmill_Profile", "Wire_EDM_Rough")
+
+    Returns:
+        Dict with speeds/feeds data, or None if not found
+    """
+    data = load_speeds_feeds_data()
+
+    # Try exact match first
+    for row in data:
+        if row['material'] == material and row['operation'] == operation:
+            return row
+
+    # Fall back to GENERIC
+    for row in data:
+        if row['material_group'] == 'GENERIC' and row['operation'] == operation:
+            return row
+
+    return None
+
+
+def calculate_drill_time(
+    diameter: float,
+    depth: float,
+    qty: int,
+    material: str = "GENERIC",
+    is_deep_hole: bool = False
+) -> float:
+    """
+    Calculate drilling time in minutes.
+
+    Args:
+        diameter: Hole diameter in inches
+        depth: Hole depth in inches
+        qty: Number of holes
+        material: Material name
+        is_deep_hole: Whether this is a deep hole (depth > 3*diameter)
+
+    Returns:
+        Time in minutes
+    """
+    operation = "Deep_Drill" if is_deep_hole or (depth > 3 * diameter) else "Drill"
+    sf = get_speeds_feeds(material, operation)
+
+    if not sf:
+        # Fallback estimate: 0.5 min per inch depth per hole
+        return depth * qty * 0.5
+
+    # Select feed based on diameter
+    if diameter <= 0.1875:  # <= 3/16"
+        feed = sf.get('fz_ipr_0_125in') or 0.001
+    elif diameter <= 0.375:  # <= 3/8"
+        feed = sf.get('fz_ipr_0_25in') or 0.0015
+    else:
+        feed = sf.get('fz_ipr_0_5in') or 0.002
+
+    sfm = sf.get('sfm_start') or 100
+
+    # Calculate RPM
+    rpm = (sfm * 12) / (3.14159 * diameter) if diameter > 0 else 1000
+    rpm = min(rpm, 3000)  # Cap at typical machine limit
+
+    # Calculate feed rate (IPM)
+    ipm = feed * rpm
+
+    # Time per hole (minutes) = depth / feed_rate + approach/retract
+    time_per_hole = (depth / ipm) + 0.1  # 0.1 min for approach/retract
+
+    return time_per_hole * qty
+
+
+def calculate_milling_time(
+    length: float,
+    width: float,
+    depth: float,
+    material: str = "GENERIC",
+    operation: str = "Endmill_Profile"
+) -> float:
+    """
+    Calculate milling time in minutes.
+
+    Args:
+        length: Cut length in inches
+        width: Cut width in inches
+        depth: Total depth in inches
+        material: Material name
+        operation: "Endmill_Profile" or "Endmill_Slot"
+
+    Returns:
+        Time in minutes
+    """
+    sf = get_speeds_feeds(material, operation)
+
+    if not sf:
+        # Fallback: 2 minutes per square inch of material removal
+        volume = length * width * depth
+        return volume * 2
+
+    # Use 0.25" tool as default
+    fz = sf.get('fz_ipr_0_25in') or 0.0015
+    sfm = sf.get('sfm_start') or 200
+    doc = sf.get('doc_axial_in') or 0.2
+    woc_pct = sf.get('woc_radial_pct') or 50
+
+    tool_dia = 0.25
+    rpm = (sfm * 12) / (3.14159 * tool_dia)
+    rpm = min(rpm, 8000)
+
+    # Feed rate
+    num_flutes = 4
+    ipm = fz * num_flutes * rpm
+
+    # Number of passes needed
+    axial_passes = max(1, int(depth / doc) + 1)
+    radial_passes = max(1, int(100 / woc_pct))
+
+    # Cut length per pass
+    if operation == "Endmill_Slot":
+        cut_length_per_pass = length
+    else:
+        cut_length_per_pass = 2 * (length + width)  # Perimeter
+
+    # Total time
+    total_length = cut_length_per_pass * axial_passes * radial_passes
+    time = (total_length / ipm) + (axial_passes * 0.5)  # Add time for plunges
+
+    return time
+
+
+def calculate_edm_time(
+    perimeter: float,
+    thickness: float,
+    num_windows: int,
+    num_skims: int = 0,
+    material: str = "GENERIC"
+) -> float:
+    """
+    Calculate Wire EDM time in minutes.
+
+    Args:
+        perimeter: Total perimeter to cut in inches
+        thickness: Part thickness in inches
+        num_windows: Number of windows to cut
+        num_skims: Number of skim passes
+        material: Material name
+
+    Returns:
+        Time in minutes
+    """
+    # Rough cut
+    sf_rough = get_speeds_feeds(material, "Wire_EDM_Rough")
+    rough_ipm = sf_rough.get('linear_cut_rate_ipm') or 3.0 if sf_rough else 3.0
+
+    # Skim cut
+    sf_skim = get_speeds_feeds(material, "Wire_EDM_Skim")
+    skim_ipm = sf_skim.get('linear_cut_rate_ipm') or 2.0 if sf_skim else 2.0
+
+    # Time = (perimeter * thickness / rate)
+    # For rough cut
+    rough_time = (perimeter * thickness * num_windows) / rough_ipm
+
+    # For skim passes
+    skim_time = (perimeter * thickness * num_windows * num_skims) / skim_ipm
+
+    # Add setup time per window (threading wire, etc.)
+    setup_time = num_windows * 5  # 5 minutes per window
+
+    return rough_time + skim_time + setup_time
+
+
+def calculate_tap_time(
+    diameter: float,
+    depth: float,
+    qty: int,
+    is_rigid_tap: bool = True
+) -> float:
+    """
+    Calculate tapping time in minutes.
+
+    Args:
+        diameter: Tap diameter in inches
+        depth: Thread depth in inches
+        qty: Number of holes to tap
+        is_rigid_tap: Whether using rigid tapping (faster)
+
+    Returns:
+        Time in minutes
+    """
+    # Typical tapping speed: 20-40 SFM
+    sfm = 30
+    rpm = (sfm * 12) / (3.14159 * diameter) if diameter > 0 else 500
+    rpm = min(rpm, 1000)  # Cap at reasonable limit
+
+    # Feed = pitch (assume standard coarse thread)
+    # For simplicity, use approximate TPI
+    if diameter <= 0.25:
+        tpi = 20
+    elif diameter <= 0.5:
+        tpi = 13
+    else:
+        tpi = 10
+
+    pitch = 1.0 / tpi
+    ipm = rpm * pitch
+
+    # Time = (depth / ipm) * 2 (in and out) + dwell
+    time_per_hole = ((depth / ipm) * 2) + 0.15 if ipm > 0 else 0.5
+
+    # Rigid tap is faster
+    if is_rigid_tap:
+        time_per_hole *= 0.7
+
+    return time_per_hole * qty
+
+
+def estimate_machine_hours_from_plan(
+    plan: Dict[str, Any],
+    material: str = "GENERIC",
+    plate_LxW: Tuple[float, float] = (0, 0),
+    thickness: float = 0
+) -> Dict[str, Any]:
+    """
+    Estimate machine hours from a process plan.
+
+    Args:
+        plan: Process plan dict (from plan_job or plan_from_cad_file)
+        material: Material name for speeds/feeds lookup
+        plate_LxW: Plate length and width in inches
+        thickness: Plate thickness in inches
+
+    Returns:
+        Dict with machine time breakdown by operation type
+
+    Example:
+        >>> plan = plan_from_cad_file("part.dxf")
+        >>> machine_time = estimate_machine_hours_from_plan(plan, "P20 Tool Steel", (8, 4), 0.5)
+        >>> print(f"Total: {machine_time['total_hours']:.2f} hours")
+    """
+    from dataclasses import asdict
+
+    ops = plan.get('ops', [])
+    L, W = plate_LxW
+    T = thickness
+
+    time_breakdown = {
+        'drilling': 0,
+        'milling': 0,
+        'edm': 0,
+        'tapping': 0,
+        'grinding': 0,
+        'other': 0,
+    }
+
+    for op in ops:
+        op_type = op.get('op', '').lower()
+
+        # Drilling operations
+        if 'drill' in op_type and 'pattern' in op_type:
+            # drill_patterns - estimate based on typical plate
+            num_holes = 20  # Rough estimate
+            avg_depth = T or 0.5
+            time_breakdown['drilling'] += calculate_drill_time(0.25, avg_depth, num_holes, material)
+
+        elif 'spot_drill' in op_type:
+            # Spot drilling - quick operation
+            time_breakdown['drilling'] += 2  # 2 minutes estimate
+
+        # Milling operations
+        elif 'face_mill' in op_type or 'mill_face' in op_type:
+            # Face milling
+            area = L * W if (L and W) else 10  # Default 10 sq in
+            time_breakdown['milling'] += calculate_milling_time(L or 3, W or 3, 0.05, material)
+
+        elif 'endmill' in op_type or 'profile' in op_type:
+            perimeter = 2 * ((L or 4) + (W or 3))
+            time_breakdown['milling'] += calculate_milling_time(perimeter, 0.1, T or 0.5, material, "Endmill_Profile")
+
+        # EDM operations
+        elif 'wedm' in op_type or 'wire_edm' in op_type:
+            num_windows = op.get('windows', 1)
+            skims = op.get('skims', 0)
+            # Estimate perimeter
+            perimeter = 4  # inches, typical window
+            time_breakdown['edm'] += calculate_edm_time(perimeter, T or 0.5, num_windows, skims, material)
+
+        # Tapping operations
+        elif 'tap' in op_type:
+            dia = op.get('dia', 0.25)
+            depth = op.get('depth', 0.5)
+            qty = op.get('qty', 1)
+            is_rigid = 'rigid' in op_type
+            time_breakdown['tapping'] += calculate_tap_time(dia, depth, qty, is_rigid)
+
+        elif 'thread_mill' in op_type:
+            dia = op.get('dia', 0.5)
+            depth = op.get('depth', 0.5)
+            # Thread milling is slower than tapping
+            time_breakdown['tapping'] += calculate_tap_time(dia, depth, 1, False) * 1.5
+
+        # Counterbore operations
+        elif 'counterbore' in op_type or 'c_bore' in op_type or 'cbore' in op_type:
+            dia = op.get('dia', 0.5)
+            depth = op.get('depth', 0.25)
+            qty = op.get('qty', 1)
+            time_breakdown['drilling'] += calculate_drill_time(dia, depth, qty, material)
+
+        # Grinding operations
+        elif 'grind' in op_type or 'jig_grind' in op_type:
+            # Grinding is slow and precise
+            if 'bore' in op_type:
+                time_breakdown['grinding'] += 15  # 15 min per bore
+            elif 'face' in op_type:
+                area = L * W if (L and W) else 10
+                time_breakdown['grinding'] += area * 2  # 2 min per sq in
+            else:
+                time_breakdown['grinding'] += 10  # Generic estimate
+
+        # Assembly operations don't count as machine time
+        elif 'assemble' in op_type:
+            pass  # No machine time
+
+        # Other operations
+        else:
+            # Generic estimate
+            time_breakdown['other'] += 5  # 5 minutes
+
+    # Calculate total
+    total_minutes = sum(time_breakdown.values())
+
+    return {
+        'breakdown_minutes': time_breakdown,
+        'total_minutes': total_minutes,
+        'total_hours': total_minutes / 60,
+        'material': material,
+        'dimensions': {'L': L, 'W': W, 'T': T},
+    }
+
+
+def estimate_hole_table_times(
+    hole_table: List[Dict[str, Any]],
+    material: str = "GENERIC",
+    thickness: float = 0
+) -> Dict[str, Any]:
+    """
+    Calculate detailed time estimates for each hole table entry.
+
+    Args:
+        hole_table: List of hole table entries from extract_hole_table_from_cad()
+        material: Material name for speeds/feeds lookup
+        thickness: Plate thickness in inches (for THRU holes)
+
+    Returns:
+        Dict with detailed time breakdown by hole and operation type
+
+    Example:
+        >>> hole_table = extract_hole_table_from_cad("part.dxf")
+        >>> times = estimate_hole_table_times(hole_table, "17-4 PH Stainless", 2.0)
+        >>> print(times['drill_groups'])
+    """
+    import re
+
+    # Storage for different operation types
+    drill_groups = []
+    jig_grind_groups = []
+    tap_groups = []
+    cbore_groups = []
+    cdrill_groups = []
+
+    for entry in hole_table:
+        hole_id = entry.get('HOLE', '?')
+        ref_diam_str = entry.get('REF_DIAM', '')
+        qty_raw = entry.get('QTY', 1)
+        qty = int(qty_raw) if isinstance(qty_raw, str) else qty_raw
+
+        # Check if we have expanded operations (with OPERATION field) or compressed table (with DESCRIPTION)
+        operation = entry.get('OPERATION', '').upper()
+        description = entry.get('DESCRIPTION', '').upper()
+
+        # Use OPERATION if available, otherwise use DESCRIPTION
+        op_text = operation if operation else description
+
+        # Parse diameter - match decimal after ∅ symbol or standalone
+        dia_match = re.search(r'[∅Ø]\s*(\d*\.\d+)', ref_diam_str)
+        if not dia_match:
+            # Try fractional format like 11/32
+            frac_match = re.search(r'(\d+)/(\d+)', ref_diam_str)
+            if frac_match:
+                ref_dia = float(frac_match.group(1)) / float(frac_match.group(2))
+            else:
+                dia_match = re.search(r'(\d+\.\d+)', ref_diam_str)
+                ref_dia = float(dia_match.group(1)) if dia_match else 0.5
+        else:
+            ref_dia = float(dia_match.group(1))
+
+        # Determine operation type
+        is_jig_grind = 'JIG GRIND' in op_text
+        is_thru = 'THRU' in op_text
+        is_tap = 'TAP' in op_text
+        is_cbore = "C'BORE" in op_text or 'CBORE' in op_text or 'COUNTERBORE' in op_text
+        is_cdrill = "C'DRILL" in op_text or 'CDRILL' in op_text or 'CENTER DRILL' in op_text
+
+        # Determine depth for drilling operation
+        if is_thru and not is_jig_grind:
+            depth = thickness if thickness > 0 else 2.0
+        else:
+            depth = 0.5  # Default for non-THRU holes
+
+        # Get speeds/feeds for drilling
+        sf_drill = get_speeds_feeds(material, "Drill")
+        if not sf_drill:
+            sf_drill = {'sfm_start': 100, 'fz_ipr_0_125in': 0.002, 'fz_ipr_0_25in': 0.004, 'fz_ipr_0_5in': 0.008}
+
+        sfm = sf_drill.get('sfm_start', 100)
+
+        # Select feed based on diameter
+        if ref_dia <= 0.1875:  # <= 3/16"
+            feed_per_tooth = sf_drill.get('fz_ipr_0_125in', 0.002)
+        elif ref_dia <= 0.375:  # <= 3/8"
+            feed_per_tooth = sf_drill.get('fz_ipr_0_25in', 0.004)
+        else:
+            feed_per_tooth = sf_drill.get('fz_ipr_0_5in', 0.008)
+
+        # Calculate RPM and feed rate
+        rpm = (sfm * 12) / (3.14159 * ref_dia) if ref_dia > 0 else 1000
+        rpm = min(rpm, 3500)  # Max spindle RPM
+
+        # For drilling, assume 2 flutes
+        feed_rate = rpm * 2 * feed_per_tooth  # IPM
+
+        # DRILL operations (main hole) - skip if it's a jig grind operation
+        if not is_jig_grind:
+            # Time per hole: depth / feed_rate gives minutes (since feed_rate is IPM)
+            time_per_hole = (depth / feed_rate) if feed_rate > 0 else 1.0
+            time_per_hole += 0.1  # Add approach/retract time
+
+            total_time = time_per_hole * qty
+
+            drill_groups.append({
+                'hole_id': hole_id,
+                'diameter': ref_dia,
+                'depth': depth,
+                'qty': qty,
+                'sfm': sfm,
+                'ipr': feed_per_tooth,
+                'rpm': rpm,
+                'feed_rate': feed_rate,
+                'time_per_hole': time_per_hole,
+                'total_time': total_time,
+                'description': entry.get('DESCRIPTION', '')
+            })
+
+        # JIG GRIND operations (using is_jig_grind check from above)
+        if is_jig_grind:
+            # Jig grinding time calculation
+            # Constants (can be made configurable later)
+            setup_min = 0  # Setup time per bore
+            mpsi = 7  # Minutes per square inch ground
+            stock_diam = 0.003  # Diametral stock to remove (inches)
+            stock_rate_diam = 0.003  # Diametral removal rate (inches)
+
+            # Calculate grinding surface area: π × D × depth
+            grind_area = 3.14159 * ref_dia * depth
+
+            # Spark out time: 0.7 + 0.2 if depth ≥ 3×D
+            spark_out_min = 0.7
+            if depth >= 3 * ref_dia:
+                spark_out_min += 0.2
+
+            # Total time per hole
+            time_per_hole = (
+                setup_min +
+                (grind_area * mpsi) +
+                (stock_diam / stock_rate_diam) +
+                spark_out_min
+            )
+
+            total_time = time_per_hole * qty
+
+            jig_grind_groups.append({
+                'hole_id': hole_id,
+                'diameter': ref_dia,
+                'depth': depth,
+                'qty': qty,
+                'time_per_hole': time_per_hole,
+                'total_time': total_time,
+                'description': entry.get('DESCRIPTION', '')
+            })
+
+        # TAP operations
+        if is_tap:
+            # Extract tap size
+            tap_match = re.search(r'(\d+/\d+)-(\d+)', op_text)
+            if tap_match:
+                # Fractional tap (e.g., 5/8-11)
+                frac_parts = tap_match.group(1).split('/')
+                tap_dia = float(frac_parts[0]) / float(frac_parts[1])
+                tpi = int(tap_match.group(2))
+            else:
+                # Try #10-32 format
+                num_tap_match = re.search(r'#(\d+)-(\d+)', op_text)
+                if num_tap_match:
+                    # #10 screw ≈ 0.190"
+                    screw_num = int(num_tap_match.group(1))
+                    tap_dia = 0.060 + (screw_num * 0.013)
+                    tpi = int(num_tap_match.group(2))
+                else:
+                    tap_dia = ref_dia * 0.8  # Estimate tap drill size
+                    tpi = int(20 / tap_dia) if tap_dia > 0 else 20
+
+            # Extract TAP depth - look for "TAP X {number} DEEP" or "X {number} DEEP"
+            tap_depth_match = re.search(r'[TAP\s+]*X\s+(\d*\.\d+|\d+)\s+DEEP', op_text)
+            if tap_depth_match:
+                tap_depth = float(tap_depth_match.group(1))
+            elif 'TAP THRU' in op_text or is_thru:
+                tap_depth = thickness if thickness > 0 else 2.0
+            else:
+                tap_depth = 0.5  # Default
+
+            is_rigid = 'RIGID' in op_text
+
+            # Tapping speed (much slower than drilling)
+            tap_rpm = min(rpm * 0.3, 500)
+            tap_feed_rate = tap_rpm / tpi  # IPM
+
+            time_per_hole = (tap_depth / tap_feed_rate) if tap_feed_rate > 0 else 2.0
+            time_per_hole += 0.5  # Add approach/retract/dwell
+
+            if is_rigid:
+                time_per_hole *= 0.7  # Rigid tap is faster
+
+            total_time = time_per_hole * qty
+
+            tap_groups.append({
+                'hole_id': hole_id,
+                'diameter': tap_dia,
+                'depth': tap_depth,
+                'qty': qty,
+                'tpi': tpi,
+                'rpm': tap_rpm,
+                'feed_rate': tap_feed_rate,
+                'time_per_hole': time_per_hole,
+                'total_time': total_time,
+                'is_rigid': is_rigid,
+                'description': entry.get('DESCRIPTION', '')
+            })
+
+        # COUNTERBORE operations
+        if is_cbore:
+            # For expanded operations, the counterbore diameter is in REF_DIAM
+            # For compressed table, need to extract from description
+            cbore_dia = ref_dia  # Start with REF_DIAM
+
+            # If description has a different diameter specified, use that
+            if description:
+                cbore_dia_match = re.search(r'(\d*\.\d+)[∅Ø]\s*C[\'"]?BORE', description)
+                if cbore_dia_match:
+                    cbore_dia = float(cbore_dia_match.group(1))
+                else:
+                    # Try fractional format like "∅13/32"
+                    cbore_dia_match = re.search(r'[∅Ø]\s*(\d+)/(\d+)\s*C[\'"]?BORE', description)
+                    if cbore_dia_match:
+                        cbore_dia = float(cbore_dia_match.group(1)) / float(cbore_dia_match.group(2))
+
+            # Extract counterbore depth - look for "X {number} DEEP"
+            cbore_depth_match = re.search(r'X\s+(\d*\.\d+|\d+)\s+DEEP', op_text)
+            if cbore_depth_match:
+                cbore_depth = float(cbore_depth_match.group(1))
+            else:
+                cbore_depth = 0.25  # Default
+
+            # Counterboring is like drilling but larger diameter
+            cbore_rpm = (sfm * 12) / (3.14159 * cbore_dia) if cbore_dia > 0 else 1000
+            cbore_rpm = min(cbore_rpm, 2000)
+
+            cbore_feed = cbore_rpm * 2 * 0.006  # IPM
+
+            time_per_hole = (cbore_depth / cbore_feed) if cbore_feed > 0 else 0.5
+            time_per_hole += 0.1
+
+            total_time = time_per_hole * qty
+
+            cbore_groups.append({
+                'hole_id': hole_id,
+                'diameter': cbore_dia,
+                'depth': cbore_depth,
+                'qty': qty,
+                'sfm': sfm,
+                'rpm': cbore_rpm,
+                'feed_rate': cbore_feed,
+                'time_per_hole': time_per_hole,
+                'total_time': total_time,
+                'description': entry.get('DESCRIPTION', '')
+            })
+
+        # CENTER DRILL operations
+        if is_cdrill:
+            # Extract center drill depth if specified
+            cdrill_depth_match = re.search(r'[Xx]\s+(\d*\.\d+|\d+)\s+DEEP', op_text)
+            if cdrill_depth_match:
+                cdrill_depth = float(cdrill_depth_match.group(1))
+            else:
+                cdrill_depth = 0.1  # Default shallow depth
+
+            # Center drilling is quick - estimate based on depth
+            time_per_hole = max(0.05, cdrill_depth * 0.5)  # Min 3 seconds, or 30 sec per inch
+            total_time = time_per_hole * qty
+
+            cdrill_groups.append({
+                'hole_id': hole_id,
+                'diameter': ref_dia,
+                'depth': cdrill_depth,
+                'qty': qty,
+                'time_per_hole': time_per_hole,
+                'total_time': total_time,
+                'description': entry.get('DESCRIPTION', '')
+            })
+
+    # Calculate totals
+    total_drill = sum(g['total_time'] for g in drill_groups)
+    total_jig_grind = sum(g['total_time'] for g in jig_grind_groups)
+    total_tap = sum(g['total_time'] for g in tap_groups)
+    total_cbore = sum(g['total_time'] for g in cbore_groups)
+    total_cdrill = sum(g['total_time'] for g in cdrill_groups)
+
+    total_minutes = total_drill + total_jig_grind + total_tap + total_cbore + total_cdrill
+
+    return {
+        'drill_groups': drill_groups,
+        'jig_grind_groups': jig_grind_groups,
+        'tap_groups': tap_groups,
+        'cbore_groups': cbore_groups,
+        'cdrill_groups': cdrill_groups,
+        'total_drill_minutes': total_drill,
+        'total_jig_grind_minutes': total_jig_grind,
+        'total_tap_minutes': total_tap,
+        'total_cbore_minutes': total_cbore,
+        'total_cdrill_minutes': total_cdrill,
+        'total_minutes': total_minutes,
+        'total_hours': total_minutes / 60,
+        'material': material,
+        'thickness': thickness,
+    }
