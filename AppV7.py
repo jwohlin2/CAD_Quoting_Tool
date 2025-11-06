@@ -1173,6 +1173,16 @@ class AppV7:
             )
             summary_lines.append("-" * 74)
             summary_lines.append(self._format_cost_summary_line("Total Estimated Cost", total_cost))
+            margin_rate = 0.15
+            margin_amount = total_cost * margin_rate
+            final_cost = total_cost + margin_amount
+            summary_lines.append(
+                self._format_cost_summary_line(
+                    f"Margin ({margin_rate:.0%})",
+                    margin_amount,
+                )
+            )
+            summary_lines.append(self._format_cost_summary_line("Final Cost", final_cost))
 
         summary_lines.append("")
         self.output_text.insert(tk.END, "\n".join(summary_lines))
