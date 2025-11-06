@@ -2,7 +2,7 @@
 
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Optional, Dict, Any, Tuple, List
+from typing import Optional, Dict, Any, Tuple, List, Mapping
 import os
 
 # ============================================================================
@@ -30,9 +30,49 @@ class PartInfo:
         self.area = self.length * self.width
 
 
+def _safe_float(value: Any) -> float:
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def _normalize_dim_overrides(dims_override: Optional[Mapping[str, Any]]) -> Dict[str, float]:
+    """Return canonical overrides keyed by 'L', 'W', 'T'."""
+    if not dims_override:
+        return {}
+
+    key_map = {
+        "L": "L",
+        "LENGTH": "L",
+        "W": "W",
+        "WIDTH": "W",
+        "T": "T",
+        "THK": "T",
+        "THICK": "T",
+        "THICKNESS": "T",
+    }
+
+    normalized: Dict[str, float] = {}
+    for key, raw_value in dims_override.items():
+        if raw_value is None:
+            continue
+        canonical = key_map.get(str(key).strip().upper())
+        if not canonical:
+            continue
+        try:
+            normalized[canonical] = float(raw_value)
+        except (TypeError, ValueError):
+            continue
+
+    return normalized
+
+
 def extract_part_info_from_plan(
     plan: Dict[str, Any],
-    material: Optional[str] = None
+    material: Optional[str] = None,
+    *,
+    dims_override: Optional[Mapping[str, Any]] = None,
 ) -> PartInfo:
     """
     Extract part size and material from a process plan.
@@ -40,6 +80,7 @@ def extract_part_info_from_plan(
     Args:
         plan: Process plan dict (from plan_job or plan_from_cad_file)
         material: Material override (if not provided, uses default)
+        dims_override: Optional mapping with manual dimension overrides
 
     Returns:
         PartInfo with dimensions and material
@@ -51,11 +92,16 @@ def extract_part_info_from_plan(
         >>> print(f"Volume: {part_info.volume:.2f} cubic inches")
     """
     # Extract dimensions from plan
-    dims = plan.get('extracted_dims', {})
+    dims = dict(plan.get('extracted_dims', {}))
+    overrides = _normalize_dim_overrides(dims_override)
 
-    length = dims.get('L', 0.0)
-    width = dims.get('W', 0.0)
-    thickness = dims.get('T', 0.0)
+    if overrides:
+        dims.update(overrides)
+        plan.setdefault('extracted_dims', {}).update(overrides)
+
+    length = _safe_float(dims.get('L', 0.0))
+    width = _safe_float(dims.get('W', 0.0))
+    thickness = _safe_float(dims.get('T', 0.0))
 
     # Use provided material or default
     part_material = material if material else DEFAULT_MATERIAL
@@ -73,7 +119,9 @@ def extract_part_info_from_cad(
     material: Optional[str] = None,
     use_paddle_ocr: bool = True,
     auto_detect_material: bool = True,
-    verbose: bool = False
+    verbose: bool = False,
+    *,
+    dims_override: Optional[Mapping[str, Any]] = None,
 ) -> PartInfo:
     """
     Extract part size and material directly from CAD file using PaddleOCR.
@@ -87,6 +135,7 @@ def extract_part_info_from_cad(
         use_paddle_ocr: Use PaddleOCR for dimension extraction (default: True)
         auto_detect_material: Auto-detect material from CAD text if not specified (default: True)
         verbose: Print extraction details
+        dims_override: Optional mapping with manual dimension overrides
 
     Returns:
         PartInfo with dimensions (extracted via PaddleOCR) and material
@@ -119,11 +168,12 @@ def extract_part_info_from_cad(
     plan = plan_from_cad_file(
         cad_file_path,
         use_paddle_ocr=use_paddle_ocr,
-        verbose=verbose
+        verbose=verbose,
+        dims_override=dims_override,
     )
 
     # Extract part info from plan (dimensions come from PaddleOCR)
-    return extract_part_info_from_plan(plan, material)
+    return extract_part_info_from_plan(plan, material, dims_override=dims_override)
 
 
 def get_part_dimensions(plan: Dict[str, Any]) -> Tuple[float, float, float]:

@@ -3,6 +3,7 @@ from __future__ import annotations
 import tkinter as tk
 from tkinter import ttk, filedialog, scrolledtext, messagebox
 import json
+from fractions import Fraction
 from pathlib import Path
 from typing import Optional
 
@@ -193,6 +194,7 @@ class AppV7:
         # Data storage
         self.cad_data = {}
         self.quote_vars = {}
+        self.manual_dim_overrides: dict[str, float] = {}
         self.cad_file_path: Optional[str] = None
 
         # Cached totals for summary display
@@ -318,6 +320,21 @@ class AppV7:
         self.quote_fields = {}
         variables = [
             ("Material Scrap / Remnant Value", "50", "Enter the estimated scrap or remnant value for this material"),
+            (
+                "Override Length (in)",
+                "",
+                "Optional: manually enter the finished part length in inches. Leave blank to use the CAD value.",
+            ),
+            (
+                "Override Width (in)",
+                "",
+                "Optional: manually enter the finished part width in inches. Leave blank to use the CAD value.",
+            ),
+            (
+                "Override Thickness (in)",
+                "",
+                "Optional: manually enter the finished part thickness in inches. Leave blank to use the CAD value.",
+            ),
         ]
 
         row = 0
@@ -456,6 +473,32 @@ class AppV7:
         oz = (weight_lbs - lbs) * 16
         return f"{lbs} lb {oz:.1f} oz"
 
+    def _parse_optional_float(self, value: str) -> tuple[Optional[float], Optional[str]]:
+        """Parse a string to float, allowing fractions; return (value, error_text)."""
+        if value is None:
+            return None, None
+
+        text = value.strip()
+        if not text:
+            return None, None
+
+        try:
+            # Support fractional entries like "3 1/2" or "7/8"
+            if "/" in text:
+                normalized = text.replace("-", " -").replace("\u2032", "'")
+                # Split on whitespace to handle mixed numbers (e.g., "3 1/2")
+                parts = normalized.split()
+                if len(parts) == 2 and parts[1].count("/") == 1:
+                    whole = float(parts[0])
+                    frac = float(Fraction(parts[1]))
+                    return whole + frac, None
+                return float(Fraction(text)), None
+
+            sanitized = text.replace("\u2033", "").replace("\"", "")
+            return float(sanitized), None
+        except (ValueError, ZeroDivisionError):
+            return None, text
+
     def _generate_direct_costs_report(self) -> str:
         """Generate formatted direct costs report using DirectCostHelper functions."""
         self.direct_cost_total = None
@@ -470,11 +513,27 @@ class AppV7:
             )
             from cad_quoter.resources import default_catalog_csv
 
-            # Extract part info from CAD file
-            part_info = extract_part_info_from_cad(self.cad_file_path, verbose=True)
+            overrides = self.manual_dim_overrides
+
+            # Extract part info from CAD file, applying manual overrides if provided
+            part_info = extract_part_info_from_cad(
+                self.cad_file_path,
+                verbose=True,
+                dims_override=overrides or None,
+            )
 
             # Debug: print what was extracted
             print(f"[AppV7] Extracted part_info: L={part_info.length}, W={part_info.width}, T={part_info.thickness}, material={part_info.material}")
+
+            if overrides:
+                if "L" in overrides:
+                    part_info.length = overrides["L"]
+                if "W" in overrides:
+                    part_info.width = overrides["W"]
+                if "T" in overrides:
+                    part_info.thickness = overrides["T"]
+                part_info.volume = part_info.length * part_info.width * part_info.thickness
+                part_info.area = part_info.length * part_info.width
 
             # Check if dimensions were successfully extracted
             if part_info.length == 0 or part_info.width == 0 or part_info.thickness == 0:
@@ -536,7 +595,12 @@ class AppV7:
                     print("[AppV7] Trying fallback dimension extraction from text...")
                     try:
                         from cad_quoter.planning import plan_from_cad_file
-                        plan = plan_from_cad_file(self.cad_file_path, use_paddle_ocr=False, verbose=True)
+                        plan = plan_from_cad_file(
+                            self.cad_file_path,
+                            use_paddle_ocr=False,
+                            verbose=True,
+                            dims_override=overrides or None,
+                        )
 
                         # Try to extract from text records
                         import re
@@ -790,7 +854,12 @@ class AppV7:
                 return "No hole table found in CAD file."
 
             # Get dimensions from plan (or cached JSON)
-            plan = plan_from_cad_file(self.cad_file_path, verbose=False)
+            overrides = self.manual_dim_overrides
+            plan = plan_from_cad_file(
+                self.cad_file_path,
+                verbose=False,
+                dims_override=overrides or None,
+            )
             dims = plan.get('extracted_dims', {})
             thickness = dims.get('T', 0)
 
@@ -805,6 +874,9 @@ class AppV7:
                         thickness = dims_data.get('thickness', 0.0)
                     except Exception:
                         pass
+
+            if thickness == 0 and overrides and "T" in overrides:
+                thickness = overrides["T"]
 
             # Get material from part info
             material = "17-4 PH Stainless"  # Default, could extract from CAD text
@@ -925,7 +997,11 @@ class AppV7:
             from cad_quoter.planning.process_planner import LaborInputs, compute_labor_minutes
 
             # Get the process plan
-            plan = plan_from_cad_file(self.cad_file_path, verbose=False)
+            plan = plan_from_cad_file(
+                self.cad_file_path,
+                verbose=False,
+                dims_override=self.manual_dim_overrides or None,
+            )
 
             # Extract operation counts from plan
             ops = plan.get('ops', [])
@@ -1183,6 +1259,37 @@ class AppV7:
         for label, field in self.quote_fields.items():
             quote_data[label] = field.get()
         self.quote_vars = quote_data
+
+        overrides: dict[str, float] = {}
+        override_label_map = {
+            "Override Length (in)": "L",
+            "Override Width (in)": "W",
+            "Override Thickness (in)": "T",
+        }
+
+        for label, dim_key in override_label_map.items():
+            raw_value = quote_data.get(label, "") or ""
+            parsed_value, error_text = self._parse_optional_float(raw_value)
+
+            if error_text is not None:
+                messagebox.showerror(
+                    "Invalid Dimension Override",
+                    f"Could not parse '{raw_value}' for {label}. Please enter a numeric value.",
+                )
+                self.status_bar.config(text=f"Invalid value for {label}: '{raw_value}'")
+                return
+
+            if parsed_value is not None:
+                if parsed_value <= 0:
+                    messagebox.showerror(
+                        "Invalid Dimension Override",
+                        f"{label} must be greater than zero.",
+                    )
+                    self.status_bar.config(text=f"{label} must be greater than zero")
+                    return
+                overrides[dim_key] = parsed_value
+
+        self.manual_dim_overrides = overrides
 
         # Display in output tab
         self.output_text.delete(1.0, tk.END)
