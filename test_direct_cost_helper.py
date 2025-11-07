@@ -211,6 +211,34 @@ assert fallback_part_info.width == 24.0
 assert fallback_part_info.thickness == 2.0
 assert fallback_part_info.used_default_dimensions is True
 
+print("\n7b. Default fallback metadata cleared after overrides:")
+
+plan_with_defaults = {}
+initial_defaults_part_info = extract_part_info_from_plan(plan_with_defaults)
+
+assert initial_defaults_part_info.used_default_dimensions is True
+
+explicit_overrides_after_defaults = extract_part_info_from_plan(
+    plan_with_defaults,
+    dims_override={"L": 10.0, "W": 5.0, "T": 0.75},
+)
+
+print(
+    "   Overrides after defaults: "
+    f"{explicit_overrides_after_defaults.length}\" x "
+    f"{explicit_overrides_after_defaults.width}\" x "
+    f"{explicit_overrides_after_defaults.thickness}\""
+)
+print(
+    "   Used defaults after overrides: "
+    f"{explicit_overrides_after_defaults.used_default_dimensions}"
+)
+
+assert explicit_overrides_after_defaults.used_default_dimensions is False
+assert plan_with_defaults.get("extracted_dims_meta", {}).get(
+    "used_default_dimension_fallbacks"
+) is None
+
 
 print("\n" + "=" * 70)
 print("TEST COMPLETE")

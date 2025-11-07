@@ -144,6 +144,9 @@ def extract_part_info_from_plan(
     if overrides:
         dims.update(overrides)
         plan.setdefault('extracted_dims', {}).update(overrides)
+        meta = plan.get('extracted_dims_meta')
+        if meta:
+            meta.pop('used_default_dimension_fallbacks', None)
     else:
         extracted_dims = plan.setdefault('extracted_dims', {})
         for key, default_value in DEFAULT_DIMENSION_OVERRIDES.items():
