@@ -671,6 +671,8 @@ def _normalize_dim_overrides(dims_override: Optional[Mapping[str, Any]]) -> Dict
 
 # Default explicit overrides used when nothing can be extracted (24" × 24" × 2")
 DEFAULT_EXPLICIT_OVERRIDES = {"L": 24.0, "W": 24.0, "T": 2.0}
+_BASE_DEFAULT_EXPLICIT_OVERRIDES = dict(DEFAULT_EXPLICIT_OVERRIDES)
+_CURRENT_DEFAULT_EXPLICIT_OVERRIDES = dict(DEFAULT_EXPLICIT_OVERRIDES)
 
 
 def _collect_dimension_overrides(
@@ -699,6 +701,26 @@ def _collect_dimension_overrides(
             continue
 
     return overrides
+
+
+def get_default_explicit_overrides() -> Dict[str, float]:
+    """Return a copy of the active explicit override fallbacks."""
+
+    return dict(_CURRENT_DEFAULT_EXPLICIT_OVERRIDES)
+
+
+def set_default_explicit_overrides(overrides: Optional[Mapping[str, Any]]) -> None:
+    """Update or reset the module-level explicit override fallbacks."""
+
+    _CURRENT_DEFAULT_EXPLICIT_OVERRIDES.clear()
+
+    if overrides:
+        normalized = _normalize_dim_overrides(overrides)
+        if normalized:
+            _CURRENT_DEFAULT_EXPLICIT_OVERRIDES.update(normalized)
+            return
+
+    _CURRENT_DEFAULT_EXPLICIT_OVERRIDES.update(_BASE_DEFAULT_EXPLICIT_OVERRIDES)
 
 
 def plan_from_cad_file(
@@ -779,7 +801,7 @@ def plan_from_cad_file(
 
     # If nothing was provided and OCR failed, use default explicit overrides
     if not explicit_override_used and not overrides and not dims:
-        overrides = dict(DEFAULT_EXPLICIT_OVERRIDES)
+        overrides = dict(_CURRENT_DEFAULT_EXPLICIT_OVERRIDES)
         explicit_override_used = True
         default_overrides_used = True
 

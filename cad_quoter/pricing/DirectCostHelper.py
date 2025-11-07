@@ -19,6 +19,8 @@ DEFAULT_DIMENSION_OVERRIDES = {
     "W": 24.0,
     "T": 2.0,
 }
+_BASE_DEFAULT_DIMENSION_OVERRIDES = dict(DEFAULT_DIMENSION_OVERRIDES)
+_CURRENT_DEFAULT_DIMENSION_OVERRIDES = dict(DEFAULT_DIMENSION_OVERRIDES)
 # ============================================================================
 
 
@@ -44,6 +46,26 @@ def _safe_float(value: Any) -> float:
         return float(value)
     except (TypeError, ValueError):
         return 0.0
+
+
+def get_default_dimension_overrides() -> Dict[str, float]:
+    """Return a copy of the active default dimension fallbacks."""
+
+    return dict(_CURRENT_DEFAULT_DIMENSION_OVERRIDES)
+
+
+def set_default_dimension_overrides(overrides: Optional[Mapping[str, Any]]) -> None:
+    """Update or reset the module-level default dimension fallbacks."""
+
+    _CURRENT_DEFAULT_DIMENSION_OVERRIDES.clear()
+
+    if overrides:
+        normalized = _normalize_dim_overrides(overrides)
+        if normalized:
+            _CURRENT_DEFAULT_DIMENSION_OVERRIDES.update(normalized)
+            return
+
+    _CURRENT_DEFAULT_DIMENSION_OVERRIDES.update(_BASE_DEFAULT_DIMENSION_OVERRIDES)
 
 
 def _normalize_dim_overrides(dims_override: Optional[Mapping[str, Any]]) -> Dict[str, float]:
@@ -146,7 +168,7 @@ def extract_part_info_from_plan(
         plan.setdefault('extracted_dims', {}).update(overrides)
     else:
         extracted_dims = plan.setdefault('extracted_dims', {})
-        for key, default_value in DEFAULT_DIMENSION_OVERRIDES.items():
+        for key, default_value in _CURRENT_DEFAULT_DIMENSION_OVERRIDES.items():
             current_value = _safe_float(dims.get(key, 0.0))
             if current_value <= 0:
                 dims[key] = default_value
