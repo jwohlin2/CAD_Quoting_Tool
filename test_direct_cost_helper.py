@@ -208,7 +208,7 @@ print(f"   Used defaults: {fallback_part_info.used_default_dimensions}")
 
 assert fallback_part_info.length == 24.0
 assert fallback_part_info.width == 24.0
-assert fallback_part_info.thickness == 3.0
+assert fallback_part_info.thickness == 2.0
 assert fallback_part_info.used_default_dimensions is True
 
 

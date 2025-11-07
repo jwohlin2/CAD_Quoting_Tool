@@ -17,7 +17,7 @@ DEFAULT_MATERIAL = "aluminum MIC6"  # <-- CHANGE THIS TO SET DEFAULT MATERIAL
 DEFAULT_DIMENSION_OVERRIDES = {
     "L": 24.0,
     "W": 24.0,
-    "T": 3.0,
+    "T": 2.0,
 }
 # ============================================================================
 
@@ -161,6 +161,10 @@ def extract_part_info_from_plan(
     length = _safe_float(dims.get('L', 0.0))
     width = _safe_float(dims.get('W', 0.0))
     thickness = _safe_float(dims.get('T', 0.0))
+
+    meta = plan.get('extracted_dims_meta', {})
+    if meta.get('used_default_dimension_fallbacks'):
+        default_dims_used = True
 
     # Use provided material or default
     part_material = material if material else DEFAULT_MATERIAL
