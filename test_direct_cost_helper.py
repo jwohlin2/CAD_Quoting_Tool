@@ -1,6 +1,15 @@
 """Test DirectCostHelper functionality."""
 
 from pathlib import Path
+import sys
+import types
+
+# The pricing package imports the McMaster API module, which depends on the
+# third-party ``requests`` package. The test environment used for these examples
+# does not have external network access to install dependencies, so we provide a
+# lightweight stub to satisfy the import without performing any HTTP requests.
+if "requests" not in sys.modules:  # pragma: no cover - defensive guard
+    sys.modules["requests"] = types.ModuleType("requests")
 from cad_quoter.pricing.DirectCostHelper import (
     extract_part_info_from_cad,
     extract_part_info_from_plan,
@@ -50,6 +59,191 @@ print(f"   Material: {part_info2.material}")
 al_density = get_material_density(part_info2.material)
 al_weight = calculate_material_weight(part_info2.volume, al_density)
 print(f"   If Aluminum: {al_weight:.2f} lbs (vs Steel: {weight:.2f} lbs)")
+# Test 4: Explicit dimension overrides
+print("\n4. Explicit dimension overrides:")
+override_dims = {
+    "length": 24.0,
+    "width": 24.0,
+    "thickness": 2.0,
+}
+
+override_part_info = extract_part_info_from_plan(
+    plan,
+    "Aluminum 6061-T6",
+    length_override=override_dims["length"],
+    width_override=override_dims["width"],
+    thickness_override=override_dims["thickness"],
+)
+
+print(
+    "   Plan override dimensions: "
+    f"{override_part_info.length}\" x {override_part_info.width}\" x {override_part_info.thickness}\""
+)
+
+assert override_part_info.length == override_dims["length"]
+assert override_part_info.width == override_dims["width"]
+assert override_part_info.thickness == override_dims["thickness"]
+
+from cad_quoter.planning import process_planner as _process_planner
+
+_orig_extract_dimensions = _process_planner.extract_dimensions_from_cad
+
+
+def _fail_if_called(*args, **kwargs):  # pragma: no cover - defensive assertion
+    raise AssertionError(
+        "extract_dimensions_from_cad should be skipped when overrides are provided"
+    )
+
+
+_process_planner.extract_dimensions_from_cad = _fail_if_called
+
+try:
+    override_part_info_cad = extract_part_info_from_cad(
+        cad_file,
+        material,
+        use_paddle_ocr=True,
+        length_override=override_dims["length"],
+        width_override=override_dims["width"],
+        thickness_override=override_dims["thickness"],
+    )
+finally:
+    _process_planner.extract_dimensions_from_cad = _orig_extract_dimensions
+
+print(
+    "   CAD override dimensions: "
+    f"{override_part_info_cad.length}\" x {override_part_info_cad.width}\" x {override_part_info_cad.thickness}\""
+)
+
+assert override_part_info_cad.length == override_dims["length"]
+assert override_part_info_cad.width == override_dims["width"]
+assert override_part_info_cad.thickness == override_dims["thickness"]
+
+print("\n6a. plan_from_cad_file explicit overrides:")
+
+_process_planner.extract_dimensions_from_cad = _fail_if_called
+
+try:
+    plan_with_explicit_overrides = plan_from_cad_file(
+        cad_file,
+        verbose=False,
+        length_override=override_dims["length"],
+        width_override=override_dims["width"],
+        thickness_override=override_dims["thickness"],
+    )
+finally:
+    _process_planner.extract_dimensions_from_cad = _orig_extract_dimensions
+
+plan_with_explicit_dims = plan_with_explicit_overrides["extracted_dims"]
+
+print(
+    "   Plan explicit overrides dimensions: "
+    f"{plan_with_explicit_dims['L']}\" x {plan_with_explicit_dims['W']}\" x {plan_with_explicit_dims['T']}\""
+)
+
+assert plan_with_explicit_dims["L"] == override_dims["length"]
+assert plan_with_explicit_dims["W"] == override_dims["width"]
+assert plan_with_explicit_dims["T"] == override_dims["thickness"]
+
+# Test 5: dims_override mapping (case-insensitive keys)
+print("\n5. dims_override mapping overrides:")
+
+plan_for_mapping_override = plan_from_cad_file(cad_file, verbose=False)
+mapping_overrides = {"Length": 8.0, "width": 5.5, "thk": 0.625}
+
+mapping_part_info = extract_part_info_from_plan(
+    plan_for_mapping_override,
+    "Aluminum 6061-T6",
+    dims_override=mapping_overrides,
+)
+
+print(
+    "   Plan dims_override dimensions: "
+    f"{mapping_part_info.length}\" x {mapping_part_info.width}\" x {mapping_part_info.thickness}\""
+)
+
+assert mapping_part_info.length == mapping_overrides["Length"]
+assert mapping_part_info.width == mapping_overrides["width"]
+assert mapping_part_info.thickness == mapping_overrides["thk"]
+
+plan_dims = plan_for_mapping_override["extracted_dims"]
+assert plan_dims["L"] == mapping_overrides["Length"]
+assert plan_dims["W"] == mapping_overrides["width"]
+assert plan_dims["T"] == mapping_overrides["thk"]
+
+# Test 6: dims_override mapping (CAD helper) should still skip PaddleOCR when all dims provided
+print("\n6. CAD dims_override mapping overrides:")
+
+_process_planner.extract_dimensions_from_cad = _fail_if_called
+
+try:
+    mapping_part_info_cad = extract_part_info_from_cad(
+        cad_file,
+        material,
+        use_paddle_ocr=True,
+        dims_override=mapping_overrides,
+    )
+finally:
+    _process_planner.extract_dimensions_from_cad = _orig_extract_dimensions
+
+print(
+    "   CAD dims_override dimensions: "
+    f"{mapping_part_info_cad.length}\" x {mapping_part_info_cad.width}\" x {mapping_part_info_cad.thickness}\""
+)
+
+assert mapping_part_info_cad.length == mapping_overrides["Length"]
+assert mapping_part_info_cad.width == mapping_overrides["width"]
+assert mapping_part_info_cad.thickness == mapping_overrides["thk"]
+
+# Test 6b: Partial overrides should still run PaddleOCR to fill missing dimensions
+print("\n6b. Partial overrides still trigger PaddleOCR:")
+
+call_counter = {"count": 0}
+
+
+def _record_call(*args, **kwargs):  # pragma: no cover - defensive guard
+    call_counter["count"] += 1
+    return (15.75, 15.38, 3.13)
+
+
+_process_planner.extract_dimensions_from_cad = _record_call
+
+try:
+    partial_override_part_info = extract_part_info_from_cad(
+        cad_file,
+        material,
+        use_paddle_ocr=True,
+        thickness_override=2.12,
+    )
+finally:
+    _process_planner.extract_dimensions_from_cad = _orig_extract_dimensions
+
+print(
+    "   Partial override dimensions: "
+    f"{partial_override_part_info.length}\" x {partial_override_part_info.width}\" x {partial_override_part_info.thickness}\""
+)
+
+assert call_counter["count"] == 1
+assert partial_override_part_info.length == 15.75
+assert partial_override_part_info.width == 15.38
+assert partial_override_part_info.thickness == 2.12
+
+# Test 7: Default dimension fallbacks when plan lacks overrides or extracted values
+print("\n7. Default dimension fallbacks:")
+
+empty_plan = {}
+fallback_part_info = extract_part_info_from_plan(empty_plan)
+
+print(
+    "   Fallback dimensions: "
+    f"{fallback_part_info.length}\" x {fallback_part_info.width}\" x {fallback_part_info.thickness}\""
+)
+print(f"   Used defaults: {fallback_part_info.used_default_dimensions}")
+
+assert fallback_part_info.length == 24.0
+assert fallback_part_info.width == 24.0
+assert fallback_part_info.thickness == 2.0
+assert fallback_part_info.used_default_dimensions is True
+
 
 print("\n" + "=" * 70)
 print("TEST COMPLETE")
