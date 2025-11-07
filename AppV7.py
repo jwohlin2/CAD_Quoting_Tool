@@ -195,7 +195,52 @@ class AppV7:
         self.cad_data = {}
         self.quote_vars = {}
         self.manual_dim_overrides: dict[str, float] = {}
+        self.direct_cost_default_overrides: dict[str, float] = {}
+        self.process_planner_default_overrides: dict[str, float] = {}
         self.cad_file_path: Optional[str] = None
+
+        # Configurable fallback defaults for dimension extraction
+        self.direct_cost_default_entries = [
+            (
+                "Direct Cost Default Length (in)",
+                "L",
+                "Fallback length (in inches) used by direct cost calculations when no CAD dimensions or manual overrides are available.",
+            ),
+            (
+                "Direct Cost Default Width (in)",
+                "W",
+                "Fallback width (in inches) used by direct cost calculations when no CAD dimensions or manual overrides are available.",
+            ),
+            (
+                "Direct Cost Default Thickness (in)",
+                "T",
+                "Fallback thickness (in inches) used by direct cost calculations when no CAD dimensions or manual overrides are available.",
+            ),
+        ]
+        self.direct_cost_default_label_map = {
+            label: key for label, key, _ in self.direct_cost_default_entries
+        }
+
+        self.process_planner_default_entries = [
+            (
+                "Process Planner Default Length (in)",
+                "L",
+                "Fallback length (in inches) supplied to the process planner when no CAD dimensions or manual overrides are detected.",
+            ),
+            (
+                "Process Planner Default Width (in)",
+                "W",
+                "Fallback width (in inches) supplied to the process planner when no CAD dimensions or manual overrides are detected.",
+            ),
+            (
+                "Process Planner Default Thickness (in)",
+                "T",
+                "Fallback thickness (in inches) supplied to the process planner when no CAD dimensions or manual overrides are detected.",
+            ),
+        ]
+        self.process_planner_default_label_map = {
+            label: key for label, key, _ in self.process_planner_default_entries
+        }
 
         # Cached totals for summary display
         self.direct_cost_total: Optional[float] = None
@@ -315,10 +360,46 @@ class AppV7:
         # Quote-Specific Variables section with Labelframe (like appV5)
         quote_frame = ttk.Labelframe(editor_scroll.inner, text="Quote-Specific Variables", padding=(10, 5))
         quote_frame.grid(row=0, column=0, sticky="ew", padx=10, pady=5)
+        quote_frame.columnconfigure(1, weight=1)
 
-        # Define all the quote variables from the screenshot
         self.quote_fields = {}
-        variables = [
+
+        def _add_entry_field(
+            container: ttk.Labelframe | ttk.Frame,
+            row_index: int,
+            label_text: str,
+            *,
+            tooltip_text: str = "",
+            default_value: str = "",
+        ) -> int:
+            label = ttk.Label(container, text=label_text)
+            label.grid(row=row_index, column=0, sticky="w", padx=5, pady=5)
+
+            if default_value == "Number":
+                field = ttk.Combobox(container, width=30, values=["Number"])
+                field.set("Number")
+            else:
+                field = ttk.Entry(container, width=30)
+                if default_value:
+                    field.insert(0, default_value)
+
+            field.grid(row=row_index, column=1, sticky="ew", padx=5, pady=5)
+            container.columnconfigure(1, weight=1)
+            self.quote_fields[label_text] = field
+
+            if tooltip_text:
+                info_indicator = ttk.Label(
+                    container,
+                    text="ⓘ",
+                    padding=(4, 0),
+                    cursor="question_arrow",
+                )
+                info_indicator.grid(row=row_index, column=2, sticky="nw", padx=(6, 0))
+                CreateToolTip(info_indicator, tooltip_text, wraplength=360)
+
+            return row_index + 1
+
+        base_variables = [
             ("Material Scrap / Remnant Value", "50", "Enter the estimated scrap or remnant value for this material"),
             (
                 "Override Length (in)",
@@ -338,38 +419,48 @@ class AppV7:
         ]
 
         row = 0
-        for item in variables:
-            label_text, default_value = item[0], item[1]
-            tooltip_text = item[2] if len(item) > 2 else ""
+        for label_text, default_value, tooltip_text in base_variables:
+            row = _add_entry_field(
+                quote_frame,
+                row,
+                label_text,
+                tooltip_text=tooltip_text,
+                default_value=default_value,
+            )
 
-            # Label
-            label = ttk.Label(quote_frame, text=label_text)
-            label.grid(row=row, column=0, sticky="w", padx=5, pady=5)
+        direct_defaults_frame = ttk.Labelframe(
+            editor_scroll.inner,
+            text="Fallback Dimensions – Direct Cost",
+            padding=(10, 5),
+        )
+        direct_defaults_frame.grid(row=1, column=0, sticky="ew", padx=10, pady=5)
+        direct_defaults_frame.columnconfigure(1, weight=1)
 
-            # Entry field or dropdown
-            if default_value == "Number":
-                field = ttk.Combobox(quote_frame, width=30, values=["Number"])
-                field.set("Number")
-            else:
-                field = ttk.Entry(quote_frame, width=30)
-                if default_value:
-                    field.insert(0, default_value)
+        row = 0
+        for label_text, _dim_key, tooltip_text in self.direct_cost_default_entries:
+            row = _add_entry_field(
+                direct_defaults_frame,
+                row,
+                label_text,
+                tooltip_text=tooltip_text,
+            )
 
-            field.grid(row=row, column=1, sticky="w", padx=5, pady=5)
-            self.quote_fields[label_text] = field
+        planner_defaults_frame = ttk.Labelframe(
+            editor_scroll.inner,
+            text="Fallback Dimensions – Process Planner",
+            padding=(10, 5),
+        )
+        planner_defaults_frame.grid(row=2, column=0, sticky="ew", padx=10, pady=5)
+        planner_defaults_frame.columnconfigure(1, weight=1)
 
-            # Info indicator with tooltip (like appV5)
-            if tooltip_text:
-                info_indicator = ttk.Label(
-                    quote_frame,
-                    text="ⓘ",
-                    padding=(4, 0),
-                    cursor="question_arrow",
-                )
-                info_indicator.grid(row=row, column=2, sticky="nw", padx=(6, 0))
-                CreateToolTip(info_indicator, tooltip_text, wraplength=360)
-
-            row += 1
+        row = 0
+        for label_text, _dim_key, tooltip_text in self.process_planner_default_entries:
+            row = _add_entry_field(
+                planner_defaults_frame,
+                row,
+                label_text,
+                tooltip_text=tooltip_text,
+            )
 
     def _create_output_tab(self) -> None:
         """Create the Output tab with JSON display."""
@@ -498,6 +589,44 @@ class AppV7:
             return float(sanitized), None
         except (ValueError, ZeroDivisionError):
             return None, text
+
+    def _collect_default_override_values(
+        self,
+        label_map: dict[str, str],
+        quote_data: dict[str, str],
+        *,
+        context: str,
+    ) -> Optional[dict[str, float]]:
+        """Parse optional default override entries for a given context."""
+
+        overrides: dict[str, float] = {}
+
+        for label, dim_key in label_map.items():
+            raw_value = quote_data.get(label, "") or ""
+            parsed_value, error_text = self._parse_optional_float(raw_value)
+
+            if error_text is not None:
+                messagebox.showerror(
+                    f"Invalid {context}",
+                    f"Could not parse '{raw_value}' for {label}. Please enter a numeric value.",
+                )
+                self.status_bar.config(text=f"Invalid value for {label}: '{raw_value}'")
+                return None
+
+            if parsed_value is None:
+                continue
+
+            if parsed_value <= 0:
+                messagebox.showerror(
+                    f"Invalid {context}",
+                    f"{label} must be greater than zero.",
+                )
+                self.status_bar.config(text=f"{label} must be greater than zero")
+                return None
+
+            overrides[dim_key] = parsed_value
+
+        return overrides
 
     def _generate_direct_costs_report(self) -> str:
         """Generate formatted direct costs report using DirectCostHelper functions."""
@@ -1305,6 +1434,44 @@ class AppV7:
                 overrides[dim_key] = parsed_value
 
         self.manual_dim_overrides = overrides
+
+        direct_cost_defaults = self._collect_default_override_values(
+            self.direct_cost_default_label_map,
+            quote_data,
+            context="Direct Cost default dimension override",
+        )
+        if direct_cost_defaults is None:
+            return
+
+        process_planner_defaults = self._collect_default_override_values(
+            self.process_planner_default_label_map,
+            quote_data,
+            context="Process Planner default dimension override",
+        )
+        if process_planner_defaults is None:
+            return
+
+        from cad_quoter.pricing import DirectCostHelper as direct_cost_helper_module
+
+        direct_cost_helper_module.set_default_dimension_overrides(
+            direct_cost_defaults if direct_cost_defaults else None
+        )
+
+        if direct_cost_defaults:
+            self.direct_cost_default_overrides = direct_cost_defaults.copy()
+        else:
+            self.direct_cost_default_overrides = {}
+
+        from cad_quoter.planning import process_planner as process_planner_module
+
+        process_planner_module.set_default_explicit_overrides(
+            process_planner_defaults if process_planner_defaults else None
+        )
+
+        if process_planner_defaults:
+            self.process_planner_default_overrides = process_planner_defaults.copy()
+        else:
+            self.process_planner_default_overrides = {}
 
         # Display in output tab
         self.output_text.delete(1.0, tk.END)
