@@ -894,14 +894,14 @@ class AppV7:
                 report.append("-" * 74)
                 for group in times['cdrill_groups']:
                     report.append(format_cdrill_group(group))
-                report.append(f"\nTotal CDrill Time: {times['total_cdrill_minutes']:.2f} minutes")
+                report.append(f"\nTotal Center Drill Time: {times['total_cdrill_minutes']:.2f} minutes")
                 report.append("")
 
             # Summary
             machine_cost = times['total_hours'] * self.MACHINE_RATE
             report.append("=" * 74)
             report.append(f"TOTAL MACHINE TIME: {times['total_minutes']:.2f} minutes ({times['total_hours']:.2f} hours)")
-            report.append(f"TOTAL MACHINE COST: ${machine_cost:.2f}")
+            report.append(f"TOTAL MACHINE COST: {machine_cost:.2f}")
             report.append("=" * 74)
             report.append("")
 
@@ -1056,7 +1056,7 @@ class AppV7:
             labor_cost = labor_hours * self.LABOR_RATE
             report.append(f"  TOTAL LABOR TIME:                {minutes['Labor_Total']:>10.2f} minutes")
             report.append(f"                                   {labor_hours:>10.2f} hours")
-            report.append(f"  TOTAL LABOR COST:                ${labor_cost:>10.2f}")
+            report.append(f"  TOTAL LABOR COST:                {labor_cost:>10.2f}")
             report.append("")
 
             self.labor_cost_total = labor_cost
@@ -1139,7 +1139,8 @@ class AppV7:
         if is_current:
             margin_text += " (current)"
         final_price = total_cost * (1.0 + safe_margin)
-        return f"  {margin_text:<18}${final_price:>12,.2f}"
+        price_text = f"${final_price:,.2f}"
+        return f" {margin_text:<17}{price_text:>15}"
 
     def _build_quick_margin_section(self, total_cost: float, margin_rate: float) -> list[str]:
         """Return the QUICK WHAT-IFS margin table for the summary output."""
@@ -1157,7 +1158,7 @@ class AppV7:
             "QUICK WHAT-IFS",
             "=" * 74,
             "Margin slider",
-            "  Margin           Final Price",
+            f" {'Margin':<17}{'Final Price':>15}",
         ]
 
         for margin in margins:
