@@ -58,14 +58,14 @@ def set_default_dimension_overrides(overrides: Optional[Mapping[str, Any]]) -> N
     """Update or reset the module-level default dimension fallbacks."""
 
     _CURRENT_DEFAULT_DIMENSION_OVERRIDES.clear()
-
-    if overrides:
-        normalized = _normalize_dim_overrides(overrides)
-        if normalized:
-            _CURRENT_DEFAULT_DIMENSION_OVERRIDES.update(normalized)
-            return
-
     _CURRENT_DEFAULT_DIMENSION_OVERRIDES.update(_BASE_DEFAULT_DIMENSION_OVERRIDES)
+
+    if not overrides:
+        return
+
+    normalized = _normalize_dim_overrides(overrides)
+    if normalized:
+        _CURRENT_DEFAULT_DIMENSION_OVERRIDES.update(normalized)
 
 
 def _normalize_dim_overrides(dims_override: Optional[Mapping[str, Any]]) -> Dict[str, float]:
