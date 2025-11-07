@@ -525,6 +525,8 @@ class AppV7:
             # Debug: print what was extracted
             print(f"[AppV7] Extracted part_info: L={part_info.length}, W={part_info.width}, T={part_info.thickness}, material={part_info.material}")
 
+            used_default_dimensions = getattr(part_info, "used_default_dimensions", False)
+
             if overrides:
                 if "L" in overrides:
                     part_info.length = overrides["L"]
@@ -534,9 +536,17 @@ class AppV7:
                     part_info.thickness = overrides["T"]
                 part_info.volume = part_info.length * part_info.width * part_info.thickness
                 part_info.area = part_info.length * part_info.width
+                if hasattr(part_info, "used_default_dimensions"):
+                    part_info.used_default_dimensions = False
+                used_default_dimensions = False
 
             # Check if dimensions were successfully extracted
-            if part_info.length == 0 or part_info.width == 0 or part_info.thickness == 0:
+            if (
+                part_info.length == 0
+                or part_info.width == 0
+                or part_info.thickness == 0
+                or used_default_dimensions
+            ):
                 # First check if a cached JSON file exists from previous extraction
                 json_output = Path(__file__).parent / "debug" / f"{Path(self.cad_file_path).stem}_dims.json"
 
@@ -552,13 +562,20 @@ class AppV7:
                         part_info.thickness = dims_data.get('thickness', 0.0)
                         part_info.volume = part_info.length * part_info.width * part_info.thickness
                         part_info.area = part_info.length * part_info.width
+                        if hasattr(part_info, "used_default_dimensions"):
+                            part_info.used_default_dimensions = False
 
                         print(f"[AppV7] Loaded dims from JSON: L={part_info.length}, W={part_info.width}, T={part_info.thickness}")
                     except Exception as e:
                         print(f"[AppV7] Failed to load JSON: {e}")
 
                 # If still zero, try calling paddle_dims_extractor.py as subprocess
-                if part_info.length == 0 or part_info.width == 0 or part_info.thickness == 0:
+                if (
+                    part_info.length == 0
+                    or part_info.width == 0
+                    or part_info.thickness == 0
+                    or getattr(part_info, "used_default_dimensions", False)
+                ):
                     print("[AppV7] Trying paddle_dims_extractor.py as subprocess...")
                     try:
                         import subprocess
@@ -581,6 +598,8 @@ class AppV7:
                             part_info.thickness = dims_data.get('thickness', 0.0)
                             part_info.volume = part_info.length * part_info.width * part_info.thickness
                             part_info.area = part_info.length * part_info.width
+                            if hasattr(part_info, "used_default_dimensions"):
+                                part_info.used_default_dimensions = False
 
                             print(f"[AppV7] paddle_dims_extractor.py succeeded: L={part_info.length}, W={part_info.width}, T={part_info.thickness}")
                         else:
@@ -591,7 +610,12 @@ class AppV7:
                         print(f"[AppV7] paddle_dims_extractor.py subprocess failed: {e}")
 
                 # If still zero, try fallback text extraction
-                if part_info.length == 0 or part_info.width == 0 or part_info.thickness == 0:
+                if (
+                    part_info.length == 0
+                    or part_info.width == 0
+                    or part_info.thickness == 0
+                    or getattr(part_info, "used_default_dimensions", False)
+                ):
                     print("[AppV7] Trying fallback dimension extraction from text...")
                     try:
                         from cad_quoter.planning import plan_from_cad_file
@@ -641,11 +665,18 @@ class AppV7:
                             # Recalculate volume and area
                             part_info.volume = part_info.length * part_info.width * part_info.thickness
                             part_info.area = part_info.length * part_info.width
+                            if hasattr(part_info, "used_default_dimensions"):
+                                part_info.used_default_dimensions = False
                     except Exception as e:
                         print(f"[AppV7] Fallback extraction failed: {e}")
 
             # Final check if dimensions were successfully extracted
-            if part_info.length == 0 or part_info.width == 0 or part_info.thickness == 0:
+            if (
+                part_info.length == 0
+                or part_info.width == 0
+                or part_info.thickness == 0
+                or getattr(part_info, "used_default_dimensions", False)
+            ):
                 # Try to help the user
                 file_path = Path(self.cad_file_path)
                 if file_path.suffix.lower() == '.dwg':
