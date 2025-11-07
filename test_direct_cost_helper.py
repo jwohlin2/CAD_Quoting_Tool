@@ -170,7 +170,7 @@ assert plan_dims["L"] == mapping_overrides["Length"]
 assert plan_dims["W"] == mapping_overrides["width"]
 assert plan_dims["T"] == mapping_overrides["thk"]
 
-# Test 6: dims_override passed directly to CAD helper
+# Test 6: dims_override mapping (CAD helper) should still skip PaddleOCR when all dims provided
 print("\n6. CAD dims_override mapping overrides:")
 
 _process_planner.extract_dimensions_from_cad = _fail_if_called
@@ -193,6 +193,39 @@ print(
 assert mapping_part_info_cad.length == mapping_overrides["Length"]
 assert mapping_part_info_cad.width == mapping_overrides["width"]
 assert mapping_part_info_cad.thickness == mapping_overrides["thk"]
+
+# Test 6b: Partial overrides should still run PaddleOCR to fill missing dimensions
+print("\n6b. Partial overrides still trigger PaddleOCR:")
+
+call_counter = {"count": 0}
+
+
+def _record_call(*args, **kwargs):  # pragma: no cover - defensive guard
+    call_counter["count"] += 1
+    return (15.75, 15.38, 3.13)
+
+
+_process_planner.extract_dimensions_from_cad = _record_call
+
+try:
+    partial_override_part_info = extract_part_info_from_cad(
+        cad_file,
+        material,
+        use_paddle_ocr=True,
+        thickness_override=2.12,
+    )
+finally:
+    _process_planner.extract_dimensions_from_cad = _orig_extract_dimensions
+
+print(
+    "   Partial override dimensions: "
+    f"{partial_override_part_info.length}\" x {partial_override_part_info.width}\" x {partial_override_part_info.thickness}\""
+)
+
+assert call_counter["count"] == 1
+assert partial_override_part_info.length == 15.75
+assert partial_override_part_info.width == 15.38
+assert partial_override_part_info.thickness == 2.12
 
 # Test 7: Default dimension fallbacks when plan lacks overrides or extracted values
 print("\n7. Default dimension fallbacks:")
