@@ -713,14 +713,14 @@ def set_default_explicit_overrides(overrides: Optional[Mapping[str, Any]]) -> No
     """Update or reset the module-level explicit override fallbacks."""
 
     _CURRENT_DEFAULT_EXPLICIT_OVERRIDES.clear()
-
-    if overrides:
-        normalized = _normalize_dim_overrides(overrides)
-        if normalized:
-            _CURRENT_DEFAULT_EXPLICIT_OVERRIDES.update(normalized)
-            return
-
     _CURRENT_DEFAULT_EXPLICIT_OVERRIDES.update(_BASE_DEFAULT_EXPLICIT_OVERRIDES)
+
+    if not overrides:
+        return
+
+    normalized = _normalize_dim_overrides(overrides)
+    if normalized:
+        _CURRENT_DEFAULT_EXPLICIT_OVERRIDES.update(normalized)
 
 
 def plan_from_cad_file(
