@@ -669,6 +669,10 @@ def _normalize_dim_overrides(dims_override: Optional[Mapping[str, Any]]) -> Dict
     return overrides
 
 
+# Default explicit overrides used when nothing can be extracted (24" × 24" × 2")
+DEFAULT_EXPLICIT_OVERRIDES = {"L": 24.0, "W": 24.0, "T": 2.0}
+
+
 def _collect_dimension_overrides(
     dims_override: Optional[Mapping[str, Any]],
     *,
@@ -756,6 +760,7 @@ def plan_from_cad_file(
         width_override=width_override,
         thickness_override=thickness_override,
     )
+    explicit_override_used = bool(overrides)
 
     # 1. Extract dimensions (L, W, T)
     dims = None
@@ -770,6 +775,11 @@ def plan_from_cad_file(
         else:
             if verbose:
                 print("[PLANNER] Could not extract dimensions with PaddleOCR")
+
+    # If nothing was provided and OCR failed, use default explicit overrides
+    if not explicit_override_used and not overrides and not dims:
+        overrides = dict(DEFAULT_EXPLICIT_OVERRIDES)
+        explicit_override_used = True
 
     # 2. Extract hole table and operations
     if verbose:
@@ -820,7 +830,7 @@ def plan_from_cad_file(
 
     # Add source info to plan
     plan["source_file"] = str(file_path)
-    if dims_detected or overrides:
+    if dims_detected or explicit_override_used:
         plan["extracted_dims"] = {
             "L": dims_map["L"],
             "W": dims_map["W"],
