@@ -264,10 +264,12 @@ def extract_part_info_from_cad(
         thickness_override=thickness_override,
     )
 
-    # If explicit dimension overrides are provided, skip PaddleOCR to avoid
-    # redundant extraction attempts (and associated warnings when PaddleOCR
-    # isn't available). The overrides will populate the dimensions instead.
-    effective_use_paddle = use_paddle_ocr and not combined_overrides
+    # Only skip PaddleOCR when all three dimensions are explicitly overridden.
+    # Partial overrides (e.g., just thickness) should still leverage PaddleOCR
+    # to populate the remaining dimensions extracted from the CAD drawing.
+    override_keys = set(combined_overrides)
+    all_dims_overridden = {"L", "W", "T"}.issubset(override_keys)
+    effective_use_paddle = use_paddle_ocr and not all_dims_overridden
 
     plan = plan_from_cad_file(
         cad_file_path,

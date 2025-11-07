@@ -783,11 +783,12 @@ def plan_from_cad_file(
         thickness_override=thickness_override,
     )
     explicit_override_used = bool(overrides)
+    all_dims_overridden = {"L", "W", "T"}.issubset(overrides)
     default_overrides_used = False
 
     # 1. Extract dimensions (L, W, T)
     dims = None
-    if use_paddle_ocr and not overrides:
+    if use_paddle_ocr and not all_dims_overridden:
         if verbose:
             print("[PLANNER] Extracting dimensions with PaddleOCR...")
         dims = extract_dimensions_from_cad(file_path)
