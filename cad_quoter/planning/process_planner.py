@@ -761,6 +761,7 @@ def plan_from_cad_file(
         thickness_override=thickness_override,
     )
     explicit_override_used = bool(overrides)
+    default_overrides_used = False
 
     # 1. Extract dimensions (L, W, T)
     dims = None
@@ -780,6 +781,7 @@ def plan_from_cad_file(
     if not explicit_override_used and not overrides and not dims:
         overrides = dict(DEFAULT_EXPLICIT_OVERRIDES)
         explicit_override_used = True
+        default_overrides_used = True
 
     # 2. Extract hole table and operations
     if verbose:
@@ -836,6 +838,10 @@ def plan_from_cad_file(
             "W": dims_map["W"],
             "T": dims_map["T"],
         }
+    if default_overrides_used:
+        meta = plan.setdefault("extracted_dims_meta", {})
+        meta["used_default_dimension_fallbacks"] = True
+        meta.setdefault("override_source", "default_explicit_overrides")
     plan["extracted_holes"] = len(hole_table)
     plan["extracted_hole_operations"] = len(hole_operations)
 
