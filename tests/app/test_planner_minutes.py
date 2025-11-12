@@ -9,7 +9,6 @@ def _disable_speeds_feeds_loader(monkeypatch):
     import appV5
 
     monkeypatch.setattr(appV5, "_load_speeds_feeds_table_from_path", lambda _path: (None, False))
-    monkeypatch.setattr(appV5, "FORCE_ESTIMATOR", False, raising=False)
 
 
 def test_compute_quote_uses_planner_minutes(monkeypatch):
@@ -55,7 +54,6 @@ def test_compute_quote_uses_planner_minutes(monkeypatch):
 
     monkeypatch.setattr(appV5, "_process_plan_job", fake_plan_job)
     monkeypatch.setattr(planner_pricing, "price_with_planner", fake_price_with_planner)
-    monkeypatch.setattr(appV5, "FORCE_PLANNER", False)
 
     result = appV5.compute_quote_from_df(
         df,
@@ -140,7 +138,6 @@ def test_planner_total_mismatch_records_red_flag(monkeypatch):
 
     monkeypatch.setattr(appV5, "_process_plan_job", fake_plan_job)
     monkeypatch.setattr(planner_pricing, "price_with_planner", fake_price_with_planner)
-    monkeypatch.setattr(appV5, "FORCE_PLANNER", False)
     monkeypatch.setattr(appV5, "roughly_equal", fake_roughly_equal)
 
     result = appV5.compute_quote_from_df(
@@ -210,7 +207,6 @@ def test_planner_bucket_minutes_from_line_items_when_bucketize_empty(monkeypatch
     monkeypatch.setattr(appV5, "_process_plan_job", fake_plan_job)
     monkeypatch.setattr(planner_pricing, "price_with_planner", fake_price_with_planner)
     monkeypatch.setattr(appV5, "bucketize", fake_bucketize)
-    monkeypatch.setattr(appV5, "FORCE_PLANNER", False)
 
     result = appV5.compute_quote_from_df(
         df,
@@ -274,7 +270,6 @@ def test_planner_does_not_emit_legacy_buckets_when_line_items_present(monkeypatc
 
     monkeypatch.setattr(appV5, "_process_plan_job", fake_plan_job)
     monkeypatch.setattr(planner_pricing, "price_with_planner", fake_price_with_planner)
-    monkeypatch.setattr(appV5, "FORCE_PLANNER", False)
 
     result = appV5.compute_quote_from_df(
         df,
@@ -327,7 +322,6 @@ def test_planner_fallback_when_no_line_items(monkeypatch):
 
     monkeypatch.setattr(appV5, "_process_plan_job", fake_plan_job)
     monkeypatch.setattr(planner_pricing, "price_with_planner", fake_price_with_planner)
-    monkeypatch.setattr(appV5, "FORCE_PLANNER", False)
 
     result = appV5.compute_quote_from_df(
         df,
@@ -400,7 +394,6 @@ def test_planner_zero_totals_logs_flag_and_falls_back(monkeypatch):
 
     monkeypatch.setattr(appV5, "_process_plan_job", fake_plan_job)
     monkeypatch.setattr(planner_pricing, "price_with_planner", fake_price_with_planner)
-    monkeypatch.setattr(appV5, "FORCE_PLANNER", False)
 
     result = appV5.compute_quote_from_df(
         df,
@@ -466,7 +459,6 @@ def test_planner_milling_bucket_backfills_from_estimator_when_planner_falls_back
 
     monkeypatch.setattr(appV5, "_process_plan_job", fake_plan_job)
     monkeypatch.setattr(planner_pricing, "price_with_planner", fake_price_with_planner)
-    monkeypatch.setattr(appV5, "FORCE_PLANNER", False)
 
     result = appV5.compute_quote_from_df(
         df,
@@ -545,7 +537,6 @@ def test_die_plate_163_holes_has_planner_totals(monkeypatch):
 
     monkeypatch.setattr(appV5, "_process_plan_job", fake_plan_job)
     monkeypatch.setattr(planner_pricing, "price_with_planner", fake_price_with_planner)
-    monkeypatch.setattr(appV5, "FORCE_PLANNER", False)
 
     result = appV5.compute_quote_from_df(
         df,

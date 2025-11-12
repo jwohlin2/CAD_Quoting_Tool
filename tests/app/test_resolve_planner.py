@@ -15,11 +15,6 @@ def reload_appv5(monkeypatch):
         )
 
     module = importlib.import_module("appV5")
-    planner_adapter = importlib.import_module("cad_quoter.app.planner_adapter")
-    monkeypatch.setattr(module, "FORCE_PLANNER", False)
-    monkeypatch.setattr(planner_adapter, "FORCE_PLANNER", False)
-    monkeypatch.setattr(module, "FORCE_ESTIMATOR", False, raising=False)
-    monkeypatch.setattr(planner_adapter, "FORCE_ESTIMATOR", False, raising=False)
     yield module
     importlib.reload(module)
 
@@ -31,9 +26,8 @@ def test_resolve_planner_defaults_to_planner(reload_appv5):
     assert mode == "planner"
 
 
-def test_resolve_planner_handles_planner_mode_signal(reload_appv5, monkeypatch):
+def test_resolve_planner_handles_planner_mode_signal(reload_appv5):
     module = reload_appv5
-    monkeypatch.setattr(module, "FORCE_PLANNER", False)
     used, mode = module.resolve_planner(
         {"PlannerMode": "planner"},
         {"totals_present": True},
@@ -72,25 +66,13 @@ def test_resolve_planner_invalid_mode_falls_back(reload_appv5):
     assert mode == "planner"
 
 
-def test_resolve_planner_force_flag_overrides_mode(monkeypatch, reload_appv5):
+def test_resolve_planner_estimator_mode_overrides_signals(reload_appv5):
     module = reload_appv5
-    planner_adapter = importlib.import_module("cad_quoter.app.planner_adapter")
-    monkeypatch.setattr(module, "FORCE_PLANNER", True)
-    monkeypatch.setattr(planner_adapter, "FORCE_PLANNER", True)
-    used, mode = module.resolve_planner({"PlannerMode": "legacy"}, None)
-    assert used is True
-    assert mode == "planner"
 
-
-def test_resolve_planner_force_estimator(monkeypatch, reload_appv5):
-    module = reload_appv5
-    planner_adapter = importlib.import_module("cad_quoter.app.planner_adapter")
-    monkeypatch.setattr(module, "FORCE_PLANNER", False)
-    monkeypatch.setattr(planner_adapter, "FORCE_PLANNER", False)
-    monkeypatch.setattr(module, "FORCE_ESTIMATOR", True, raising=False)
-    monkeypatch.setattr(planner_adapter, "FORCE_ESTIMATOR", True, raising=False)
-
-    used, mode = module.resolve_planner({"PlannerMode": "planner"}, {"line_items": [1]})
+    used, mode = module.resolve_planner(
+        {"PlannerMode": "estimator"},
+        {"line_items": [1]},
+    )
 
     assert used is False
     assert mode == "estimator"
