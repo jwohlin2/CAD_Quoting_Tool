@@ -3,6 +3,9 @@ from __future__ import annotations
 import tkinter as tk
 from tkinter import ttk, filedialog, scrolledtext, messagebox
 import json
+import os
+import subprocess
+import platform
 from pathlib import Path
 from typing import Optional
 
@@ -206,6 +209,9 @@ class AppV7:
         # Default profit margin applied to the final price
         self.margin_rate: float = 0.15
 
+        # Store path to drawing image file
+        self.drawing_image_path: Optional[str] = None
+
         self._create_menu()
         self._create_button_panel()
         self._create_tabs()
@@ -245,8 +251,8 @@ class AppV7:
         ttk.Button(button_frame, text="2. Generate Quote",
                    command=self.generate_quote).pack(side=tk.LEFT, padx=5)
 
-        ttk.Button(button_frame, text="LLM Inspector",
-                   command=self.show_llm_inspector).pack(side=tk.LEFT, padx=5)
+        ttk.Button(button_frame, text="Drawing Preview",
+                   command=self.open_drawing_preview).pack(side=tk.LEFT, padx=5)
 
     def _create_tabs(self) -> None:
         """Create the tabbed interface."""
@@ -267,6 +273,41 @@ class AppV7:
         self.output_tab = tk.Frame(self.notebook)
         self.notebook.add(self.output_tab, text="Output")
         self._create_output_tab()
+
+    def open_drawing_preview(self) -> None:
+        """Open the drawing preview image file with the system default viewer."""
+        if not self.drawing_image_path:
+            messagebox.showinfo(
+                "No Drawing Image",
+                "No drawing image found.\n\n"
+                "Load a CAD file first, and make sure there's a corresponding image file\n"
+                "(PNG, JPG, etc.) with the same name in the same directory.\n\n"
+                "Or use File > Load Drawing Image... to select an image manually."
+            )
+            return
+
+        if not os.path.exists(self.drawing_image_path):
+            messagebox.showerror(
+                "File Not Found",
+                f"Drawing image file not found:\n{self.drawing_image_path}"
+            )
+            return
+
+        try:
+            # Open file with system default viewer
+            if platform.system() == 'Windows':
+                os.startfile(self.drawing_image_path)
+            elif platform.system() == 'Darwin':  # macOS
+                subprocess.run(['open', self.drawing_image_path])
+            else:  # Linux
+                subprocess.run(['xdg-open', self.drawing_image_path])
+
+            self.status_bar.config(text=f"Opened drawing: {Path(self.drawing_image_path).name}")
+        except Exception as e:
+            messagebox.showerror(
+                "Error Opening File",
+                f"Failed to open drawing image:\n{str(e)}"
+            )
 
     def _create_geo_tab(self) -> None:
         """Create the GEO tab content."""
@@ -580,6 +621,26 @@ class AppV7:
         except Exception:
             return default
 
+    def load_drawing_image_manual(self) -> None:
+        """Manually select a drawing image file."""
+        filename = filedialog.askopenfilename(
+            title="Select Drawing Image",
+            filetypes=[
+                ("Image Files", "*.png *.jpg *.jpeg *.bmp *.tiff *.gif"),
+                ("PNG Files", "*.png"),
+                ("JPEG Files", "*.jpg *.jpeg"),
+                ("All Files", "*.*")
+            ]
+        )
+        if filename:
+            self.drawing_image_path = filename
+            self.status_bar.config(text=f"Drawing image set: {Path(filename).name}")
+            messagebox.showinfo(
+                "Drawing Image Set",
+                f"Drawing image set to:\n{Path(filename).name}\n\n"
+                f"Click the 'Drawing Preview' button to open it."
+            )
+
     def load_cad(self) -> None:
         """Load CAD file and variables."""
         filename = filedialog.askopenfilename(
@@ -604,7 +665,16 @@ class AppV7:
 
                 # Load and extract hole table data
                 self._extract_and_display_hole_table(filename)
-                self.status_bar.config(text="DWG variables loaded. Review the Quote Editor and generate the quote.")
+
+                # Try to load or generate a corresponding drawing image
+                self.status_bar.config(text="Generating drawing preview...")
+                self.root.update_idletasks()
+                self._try_load_drawing_image(filename)
+
+                status_msg = "CAD file loaded. Review the Quote Editor and generate the quote."
+                if self.drawing_image_path:
+                    status_msg += " (Drawing preview available)"
+                self.status_bar.config(text=status_msg)
                 self.notebook.select(self.geo_tab)
             except Exception as e:
                 error_msg = str(e)
@@ -620,6 +690,42 @@ class AppV7:
                     )
                 self.status_bar.config(text=f"Error loading file: {Path(filename).name}")
                 messagebox.showerror("Error Loading CAD File", error_msg)
+
+    def _try_load_drawing_image(self, cad_filename: str) -> None:
+        """Try to find or create a drawing image for the CAD file."""
+        cad_path = Path(cad_filename)
+        base_name = cad_path.stem
+
+        # Common image extensions to check
+        image_extensions = ['.png', '.jpg', '.jpeg', '.bmp', '.tiff', '.gif']
+
+        # Check for existing image file in the same directory
+        for ext in image_extensions:
+            image_path = cad_path.parent / f"{base_name}{ext}"
+            if image_path.exists():
+                self.drawing_image_path = str(image_path)
+                print(f"[AppV7] Found existing drawing image: {image_path}")
+                return
+
+        # If no existing image found, try to generate one
+        print(f"[AppV7] No existing drawing image found for {base_name}, generating PNG...")
+
+        try:
+            from tools.paddle_dims_extractor import DrawingRenderer
+
+            # Generate PNG in the same directory as the CAD file
+            output_png = str(cad_path.parent / f"{base_name}.png")
+
+            # Create renderer and generate image
+            renderer = DrawingRenderer(verbose=False)
+            renderer.render(str(cad_path), output_png)
+
+            self.drawing_image_path = output_png
+            print(f"[AppV7] Successfully generated drawing image: {output_png}")
+
+        except Exception as e:
+            print(f"[AppV7] Failed to generate drawing image: {e}")
+            self.drawing_image_path = None
 
     def _extract_and_display_hole_table(self, filename: str) -> None:
         """Extract geometry and display hole operations."""
@@ -976,6 +1082,9 @@ class AppV7:
 
     def generate_quote(self) -> None:
         """Generate the quote."""
+        # Clear the cache to ensure we use the latest overrides from Quote Editor
+        self._clear_cad_cache()
+
         # Collect values from quote editor
         quote_data = {}
         for label, field in self.quote_fields.items():

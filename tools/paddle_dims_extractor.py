@@ -1174,7 +1174,7 @@ class DrawingRenderer:
         
         return dxf_path
     
-    def _dxf_to_png(self, dxf_path: str, png_path: str, dpi: int = 800, max_dimension: int = 3000):
+    def _dxf_to_png(self, dxf_path: str, png_path: str, dpi: int = 600, max_dimension: int = 3000):
         """Render DXF to high-contrast PNG optimized for OCR.
 
         max_dimension set to 3000 to prevent PaddleOCR segmentation faults.
