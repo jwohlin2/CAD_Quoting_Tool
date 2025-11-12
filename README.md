@@ -100,7 +100,9 @@ pytest
 ```
 
 The repository also includes a `docs/` directory with deployment notes and
-integration guides for downstream teams.
+integration guides for downstream teams. For AppV7 rollouts, start with
+`docs/planner_pricing_migration.md`, which describes the planner-driven pricing
+engine that supersedes the legacy AppV5 simplification work.
 
 ## Troubleshooting
 
