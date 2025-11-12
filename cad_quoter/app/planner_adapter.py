@@ -3,7 +3,6 @@ from __future__ import annotations
 from typing import Any, Mapping, Sequence, TYPE_CHECKING
 from collections.abc import Mapping as _MappingABC
 
-from cad_quoter.app.env_flags import FORCE_ESTIMATOR, FORCE_PLANNER, _coerce_env_bool
 from cad_quoter.utils import coerce_bool
 
 if TYPE_CHECKING:
@@ -16,13 +15,7 @@ def _resolve_planner_mode(
     params: Mapping[str, Any] | None,
     default_mode: str = DEFAULT_PLANNER_MODE,
 ) -> str:
-    """Return the planner mode based on params and the FORCE flag."""
-
-    if FORCE_ESTIMATOR:
-        return "estimator"
-
-    if FORCE_PLANNER:
-        return DEFAULT_PLANNER_MODE
+    """Return the planner mode requested by params (defaulting to planner)."""
 
     if isinstance(params, _MappingABC):
         try:
@@ -43,12 +36,6 @@ def _resolve_planner_usage(
     signals: Mapping[str, Any] | None,
 ) -> bool:
     """Return True when planner pricing should be used."""
-
-    if FORCE_ESTIMATOR:
-        return False
-
-    if FORCE_PLANNER:
-        return True
 
     signals_map: Mapping[str, Any]
     if isinstance(signals, _MappingABC):
@@ -292,7 +279,5 @@ __all__ = [
     "_planner_signals_present",
     "resolve_pricing_source_value",
     "coerce_bool",
-    "_coerce_env_bool",
-    "FORCE_PLANNER",
 ]
 
