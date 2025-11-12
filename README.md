@@ -4,8 +4,8 @@ The CAD Quoting Tool is a desktop workflow for estimating part pricing from
 engineering data.  It loads customer CAD (STEP/IGES/STL/DXF), applies quoting
 heuristics, and optionally calls a local Qwen vision model to propose override
 values for the standard quoting variables.  The Tkinter UI also exposes
-override, audit and debugging panels so estimators can review generated quotes
-before export.
+override and debugging panels so estimators can review generated quotes before
+export.
 
 ## Prerequisites
 
