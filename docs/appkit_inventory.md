@@ -5,6 +5,9 @@ piece of functionality is used in production code (primarily `appV5.py` and the
 `cad_quoter/` package). The table below captures the primary responsibilities and
 callers for every module that currently ships under `appkit/`.
 
+> **Update:** the Tk-based desktop interface has been removed from this repository.
+> References to `appkit/ui/*` now exist only for historical context.
+
 | Module | Key responsibilities | Primary production consumers |
 | --- | --- | --- |
 | `appkit/data/__init__.py` | Package resource helpers (`load_text`, `load_json`). | `cad_quoter/domain_models/materials.py`, `cad_quoter/estimators/drilling_legacy.py`, `cad_quoter/material_density.py`, `cad_quoter/llm/__init__.py`, `appV5.py` (via indirect imports). |
@@ -12,7 +15,7 @@ callers for every module that currently ships under `appkit/`.
 | `appkit/effective.py` | LLM suggestion acceptance flags, guardrail-aware merge, and conversion to overrides. | `appV5.py`, `cad_quoter/domain.py`, `tests/domain/test_effective_state.py`. |
 | `appkit/env_utils.py` | Lazy boolean flags backed by environment variables (`FORCE_ESTIMATOR`, `FORCE_PLANNER`). | `appV5.py`, `appkit/planner_adapter.py`. |
 | `appkit/guardrails.py` | Guardrail calculations for drilling/tapping floors, setup minimums, and finish pass cost enforcement. | `appkit/effective.py`, `appkit/merge_utils.py`, `appV5.py`. |
-| `appkit/llm_adapter.py` | Integration surface for LLM-based hour inference, normalization/clamping helpers. | `appV5.py` (UI hook-up), `cad_quoter/app/llm_helpers.py` (delegate configuration). |
+| `appkit/llm_adapter.py` | Integration surface for LLM-based hour inference, normalization/clamping helpers. | _Retired_: superseded by `cad_quoter/app/llm_helpers.py` after the Tk UI removal. |
 | `appkit/llm_converters.py` | Utilities for converting quote state data into LLM payloads and interpreting results. | `cad_quoter/domain.py` (lazy imports), `appV5.py`. |
 | `appkit/merge_utils.py` | Core merge algorithm for baseline vs LLM suggestions vs overrides plus helper constants. | `appkit/effective.py`, `appkit/ui/suggestions.py`, `appV5.py`, `tests/domain/test_effective_state.py`. |
 | `appkit/occ_compat.py` | Thin compatibility layer for OCC/trimesh geometry operations used by the viewer. | `cad_quoter/geometry/__init__.py`. |
