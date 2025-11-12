@@ -20,7 +20,7 @@ callers for every module that currently ships under `appkit/`.
 | `appkit/planner_helpers.py` | Planner-related orchestration helpers (process plan job execution). | `appV5.py`. |
 | `appkit/ui/editor_controls.py` | Tk widget metadata derivation for editor panes. | `appV5.py`, `tests/test_editor_controls.py`. |
 | `appkit/ui/llm_panel.py` | Tk UI components for LLM configuration/status. | `appV5.py`. |
-| `appkit/ui/planner_render.py` | Rendering helpers for planner/process tables. | `cad_quoter/pricing/process_view.py`, `appV5.py`, `tests/app/test_planner_render.py`. |
+| `appkit/ui/planner_render.py` | Rendering helpers for planner/process tables. | `appV5.py`, `tests/app/test_planner_render.py`. |
 | `appkit/ui/services.py` | Quote configuration data class and helpers used by UI and quote document. | `cad_quoter/app/quote_doc.py`, `appV5.py`. |
 | `appkit/ui/session_io.py` | Serialize/deserialize quote sessions and file dialogs. | `appV5.py`, `tests/integration/test_app_smoke.py`. |
 | `appkit/ui/suggestions.py` | Build/iterate UI suggestion rows. | `appV5.py`, `tests/unit/test_suggestion_rows.py`. |
