@@ -2,12 +2,12 @@
 from __future__ import annotations
 
 from .container import ServiceContainer, create_default_container
-from . import audit, runtime, chart_lines
+from . import audit, runtime, legacy_hole_support
 
 __all__ = [
     "ServiceContainer",
     "create_default_container",
     "audit",
     "runtime",
-    "chart_lines",
+    "legacy_hole_support",
 ]

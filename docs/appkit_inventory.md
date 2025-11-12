@@ -29,7 +29,7 @@ callers for every module that currently ships under `appkit/`.
 | `appkit/ui/suggestions.py` | Build/iterate UI suggestion rows. | `appV5.py`, `tests/unit/test_suggestion_rows.py`. |
 | `appkit/ui/tk_compat.py` | Tk compatibility imports/shims for UI modules. | `appkit/ui/*`, `appV5.py`. |
 | `appkit/ui/widgets.py` | Miscellaneous Tk widget helpers (scroll frames, etc.). | `appV5.py`. |
-| `appkit/utils/__init__.py` | Machining math helpers (feeds/speeds), numeric parsing, debug JSON adapters. | `cad_quoter/app/chart_lines.py`, `cad_quoter/estimators/drilling_legacy.py`, `appV5.py`. |
+| `appkit/utils/__init__.py` | Machining math helpers (feeds/speeds), numeric parsing, debug JSON adapters. | `cad_quoter/app/legacy_hole_support.py`, `cad_quoter/estimators/drilling_legacy.py`, `appV5.py`. |
 | `appkit/utils/text_rules.py` | Text normalization rules for amortized cost labels. | `appkit/ui/planner_render.py`, `appV5.py`. |
 | `appkit/vendor_utils.py` | Lead-time heuristics and partner metadata. | `tests/app/test_vendor_utils_lead_times.py`, `appV5.py`. |
 | `appkit/graveyard.py` | Historical helpers kept for reference (unused in production). | (Not imported by production modules; safe to drop or archive.) |
