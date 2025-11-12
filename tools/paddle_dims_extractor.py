@@ -98,9 +98,11 @@ class PaddleOCRDimensionExtractor:
         # Initialize PaddleOCR
         # use_textline_orientation=True helps with rotated text
         # lang='en' for English (CAD drawings are typically in English)
+        # det_limit_side_len=3000 prevents downsampling of high-res images (default: 960)
         self.ocr = PaddleOCR(
             use_textline_orientation=True,
-            lang='en'
+            lang='en',
+            det_limit_side_len=3000  # Critical: prevents image downsampling
         )
         
         if self.verbose:
@@ -339,6 +341,7 @@ class PaddleOCRDimensionExtractor:
             text = text.replace('R', '')  # Radius (remove R first so "OVER R" becomes "OVER")
             text = text.replace('X', ' ')  # X separator (e.g., "12X4" -> "12 4")
             text = text.replace('x', ' ')
+            text = text.replace('×', ' ')  # Unicode multiplication sign (U+00D7)
             text = text.replace('OVER', '')  # Common suffix for tolerances (e.g., ".7811 OVER R")
             text = text.strip()
 
@@ -765,7 +768,11 @@ class PaddleOCRDimensionExtractor:
         from PIL import Image, ImageDraw, ImageFont
 
         orc = getattr(self, "_last_ocr_result", {}) or {}
-        pre = orc.get("doc_preprocessor_res", {}) or {}
+        # Handle both dict and list formats from PaddleOCR
+        if isinstance(orc, dict):
+            pre = orc.get("doc_preprocessor_res", {}) or {}
+        else:
+            pre = {}
 
         use_pre = pre.get("output_img", None) is not None
         rotate_mode = None

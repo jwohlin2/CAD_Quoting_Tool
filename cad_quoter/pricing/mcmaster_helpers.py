@@ -64,24 +64,45 @@ def _pick_mcmaster_plate_sku_impl(
     *,
     material_key: str = "MIC6",
     catalog_rows: Sequence[Mapping[str, Any]] | None = None,
+    verbose: bool = False,
 ) -> dict[str, Any] | None:
     """Return the smallest-area McMaster plate covering the requested envelope."""
 
     import math as _math
 
+    if verbose:
+        print(f"[McMaster Lookup] Searching for: {need_L_in:.3f} x {need_W_in:.3f} x {need_T_in:.3f} in")
+        print(f"[McMaster Lookup] Material key: '{material_key}'")
+
     if not all(val > 0 for val in (need_L_in, need_W_in, need_T_in)):
+        if verbose:
+            print(f"[McMaster Lookup] ERROR: Invalid dimensions")
         return None
 
     rows = list(catalog_rows) if catalog_rows is not None else load_mcmaster_catalog_rows()
     if not rows:
+        if verbose:
+            print(f"[McMaster Lookup] ERROR: No catalog rows loaded")
         return None
+
+    if verbose:
+        print(f"[McMaster Lookup] Loaded {len(rows)} catalog rows")
 
     target_key = str(material_key or "").strip().lower()
     if not target_key:
+        if verbose:
+            print(f"[McMaster Lookup] ERROR: Empty material key")
         return None
 
-    tolerance = 0.02
+    # Tolerance for thickness matching - allow rounding UP to next standard stock thickness
+    # Standard stock comes in fixed increments (0.25", 0.5", etc.), so we need enough
+    # tolerance to match the next available size (e.g., 2.125" need → 2.25" stock)
+    # IMPORTANT: Stock must be >= needed thickness (never thinner)
+    tolerance = 0.5  # Allow rounding up by up to 0.5" to next standard thickness
     candidates: list[dict[str, Any]] = []
+    material_matches = 0
+    thickness_matches = 0
+
     for row in rows:
         if not isinstance(row, Mapping):
             continue
@@ -98,6 +119,9 @@ def _pick_mcmaster_plate_sku_impl(
         normalised_material = material_text.replace("_", " ")
         if not any(variant and variant in normalised_material for variant in variants):
             continue
+
+        # Material matches
+        material_matches += 1
 
         length = _coerce_inches_value(
             row.get("length_in")
@@ -126,8 +150,13 @@ def _pick_mcmaster_plate_sku_impl(
             or thickness <= 0
         ):
             continue
-        if abs(thickness - need_T_in) > tolerance:
+        # Stock thickness must be >= needed thickness (only round UP, never down)
+        if thickness < need_T_in or (thickness - need_T_in) > tolerance:
             continue
+
+        # Thickness matches within tolerance
+        thickness_matches += 1
+
         part_no = str(
             row.get("mcmaster_part")
             or row.get("part")
@@ -166,15 +195,27 @@ def _pick_mcmaster_plate_sku_impl(
             }
         )
 
+    if verbose:
+        print(f"[McMaster Lookup] Material matches: {material_matches}")
+        print(f"[McMaster Lookup] Thickness matches (within {tolerance} in): {thickness_matches}")
+        print(f"[McMaster Lookup] Final candidates (covers L×W): {len(candidates)}")
+
     if not candidates:
+        if verbose:
+            print(f"[McMaster Lookup] ERROR: No matching catalog entries found")
         return None
 
     candidates.sort(key=lambda c: (c["area"], max(c["overL"], c["overW"])))
     best = candidates[0]
+
+    if verbose:
+        print(f"[McMaster Lookup] FOUND: {best['len_in']} × {best['wid_in']} × {best['thk_in']} in")
+        print(f"[McMaster Lookup] Part: {best['mcmaster_part']}")
+
     return {
-        "len_in": float(best["len_in"]),
-        "wid_in": float(best["wid_in"]),
-        "thk_in": float(best["thk_in"]),
+        "stock_L_in": float(best["len_in"]),
+        "stock_W_in": float(best["wid_in"]),
+        "stock_T_in": float(best["thk_in"]),
         "mcmaster_part": best["mcmaster_part"],
         "source": best.get("source") or "mcmaster-catalog",
     }
@@ -187,6 +228,7 @@ def pick_mcmaster_plate_sku(
     *,
     material_key: str = "MIC6",
     catalog_rows: Sequence[Mapping[str, Any]] | None = None,
+    verbose: bool = False,
 ) -> dict[str, Any] | None:
     """Return the smallest-area McMaster plate covering the requested envelope."""
 
@@ -196,6 +238,7 @@ def pick_mcmaster_plate_sku(
         need_T_in,
         material_key=material_key,
         catalog_rows=catalog_rows,
+        verbose=verbose,
     )
 
 

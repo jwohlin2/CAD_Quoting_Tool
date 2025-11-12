@@ -554,6 +554,9 @@ def calculate_machining_scrap_from_cad(
     desired_length: float = None,
     desired_width: float = None,
     desired_thickness: float = None,
+    part_length: float = None,
+    part_width: float = None,
+    part_thickness: float = None,
     verbose: bool = False
 ) -> Dict[str, Any]:
     """
@@ -568,6 +571,9 @@ def calculate_machining_scrap_from_cad(
         desired_length: Desired starting stock length (if None, uses part L + allowance)
         desired_width: Desired starting stock width (if None, uses part W + allowance)
         desired_thickness: Desired starting stock thickness (if None, uses part T + allowance)
+        part_length: Part length (if provided, skips OCR extraction)
+        part_width: Part width (if provided, skips OCR extraction)
+        part_thickness: Part thickness (if provided, skips OCR extraction)
         verbose: Print detailed output
 
     Returns:
@@ -599,12 +605,15 @@ def calculate_machining_scrap_from_cad(
     if verbose:
         print(f"Analyzing machining scrap for: {cad_file_path.name}")
 
-    # Extract part dimensions
-    dims = extract_dimensions_from_cad(cad_file_path)
-    if dims:
-        part_L, part_W, part_T = dims
+    # Extract part dimensions (use provided dimensions to avoid redundant OCR)
+    if part_length is not None and part_width is not None and part_thickness is not None:
+        part_L, part_W, part_T = part_length, part_width, part_thickness
     else:
-        raise ValueError(f"Could not extract dimensions from {cad_file_path}")
+        dims = extract_dimensions_from_cad(cad_file_path)
+        if dims:
+            part_L, part_W, part_T = dims
+        else:
+            raise ValueError(f"Could not extract dimensions from {cad_file_path}")
 
     if verbose:
         print(f"Part dimensions: L={part_L:.3f}\", W={part_W:.3f}\", T={part_T:.3f}\"")
@@ -708,6 +717,9 @@ def calculate_total_scrap(
     desired_length: float = None,
     desired_width: float = None,
     desired_thickness: float = None,
+    part_length: Optional[float] = None,
+    part_width: Optional[float] = None,
+    part_thickness: Optional[float] = None,
     catalog_csv_path: Optional[str] = None,
     verbose: bool = False
 ) -> ScrapInfo:
@@ -774,12 +786,20 @@ def calculate_total_scrap(
         print(f"Material: {material}")
         print(f"{'='*70}\n")
 
-    # Get part dimensions
-    dims = extract_dimensions_from_cad(cad_file_path)
-    if not dims:
-        raise ValueError(f"Could not extract dimensions from {cad_file_path}")
-
-    part_L, part_W, part_T = dims
+    # Get part dimensions (use provided dimensions or extract from CAD)
+    if part_length is not None and part_width is not None and part_thickness is not None:
+        # Use provided dimensions (avoids OCR extraction)
+        part_L, part_W, part_T = part_length, part_width, part_thickness
+        if verbose:
+            print(f"Using provided part dimensions: {part_L:.2f} x {part_W:.2f} x {part_T:.2f} in")
+    else:
+        # Extract dimensions from CAD file
+        dims = extract_dimensions_from_cad(cad_file_path)
+        if not dims:
+            raise ValueError(f"Could not extract dimensions from {cad_file_path}")
+        part_L, part_W, part_T = dims
+        if verbose:
+            print(f"Extracted part dimensions: {part_L:.2f} x {part_W:.2f} x {part_T:.2f} in")
 
     # Calculate desired stock dimensions if not provided
     if desired_length is None:
@@ -803,7 +823,8 @@ def calculate_total_scrap(
             need_W_in=desired_width,
             need_T_in=desired_thickness,
             material_key=material,
-            catalog_rows=catalog_rows
+            catalog_rows=catalog_rows,
+            verbose=verbose
         )
 
         if result:
@@ -830,6 +851,9 @@ def calculate_total_scrap(
         desired_length=desired_length,
         desired_width=desired_width,
         desired_thickness=desired_thickness,
+        part_length=part_L,
+        part_width=part_W,
+        part_thickness=part_T,
         verbose=False
     )
 

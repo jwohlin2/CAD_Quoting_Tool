@@ -320,22 +320,7 @@ class AppV7:
         # Define all the quote variables from the screenshot
         self.quote_fields = {}
         variables = [
-            # Part Dimensions (optional - leave blank for OCR auto-detection)
-            ("Length (in)", "", "Part length in inches (optional - leave blank for OCR auto-detection)"),
-            ("Width (in)", "", "Part width in inches (optional - leave blank for OCR auto-detection)"),
-            ("Thickness (in)", "", "Part thickness in inches (optional - leave blank for OCR auto-detection)"),
-
-            # Material Override
-            ("Material", "", "Override auto-detected material (e.g., '17-4 PH Stainless Steel', 'Aluminum 6061'). Leave blank for auto-detection."),
-
-            # Rate Overrides
-            ("Machine Rate ($/hr)", "90", "Override machine hourly rate (default: $90/hr)"),
-            ("Labor Rate ($/hr)", "90", "Override labor hourly rate (default: $90/hr)"),
-            ("Margin (%)", "15", "Override profit margin percentage (default: 15%)"),
-
-            # Price Overrides (optional)
-            ("McMaster Price Override ($)", "", "Manual stock price - skips McMaster API lookup (optional)"),
-            ("Scrap Value Override ($)", "", "Manual scrap value - skips automatic scrap value calculation (optional)"),
+            ("Material Scrap / Remnant Value", "50", "Enter the estimated scrap or remnant value for this material"),
         ]
 
         row = 0
@@ -414,52 +399,15 @@ class AppV7:
             print("[AppV7] Extracting complete quote data (ODA + OCR will run once)...")
             from cad_quoter.pricing.QuoteDataHelper import extract_quote_data_from_cad
 
-            # Read all overrides from Quote Editor
-            dimension_override = self._get_manual_dimensions()
-            material_override = self._get_field_string("Material")
-            machine_rate = self._get_field_float("Machine Rate ($/hr)", self.MACHINE_RATE)
-            labor_rate = self._get_field_float("Labor Rate ($/hr)", self.LABOR_RATE)
-            margin_percent = self._get_field_float("Margin (%)", 15.0)
-            margin_rate = (margin_percent / 100.0) if margin_percent is not None else 0.15  # Convert percentage to decimal
-            mcmaster_price_override = self._get_field_float("McMaster Price Override ($)")
-            scrap_value_override = self._get_field_float("Scrap Value Override ($)")
-
             try:
                 self._cached_quote_data = extract_quote_data_from_cad(
                     cad_file_path=self.cad_file_path,
-                    machine_rate=machine_rate,
-                    labor_rate=labor_rate,
-                    margin_rate=margin_rate,
-                    material_override=material_override,
-                    dimension_override=dimension_override,
-                    mcmaster_price_override=mcmaster_price_override,
-                    scrap_value_override=scrap_value_override,
-                    verbose=True
+                    machine_rate=self.MACHINE_RATE,
+                    labor_rate=self.LABOR_RATE,
+                    margin_rate=self.margin_rate,
+                    verbose=False
                 )
-                if dimension_override:
-                    print(f"[AppV7] Quote data cached (using manual dimensions: {dimension_override})")
-                else:
-                    print("[AppV7] Quote data cached for reuse")
-            except ValueError as e:
-                error_msg = str(e)
-                # Check if it's a dimension extraction failure
-                if "Could not extract dimensions" in error_msg:
-                    print(f"[AppV7 ERROR] OCR dimension extraction failed: {e}")
-                    messagebox.showerror(
-                        "OCR Dimension Extraction Failed",
-                        "Could not extract dimensions from the CAD file.\n\n"
-                        "Please enter the part dimensions manually in the Quote Editor tab:\n"
-                        "- Length (in)\n"
-                        "- Width (in)\n"
-                        "- Thickness (in)\n\n"
-                        "Then click 'Generate Quote' again."
-                    )
-                    # Switch to Quote Editor tab so user can see the fields
-                    self.notebook.select(self.quote_editor_tab)
-                    raise
-                else:
-                    print(f"[AppV7 ERROR] Failed to extract quote data: {e}")
-                    raise
+                print("[AppV7] Quote data cached for reuse")
             except Exception as e:
                 print(f"[AppV7 ERROR] Failed to extract quote data: {e}")
                 raise
@@ -467,118 +415,6 @@ class AppV7:
             print("[AppV7] Using cached quote data (no ODA/OCR)")
 
         return self._cached_quote_data
-
-    def _get_manual_dimensions(self):
-        """
-        Read manual dimensions from Quote Editor fields.
-
-        Returns:
-            tuple of (length, width, thickness) or None if not provided
-        """
-        try:
-            length_str = self.quote_fields.get("Length (in)", None)
-            width_str = self.quote_fields.get("Width (in)", None)
-            thickness_str = self.quote_fields.get("Thickness (in)", None)
-
-            if not length_str or not width_str or not thickness_str:
-                return None
-
-            length_val = length_str.get().strip()
-            width_val = width_str.get().strip()
-            thickness_val = thickness_str.get().strip()
-
-            # If any field is empty, don't use manual dimensions
-            if not length_val or not width_val or not thickness_val:
-                return None
-
-            # Parse values
-            length = float(length_val)
-            width = float(width_val)
-            thickness = float(thickness_val)
-
-            # Validate
-            if length <= 0 or width <= 0 or thickness <= 0:
-                messagebox.showerror(
-                    "Invalid Dimensions",
-                    "All dimensions must be positive numbers."
-                )
-                return None
-
-            return (length, width, thickness)
-
-        except ValueError:
-            messagebox.showerror(
-                "Invalid Dimensions",
-                "Please enter valid numbers for Length, Width, and Thickness."
-            )
-            return None
-        except Exception:
-            # If fields don't exist or other error, just return None
-            return None
-
-    def _get_field_float(self, label: str, default: Optional[float] = None) -> Optional[float]:
-        """
-        Read a float value from Quote Editor field.
-
-        Args:
-            label: Field label text
-            default: Default value if field is empty or invalid (can be None)
-
-        Returns:
-            Float value from field or default
-        """
-        try:
-            field = self.quote_fields.get(label, None)
-            if not field:
-                return default
-
-            value_str = field.get().strip()
-            if not value_str:
-                return default
-
-            value = float(value_str)
-
-            # Validate positive (only if we got a value)
-            if value <= 0:
-                if default is not None:
-                    print(f"[AppV7] Warning: {label} must be positive. Using default: {default}")
-                else:
-                    print(f"[AppV7] Warning: {label} must be positive. Ignoring value.")
-                return default
-
-            return value
-
-        except ValueError:
-            if default is not None:
-                print(f"[AppV7] Warning: Invalid number for {label}. Using default: {default}")
-            return default
-        except Exception:
-            return default
-
-    def _get_field_string(self, label: str, default: Optional[str] = None) -> Optional[str]:
-        """
-        Read a string value from Quote Editor field.
-
-        Args:
-            label: Field label text
-            default: Default value if field is empty
-
-        Returns:
-            String value from field or default (None if not provided)
-        """
-        try:
-            field = self.quote_fields.get(label, None)
-            if not field:
-                return default
-
-            value = field.get().strip()
-            if not value:
-                return default
-
-            return value
-
-        except Exception:
-            return default
 
     def load_cad(self) -> None:
         """Load CAD file and variables."""
@@ -682,27 +518,17 @@ class AppV7:
             scrap_info = quote_data.scrap_info
             cost_breakdown = quote_data.direct_cost_breakdown
 
-            # Check if overrides were used
-            material_override = self._get_field_string("Material")
-            mcmaster_price_override = self._get_field_float("McMaster Price Override ($)")
-            scrap_value_override = self._get_field_float("Scrap Value Override ($)")
-
             # Check if we have valid price data
             if stock_info.mcmaster_price is None:
                 price_str = "Price N/A"
             else:
                 price_str = f"${stock_info.mcmaster_price:,.2f}"
-                if mcmaster_price_override is not None:
-                    price_str += " (MANUAL)"
 
             # Format the report
             report = []
             report.append("DIRECT COSTS")
             report.append("=" * 74)
-            material_label = f"Material used: {material_info.material_name}"
-            if material_override:
-                material_label += " (OVERRIDDEN)"
-            report.append(material_label)
+            report.append(f"Material used: {material_info.material_name}")
             report.append(f"  Required Stock: {stock_info.desired_length:.2f} × {stock_info.desired_width:.2f} × {stock_info.desired_thickness:.2f} in")
             report.append(f"  Rounded to catalog: {stock_info.mcmaster_length:.2f} × {stock_info.mcmaster_width:.2f} × {stock_info.mcmaster_thickness:.3f}")
             report.append(f"  Starting Weight: {self._format_weight(stock_info.mcmaster_weight)}")
@@ -727,8 +553,6 @@ class AppV7:
 
             if cost_breakdown.scrap_credit > 0:
                 scrap_credit_line = f"  Scrap Credit @ Wieland ${scrap_info.scrap_price_per_lb:.2f}/lb × {scrap_info.scrap_percentage:.1f}%"
-                if scrap_value_override is not None:
-                    scrap_credit_line += " (MANUAL)"
                 report.append(f"{scrap_credit_line.ljust(60)}-${cost_breakdown.scrap_credit:>12.2f}")
 
             report.append(" " * 60 + "-" * 14)
@@ -850,14 +674,9 @@ class AppV7:
                 report.append("")
 
             # Summary
-            machine_rate = self._get_field_float("Machine Rate ($/hr)", self.MACHINE_RATE)
-            machine_rate_label = f"@ ${machine_rate:.2f}/hr"
-            if machine_rate != self.MACHINE_RATE:
-                machine_rate_label += " (OVERRIDDEN)"
-
             report.append("=" * 74)
             report.append(f"TOTAL MACHINE TIME: {machine_hours.total_minutes:.2f} minutes ({machine_hours.total_hours:.2f} hours)")
-            report.append(f"TOTAL MACHINE COST: ${machine_hours.machine_cost:.2f} {machine_rate_label}")
+            report.append(f"TOTAL MACHINE COST: {machine_hours.machine_cost:.2f}")
             report.append("=" * 74)
             report.append("")
 
@@ -899,14 +718,7 @@ class AppV7:
             report.append("-" * 74)
             report.append(f"  TOTAL LABOR TIME:                {labor_hours.total_minutes:>10.2f} minutes")
             report.append(f"                                   {labor_hours.total_hours:>10.2f} hours")
-
-            # Show labor rate with override indicator
-            labor_rate = self._get_field_float("Labor Rate ($/hr)", self.LABOR_RATE)
-            labor_rate_label = f"@ ${labor_rate:.2f}/hr"
-            if labor_rate != self.LABOR_RATE:
-                labor_rate_label += " (OVERRIDDEN)"
-
-            report.append(f"  TOTAL LABOR COST:                ${labor_hours.labor_cost:>9.2f} {labor_rate_label}")
+            report.append(f"  TOTAL LABOR COST:                {labor_hours.labor_cost:>10.2f}")
             report.append("")
             report.append("=" * 74)
             report.append("")
@@ -1006,11 +818,7 @@ class AppV7:
         # Add summary
         self.output_text.insert(tk.END, "\n\n" + "=" * 74 + "\n\n")
 
-        # Get margin rate with override check
-        margin_percent = self._get_field_float("Margin (%)", 15.0)
-        margin_rate = (margin_percent / 100.0) if margin_percent is not None else 0.15
-        margin_overridden = (margin_percent is not None and margin_percent != 15.0)
-
+        margin_rate = self.margin_rate
         quick_margin_lines: list[str] = []
         summary_lines = [
             "COST SUMMARY",
@@ -1031,13 +839,11 @@ class AppV7:
             summary_lines.append(self._format_cost_summary_line("Total Estimated Cost", total_cost))
             margin_amount = total_cost * margin_rate
             final_cost = total_cost + margin_amount
-
-            # Add margin line with override indicator
-            margin_label = f"Margin ({margin_rate:.0%})"
-            if margin_overridden:
-                margin_label += " (OVERRIDDEN)"
             summary_lines.append(
-                self._format_cost_summary_line(margin_label, margin_amount)
+                self._format_cost_summary_line(
+                    f"Margin ({margin_rate:.0%})",
+                    margin_amount,
+                )
             )
             summary_lines.append(self._format_cost_summary_line("Final Cost", final_cost))
 
@@ -1051,35 +857,14 @@ class AppV7:
         self.status_bar.config(text="Quote generated successfully!")
 
     def save_quote(self) -> None:
-        """Save the quote to JSON file."""
-        if not self.cad_file_path:
-            messagebox.showwarning("No Quote", "Please load a CAD file and generate a quote first.")
-            return
-
-        if self._cached_quote_data is None:
-            messagebox.showwarning("No Quote", "Please generate a quote first before saving.")
-            return
-
-        # Suggest filename based on CAD file
-        from pathlib import Path
-        suggested_name = Path(self.cad_file_path).stem + "_quote.json"
-
+        """Save the quote to file."""
         filename = filedialog.asksaveasfilename(
             title="Save Quote",
             defaultextension=".json",
-            initialfile=suggested_name,
             filetypes=[("JSON Files", "*.json"), ("All Files", "*.*")]
         )
-
         if filename:
-            try:
-                from cad_quoter.pricing.QuoteDataHelper import save_quote_data
-                save_quote_data(self._cached_quote_data, filename)
-                self.status_bar.config(text=f"Quote saved to: {filename}")
-                messagebox.showinfo("Success", f"Quote saved successfully to:\n{filename}")
-            except Exception as e:
-                messagebox.showerror("Save Error", f"Failed to save quote:\n{str(e)}")
-                self.status_bar.config(text="Error saving quote")
+            self.status_bar.config(text=f"Saved to: {filename}")
 
     def show_llm_inspector(self) -> None:
         """Show LLM inspector window."""

@@ -1,0 +1,796 @@
+"""
+QuoteDataHelper - Unified data structure for all CAD extraction results.
+
+This module provides a centralized data structure that holds all extracted information
+from DirectCostHelper and ProcessPlanner, making it easy to cache, serialize, and
+pass around quote data throughout the application.
+"""
+
+from __future__ import annotations
+from dataclasses import dataclass, asdict
+from pathlib import Path
+from typing import Optional, Dict, Any, List
+import json
+from datetime import datetime
+
+
+@dataclass
+class PartDimensions:
+    """Part dimensions extracted from CAD file."""
+    length: float = 0.0  # inches
+    width: float = 0.0   # inches
+    thickness: float = 0.0  # inches
+    volume: float = 0.0  # cubic inches
+    area: float = 0.0    # square inches (L × W)
+
+    def __post_init__(self):
+        """Calculate derived properties if not set."""
+        if self.volume == 0.0:
+            self.volume = self.length * self.width * self.thickness
+        if self.area == 0.0:
+            self.area = self.length * self.width
+
+
+@dataclass
+class MaterialInfo:
+    """Material information and properties."""
+    material_name: str = "GENERIC"
+    material_family: str = "aluminum"  # aluminum, steel, stainless, etc.
+    density: float = 0.098  # lb/in³
+    detected_from_cad: bool = False
+    is_default: bool = False
+
+
+@dataclass
+class StockInfo:
+    """McMaster stock information."""
+    # Desired starting stock (part + allowances)
+    desired_length: float = 0.0
+    desired_width: float = 0.0
+    desired_thickness: float = 0.0
+    desired_volume: float = 0.0
+
+    # McMaster catalog stock
+    mcmaster_length: float = 0.0
+    mcmaster_width: float = 0.0
+    mcmaster_thickness: float = 0.0
+    mcmaster_volume: float = 0.0
+    mcmaster_part_number: Optional[str] = None
+    mcmaster_price: Optional[float] = None  # Unit price
+
+    # Weights
+    mcmaster_weight: float = 0.0  # lbs
+    final_part_weight: float = 0.0  # lbs
+
+
+@dataclass
+class ScrapInfo:
+    """Scrap calculation results."""
+    # Scrap breakdown by source
+    stock_prep_scrap: float = 0.0  # McMaster → Desired (in³)
+    face_milling_scrap: float = 0.0  # Desired → Part envelope (in³)
+    hole_drilling_scrap: float = 0.0  # Holes removed from part (in³)
+    total_scrap_volume: float = 0.0  # Total material removed (in³)
+    total_scrap_weight: float = 0.0  # lbs
+
+    # Scrap percentages
+    scrap_percentage: float = 0.0  # Scrap as % of McMaster stock
+    utilization_percentage: float = 0.0  # Final part as % of McMaster stock
+
+    # Scrap value
+    scrap_price_per_lb: Optional[float] = None  # $/lb
+    scrap_value: float = 0.0  # Total scrap value ($)
+    scrap_price_source: str = ""  # e.g., "Wieland aluminum scrap"
+
+
+@dataclass
+class DirectCostBreakdown:
+    """Direct cost breakdown."""
+    stock_cost: float = 0.0  # McMaster stock price
+    tax: float = 0.0  # Tax on stock
+    shipping: float = 0.0  # Shipping on stock
+    scrap_credit: float = 0.0  # Credit for scrap value (negative cost)
+    net_material_cost: float = 0.0  # Total direct cost
+
+
+@dataclass
+class HoleOperation:
+    """Single hole operation details."""
+    hole_id: str = ""
+    diameter: float = 0.0  # inches
+    depth: float = 0.0  # inches
+    qty: int = 1
+    operation_type: str = ""  # drill, tap, cbore, cdrill, jig_grind
+    description: str = ""
+
+    # Time estimates
+    time_per_hole: float = 0.0  # minutes
+    total_time: float = 0.0  # minutes (qty × time_per_hole)
+
+    # Operation-specific parameters
+    sfm: Optional[float] = None  # Surface feet per minute
+    ipr: Optional[float] = None  # Inches per revolution
+    tpi: Optional[int] = None  # Threads per inch (for taps)
+
+
+@dataclass
+class MachineHoursBreakdown:
+    """Machine hours estimation breakdown."""
+    # Operations by type
+    drill_operations: List[HoleOperation] = None
+    tap_operations: List[HoleOperation] = None
+    cbore_operations: List[HoleOperation] = None
+    cdrill_operations: List[HoleOperation] = None
+    jig_grind_operations: List[HoleOperation] = None
+
+    # Time totals by operation type
+    total_drill_minutes: float = 0.0
+    total_tap_minutes: float = 0.0
+    total_cbore_minutes: float = 0.0
+    total_cdrill_minutes: float = 0.0
+    total_jig_grind_minutes: float = 0.0
+
+    # Overall totals
+    total_minutes: float = 0.0
+    total_hours: float = 0.0
+    machine_cost: float = 0.0  # Total cost at machine rate
+
+    def __post_init__(self):
+        """Initialize empty lists."""
+        if self.drill_operations is None:
+            self.drill_operations = []
+        if self.tap_operations is None:
+            self.tap_operations = []
+        if self.cbore_operations is None:
+            self.cbore_operations = []
+        if self.cdrill_operations is None:
+            self.cdrill_operations = []
+        if self.jig_grind_operations is None:
+            self.jig_grind_operations = []
+
+
+@dataclass
+class LaborHoursBreakdown:
+    """Labor hours estimation breakdown."""
+    # Labor by category (minutes)
+    setup_minutes: float = 0.0
+    programming_minutes: float = 0.0
+    machining_steps_minutes: float = 0.0
+    inspection_minutes: float = 0.0
+    finishing_minutes: float = 0.0
+
+    # Totals
+    total_minutes: float = 0.0
+    total_hours: float = 0.0
+    labor_cost: float = 0.0  # Total cost at labor rate
+
+    # Input parameters (for reference)
+    ops_total: int = 0
+    holes_total: int = 0
+    tool_changes: int = 0
+    fixturing_complexity: int = 1  # 0=none, 1=light, 2=moderate, 3=complex
+
+
+@dataclass
+class CostSummary:
+    """Overall cost summary."""
+    direct_cost: float = 0.0
+    machine_cost: float = 0.0
+    labor_cost: float = 0.0
+    total_cost: float = 0.0
+
+    # Margin and final price
+    margin_rate: float = 0.15
+    margin_amount: float = 0.0
+    final_price: float = 0.0
+
+
+@dataclass
+class QuoteData:
+    """
+    Complete quote data structure holding all extraction results.
+
+    This is the main data structure that aggregates all information from
+    DirectCostHelper and ProcessPlanner.
+    """
+    # Metadata
+    cad_file_path: str = ""
+    cad_file_name: str = ""
+    extraction_timestamp: str = ""
+
+    # Core data
+    part_dimensions: PartDimensions = None
+    material_info: MaterialInfo = None
+    stock_info: StockInfo = None
+    scrap_info: ScrapInfo = None
+    direct_cost_breakdown: DirectCostBreakdown = None
+    machine_hours: MachineHoursBreakdown = None
+    labor_hours: LaborHoursBreakdown = None
+    cost_summary: CostSummary = None
+
+    # Raw plan data (optional, for reference)
+    raw_plan: Optional[Dict[str, Any]] = None
+
+    def __post_init__(self):
+        """Initialize nested dataclasses."""
+        if self.part_dimensions is None:
+            self.part_dimensions = PartDimensions()
+        if self.material_info is None:
+            self.material_info = MaterialInfo()
+        if self.stock_info is None:
+            self.stock_info = StockInfo()
+        if self.scrap_info is None:
+            self.scrap_info = ScrapInfo()
+        if self.direct_cost_breakdown is None:
+            self.direct_cost_breakdown = DirectCostBreakdown()
+        if self.machine_hours is None:
+            self.machine_hours = MachineHoursBreakdown()
+        if self.labor_hours is None:
+            self.labor_hours = LaborHoursBreakdown()
+        if self.cost_summary is None:
+            self.cost_summary = CostSummary()
+
+    def to_dict(self) -> Dict[str, Any]:
+        """Convert to dictionary (for JSON serialization)."""
+        return asdict(self)
+
+    def to_json(self, filepath: Optional[str | Path] = None, indent: int = 2) -> str:
+        """
+        Convert to JSON string.
+
+        Args:
+            filepath: Optional path to save JSON file
+            indent: JSON indentation level
+
+        Returns:
+            JSON string
+        """
+        data = self.to_dict()
+        json_str = json.dumps(data, indent=indent)
+
+        if filepath:
+            Path(filepath).write_text(json_str)
+
+        return json_str
+
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any]) -> QuoteData:
+        """Create QuoteData from dictionary."""
+        # Convert nested dicts to dataclasses
+        if 'part_dimensions' in data and isinstance(data['part_dimensions'], dict):
+            data['part_dimensions'] = PartDimensions(**data['part_dimensions'])
+        if 'material_info' in data and isinstance(data['material_info'], dict):
+            data['material_info'] = MaterialInfo(**data['material_info'])
+        if 'stock_info' in data and isinstance(data['stock_info'], dict):
+            data['stock_info'] = StockInfo(**data['stock_info'])
+        if 'scrap_info' in data and isinstance(data['scrap_info'], dict):
+            data['scrap_info'] = ScrapInfo(**data['scrap_info'])
+        if 'direct_cost_breakdown' in data and isinstance(data['direct_cost_breakdown'], dict):
+            data['direct_cost_breakdown'] = DirectCostBreakdown(**data['direct_cost_breakdown'])
+        if 'machine_hours' in data and isinstance(data['machine_hours'], dict):
+            # Convert hole operations lists
+            machine_data = data['machine_hours']
+            for key in ['drill_operations', 'tap_operations', 'cbore_operations',
+                       'cdrill_operations', 'jig_grind_operations']:
+                if key in machine_data and isinstance(machine_data[key], list):
+                    machine_data[key] = [HoleOperation(**op) if isinstance(op, dict) else op
+                                        for op in machine_data[key]]
+            data['machine_hours'] = MachineHoursBreakdown(**machine_data)
+        if 'labor_hours' in data and isinstance(data['labor_hours'], dict):
+            data['labor_hours'] = LaborHoursBreakdown(**data['labor_hours'])
+        if 'cost_summary' in data and isinstance(data['cost_summary'], dict):
+            data['cost_summary'] = CostSummary(**data['cost_summary'])
+
+        return cls(**data)
+
+    @classmethod
+    def from_json(cls, json_str_or_path: str | Path) -> QuoteData:
+        """
+        Load QuoteData from JSON string or file.
+
+        Args:
+            json_str_or_path: JSON string or path to JSON file
+
+        Returns:
+            QuoteData instance
+        """
+        # Check if it's a file path
+        try:
+            path = Path(json_str_or_path)
+            if path.exists():
+                json_str = path.read_text()
+            else:
+                json_str = json_str_or_path
+        except:
+            json_str = json_str_or_path
+
+        data = json.loads(json_str)
+        return cls.from_dict(data)
+
+
+# ============================================================================
+# EXTRACTION FUNCTIONS
+# ============================================================================
+
+def extract_quote_data_from_cad(
+    cad_file_path: str | Path,
+    machine_rate: float = 45.0,
+    labor_rate: float = 45.0,
+    margin_rate: float = 0.15,
+    material_override: Optional[str] = None,
+    catalog_csv_path: Optional[str] = None,
+    dimension_override: Optional[tuple[float, float, float]] = None,
+    mcmaster_price_override: Optional[float] = None,
+    scrap_value_override: Optional[float] = None,
+    verbose: bool = False
+) -> QuoteData:
+    """
+    Extract complete quote data from a CAD file.
+
+    This is the main extraction function that pulls all data from DirectCostHelper
+    and ProcessPlanner and packages it into a unified QuoteData structure.
+
+    Args:
+        cad_file_path: Path to CAD file (DXF/DWG)
+        machine_rate: Machine hourly rate ($/hr)
+        labor_rate: Labor hourly rate ($/hr)
+        margin_rate: Profit margin rate (decimal, e.g., 0.15 = 15%)
+        material_override: Optional material name override
+        catalog_csv_path: Optional path to McMaster catalog CSV
+        dimension_override: Optional (length, width, thickness) tuple to override OCR extraction
+        mcmaster_price_override: Optional manual stock price - skips McMaster API lookup
+        scrap_value_override: Optional manual scrap value - skips automatic scrap value calculation
+        verbose: Print extraction progress
+
+    Returns:
+        QuoteData with all extraction results
+
+    Example:
+        >>> quote_data = extract_quote_data_from_cad("part.dxf", verbose=True)
+        >>> print(f"Total cost: ${quote_data.cost_summary.total_cost:.2f}")
+
+        >>> # With dimension override (when OCR fails)
+        >>> quote_data = extract_quote_data_from_cad(
+        ...     "part.dxf",
+        ...     dimension_override=(10.0, 8.0, 0.5)
+        ... )
+        >>> quote_data.to_json("quote_results.json")
+    """
+    from cad_quoter.planning import (
+        plan_from_cad_file,
+        extract_hole_operations_from_cad,
+        estimate_hole_table_times
+    )
+    from cad_quoter.planning.process_planner import LaborInputs, compute_labor_minutes
+    from cad_quoter.pricing.DirectCostHelper import (
+        extract_part_info_from_plan,
+        get_mcmaster_part_number,
+        get_mcmaster_price,
+        calculate_total_scrap,
+        calculate_scrap_value,
+        get_material_density,
+        DEFAULT_MATERIAL
+    )
+    from cad_quoter.pricing.KeywordDetector import detect_material_in_cad
+    from cad_quoter.pricing.mcmaster_helpers import (
+        pick_mcmaster_plate_sku,
+        load_mcmaster_catalog_rows
+    )
+    from cad_quoter.resources import default_catalog_csv
+
+    cad_file_path = Path(cad_file_path)
+
+    if verbose:
+        print(f"\n{'='*70}")
+        print(f"EXTRACTING QUOTE DATA: {cad_file_path.name}")
+        print(f"{'='*70}\n")
+
+    # Initialize QuoteData
+    quote_data = QuoteData(
+        cad_file_path=str(cad_file_path),
+        cad_file_name=cad_file_path.name,
+        extraction_timestamp=datetime.now().isoformat()
+    )
+
+    # ========================================================================
+    # STEP 1: Extract process plan (ODA + OCR)
+    # ========================================================================
+    if verbose:
+        print("[1/5] Extracting process plan (ODA + OCR)...")
+
+    # Skip expensive OCR if manual dimensions provided (saves ~43 seconds)
+    use_ocr = dimension_override is None
+    if not use_ocr and verbose:
+        print("  Skipping OCR dimension extraction (manual dimensions provided)")
+
+    plan = plan_from_cad_file(cad_file_path, use_paddle_ocr=use_ocr, verbose=False)
+    quote_data.raw_plan = plan if verbose else None  # Only store if verbose
+
+    # ========================================================================
+    # STEP 2: Extract part dimensions and material
+    # ========================================================================
+    if verbose:
+        print("[2/5] Extracting dimensions and material...")
+
+    # Apply dimension override if provided (useful when OCR fails)
+    if dimension_override:
+        length, width, thickness = dimension_override
+        if 'extracted_dims' not in plan:
+            plan['extracted_dims'] = {}
+        plan['extracted_dims']['L'] = length
+        plan['extracted_dims']['W'] = width
+        plan['extracted_dims']['T'] = thickness
+        if verbose:
+            print(f"  Using dimension override: {length} x {width} x {thickness}")
+
+    # Material detection
+    if material_override:
+        material = material_override
+        detected_from_cad = False
+    else:
+        material = detect_material_in_cad(cad_file_path)
+        detected_from_cad = True
+        if material == "GENERIC":
+            material = DEFAULT_MATERIAL
+            detected_from_cad = False
+
+    # Get part info from plan
+    part_info = extract_part_info_from_plan(plan, material)
+
+    # Populate part dimensions
+    quote_data.part_dimensions = PartDimensions(
+        length=part_info.length,
+        width=part_info.width,
+        thickness=part_info.thickness,
+        volume=part_info.volume,
+        area=part_info.area
+    )
+
+    # Populate material info
+    density = get_material_density(material)
+    material_lower = material.lower()
+    if any(kw in material_lower for kw in ["aluminum", "aluminium", "6061", "mic6"]):
+        material_family = "aluminum"
+    elif any(kw in material_lower for kw in ["stainless", "304", "316", "17-4"]):
+        material_family = "stainless"
+    elif any(kw in material_lower for kw in ["steel", "p20", "a36", "1018"]):
+        material_family = "steel"
+    else:
+        material_family = "aluminum"  # Default
+
+    quote_data.material_info = MaterialInfo(
+        material_name=material,
+        material_family=material_family,
+        density=density,
+        detected_from_cad=detected_from_cad,
+        is_default=(material == DEFAULT_MATERIAL and not material_override)
+    )
+
+    if verbose:
+        print(f"  Dimensions: {part_info.length:.2f} x {part_info.width:.2f} x {part_info.thickness:.2f} in")
+        print(f"  Material: {material} ({'detected' if detected_from_cad else 'default'})")
+
+    # ========================================================================
+    # STEP 3: Calculate direct costs (McMaster stock, scrap, pricing)
+    # ========================================================================
+    if verbose:
+        print("[3/5] Calculating direct costs...")
+
+    # Use default catalog if not specified
+    if catalog_csv_path is None:
+        catalog_csv_path = str(default_catalog_csv())
+
+    # Calculate scrap info
+    # Always pass dimensions to avoid redundant OCR extraction
+    # Dimensions are already extracted from the process plan above (line 429)
+    scrap_calc = calculate_total_scrap(
+        cad_file_path=cad_file_path,
+        material=material,
+        part_length=part_info.length,
+        part_width=part_info.width,
+        part_thickness=part_info.thickness,
+        catalog_csv_path=catalog_csv_path,
+        verbose=verbose
+    )
+
+    # Calculate scrap value
+    scrap_value_calc = calculate_scrap_value(
+        scrap_weight_lbs=scrap_calc.total_scrap_weight,
+        material=material,
+        verbose=verbose
+    )
+
+    # Apply scrap value override if provided
+    if scrap_value_override is not None:
+        scrap_value_calc['scrap_value'] = scrap_value_override
+        if verbose:
+            print(f"  Using manual scrap value override: ${scrap_value_override:.2f}")
+
+    # Get McMaster pricing
+    # Note: McMaster stock dimensions are already calculated in scrap_calc from calculate_total_scrap()
+    # We just need to get the part number for pricing lookup
+    catalog_rows = load_mcmaster_catalog_rows(catalog_csv_path)
+    desired_L = part_info.length + 0.50
+    desired_W = part_info.width + 0.50
+    desired_T = part_info.thickness + 0.25
+
+    mcmaster_result = pick_mcmaster_plate_sku(
+        need_L_in=desired_L,
+        need_W_in=desired_W,
+        need_T_in=desired_T,
+        material_key=material,
+        catalog_rows=catalog_rows
+    )
+
+    mcmaster_part_num = None
+    mcmaster_price = None
+
+    # Use price override if provided, otherwise lookup from McMaster
+    if mcmaster_price_override is not None:
+        mcmaster_price = mcmaster_price_override
+        if verbose:
+            print(f"  Using manual McMaster price override: ${mcmaster_price:.2f}")
+    elif mcmaster_result:
+        mcmaster_part_num = mcmaster_result.get('mcmaster_part')
+        if mcmaster_part_num:
+            mcmaster_price = get_mcmaster_price(mcmaster_part_num, quantity=1)
+
+    # Populate stock info
+    # Use McMaster dimensions from scrap_calc (which already did the catalog lookup)
+    quote_data.stock_info = StockInfo(
+        desired_length=desired_L,
+        desired_width=desired_W,
+        desired_thickness=desired_T,
+        desired_volume=desired_L * desired_W * desired_T,
+        mcmaster_length=scrap_calc.mcmaster_length,
+        mcmaster_width=scrap_calc.mcmaster_width,
+        mcmaster_thickness=scrap_calc.mcmaster_thickness,
+        mcmaster_volume=scrap_calc.mcmaster_length * scrap_calc.mcmaster_width * scrap_calc.mcmaster_thickness,
+        mcmaster_part_number=mcmaster_part_num,
+        mcmaster_price=mcmaster_price,
+        mcmaster_weight=scrap_calc.mcmaster_weight,
+        final_part_weight=scrap_calc.final_part_weight
+    )
+
+    # Populate scrap info
+    quote_data.scrap_info = ScrapInfo(
+        stock_prep_scrap=scrap_calc.stock_prep_scrap,
+        face_milling_scrap=scrap_calc.face_milling_scrap,
+        hole_drilling_scrap=scrap_calc.hole_drilling_scrap,
+        total_scrap_volume=scrap_calc.total_scrap_volume,
+        total_scrap_weight=scrap_calc.total_scrap_weight,
+        scrap_percentage=scrap_calc.scrap_percentage,
+        utilization_percentage=scrap_calc.utilization_percentage,
+        scrap_price_per_lb=scrap_value_calc.get('scrap_price_per_lb'),
+        scrap_value=scrap_value_calc.get('scrap_value', 0.0),
+        scrap_price_source=scrap_value_calc.get('price_source', '')
+    )
+
+    # Calculate direct cost breakdown
+    if mcmaster_price:
+        tax = mcmaster_price * 0.07
+        shipping = mcmaster_price * 0.125
+        scrap_credit = scrap_value_calc.get('scrap_value', 0.0)
+        net_cost = mcmaster_price + tax + shipping - scrap_credit
+    else:
+        tax = shipping = scrap_credit = net_cost = 0.0
+
+    quote_data.direct_cost_breakdown = DirectCostBreakdown(
+        stock_cost=mcmaster_price or 0.0,
+        tax=tax,
+        shipping=shipping,
+        scrap_credit=scrap_credit,
+        net_material_cost=net_cost
+    )
+
+    if verbose:
+        print(f"  McMaster: {mcmaster_part_num or 'N/A'}")
+        print(f"  Stock price: ${mcmaster_price:.2f}" if mcmaster_price else "  Stock price: N/A")
+        print(f"  Net material cost: ${net_cost:.2f}")
+
+    # ========================================================================
+    # STEP 4: Calculate machine hours
+    # ========================================================================
+    if verbose:
+        print("[4/5] Calculating machine hours...")
+
+    hole_table = extract_hole_operations_from_cad(cad_file_path)
+
+    if hole_table:
+        times = estimate_hole_table_times(hole_table, material, part_info.thickness)
+
+        # Convert to HoleOperation objects
+        drill_ops = [
+            HoleOperation(
+                hole_id=g['hole_id'],
+                diameter=g['diameter'],
+                depth=g['depth'],
+                qty=g['qty'],
+                operation_type='drill',
+                time_per_hole=g['time_per_hole'],
+                total_time=g['total_time'],
+                sfm=g.get('sfm'),
+                ipr=g.get('ipr')
+            )
+            for g in times.get('drill_groups', [])
+        ]
+
+        tap_ops = [
+            HoleOperation(
+                hole_id=g['hole_id'],
+                diameter=g['diameter'],
+                depth=g['depth'],
+                qty=g['qty'],
+                operation_type='tap',
+                time_per_hole=g['time_per_hole'],
+                total_time=g['total_time'],
+                tpi=g.get('tpi')
+            )
+            for g in times.get('tap_groups', [])
+        ]
+
+        cbore_ops = [
+            HoleOperation(
+                hole_id=g['hole_id'],
+                diameter=g['diameter'],
+                depth=g['depth'],
+                qty=g['qty'],
+                operation_type='cbore',
+                time_per_hole=g['time_per_hole'],
+                total_time=g['total_time'],
+                sfm=g.get('sfm')
+            )
+            for g in times.get('cbore_groups', [])
+        ]
+
+        cdrill_ops = [
+            HoleOperation(
+                hole_id=g['hole_id'],
+                diameter=g['diameter'],
+                depth=g['depth'],
+                qty=g['qty'],
+                operation_type='cdrill',
+                time_per_hole=g['time_per_hole'],
+                total_time=g['total_time']
+            )
+            for g in times.get('cdrill_groups', [])
+        ]
+
+        jig_grind_ops = [
+            HoleOperation(
+                hole_id=g['hole_id'],
+                diameter=g['diameter'],
+                depth=g['depth'],
+                qty=g['qty'],
+                operation_type='jig_grind',
+                time_per_hole=g['time_per_hole'],
+                total_time=g['total_time']
+            )
+            for g in times.get('jig_grind_groups', [])
+        ]
+
+        quote_data.machine_hours = MachineHoursBreakdown(
+            drill_operations=drill_ops,
+            tap_operations=tap_ops,
+            cbore_operations=cbore_ops,
+            cdrill_operations=cdrill_ops,
+            jig_grind_operations=jig_grind_ops,
+            total_drill_minutes=times.get('total_drill_minutes', 0.0),
+            total_tap_minutes=times.get('total_tap_minutes', 0.0),
+            total_cbore_minutes=times.get('total_cbore_minutes', 0.0),
+            total_cdrill_minutes=times.get('total_cdrill_minutes', 0.0),
+            total_jig_grind_minutes=times.get('total_jig_grind_minutes', 0.0),
+            total_minutes=times.get('total_minutes', 0.0),
+            total_hours=times.get('total_hours', 0.0),
+            machine_cost=times.get('total_hours', 0.0) * machine_rate
+        )
+
+        if verbose:
+            print(f"  Machine hours: {times.get('total_hours', 0.0):.2f} hr")
+            print(f"  Machine cost: ${quote_data.machine_hours.machine_cost:.2f}")
+
+    # ========================================================================
+    # STEP 5: Calculate labor hours
+    # ========================================================================
+    if verbose:
+        print("[5/5] Calculating labor hours...")
+
+    ops = plan.get('ops', [])
+    holes_total = len(hole_table) if hole_table else 0
+
+    # Estimate labor inputs (simplified - could be more sophisticated)
+    labor_inputs = LaborInputs(
+        ops_total=len(ops),
+        holes_total=holes_total,
+        tool_changes=len(ops) * 2,  # Rough estimate
+        fixturing_complexity=1
+    )
+
+    labor_result = compute_labor_minutes(labor_inputs)
+    minutes = labor_result['minutes']
+
+    quote_data.labor_hours = LaborHoursBreakdown(
+        setup_minutes=minutes.get('Setup', 0.0),
+        programming_minutes=minutes.get('Programming', 0.0),
+        machining_steps_minutes=minutes.get('Machining_Steps', 0.0),
+        inspection_minutes=minutes.get('Inspection', 0.0),
+        finishing_minutes=minutes.get('Finishing', 0.0),
+        total_minutes=minutes.get('Labor_Total', 0.0),
+        total_hours=minutes.get('Labor_Total', 0.0) / 60.0,
+        labor_cost=(minutes.get('Labor_Total', 0.0) / 60.0) * labor_rate,
+        ops_total=len(ops),
+        holes_total=holes_total,
+        tool_changes=len(ops) * 2
+    )
+
+    if verbose:
+        print(f"  Labor hours: {quote_data.labor_hours.total_hours:.2f} hr")
+        print(f"  Labor cost: ${quote_data.labor_hours.labor_cost:.2f}")
+
+    # ========================================================================
+    # STEP 6: Calculate cost summary
+    # ========================================================================
+    total_cost = (
+        quote_data.direct_cost_breakdown.net_material_cost +
+        quote_data.machine_hours.machine_cost +
+        quote_data.labor_hours.labor_cost
+    )
+
+    margin_amount = total_cost * margin_rate
+    final_price = total_cost + margin_amount
+
+    quote_data.cost_summary = CostSummary(
+        direct_cost=quote_data.direct_cost_breakdown.net_material_cost,
+        machine_cost=quote_data.machine_hours.machine_cost,
+        labor_cost=quote_data.labor_hours.labor_cost,
+        total_cost=total_cost,
+        margin_rate=margin_rate,
+        margin_amount=margin_amount,
+        final_price=final_price
+    )
+
+    if verbose:
+        print(f"\n{'='*70}")
+        print(f"EXTRACTION COMPLETE")
+        print(f"{'='*70}")
+        print(f"Total cost: ${total_cost:.2f}")
+        print(f"Margin ({margin_rate:.0%}): ${margin_amount:.2f}")
+        print(f"Final price: ${final_price:.2f}")
+        print(f"{'='*70}\n")
+
+    return quote_data
+
+
+# ============================================================================
+# CONVENIENCE FUNCTIONS
+# ============================================================================
+
+def save_quote_data(
+    quote_data: QuoteData,
+    output_path: str | Path,
+    pretty: bool = True
+) -> None:
+    """
+    Save QuoteData to JSON file.
+
+    Args:
+        quote_data: QuoteData instance
+        output_path: Path to save JSON file
+        pretty: Use pretty formatting (indent=2)
+    """
+    indent = 2 if pretty else None
+    quote_data.to_json(output_path, indent=indent)
+    print(f"Saved quote data to: {output_path}")
+
+
+def load_quote_data(input_path: str | Path) -> QuoteData:
+    """
+    Load QuoteData from JSON file.
+
+    Args:
+        input_path: Path to JSON file
+
+    Returns:
+        QuoteData instance
+    """
+    return QuoteData.from_json(input_path)
