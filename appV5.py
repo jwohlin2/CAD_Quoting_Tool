@@ -114,11 +114,6 @@ try:
     from tools.hole_ops import explode_rows_to_operations as _explode_rows_to_operations
 except Exception:  # pragma: no cover - optional helper unavailable at runtime
     _explode_rows_to_operations = None  # type: ignore[assignment]
-from cad_quoter.app.container import (
-    ServiceContainer,
-    SupportsPricingEngine,
-    create_default_container,
-)
 from cad_quoter.app.llm_helpers import (
     DEFAULT_MM_PROJ_NAMES,
     DEFAULT_VL_MODEL_NAMES,
@@ -130,20 +125,6 @@ from cad_quoter.app.llm_helpers import (
     find_default_qwen_model,
     init_llm_integration,
     load_qwen_vl,
-)
-from cad_quoter.app import ui_settings as _ui_settings
-from cad_quoter.app.optional_loaders import (
-    pd,
-    build_geo_from_dxf,
-    set_build_geo_from_dxf_hook,
-)
-from cad_quoter.app.variables import (
-    CORE_COLS,
-    _coerce_core_types,
-    _load_master_variables,
-    find_variables_near,
-    read_variables_file,
-    sanitize_vars_df,
 )
 from cad_quoter.material_density import LB_PER_IN3_PER_GCC as _LB_PER_IN3_PER_GCC
 from cad_quoter.utils.machining import (
@@ -157,10 +138,14 @@ from cad_quoter.utils.machining import (
     _rpm_from_sfm_diam,
 )
 if TYPE_CHECKING:
-    from cad_quoter.resources import default_app_settings_json
+    from cad_quoter.resources import (
+        default_app_settings_json,
+        default_master_variables_csv,
+    )
 else:
     from cad_quoter.resources import (
         default_app_settings_json,
+        default_master_variables_csv,
     )
 from cad_quoter.config import (
     AppEnvironment,
@@ -168,6 +153,8 @@ from cad_quoter.config import (
     append_debug_log,
     configure_logging,
     logger,
+    load_default_params,
+    load_default_rates,
 )
 
 _log = logger
@@ -180,6 +167,10 @@ from cad_quoter.utils.geo_ctx import (
 from cad_quoter.utils.scrap import (
     _holes_removed_mass_g,
     build_drill_groups_from_geometry,
+)
+from cad_quoter.io.csv_utils import (
+    read_csv_as_dicts as _read_csv_as_dicts,
+    sniff_delimiter as _sniff_csv_delimiter,
 )
 if TYPE_CHECKING:
     from cad_quoter.utils.render_utils import (
@@ -740,6 +731,7 @@ else:
     from cad_quoter.vendors import ezdxf as _ezdxf_vendor
 
 from cad_quoter.geometry.dxf_enrich import (
+    build_geo_from_dxf,
     detect_units_scale as _shared_detect_units_scale,
     iter_spaces as _shared_iter_spaces,
     iter_table_entities as _shared_iter_table_entities,
@@ -7518,21 +7510,7 @@ def _normalized_two_bucket_rates(
     return normalized
 
 try:
-    SERVICE_CONTAINER = create_default_container()
-except Exception as exc:
-    CONFIG_INIT_ERRORS.append(f"Service container initialisation error: {exc}")
-
-    def _empty_params() -> dict[str, Any]:
-        return {}
-
-    SERVICE_CONTAINER = ServiceContainer(
-        load_params=_empty_params,
-        load_rates=lambda: _normalized_two_bucket_rates({}),
-        pricing_engine_factory=lambda: PricingEngine(create_default_registry()),
-    )
-
-try:
-    _rates_raw = SERVICE_CONTAINER.load_rates()
+    _rates_raw = load_default_rates()
 except ConfigError as exc:
     RATES_TWO_BUCKET_DEFAULT = _normalized_two_bucket_rates({})
     CONFIG_INIT_ERRORS.append(f"Rates configuration error: {exc}")
@@ -7549,7 +7527,7 @@ else:
 RATES_DEFAULT = two_bucket_to_flat(RATES_TWO_BUCKET_DEFAULT)
 
 try:
-    PARAMS_DEFAULT = SERVICE_CONTAINER.load_params()
+    PARAMS_DEFAULT = load_default_params()
 except ConfigError as exc:
     PARAMS_DEFAULT = {}
     CONFIG_INIT_ERRORS.append(f"Parameter configuration error: {exc}")
@@ -7639,7 +7617,11 @@ MONEY_RE = r"(?:rate|/hr|per\s*hour|per\s*hr|price|cost|\$)"
 
 # ===== QUOTE HELPERS ========================================================
 
-_DEFAULT_PRICING_ENGINE = SERVICE_CONTAINER.get_pricing_engine()
+try:
+    _DEFAULT_PRICING_ENGINE = PricingEngine(create_default_registry())
+except Exception as exc:  # pragma: no cover - defensive fallback
+    CONFIG_INIT_ERRORS.append(f"Pricing engine initialisation error: {exc}")
+    _DEFAULT_PRICING_ENGINE = None  # type: ignore[assignment]
 
 
 def _text_contains_plate_signal(value: Any) -> bool:
@@ -10078,6 +10060,183 @@ def extract_2d_features_from_pdf_vector(pdf_path: str) -> dict:
         "material": material,
     }
 # ---------- PDF-driven variables + inference ----------
+CORE_COLS = ["Item", "Example Values / Options", "Data Type / Input Method"]
+
+_MASTER_VARIABLES_CACHE: dict[str, Any] = {
+    "loaded": False,
+    "core": None,
+    "full": None,
+}
+
+
+def _coerce_core_types(df_core: PandasDataFrame) -> PandasDataFrame:
+    """Light normalization for estimator expectations."""
+
+    core = df_core.copy()
+    core["Item"] = core["Item"].astype(str)
+    core["Data Type / Input Method"] = core["Data Type / Input Method"].astype(str).str.lower()
+    return core
+
+
+def sanitize_vars_df(df_full: PandasDataFrame) -> PandasDataFrame:
+    """Return a sanitized copy containing only the estimator's core columns."""
+
+    if pd is None:
+        raise RuntimeError("pandas is required to sanitize variables data frames")
+
+    canon = {str(c).strip().lower(): c for c in df_full.columns}
+
+    actual: list[str | None] = []
+    for want in CORE_COLS:
+        key = want.strip().lower()
+        candidates = [
+            canon.get(key),
+            canon.get(key.replace(" / ", " ").replace("/", " ")),
+            canon.get(key.replace(" ", "")),
+        ]
+        col = next((c for c in candidates if c in df_full.columns), None)
+        actual.append(col)
+
+    core = pd.DataFrame()
+    for want, col in zip(CORE_COLS, actual):
+        if col is not None:
+            core[want] = df_full[col]
+        else:
+            core[want] = "" if want != "Example Values / Options" else None
+
+    return _coerce_core_types(core)
+
+
+def read_variables_file(
+    path: str, return_full: bool = False
+) -> PandasDataFrame | tuple[PandasDataFrame, PandasDataFrame]:
+    """Read a CSV/XLSX variables sheet and return a sanitized dataframe."""
+
+    if pd is None:
+        raise RuntimeError("pandas required (conda/pip install pandas)")
+
+    lp = path.lower()
+    if lp.endswith(".xlsx"):
+        xl = pd.ExcelFile(path)
+        sheet_name = "Variables" if "Variables" in xl.sheet_names else xl.sheet_names[0]
+        df_full = pd.read_excel(path, sheet_name=sheet_name)
+    elif lp.endswith(".csv"):
+        encoding = "utf-8-sig"
+        try:
+            with open(path, encoding=encoding) as sniff:
+                header_line = sniff.readline()
+        except Exception:
+            header_line = ""
+        delimiter = _sniff_csv_delimiter(header_line)
+
+        read_csv_kwargs: dict[str, Any] = {"encoding": encoding}
+        if delimiter == "\t":
+            read_csv_kwargs["sep"] = "\t"
+
+        try:
+            df_full = pd.read_csv(path, **read_csv_kwargs)
+        except Exception as csv_err:
+            try:
+                normalized_dicts = _read_csv_as_dicts(
+                    path,
+                    encoding=encoding,
+                    delimiter=delimiter,
+                )
+            except Exception:
+                raise csv_err
+
+            try:
+                df_full = pd.DataFrame(normalized_dicts)
+            except Exception:
+                raise csv_err
+    else:
+        raise ValueError("Variables must be .xlsx or .csv")
+
+    core = sanitize_vars_df(df_full)
+
+    return (core, df_full) if return_full else core
+
+
+def _load_master_variables() -> tuple[PandasDataFrame | None, PandasDataFrame | None]:
+    """Load the packaged master variables sheet once and serve cached copies."""
+
+    if pd is None:
+        return (None, None)
+
+    global _MASTER_VARIABLES_CACHE
+    cache = _MASTER_VARIABLES_CACHE
+
+    if cache.get("loaded"):
+        core_cached = cache.get("core")
+        full_cached = cache.get("full")
+
+        core_copy: PandasDataFrame | None = None
+        if isinstance(core_cached, pd.DataFrame):
+            core_copy = core_cached.copy()
+
+        full_copy: PandasDataFrame | None = None
+        if isinstance(full_cached, pd.DataFrame):
+            full_copy = full_cached.copy()
+
+        return (core_copy, full_copy)
+
+    master_path = default_master_variables_csv()
+    fallback = Path(r"D:\\CAD_Quoting_Tool\\Master_Variables.csv")
+    if not master_path.exists() and fallback.exists():
+        master_path = fallback
+    if not master_path.exists():
+        cache["loaded"] = True
+        cache["core"] = None
+        cache["full"] = None
+        return (None, None)
+
+    try:
+        core_df, full_df = read_variables_file(str(master_path), return_full=True)
+    except Exception:
+        logger.warning("Failed to load master variables CSV from %s", master_path, exc_info=True)
+        cache["loaded"] = True
+        cache["core"] = None
+        cache["full"] = None
+        return (None, None)
+
+    cache["loaded"] = True
+    cache["core"] = core_df
+    cache["full"] = full_df
+
+    return (core_df.copy(), full_df.copy())
+
+
+def find_variables_near(cad_path: str):
+    """Look for ``variables.*`` in the same folder, then one level up."""
+
+    folder = os.path.dirname(cad_path)
+    names = ["variables.xlsx", "variables.csv"]
+    subs = ["variables", "vars"]
+
+    def _scan(dirpath: str) -> str | None:
+        try:
+            listing = os.listdir(dirpath)
+        except Exception:
+            return None
+        low = {e.lower(): e for e in listing}
+        for n in names:
+            if n in low:
+                return os.path.join(dirpath, low[n])
+        for e in listing:
+            le = e.lower()
+            if le.endswith((".xlsx", ".csv")) and any(s in le for s in subs):
+                return os.path.join(dirpath, e)
+        return None
+
+    hit = _scan(folder)
+    if hit:
+        return hit
+    parent = os.path.dirname(folder)
+    if os.path.isdir(parent):
+        return _scan(parent)
+    return None
+
+
 REQUIRED_COLS = ["Item", "Example Values / Options", "Data Type / Input Method"]
 
 def default_variables_template() -> PandasDataFrame:
