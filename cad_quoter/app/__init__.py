@@ -6,5 +6,5 @@ from . import audit, runtime, chart_lines
 __all__ = [
     "audit",
     "runtime",
-    "chart_lines",
+    "legacy_hole_support",
 ]

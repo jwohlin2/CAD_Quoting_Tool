@@ -81,10 +81,8 @@ from cad_quoter.utils.numeric import coerce_positive_float as _coerce_positive_f
 from cad_quoter.utils.machining import parse_length_to_mm
 
 
-from cad_quoter.app.chart_lines import (
+from cad_quoter.app.legacy_hole_support import (
     collect_chart_lines_context as _collect_chart_lines_context,
-)
-from cad_quoter.app.hole_ops import (
     CBORE_MIN_PER_SIDE_MIN,
     CSK_MIN_PER_SIDE_MIN,
     RE_CBORE,
