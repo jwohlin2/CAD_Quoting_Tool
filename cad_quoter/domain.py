@@ -224,13 +224,6 @@ def build_suggest_payload(*args, **kwargs):  # type: ignore[override]
 
     return _build_suggest_payload(*args, **kwargs)
 
-def ensure_accept_flags(*args, **kwargs):  # type: ignore[override]
-    """Proxy to :func:`appV5.ensure_accept_flags` for test visibility."""
-
-    app = _app_module()
-    return app.ensure_accept_flags(*args, **kwargs)
-
-
 def iter_suggestion_rows(*args, **kwargs):  # type: ignore[override]
     """Proxy to :func:`cad_quoter.ui.suggestions.iter_suggestion_rows` for tests."""
 

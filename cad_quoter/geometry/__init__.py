@@ -9,7 +9,13 @@ import re
 import subprocess
 import tempfile
 from pathlib import Path
-from typing import Any, Callable, Dict, Optional
+from typing import Any, Callable, Dict, Mapping, Optional
+
+from cad_quoter.geometry_fallbacks import (
+    collect_geo_features_from_df as _collect_geo_features_from_df_fallback,
+    map_geo_to_double_underscore as _map_geo_to_double_underscore_fallback,
+    update_variables_df_with_geo as _update_variables_df_with_geo_fallback,
+)
 
 
 # Optional trimesh for STL
@@ -1255,22 +1261,22 @@ __all__ = [
 ]
 
 
-def map_geo_to_double_underscore(geo: dict) -> dict:
-    from cad_quoter.geometry_wrappers import map_geo_to_double_underscore as _impl
+def map_geo_to_double_underscore(geo: Mapping[str, Any] | None) -> dict[str, float]:
+    """Return GEO__ style metrics derived from ``geo``."""
 
-    return _impl(geo)
+    return _map_geo_to_double_underscore_fallback(geo)
 
 
 def collect_geo_features_from_df(df):
-    from cad_quoter.geometry_wrappers import collect_geo_features_from_df as _impl
+    """Extract GEO__ entries from a variables dataframe."""
 
-    return _impl(df)
+    return _collect_geo_features_from_df_fallback(df)
 
 
-def update_variables_df_with_geo(df, geo: dict):
-    from cad_quoter.geometry_wrappers import update_variables_df_with_geo as _impl
+def update_variables_df_with_geo(df, geo: Mapping[str, Any] | None):
+    """Populate ``df`` with GEO__ entries taken from ``geo``."""
 
-    return _impl(df, geo)
+    return _update_variables_df_with_geo_fallback(df, geo)
 
 
 def read_dxf_as_occ_shape(dxf_path: str):
