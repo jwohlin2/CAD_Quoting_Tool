@@ -4,7 +4,7 @@ from pathlib import Path
 
 import pytest
 
-from cad_quoter.app import runtime
+from cad_quoter.llm import runtime
 
 
 class _DummyLlama:

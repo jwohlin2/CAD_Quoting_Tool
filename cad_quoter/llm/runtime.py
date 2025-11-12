@@ -1,11 +1,12 @@
-"""Runtime helpers shared by the desktop UI entrypoint."""
+"""Runtime helpers for locating and loading optional LLM dependencies."""
+
 from __future__ import annotations
 
 import gc
 import importlib.util
 import os
 from pathlib import Path
-from typing import Iterable, Sequence
+from typing import Iterable, Sequence, Tuple
 
 from cad_quoter.resources import default_catalog_csv
 
@@ -17,10 +18,6 @@ os.environ.setdefault("CATALOG_CSV_PATH", str(default_catalog_csv()))
 # Placeholder for llama-cpp bindings so tests can monkeypatch the loader without
 # importing the optional dependency at module import time.
 Llama = None  # type: ignore[assignment]
-
-# Note: Avoid importing llama_cpp at module import time so the desktop UI can
-# launch in environments without the optional LLM runtime installed. We import
-# it lazily inside load_qwen_vl().
 
 # Runtime dependencies required when the desktop UI launches.  These are kept
 # here so they can be reused in tests without importing the enormous Tk UI
@@ -35,13 +32,13 @@ REQUIRED_RUNTIME_PACKAGES: dict[str, str] = {
 # it in the search path so the upgraded runtime can still discover the models
 # automatically for those environments.
 PREFERRED_MODEL_DIRS: tuple[Path, ...] = (
-    Path(r"D:\CAD_Quoting_Tool\models"),
+    Path(r"D:\\CAD_Quoting_Tool\\models"),
 )
 
 # Legacy filenames from earlier builds.  The discovery helpers will fall back to
 # these names if no explicit paths are provided.
-LEGACY_VL_MODEL = Path(r"D:\CAD_Quoting_Tool\models\qwen2.5-vl-7b-instruct-q4_k_m.gguf")
-LEGACY_MM_PROJ = Path(r"D:\CAD_Quoting_Tool\models\mmproj-Qwen2.5-VL-3B-Instruct-Q8_0.gguf")
+LEGACY_VL_MODEL = Path(r"D:\\CAD_Quoting_Tool\\models\\qwen2.5-vl-7b-instruct-q4_k_m.gguf")
+LEGACY_MM_PROJ = Path(r"D:\\CAD_Quoting_Tool\\models\\mmproj-Qwen2.5-VL-3B-Instruct-Q8_0.gguf")
 
 DEFAULT_VL_MODEL_NAMES = (
     LEGACY_VL_MODEL.name,
@@ -159,7 +156,7 @@ def discover_qwen_vl_assets(
     *,
     model_path: str | None = None,
     mmproj_path: str | None = None,
-) -> tuple[str, str]:
+) -> Tuple[str, str]:
     """Locate Qwen vision model + projector weights on disk."""
 
     model_candidates = [
@@ -198,7 +195,7 @@ def discover_qwen_vl_assets(
         mmproj_file = _find_weight_file(DEFAULT_MM_PROJ_NAMES, search_dirs, "*mmproj*.gguf")
 
     if not model_file or not mmproj_file:
-        searched = ", ".join(str(d) for d in search_dirs if d)
+        searched = ", ".join(str(p) for p in search_dirs)
         raise RuntimeError(
             "Vision LLM weights not found. Set QWEN_VL_GGUF_PATH and "
             "QWEN_VL_MMPROJ_PATH (or place matching *.gguf files in one of: "
@@ -218,7 +215,6 @@ def load_qwen_vl(
 ):
     """Load Qwen2.5-VL with vision projector configured for llama.cpp."""
 
-    # Lazy import so environments without llama-cpp-python can still launch the UI
     global Llama
     llama_cls = Llama
     if llama_cls is None:
@@ -349,3 +345,4 @@ __all__ = [
     "find_default_qwen_model",
     "load_qwen_vl",
 ]
+

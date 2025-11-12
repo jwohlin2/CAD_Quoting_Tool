@@ -119,16 +119,14 @@ from cad_quoter.app.container import (
     SupportsPricingEngine,
     create_default_container,
 )
-from cad_quoter.app.llm_helpers import (
+from cad_quoter.llm import init_llm_integration
+from cad_quoter.llm.runtime import (
     DEFAULT_MM_PROJ_NAMES,
     DEFAULT_VL_MODEL_NAMES,
-    LEGACY_MM_PROJ,
-    LEGACY_VL_MODEL,
-    MM_PROJ,
-    VL_MODEL,
+    LEGACY_MM_PROJ as _LEGACY_MM_PROJ_PATH,
+    LEGACY_VL_MODEL as _LEGACY_VL_MODEL_PATH,
     ensure_runtime_dependencies,
     find_default_qwen_model,
-    init_llm_integration,
     load_qwen_vl,
 )
 from cad_quoter.app import ui_settings as _ui_settings
@@ -2490,6 +2488,11 @@ try:
     _DEFAULT_SYSTEM_SUGGEST = load_text("system_suggest.txt").strip()
 except FileNotFoundError:  # pragma: no cover - defensive fallback
     _DEFAULT_SYSTEM_SUGGEST = ""
+
+LEGACY_VL_MODEL = str(_LEGACY_VL_MODEL_PATH)
+LEGACY_MM_PROJ = str(_LEGACY_MM_PROJ_PATH)
+VL_MODEL = LEGACY_VL_MODEL
+MM_PROJ = LEGACY_MM_PROJ
 
 ensure_runtime_dependencies()
 

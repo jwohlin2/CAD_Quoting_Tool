@@ -32,7 +32,7 @@ except Exception:  # pragma: no cover - used when pandas is unavailable
     _HAS_PANDAS = False
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
-    from cad_quoter.app.llm_helpers import LLMClient
+    from cad_quoter.llm import LLMClient
 else:  # pragma: no cover - runtime fallback
     LLMClient = Any  # type: ignore[misc,assignment]
 

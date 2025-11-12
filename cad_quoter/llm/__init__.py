@@ -16,6 +16,18 @@ from cad_quoter.utils import _dict, compact_dict, jdump, json_safe_copy
 from cad_quoter.utils.numeric import coerce_float, coerce_int
 from cad_quoter.utils.render_utils import fmt_hours, fmt_money, fmt_percent
 from cad_quoter.resources.loading import load_text
+from cad_quoter.llm.runtime import (
+    DEFAULT_MM_PROJ_NAMES,
+    DEFAULT_VL_MODEL_NAMES,
+    LEGACY_MM_PROJ,
+    LEGACY_VL_MODEL,
+    PREFERRED_MODEL_DIRS,
+    REQUIRED_RUNTIME_PACKAGES,
+    discover_qwen_vl_assets,
+    ensure_runtime_dependencies,
+    find_default_qwen_model,
+    load_qwen_vl,
+)
 
 
 def parse_llm_json(text: str) -> dict:
@@ -1476,3 +1488,35 @@ def _estimator_patterns():
         r"(EHS|Compliance|Training|Waste\s*Handling)", r"(Gauge|Check\s*Fixture\s*NRE)",
     ]
     return [re.compile(p, re.I) for p in pats]
+
+
+@dataclass(frozen=True)
+class LLMIntegration:
+    """Describe the optional LLM helpers exposed to the UI layer."""
+
+    system_suggest: str
+    sugg_to_editor: Mapping[str, Any]
+    editor_to_sugg: Mapping[str, Any]
+    editor_from_ui: Mapping[str, Any]
+    llm_client: type[LLMClient]
+    infer_hours_and_overrides_from_geo: Callable[..., Dict[str, Any]]
+    parse_llm_json: Callable[[str], Dict[str, Any]]
+    explain_quote: Callable[..., str]
+
+
+def init_llm_integration(system_suggest: str | None = None) -> LLMIntegration:
+    """Return a container describing the available LLM integration helpers."""
+
+    override = (system_suggest or "").strip()
+    suggest = override or SYSTEM_SUGGEST
+
+    return LLMIntegration(
+        system_suggest=suggest,
+        sugg_to_editor=SUGG_TO_EDITOR,
+        editor_to_sugg=EDITOR_TO_SUGG,
+        editor_from_ui=EDITOR_FROM_UI,
+        llm_client=LLMClient,
+        infer_hours_and_overrides_from_geo=infer_hours_and_overrides_from_geo,
+        parse_llm_json=parse_llm_json,
+        explain_quote=explain_quote,
+    )

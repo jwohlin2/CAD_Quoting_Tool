@@ -29,12 +29,12 @@ extract_features_with_occ = _export_geom("extract_features_with_occ")
 read_cad_any = _export_geom("read_cad_any")
 read_step_shape = _export_geom("read_step_shape")
 safe_bbox = _export_geom("safe_bbox")
-from cad_quoter.app import runtime as _runtime
 from cad_quoter.resources import default_app_settings_json
 from cad_quoter.domain_models import DEFAULT_MATERIAL_DISPLAY
 from cad_quoter.domain_models import coerce_float_or_none as _coerce_float_or_none
 from cad_quoter.domain_models import normalize_material_key as _normalize_lookup_key
 from cad_quoter.utils import jdump
+from cad_quoter.llm import runtime as _llm_runtime
 
 from cad_quoter.app.optional_loaders import (
     build_pdf_llm_payload as _build_pdf_llm_payload,
@@ -149,8 +149,8 @@ class PricingRegistry:
 class LLMServices:
     """Helper hooks for locating default models and loading vision LLMs."""
 
-    default_model_locator: Callable[[], str] = _runtime.find_default_qwen_model
-    vision_loader: Callable[..., Any] = _runtime.load_qwen_vl
+    default_model_locator: Callable[[], str] = _llm_runtime.find_default_qwen_model
+    vision_loader: Callable[..., Any] = _llm_runtime.load_qwen_vl
 
     def default_model_path(self) -> str:
         try:

@@ -12,7 +12,7 @@ callers for every module that currently ships under `appkit/`.
 | `appkit/effective.py` | LLM suggestion acceptance flags, guardrail-aware merge, and conversion to overrides. | `appV5.py`, `cad_quoter/domain.py`, `tests/domain/test_effective_state.py`. |
 | `appkit/env_utils.py` | Lazy boolean flags backed by environment variables (`FORCE_ESTIMATOR`, `FORCE_PLANNER`). | `appV5.py`, `appkit/planner_adapter.py`. |
 | `appkit/guardrails.py` | Guardrail calculations for drilling/tapping floors, setup minimums, and finish pass cost enforcement. | `appkit/effective.py`, `appkit/merge_utils.py`, `appV5.py`. |
-| `appkit/llm_adapter.py` | Integration surface for LLM-based hour inference, normalization/clamping helpers. | `appV5.py` (UI hook-up), `cad_quoter/app/llm_helpers.py` (delegate configuration). |
+| `appkit/llm_adapter.py` | Integration surface for LLM-based hour inference, normalization/clamping helpers. | `appV5.py` (UI hook-up), `cad_quoter/llm/__init__.py` (delegate configuration). |
 | `appkit/llm_converters.py` | Utilities for converting quote state data into LLM payloads and interpreting results. | `cad_quoter/domain.py` (lazy imports), `appV5.py`. |
 | `appkit/merge_utils.py` | Core merge algorithm for baseline vs LLM suggestions vs overrides plus helper constants. | `appkit/effective.py`, `appkit/ui/suggestions.py`, `appV5.py`, `tests/domain/test_effective_state.py`. |
 | `appkit/occ_compat.py` | Thin compatibility layer for OCC/trimesh geometry operations used by the viewer. | `cad_quoter/geometry/__init__.py`. |

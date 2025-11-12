@@ -41,19 +41,14 @@ def parse_llm_json(text: str) -> dict[str, Any]: ...
 
 class LLMIntegration(Protocol):
     system_suggest: str
-    sugg_to_editor: Callable[[str], str]
-    editor_to_sugg: Callable[[str], str]
-    editor_from_ui: Callable[[str], str]
+    sugg_to_editor: Mapping[str, Any]
+    editor_to_sugg: Mapping[str, Any]
+    editor_from_ui: Mapping[str, Any]
     llm_client: type[LLMClient]
-    parse_llm_json: Callable[[str], dict[str, Any]]
-    explain_quote: Callable[[Mapping[str, Any]], str]
+    infer_hours_and_overrides_from_geo: Callable[..., Dict[str, Any]]
+    parse_llm_json: Callable[[str], Dict[str, Any]]
+    explain_quote: Callable[..., str]
 
 
 def init_llm_integration(system_suggest: str | None = ...) -> LLMIntegration: ...
-
-
-def configure_llm_integration(integration: LLMIntegration) -> None: ...
-
-
-def get_llm_quote_explanation(*args: Any, **kwargs: Any) -> str: ...
 
