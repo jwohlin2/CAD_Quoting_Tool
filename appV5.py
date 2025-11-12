@@ -13832,12 +13832,26 @@ def hole_rows_to_ops(rows: Iterable[Any] | None) -> list[dict[str, Any]]:
     return ops
 
 if __name__ == "__main__":  # pragma: no cover - manual launch helper
-    """Allow ``python appV5.py`` to invoke the CLI entry point for quotes."""
+    """Allow `python appV5.py` (or VS Code's “Run Python File”) to launch the GUI."""
 
     try:
-        from cad_quoter.app.cli import run_default_app as _run_default_app
-    except Exception as exc:  # pragma: no cover - safeguard against import issues
-        print(f"[ERROR] Unable to import GUI launcher: {exc}", file=sys.stderr)
+        sys.stdout.reconfigure(encoding="utf-8")
+    except Exception:
+        pass
+
+    try:
+        configure_logging()
+    except Exception:
+        pass
+
+    try:
+        app = App()
+    except Exception as exc:  # pragma: no cover - safeguard against init issues
+        print(f"[ERROR] Unable to start the GUI: {exc}", file=sys.stderr)
         sys.exit(1)
 
-    sys.exit(_run_default_app())
+    try:
+        app.mainloop()
+    except Exception as exc:  # pragma: no cover - defensive guard
+        print(f"[ERROR] GUI terminated unexpectedly: {exc}", file=sys.stderr)
+        sys.exit(1)

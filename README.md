@@ -57,13 +57,39 @@ and notebooks should import helpers from `cad_quoter.*` directly.
 Launch the Tkinter UI after activating the virtual environment:
 
 ```bash
-python appV5.py
+python AppV7.py
 ```
 
 Useful command-line flags:
 
 * `--print-env` – dump a JSON report of the active configuration and exit.
 * `--no-gui` – initialise dependencies without opening the Tkinter window.
+
+### Headless quoting and automation
+
+The legacy `run_quote.py` helper has been removed.  Automated workflows should
+instantiate the AppV7 application directly or import the reusable quoting
+helpers from `cad_quoter`.  For example, to extract quote data without opening
+the UI:
+
+```python
+from cad_quoter.pricing.QuoteDataHelper import extract_quote_data_from_cad, save_quote_data
+
+quote_data = extract_quote_data_from_cad(
+    cad_file_path="/path/to/part.dwg",
+    machine_rate=90.0,
+    labor_rate=90.0,
+    margin_rate=0.15,
+    material_override=None,
+    dimension_override=None,
+    verbose=True,
+)
+
+save_quote_data(quote_data, "debug/quote_output.json", pretty=True)
+```
+
+`extract_quote_data_from_cad` runs the same pipeline as the desktop client,
+including ODA conversion, OCR, and pricing calculations.
 
 ## Tests and linting
 
