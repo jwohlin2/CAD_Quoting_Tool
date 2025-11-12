@@ -42,7 +42,7 @@ try:  # noqa: E402  # pylint: disable=wrong-import-position
 except ImportError:  # pragma: no cover - optional dependency for tests
     default_variables_template = None
 
-from cad_quoter.app.chart_lines import (  # noqa: E402  # pylint: disable=wrong-import-position
+from cad_quoter.app.legacy_hole_support import (  # noqa: E402  # pylint: disable=wrong-import-position
     RE_DEPTH,
     RE_TAP,
     build_ops_rows_from_lines_fallback,

@@ -68,7 +68,7 @@ def _merge_module():
 def _suggestions_module():
     """Return the lazily-imported suggestion helpers."""
 
-    from cad_quoter.ui import suggestions as _suggestions  # imported lazily to avoid cycles
+    from cad_quoter.app import suggestions as _suggestions  # imported lazily to avoid cycles
 
     return _suggestions
 
@@ -224,15 +224,8 @@ def build_suggest_payload(*args, **kwargs):  # type: ignore[override]
 
     return _build_suggest_payload(*args, **kwargs)
 
-def ensure_accept_flags(*args, **kwargs):  # type: ignore[override]
-    """Proxy to :func:`appV5.ensure_accept_flags` for test visibility."""
-
-    app = _app_module()
-    return app.ensure_accept_flags(*args, **kwargs)
-
-
 def iter_suggestion_rows(*args, **kwargs):  # type: ignore[override]
-    """Proxy to :func:`cad_quoter.ui.suggestions.iter_suggestion_rows` for tests."""
+    """Proxy to :func:`cad_quoter.app.suggestions.iter_suggestion_rows` for tests."""
 
     suggestions = _suggestions_module()
     return suggestions.iter_suggestion_rows(*args, **kwargs)

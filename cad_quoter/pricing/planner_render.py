@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+"""Planner rendering helpers previously bundled with the Tk UI."""
+
 import copy
 import logging
 import math
@@ -9,7 +11,7 @@ from typing import Any, Callable, Mapping, MutableMapping, TypedDict, cast
 from collections.abc import Iterable, Mapping as _MappingABC, MutableMapping as _MutableMappingABC, Sequence
 
 from cad_quoter.config import logger
-from cad_quoter.app.hole_ops import TAP_MINUTES_BY_CLASS, CBORE_MIN_PER_SIDE_MIN
+from cad_quoter.app.legacy_hole_support import TAP_MINUTES_BY_CLASS, CBORE_MIN_PER_SIDE_MIN
 from cad_quoter.domain_models import coerce_float_or_none as _coerce_float_or_none
 from cad_quoter.pricing.process_buckets import (
     BUCKET_ROLE,
@@ -28,7 +30,7 @@ from cad_quoter.utils.render_utils import fmt_hours, fmt_money
 
 from cad_quoter.utils.text_rules import canonicalize_amortized_label as _canonical_amortized_label
 
-from .services import QuoteConfiguration
+from cad_quoter.app.quote_services import QuoteConfiguration
 
 
 PROGRAMMING_PER_PART_LABEL = "Programming (per part)"

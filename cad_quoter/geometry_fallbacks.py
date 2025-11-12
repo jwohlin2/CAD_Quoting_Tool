@@ -1,32 +1,17 @@
-"""Wrappers around geometry helper utilities."""
+"""Fallback implementations for lightweight geometry helpers.
+
+These functions provide the behaviour that used to live in
+``cad_quoter.geometry_wrappers``.  They intentionally avoid importing the
+heavyweight geometry stack so that tests and command line utilities can still
+operate when the optional dependencies are unavailable.
+"""
 
 from __future__ import annotations
 
 import math
 from collections import Counter
 from collections.abc import Iterable, Mapping, Sequence
-from functools import lru_cache
 from typing import Any
-
-
-@lru_cache(maxsize=1)
-def _load_app_module():  # pragma: no cover - thin wrapper around import machinery
-    import importlib
-
-    return importlib.import_module("appV5")
-
-
-def _get_app_attr(name: str):
-    try:
-        module = _load_app_module()
-    except Exception:
-        return None
-    return getattr(module, name, None)
-
-
-_map_geo_to_double_underscore = _get_app_attr("_map_geo_to_double_underscore")
-_collect_geo_features_from_df = _get_app_attr("_collect_geo_features_from_df")
-_update_variables_df_with_geo = _get_app_attr("update_variables_df_with_geo")
 
 __all__ = [
     "map_geo_to_double_underscore",
@@ -35,7 +20,9 @@ __all__ = [
 ]
 
 
-def _map_geo_to_double_underscore_fallback(geo: Mapping[str, Any] | None) -> dict[str, float]:
+def map_geo_to_double_underscore(geo: Mapping[str, Any] | None) -> dict[str, float]:
+    """Transform legacy GEO-* metrics into ``GEO__`` style keys."""
+
     data: dict[str, Any] = dict(geo or {})
 
     def _as_float(key: str) -> float | None:
@@ -98,32 +85,9 @@ def _map_geo_to_double_underscore_fallback(geo: Mapping[str, Any] | None) -> dic
     return mapped
 
 
-def map_geo_to_double_underscore(geo: dict) -> dict[str, float]:
-    """Expose :func:`appV5._map_geo_to_double_underscore` with a fallback."""
+def collect_geo_features_from_df(df: Any) -> dict[str, float]:
+    """Return geometry features from a dataframe containing ``GEO__`` rows."""
 
-    mapper = _map_geo_to_double_underscore
-    if not callable(mapper):
-        mapper = _map_geo_to_double_underscore_fallback
-    return mapper(geo)
-
-
-def collect_geo_features_from_df(df):
-    """Return geometry features from a variable dataframe using a robust fallback."""
-
-    if callable(_collect_geo_features_from_df):
-        return _collect_geo_features_from_df(df)
-    return _collect_geo_features_from_df_fallback(df)
-
-
-def update_variables_df_with_geo(df, geo: dict):
-    """Update a variables dataframe with GEO__ entries using a robust fallback."""
-
-    if callable(_update_variables_df_with_geo):
-        return _update_variables_df_with_geo(df, geo)
-    return _update_variables_df_with_geo_fallback(df, geo)
-
-
-def _collect_geo_features_from_df_fallback(df: Any) -> dict[str, float]:
     result: dict[str, float] = {}
     item_col, value_col, _ = _resolve_column_names(df)
     for _, row in _iter_indexed_rows(df):
@@ -138,7 +102,9 @@ def _collect_geo_features_from_df_fallback(df: Any) -> dict[str, float]:
     return result
 
 
-def _update_variables_df_with_geo_fallback(df: Any, geo: Mapping[str, Any] | None) -> Any:
+def update_variables_df_with_geo(df: Any, geo: Mapping[str, Any] | None) -> Any:
+    """Update a variables dataframe with ``GEO__`` metrics from ``geo``."""
+
     if df is None:
         return df
 
@@ -419,3 +385,4 @@ def _append_row(
     else:
         raise TypeError("Unsupported dataframe type for GEO__ updates")
     return new_index
+
