@@ -15829,17 +15829,26 @@ _PRINTED_CHART_DEBUG_KEYS = False
 
 
 if __name__ == "__main__":  # pragma: no cover - manual launch helper
-    """
-    Allow `python appV5.py` (or VS Code's “Run Python File”) to launch the GUI.
-
-    The actual CLI harness lives in `cad_quoter.app.cli`; we just delegate to it
-    here so existing workflows continue to work.
-    """
+    """Allow `python appV5.py` (or VS Code's “Run Python File”) to launch the GUI."""
 
     try:
-        from cad_quoter.app.cli import run_default_app as _run_default_app
-    except Exception as exc:  # pragma: no cover - safeguard against import issues
-        print(f"[ERROR] Unable to import GUI launcher: {exc}", file=sys.stderr)
+        sys.stdout.reconfigure(encoding="utf-8")
+    except Exception:
+        pass
+
+    try:
+        configure_logging()
+    except Exception:
+        pass
+
+    try:
+        app = App()
+    except Exception as exc:  # pragma: no cover - safeguard against init issues
+        print(f"[ERROR] Unable to start the GUI: {exc}", file=sys.stderr)
         sys.exit(1)
 
-    sys.exit(_run_default_app())
+    try:
+        app.mainloop()
+    except Exception as exc:  # pragma: no cover - defensive guard
+        print(f"[ERROR] GUI terminated unexpectedly: {exc}", file=sys.stderr)
+        sys.exit(1)
