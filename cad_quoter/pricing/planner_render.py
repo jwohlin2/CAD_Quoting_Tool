@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+"""Planner rendering helpers previously bundled with the Tk UI."""
+
 import copy
 import logging
 import math
@@ -28,7 +30,7 @@ from cad_quoter.utils.render_utils import fmt_hours, fmt_money
 
 from cad_quoter.utils.text_rules import canonicalize_amortized_label as _canonical_amortized_label
 
-from .services import QuoteConfiguration
+from cad_quoter.app.quote_services import QuoteConfiguration
 
 
 PROGRAMMING_PER_PART_LABEL = "Programming (per part)"

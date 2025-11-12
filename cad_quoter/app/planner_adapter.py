@@ -7,7 +7,7 @@ from cad_quoter.app.env_flags import FORCE_ESTIMATOR, FORCE_PLANNER, _coerce_env
 from cad_quoter.utils import coerce_bool
 
 if TYPE_CHECKING:
-    from cad_quoter.ui.services import QuoteConfiguration
+    from cad_quoter.app.quote_services import QuoteConfiguration
 
 DEFAULT_PLANNER_MODE = "planner"
 

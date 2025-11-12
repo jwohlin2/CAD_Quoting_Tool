@@ -8,7 +8,7 @@ import unicodedata
 from collections.abc import Mapping, MutableMapping, Sequence
 from typing import Any
 
-from cad_quoter.ui.services import QuoteConfiguration
+from cad_quoter.app.quote_services import QuoteConfiguration
 
 _ANSI_ESCAPE_RE = re.compile(r"\x1B\[[0-?]*[ -/]*[@-~]")
 _CONTROL_CHAR_RE = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]")

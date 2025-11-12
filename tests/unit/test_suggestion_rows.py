@@ -1,6 +1,6 @@
 import copy
 
-from cad_quoter.ui.suggestions import build_suggestion_rows, iter_suggestion_rows
+from cad_quoter.app.suggestions import build_suggestion_rows, iter_suggestion_rows
 from cad_quoter.domain import QuoteState
 
 
