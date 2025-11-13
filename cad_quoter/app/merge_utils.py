@@ -12,7 +12,7 @@ from cad_quoter.domain import (
     canonicalize_pass_through_map,
     coerce_bounds,
 )
-from cad_quoter.domain_models.values import to_float
+from cad_quoter.domain.values import to_float
 from cad_quoter.app.guardrails import (
     enforce_finish_pass_guardrail,
     enforce_process_floor_guardrails,

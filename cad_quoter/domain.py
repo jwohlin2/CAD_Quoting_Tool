@@ -7,8 +7,8 @@ from collections.abc import Mapping as _MappingABC
 from typing import Any, Callable, Mapping, TYPE_CHECKING, cast
 
 from cad_quoter.config import logger
-from cad_quoter.domain_models import QuoteState
-from cad_quoter.domain_models.values import to_float
+from cad_quoter.domain import QuoteState
+from cad_quoter.domain.values import to_float
 from cad_quoter.llm_suggest import build_suggest_payload as _build_suggest_payload
 from cad_quoter.llm_overrides import (
     LLM_BOUND_DEFAULTS,

@@ -4,7 +4,7 @@ from typing import Any
 
 import pytest
 
-from cad_quoter.speeds_feeds import (
+from cad_quoter.pricing.speeds_feeds_init import (
     coerce_table_to_records,
     material_label_from_records,
     normalize_operation,

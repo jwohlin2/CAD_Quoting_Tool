@@ -16,16 +16,16 @@ except Exception:  # pragma: no cover - fallback when pandas is unavailable
 
 from cad_quoter.resources.loading import load_json
 from cad_quoter.utils.machining import _jsonify_debug_value
-from cad_quoter.domain_models import MATERIAL_DISPLAY_BY_KEY, normalize_material_key
-from cad_quoter.domain_models import coerce_float_or_none as _coerce_float_or_none
-from cad_quoter.domain_models.values import to_float
-from cad_quoter.estimators.base import SpeedsFeedsUnavailableError
+from cad_quoter.domain import MATERIAL_DISPLAY_BY_KEY, normalize_material_key
+from cad_quoter.domain import coerce_float_or_none as _coerce_float_or_none
+from cad_quoter.domain.values import to_float
+from cad_quoter.pricing.estimators_base import SpeedsFeedsUnavailableError
 from cad_quoter.pricing import time_estimator as _time_estimator
 from cad_quoter.pricing.speeds_feeds_selector import (
     pick_speeds_row as _pick_speeds_row,
     unit_hp_cap as _unit_hp_cap,
 )
-from cad_quoter.speeds_feeds import (
+from cad_quoter.pricing.speeds_feeds_init import (
     coerce_table_to_records as _coerce_table_to_records,
     material_label_from_records as _material_label_from_records,
     select_group_rows as _select_group_rows,

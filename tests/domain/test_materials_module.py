@@ -1,4 +1,4 @@
-from cad_quoter.domain_models import (
+from cad_quoter.domain import (
     DEFAULT_MATERIAL_DISPLAY,
     DEFAULT_MATERIAL_KEY,
     MATERIAL_DISPLAY_BY_KEY,

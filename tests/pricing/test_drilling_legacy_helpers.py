@@ -2,8 +2,8 @@ from __future__ import annotations
 
 from typing import Any
 
-from cad_quoter.domain_models import normalize_material_key
-from cad_quoter.estimators import drilling_legacy
+from cad_quoter.domain import normalize_material_key
+from cad_quoter.pricing import estimators_drilling_legacy
 
 
 def _make_table(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:

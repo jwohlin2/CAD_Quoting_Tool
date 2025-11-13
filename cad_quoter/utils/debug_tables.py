@@ -5,7 +5,7 @@ from typing import Any, Mapping as _MappingABC, Sequence
 
 from cad_quoter.utils.render_utils import fmt_hours, fmt_range
 
-from cad_quoter.domain_models import coerce_float_or_none as _coerce_float_or_none
+from cad_quoter.domain import coerce_float_or_none as _coerce_float_or_none
 
 
 def _jsonify_debug_value(value: Any, depth: int = 0, max_depth: int = 6) -> Any:

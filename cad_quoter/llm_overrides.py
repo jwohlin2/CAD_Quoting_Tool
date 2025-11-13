@@ -10,7 +10,7 @@ from pathlib import Path
 from types import MappingProxyType
 from typing import Any, Mapping
 
-from cad_quoter.domain_models import coerce_float_or_none as _coerce_float_or_none
+from cad_quoter.domain import coerce_float_or_none as _coerce_float_or_none
 from cad_quoter.llm import LLMClient, parse_llm_json
 from cad_quoter.llm.sanitizers import (
     LLM_ADDER_MAX,

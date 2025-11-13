@@ -6,7 +6,7 @@ from collections.abc import Iterable, Mapping, Sequence
 import re
 from typing import Any, Mapping as MappingType
 
-from cad_quoter.domain_models import normalize_material_key as _normalize_material_key
+from cad_quoter.domain import normalize_material_key as _normalize_material_key
 
 __all__ = [
     "coerce_table_to_records",

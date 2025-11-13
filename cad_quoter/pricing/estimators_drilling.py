@@ -6,8 +6,8 @@ from typing import Any, Mapping
 
 import pandas as pd
 
-from cad_quoter.estimators.base import EstimatorInput
-from cad_quoter.estimators import drilling_legacy as _legacy
+from cad_quoter.pricing.estimators_base import EstimatorInput
+from cad_quoter.pricing import estimators_drilling_legacy as _legacy
 
 
 def _resolve_speeds_feeds_table(tables: Mapping[str, Any] | None) -> pd.DataFrame | None:

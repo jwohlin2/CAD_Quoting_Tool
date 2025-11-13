@@ -5,7 +5,7 @@ import math
 from collections.abc import Mapping as _MappingABC, Sequence
 from typing import Any, Callable
 
-from cad_quoter.domain_models import coerce_float_or_none as _coerce_float_or_none
+from cad_quoter.domain import coerce_float_or_none as _coerce_float_or_none
 from cad_quoter.utils import coerce_bool as _coerce_bool
 
 LLM_MULTIPLIER_MIN = 0.25

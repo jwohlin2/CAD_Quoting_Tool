@@ -7,7 +7,7 @@ from collections.abc import Iterable, Mapping, Sequence
 from collections.abc import Mapping as _MappingABC
 from typing import Any
 
-from cad_quoter.domain_models import coerce_float_or_none as _coerce_float_or_none
+from cad_quoter.domain import coerce_float_or_none as _coerce_float_or_none
 from cad_quoter.utils.numeric import coerce_positive_float as _coerce_positive_float
 from cad_quoter.utils.scrap import build_drill_groups_from_geometry
 

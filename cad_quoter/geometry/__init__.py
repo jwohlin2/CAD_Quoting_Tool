@@ -1378,3 +1378,7 @@ except Exception:
         _HAS_PYMUPDF = True
     except Exception:
         fitz = None  # allow the rest of the app to import
+
+
+# Import 2D geometry helpers (formerly cad_quoter.geo2d)
+from .geo2d_apply import apply_2d_features_to_variables

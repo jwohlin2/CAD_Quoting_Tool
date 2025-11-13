@@ -5,7 +5,7 @@ import os
 from collections.abc import Mapping, Sequence
 from typing import Any
 
-from cad_quoter.domain_models import coerce_float_or_none as _coerce_float_or_none
+from cad_quoter.domain import coerce_float_or_none as _coerce_float_or_none
 
 __all__ = ["validate_quote_before_pricing"]
 

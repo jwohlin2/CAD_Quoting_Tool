@@ -11,8 +11,8 @@ from importlib import resources
 from pathlib import Path
 from typing import Any
 
-from cad_quoter.domain_models import MATERIAL_DISPLAY_BY_KEY
-from cad_quoter.speeds_feeds import (
+from cad_quoter.domain import MATERIAL_DISPLAY_BY_KEY
+from cad_quoter.pricing.speeds_feeds_init import (
     coerce_table_to_records,
     normalize_operation as _normalize_operation,
     normalize_records as _normalize_records,

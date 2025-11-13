@@ -5,7 +5,7 @@ import math
 
 import pytest
 
-from cad_quoter.domain_models.values import coerce_float_or_none, parse_mixed_fraction
+from cad_quoter.domain.values import coerce_float_or_none, parse_mixed_fraction
 
 
 @pytest.mark.parametrize(

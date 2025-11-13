@@ -10,7 +10,7 @@ from typing import Any
 
 @lru_cache(maxsize=None)
 def _domain_values():
-    from cad_quoter.domain_models import values as _values
+    from cad_quoter.domain import values as _values
 
     return _values
 

@@ -14,7 +14,7 @@ from collections.abc import Mapping as _MappingABC, Sequence
 from typing import Any, Dict, Literal, Mapping, overload
 
 from cad_quoter.utils.scrap import normalize_scrap_pct
-from cad_quoter.domain_models import (
+from cad_quoter.domain import (
     DEFAULT_MATERIAL_KEY,
     MATERIAL_OTHER_KEY,
     coerce_float_or_none as _coerce_float_or_none,

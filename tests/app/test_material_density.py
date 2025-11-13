@@ -5,7 +5,7 @@ import math
 import pytest
 
 from appV5 import _density_for_material, render_quote
-from cad_quoter.domain_models import MATERIAL_DROPDOWN_OPTIONS
+from cad_quoter.domain import MATERIAL_DROPDOWN_OPTIONS
 from cad_quoter.material_density import (
     MATERIAL_DENSITY_G_CC_BY_KEY,
     density_for_material,

@@ -5,7 +5,7 @@ from typing import Any, Mapping
 
 import appV5
 from cad_quoter.app.planner_adapter import resolve_pricing_source_value
-from cad_quoter.domain_models import normalize_material_key
+from cad_quoter.domain import normalize_material_key
 from cad_quoter.pricing import materials as materials_pricing
 from cad_quoter.pricing.speeds_feeds_selector import material_group_for_speeds_feeds
 from cad_quoter.utils.render_utils import QuoteDoc, QuoteDocRecorder

@@ -3,7 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any, Callable, Iterable, Mapping, MutableMapping
 
-from cad_quoter.domain_models.values import safe_float as _safe_float
+from cad_quoter.domain.values import safe_float as _safe_float
 from cad_quoter.pricing.process_cost_renderer import render_process_costs
 from cad_quoter.pricing.planner_render import (
     _canonical_bucket_key,

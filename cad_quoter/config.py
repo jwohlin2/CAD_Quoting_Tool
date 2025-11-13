@@ -156,7 +156,7 @@ def load_named_config(name: str, version: int = DEFAULT_VERSION) -> dict[str, An
 
     return dict(section)
 def _ensure_two_bucket_rates(raw: Mapping[str, Any]) -> dict[str, dict[str, float]]:
-    from cad_quoter.domain_models.values import to_float
+    from cad_quoter.domain.values import to_float
 
     labor_raw = raw.get("labor") if isinstance(raw, Mapping) else None
     machine_raw = raw.get("machine") if isinstance(raw, Mapping) else None

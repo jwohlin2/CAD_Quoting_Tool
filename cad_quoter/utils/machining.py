@@ -20,7 +20,7 @@ from cad_quoter.pricing.feed_math import (
 
 
 def _coerce_float_or_none(value: Any) -> float | None:
-    from cad_quoter.domain_models.values import coerce_float_or_none as _coerce
+    from cad_quoter.domain.values import coerce_float_or_none as _coerce
 
     return _coerce(value)
 
