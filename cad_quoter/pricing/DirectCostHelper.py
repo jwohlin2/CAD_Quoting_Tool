@@ -322,7 +322,7 @@ def get_mcmaster_price(
         >>> price = get_mcmaster_price("2567N11", quantity=1)
         >>> print(f"Price: ${price:.2f}")
     """
-    from mcmaster_api import McMasterAPI, load_env
+    from cad_quoter.vendors.mcmaster_api import McMasterAPI, load_env
 
     try:
         # Load credentials from environment

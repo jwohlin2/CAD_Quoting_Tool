@@ -10,7 +10,7 @@ from dataclasses import dataclass
 from typing import Dict, Iterable, List, Optional, Tuple
 
 from cad_quoter.resources import default_catalog_csv
-from mcmaster_api import McMasterAPI, load_env
+from .mcmaster_api import McMasterAPI, load_env
 
 __all__ = [
     "StockItem",
