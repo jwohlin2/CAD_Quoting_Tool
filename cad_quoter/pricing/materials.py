@@ -396,7 +396,7 @@ def _usd_per_lb(value: Any, unit_hint: Any | None = None) -> float | None:
 
 
 try:  # Optional dependency: McMaster mutual-TLS API client
-    from mcmaster_api import McMasterAPI, load_env as _mcm_load_env  # type: ignore
+    from cad_quoter.vendors.mcmaster_api import McMasterAPI, load_env as _mcm_load_env  # type: ignore
 except Exception:  # pragma: no cover - optional dependency / environment specific
     McMasterAPI = None  # type: ignore[assignment]
     _mcm_load_env = None  # type: ignore[assignment]

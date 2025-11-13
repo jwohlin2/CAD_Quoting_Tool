@@ -175,8 +175,8 @@ payload.
 
 ## McMaster-Carr API client (official)
 
-The repository includes `mcmaster_api.py`, a simple CLI that authenticates to
-McMaster-Carr’s official API using mutual TLS (client PFX certificate) and
+The repository includes `cad_quoter.vendors.mcmaster_api`, a simple CLI that authenticates to
+McMaster-Carr's official API using mutual TLS (client PFX certificate) and
 prints price tiers for a given part number.
 
 The quoting helpers under `cad_quoter.vendors.mcmaster_stock` consume the same
@@ -205,7 +205,7 @@ MCMASTER_PFX_PASS=optional_pfx_password
 Run:
 
 ```
-python mcmaster_api.py
+python -m cad_quoter.vendors.mcmaster_api
 ```
 
 You will be prompted for any missing values and for a part number (e.g.,
