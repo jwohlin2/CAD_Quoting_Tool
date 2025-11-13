@@ -4,7 +4,7 @@ import pytest
 
 
 @pytest.fixture(autouse=True)
-def reload_appv5(monkeypatch):
+def reload_appv7(monkeypatch):
     geometry = importlib.import_module("cad_quoter.geometry")
     if not hasattr(geometry, "contours_from_polylines"):
         monkeypatch.setattr(
@@ -14,20 +14,20 @@ def reload_appv5(monkeypatch):
             raising=False,
         )
 
-    module = importlib.import_module("appV5")
+    module = importlib.import_module("AppV7")
     yield module
     importlib.reload(module)
 
 
-def test_resolve_planner_defaults_to_planner(reload_appv5):
-    module = reload_appv5
+def test_resolve_planner_defaults_to_planner(reload_appv7):
+    module = reload_appv7
     used, mode = module.resolve_planner(None, None)
     assert used is False
     assert mode == "planner"
 
 
-def test_resolve_planner_handles_planner_mode_signal(reload_appv5):
-    module = reload_appv5
+def test_resolve_planner_handles_planner_mode_signal(reload_appv7):
+    module = reload_appv7
     used, mode = module.resolve_planner(
         {"PlannerMode": "planner"},
         {"totals_present": True},
@@ -36,8 +36,8 @@ def test_resolve_planner_handles_planner_mode_signal(reload_appv5):
     assert mode == "planner"
 
 
-def test_resolve_planner_legacy_mode_requires_signals(reload_appv5):
-    module = reload_appv5
+def test_resolve_planner_legacy_mode_requires_signals(reload_appv7):
+    module = reload_appv7
     used, mode = module.resolve_planner(
         {"PlannerMode": "legacy"},
         {"recognized_line_items": 0},
@@ -46,8 +46,8 @@ def test_resolve_planner_legacy_mode_requires_signals(reload_appv5):
     assert mode == "legacy"
 
 
-def test_resolve_planner_legacy_mode_recognized_items(reload_appv5):
-    module = reload_appv5
+def test_resolve_planner_legacy_mode_recognized_items(reload_appv7):
+    module = reload_appv7
     used, mode = module.resolve_planner(
         {"PlannerMode": "legacy"},
         {"recognized_line_items": "3"},
@@ -56,8 +56,8 @@ def test_resolve_planner_legacy_mode_recognized_items(reload_appv5):
     assert mode == "legacy"
 
 
-def test_resolve_planner_invalid_mode_falls_back(reload_appv5):
-    module = reload_appv5
+def test_resolve_planner_invalid_mode_falls_back(reload_appv7):
+    module = reload_appv7
     used, mode = module.resolve_planner(
         {"PlannerMode": "   "},
         {"pricing_result": {"totals": {}}},
@@ -66,8 +66,8 @@ def test_resolve_planner_invalid_mode_falls_back(reload_appv5):
     assert mode == "planner"
 
 
-def test_resolve_planner_estimator_mode_overrides_signals(reload_appv5):
-    module = reload_appv5
+def test_resolve_planner_estimator_mode_overrides_signals(reload_appv7):
+    module = reload_appv7
 
     used, mode = module.resolve_planner(
         {"PlannerMode": "estimator"},
@@ -78,14 +78,14 @@ def test_resolve_planner_estimator_mode_overrides_signals(reload_appv5):
     assert mode == "estimator"
 
 
-def test_no_internal_resolve_helpers_exposed(reload_appv5):
-    module = reload_appv5
+def test_no_internal_resolve_helpers_exposed(reload_appv7):
+    module = reload_appv7
     assert not hasattr(module, "_resolve_planner_mode")
     assert not hasattr(module, "_resolve_planner_usage")
 
 
-def test_resolve_planner_line_items_force_usage(reload_appv5):
-    module = reload_appv5
+def test_resolve_planner_line_items_force_usage(reload_appv7):
+    module = reload_appv7
     used, mode = module.resolve_planner(
         {"PlannerMode": "auto"},
         {"line_items": [{"op": "test"}]},
@@ -94,8 +94,8 @@ def test_resolve_planner_line_items_force_usage(reload_appv5):
     assert mode == "auto"
 
 
-def test_count_recognized_ops_handles_various_entries(reload_appv5):
-    module = reload_appv5
+def test_count_recognized_ops_handles_various_entries(reload_appv7):
+    module = reload_appv7
     assert module._count_recognized_ops(None) == 0
     assert module._count_recognized_ops({"ops": None}) == 0
 

@@ -1,4 +1,4 @@
-"""Helper utilities for optional LLM integrations used by ``appV5``.
+"""Helper utilities for optional LLM integrations used by the application.
 
 This module centralizes the defensive imports and compatibility aliases that
 keep the GUI functional when the optional ``cad_quoter.llm`` package is not
@@ -14,8 +14,7 @@ from typing import Any, Callable, Dict
 
 from cad_quoter.app import runtime as _runtime
 
-# Runtime helpers that callers historically imported from ``appV5``.  Expose
-# them here so the large UI module can stay focused on presentation logic.
+# Runtime helpers exposed for the UI module to keep presentation logic clean.
 ensure_runtime_dependencies = _runtime.ensure_runtime_dependencies
 find_default_qwen_model = _runtime.find_default_qwen_model
 load_qwen_vl = _runtime.load_qwen_vl

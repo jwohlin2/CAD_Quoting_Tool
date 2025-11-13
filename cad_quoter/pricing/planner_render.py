@@ -36,7 +36,7 @@ from cad_quoter.app.quote_services import QuoteConfiguration
 PROGRAMMING_PER_PART_LABEL = "Programming (per part)"
 PROGRAMMING_AMORTIZED_LABEL = "Programming (amortized)"
 
-# Heuristic fallbacks mirrored from appV5 for spot drill and jig grind minutes.
+# Heuristic fallbacks for spot drill and jig grind minutes.
 SPOT_DRILL_MIN_PER_SIDE_MIN = 0.1
 JIG_GRIND_MIN_PER_FEATURE = 15.0
 
