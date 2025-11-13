@@ -11,8 +11,9 @@ import sys
 from pathlib import Path
 import math
 
-# Add the cad_quoter module to path
-sys.path.insert(0, str(Path(__file__).parent))
+# Add the repo root to path
+repo_root = Path(__file__).resolve().parent.parent.parent
+sys.path.insert(0, str(repo_root))
 
 from cad_quoter.planning.process_planner import (
     extract_dimensions_from_cad,

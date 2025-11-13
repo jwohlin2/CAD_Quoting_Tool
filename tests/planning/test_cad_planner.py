@@ -17,10 +17,10 @@ import sys
 import json
 from pathlib import Path
 
-# Add cad_quoter to path
-cad_quoter_dir = Path(__file__).resolve().parent
-if str(cad_quoter_dir) not in sys.path:
-    sys.path.insert(0, str(cad_quoter_dir))
+# Add repo root to path
+repo_root = Path(__file__).resolve().parent.parent.parent
+if str(repo_root) not in sys.path:
+    sys.path.insert(0, str(repo_root))
 
 from cad_quoter.planning.process_planner import plan_from_cad_file
 

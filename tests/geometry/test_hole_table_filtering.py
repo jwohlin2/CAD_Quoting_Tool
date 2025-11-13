@@ -5,8 +5,9 @@ Test script to verify hole table filtering in paddle_dims_extractor.py
 import sys
 from pathlib import Path
 
-# Add tools directory to path
-tools_dir = Path(__file__).parent / "tools"
+# Add tools directory to path (tools is in repo root)
+repo_root = Path(__file__).resolve().parent.parent.parent
+tools_dir = repo_root / "tools"
 sys.path.insert(0, str(tools_dir))
 
 from paddle_dims_extractor import PaddleOCRDimensionExtractor, DrawingRenderer

@@ -7,8 +7,9 @@ This demonstrates calculating the dollar value of scrap material.
 import sys
 from pathlib import Path
 
-# Add the cad_quoter module to path
-sys.path.insert(0, str(Path(__file__).parent))
+# Add the repo root to path
+repo_root = Path(__file__).resolve().parent.parent.parent
+sys.path.insert(0, str(repo_root))
 
 from cad_quoter.pricing.DirectCostHelper import (
     calculate_total_scrap_with_value,
