@@ -8,7 +8,7 @@ from cad_quoter.planning import plan_from_cad_file
 from cad_quoter.pricing.DirectCostHelper import extract_part_info_from_cad
 
 
-CAD_PATH = Path("Cad Files/301_redacted.dxf")
+CAD_PATH = Path("tests/fixtures/cad_files/301_redacted.dxf")
 
 
 @pytest.mark.skipif(not CAD_PATH.exists(), reason="Test CAD file not available")

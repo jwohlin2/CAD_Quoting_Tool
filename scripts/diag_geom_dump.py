@@ -1,4 +1,4 @@
-# tools/diag_geom_dump.py
+# scripts/diag_geom_dump.py
 import csv, json, re, sys, math
 from pathlib import Path
 from collections import Counter, defaultdict

@@ -20,10 +20,10 @@ for op in plan["ops"]:
 
 ```bash
 # With PaddleOCR dimensions
-python test_cad_planner.py "Cad Files/301.dxf"
+python test_cad_planner.py "tests/fixtures/cad_files/301_redacted.dxf"
 
 # Without PaddleOCR (faster, but no dimensions)
-python test_cad_planner.py "Cad Files/301.dxf" --no-ocr
+python test_cad_planner.py "tests/fixtures/cad_files/301_redacted.dxf" --no-ocr
 ```
 
 ## What It Does

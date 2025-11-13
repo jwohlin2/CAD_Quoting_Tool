@@ -132,7 +132,7 @@ def test_table_authoritative_no_pilot_add() -> None:
 def test_text_dumper_smoke(tmp_path: Path) -> None:
     pytest.importorskip("ezdxf")
 
-    sample_path = Path(__file__).resolve().parents[1] / "Cad Files" / "zeus1.dxf"
+    sample_path = Path(__file__).resolve().parents[1] / "tests" / "fixtures" / "cad_files" / "zeus1.dxf"
     if not sample_path.exists():
         pytest.skip("Sample DXF is not available")
 

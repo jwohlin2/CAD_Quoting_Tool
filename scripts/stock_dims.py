@@ -169,8 +169,8 @@ def read_texts_from_jsonl(p: Path) -> List[str]:
 def main(argv: List[str]) -> int:
     """
     Usage:
-        python tools/stock_dims.py --csv path/to/dxf_text_dump.csv
-        python tools/stock_dims.py --jsonl path/to/dxf_text_dump.jsonl
+        python scripts/stock_dims.py --csv path/to/dxf_text_dump.csv
+        python scripts/stock_dims.py --jsonl path/to/dxf_text_dump.jsonl
     Emits:
         - prints JSON: {"length_in": L, "width_in": W, "thickness_in": T}
         - writes stock_dims.json next to the input file

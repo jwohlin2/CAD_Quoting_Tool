@@ -212,7 +212,7 @@ def _split_descriptions(body_chunks: List[str], diam_list: List[str]) -> List[st
     return descs
 
 
-DEFAULT_SAMPLE_PATH = REPO_ROOT / "Cad Files" / "301_redacted.dxf"
+DEFAULT_SAMPLE_PATH = REPO_ROOT / "tests" / "fixtures" / "cad_files" / "301_redacted.dxf"
 
 
 def extract_hole_table_from_file(file_path: str | Path) -> List[dict]:

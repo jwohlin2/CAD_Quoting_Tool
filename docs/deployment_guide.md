@@ -1,19 +1,19 @@
 # Deployment Guide
 
-This document walks through moving the CAD Quoting Tool (`appV5.py`) to another
+This document walks through moving the CAD Quoting Tool (`AppV7.py`) to another
 workstation or air-gapped environment.
 
 ## 1. Collect the project assets
 
 On the source machine:
 
-1. Ensure the entire repository is up-to-date, including the `Cad Files/`
+1. Ensure the entire repository is up-to-date, including the `tests/fixtures/cad_files/`
 directory and supporting spreadsheets (for example
 `dummy_quote_sheet.xlsx`).
 2. If you use a local Qwen GGUF model, note its location so you can copy it to
 the target host. The application automatically searches for the model in
 `QWEN_GGUF_PATH`, `models/`, and the Windows-specific path documented in the
-source file.【F:appV5.py†L6-L15】
+source file.
 3. Optional vendor data such as `materials_backup.csv` or `vendor_prices.csv`
 should travel with the deployment if you rely on them for pricing fallbacks.
 
@@ -71,26 +71,26 @@ Before handing the build over to end users, run the following checks inside the
 virtual environment:
 
 ```bash
-python appV5.py --print-env
-python appV5.py --no-gui
+python AppV7.py --print-env
+python AppV7.py --no-gui
 ```
 
 The `--print-env` command prints a redacted JSON summary of the active
 configuration, while `--no-gui` exercises pricing and geometry subsystems
 without launching the Tkinter interface. Both options are built into the entry
-point for headless smoke testing.【F:appV5.py†L13566-L13599】
+point for headless smoke testing.
 
 ## 6. Launch the application
 
 Once validation passes, launch the GUI with:
 
 ```bash
-python appV5.py
+python AppV7.py
 ```
 
 If required dependencies are missing, the start-up checks will raise descriptive
 errors that point to the missing package, prompting you to adjust the
-environment.【F:appV5.py†L62-L79】
+environment.
 
 ## 7. Optional integrations
 
@@ -110,7 +110,7 @@ environment.【F:appV5.py†L62-L79】
   or include a `requirements.txt` snapshot and this guide for reproducible setup.
 * Document which optional integrations are enabled in your distribution so that
   operators know which environment variables or API keys must be provided.
-* Capture the output of `python appV5.py --print-env` as part of your deployment
+* Capture the output of `python AppV7.py --print-env` as part of your deployment
   verification record.
 
 * Confirm any auxiliary scripts or notebooks import helpers directly from the
