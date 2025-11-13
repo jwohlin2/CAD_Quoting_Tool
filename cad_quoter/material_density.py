@@ -7,6 +7,13 @@ from typing import Dict
 
 from cad_quoter.resources.loading import load_json
 
+# Import MaterialMapper for centralized material handling
+try:
+    from cad_quoter.pricing.MaterialMapper import material_mapper
+    _HAS_MATERIAL_MAPPER = True
+except ImportError:
+    _HAS_MATERIAL_MAPPER = False
+
 
 LB_PER_IN3_PER_GCC = float(
     # 1 in = 2.54 cm (exact) and 1 lb = 453.59237 g (exact).
@@ -123,7 +130,7 @@ for alias, density in _ADDITIONAL_DENSITY_ALIASES.items():
     MATERIAL_DENSITY_G_CC_BY_KEYWORD.setdefault(key, float(density))
 
 
-DEFAULT_MATERIAL_DENSITY_G_CC = MATERIAL_DENSITY_G_CC_BY_KEY.get("aluminum", 7.85)
+DEFAULT_MATERIAL_DENSITY_G_CC = 2.7  # Aluminum density in g/cm³ (fixed from incorrect 7.85 steel fallback)
 
 
 def density_for_material(material: object | None, default: float | None = None) -> float:
@@ -134,6 +141,13 @@ def density_for_material(material: object | None, default: float | None = None) 
         if default is None:
             return DEFAULT_MATERIAL_DENSITY_G_CC
         return float(default)
+
+    # Try to get canonical material from MaterialMapper first
+    if _HAS_MATERIAL_MAPPER:
+        canonical = material_mapper.get_canonical_material(raw)
+        if canonical and canonical != "GENERIC":
+            # Use canonical material for lookup
+            raw = canonical
 
     normalized = normalize_material_key(raw)
     collapsed = normalized.replace(" ", "")

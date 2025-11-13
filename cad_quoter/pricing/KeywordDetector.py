@@ -5,6 +5,9 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import List, Dict, Set, Optional, Any
 
+# Import MaterialMapper for material detection
+from cad_quoter.pricing.MaterialMapper import material_mapper
+
 
 @dataclass
 class KeywordMatch:
@@ -124,14 +127,14 @@ class KeywordDetector:
         with open(csv_path, 'r', encoding='utf-8') as f:
             reader = csv.DictReader(f)
             for row in reader:
-                input_label = row['input_label'].strip()
+                input_term = row['input_term'].strip()
                 canonical = row['canonical_material'].strip()
 
                 # Add to keyword list
-                material_keywords.append(input_label)
+                material_keywords.append(input_term)
 
                 # Map keyword to canonical name (case-insensitive key)
-                self.material_mapping[input_label.upper()] = canonical
+                self.material_mapping[input_term.upper()] = canonical
 
         # Add all materials to MATERIAL category
         self.add_keywords("MATERIAL", material_keywords)
@@ -262,9 +265,11 @@ def detect_material_in_cad(
     """
     Detect material from CAD file text, defaulting to GENERIC if not found.
 
+    Uses MaterialMapper for centralized material mapping.
+
     Args:
         cad_file_path: Path to CAD file (DXF/DWG)
-        material_csv_path: Path to material_map.csv (defaults to standard location)
+        material_csv_path: Path to material_map.csv (deprecated, uses MaterialMapper)
         default_material: Material to return if none found (default: "GENERIC")
 
     Returns:
@@ -275,25 +280,22 @@ def detect_material_in_cad(
         >>> print(f"Material: {material}")
         Material: GENERIC
     """
-    # Use default material_map.csv location if not specified
-    if material_csv_path is None:
-        import os
-        script_dir = Path(__file__).parent
-        material_csv_path = script_dir / "resources" / "material_map.csv"
+    # Extract text from CAD file
+    from cad_quoter.planning import extract_all_text_from_cad
+    text_list = extract_all_text_from_cad(cad_file_path)
 
-    # Set up detector with materials from CSV
-    detector = KeywordDetector()
-    detector.load_materials_from_csv(material_csv_path)
+    # Get all dropdown materials from MaterialMapper to search for
+    material_options = material_mapper.get_dropdown_options()
 
-    # Run detection
-    result = detector.detect_from_cad_file(cad_file_path)
+    # Search for each material in the CAD text
+    for text_entry in text_list:
+        text_upper = text_entry.upper()
+        for material_option in material_options:
+            # Check if material name appears in the text
+            if material_option.upper() in text_upper:
+                # Get canonical material name from MaterialMapper
+                canonical = material_mapper.get_canonical_material(material_option)
+                return canonical
 
-    # Get material matches
-    material_matches = result.get_matches_by_category("MATERIAL")
-
-    if material_matches:
-        # Return the canonical name of the first match
-        return material_matches[0].canonical_material
-    else:
-        # No material found, return default
-        return default_material
+    # No material found, return default
+    return default_material

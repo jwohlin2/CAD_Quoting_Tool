@@ -5,6 +5,9 @@ from pathlib import Path
 from typing import Optional, Dict, Any, Tuple, List
 import os
 
+# Import MaterialMapper for centralized material handling
+from cad_quoter.pricing.MaterialMapper import material_mapper
+
 # ============================================================================
 # DEFAULT MATERIAL FOR TESTING
 # ============================================================================
@@ -218,28 +221,17 @@ def calculate_material_weight(
     return volume_cubic_inches * density_lb_per_cubic_inch
 
 
-# Material density lookup (lb/in³)
-MATERIAL_DENSITIES = {
-    "Aluminum 6061-T6": 0.098,
-    "17-4 PH Stainless": 0.280,
-    "P20 Tool Steel": 0.283,
-    "Carbide": 0.540,
-    "Ceramic": 0.145,
-    "GENERIC": 0.283,  # Default to steel
-}
-
-
 def get_material_density(material: str) -> float:
     """
-    Get material density in lb/in³.
+    Get material density in lb/in³ using the centralized MaterialMapper.
 
     Args:
         material: Material name
 
     Returns:
-        Density in lb/in³
+        Density in lb/in³ (defaults to 0.283 for steel if not found)
     """
-    return MATERIAL_DENSITIES.get(material, MATERIAL_DENSITIES["GENERIC"])
+    return material_mapper.get_density_lb_in3(material)
 
 
 # McMaster-Carr integration functions
@@ -956,23 +948,39 @@ def calculate_scrap_value(
     """
     from cad_quoter.pricing.wieland_scraper import get_scrap_price_per_lb
 
-    # Determine material family from material string
-    material_lower = material.lower()
+    # Get Wieland key (material family) from MaterialMapper
+    wieland_key = material_mapper.get_wieland_key(material)
 
-    if any(kw in material_lower for kw in ["aluminum", "aluminium", "6061", "7075", "2024", "mic6"]):
-        material_family = "aluminum"
-    elif any(kw in material_lower for kw in ["stainless", "304", "316", "17-4", "17 4"]):
-        material_family = "stainless"
-    elif any(kw in material_lower for kw in ["steel", "p20", "a36", "1018", "1045", "tool steel"]):
-        material_family = "steel"
-    elif any(kw in material_lower for kw in ["copper", "cu", "c110"]):
-        material_family = "copper"
-    elif any(kw in material_lower for kw in ["brass", "bronze"]):
-        material_family = "brass"
-    elif any(kw in material_lower for kw in ["titanium", "ti"]):
-        material_family = "titanium"
+    # Map Wieland keys to material families for scrap pricing
+    # Wieland uses: AL, SS, TI, STEEL, COPPER, etc.
+    wieland_to_family = {
+        "AL": "aluminum",
+        "SS": "stainless",
+        "TI": "titanium",
+        "STEEL": "steel",
+        "COPPER": "copper",
+        "BRASS": "brass"
+    }
+
+    if wieland_key:
+        material_family = wieland_to_family.get(wieland_key, "aluminum")
     else:
-        material_family = "aluminum"  # Default
+        # Fallback to keyword-based detection for materials not in mapper
+        material_lower = material.lower()
+        if any(kw in material_lower for kw in ["aluminum", "aluminium", "6061", "7075", "2024", "mic6"]):
+            material_family = "aluminum"
+        elif any(kw in material_lower for kw in ["stainless", "304", "316", "17-4", "17 4"]):
+            material_family = "stainless"
+        elif any(kw in material_lower for kw in ["steel", "p20", "a36", "1018", "1045", "tool steel"]):
+            material_family = "steel"
+        elif any(kw in material_lower for kw in ["copper", "cu", "c110"]):
+            material_family = "copper"
+        elif any(kw in material_lower for kw in ["brass", "bronze"]):
+            material_family = "brass"
+        elif any(kw in material_lower for kw in ["titanium", "ti"]):
+            material_family = "titanium"
+        else:
+            material_family = "aluminum"  # Default
 
     if verbose:
         print(f"Detected material family: {material_family}")
