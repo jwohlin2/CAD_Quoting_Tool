@@ -1,6 +1,6 @@
 # Planner Pricing Migration Guide
 
-This guide documents how to replace the legacy worksheet-based process costing in `appV5.py` with the new planner-powered pricing path. The intent is to give Codex (and future maintainers) a clear recipe for swapping between the two implementations during the transition period.
+This guide documents how to replace the legacy worksheet-based process costing with the new planner-powered pricing path. The intent is to give developers (and future maintainers) a clear recipe for swapping between the two implementations during the transition period.
 
 ## Overview
 
@@ -15,7 +15,7 @@ This guide documents how to replace the legacy worksheet-based process costing i
 
 ## Sample Implementation
 
-Below is a template that can replace the legacy `validate_quote_before_pricing` helper in `appV5.py` (or whichever module is currently accumulating process costs by multiplying hours × rate):
+Below is a template that can be used for the `validate_quote_before_pricing` helper (or whichever module is currently accumulating process costs by multiplying hours × rate):
 
 ```python
 from cad_quoter.pricing.planner import price_with_planner

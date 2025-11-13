@@ -600,7 +600,7 @@ def _resolve_material_unit_price(
 
     resolver = resolve_material_unit_price
     try:
-        app_module = sys.modules.get("appV5")
+        app_module = sys.modules.get("AppV7")
         patched = getattr(app_module, "_resolve_material_unit_price", None) if app_module else None
         if callable(patched):
             resolver = patched  # type: ignore[assignment]

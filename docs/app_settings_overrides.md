@@ -36,7 +36,7 @@ labour rate while leaving every other setting untouched:
 Launch the UI with:
 
 ```bash
-CAD_QUOTER_APP_SETTINGS=/etc/cad_quoter/prod_settings.json python appV5.py
+CAD_QUOTER_APP_SETTINGS=/etc/cad_quoter/prod_settings.json python AppV7.py
 ```
 
 Settings from the override file are merged with the packaged defaults, allowing

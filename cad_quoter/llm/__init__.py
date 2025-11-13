@@ -1404,7 +1404,7 @@ def explain_quote(
     return ""
 
 
-# Helpers imported from appV5 -------------------------------------------------
+# Legacy compatibility helpers -------------------------------------------------
 
 
 def _parse_pct_like(x):

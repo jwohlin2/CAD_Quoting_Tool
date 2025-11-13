@@ -1,4 +1,4 @@
-"""Legacy hole chart parsing helpers used by appV5."""
+"""Legacy hole chart parsing helpers for backward compatibility."""
 
 from __future__ import annotations
 
