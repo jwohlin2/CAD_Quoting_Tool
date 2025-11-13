@@ -533,10 +533,10 @@ def extract_dimensions_from_cad(file_path: str | Path) -> Optional[Tuple[float, 
         import sys
         from pathlib import Path
 
-        # Add tools directory to path if needed
-        tools_dir = Path(__file__).resolve().parent.parent.parent / "tools"
-        if str(tools_dir) not in sys.path:
-            sys.path.insert(0, str(tools_dir))
+        # Add scripts directory to path if needed
+        scripts_dir = Path(__file__).resolve().parent.parent.parent / "scripts"
+        if str(scripts_dir) not in sys.path:
+            sys.path.insert(0, str(scripts_dir))
 
         from paddle_dims_extractor import PaddleOCRDimensionExtractor, DrawingRenderer
         from PIL import Image

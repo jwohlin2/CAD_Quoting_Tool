@@ -1,12 +1,12 @@
 """
 hole_table_adapter.py
 Thin adapter that extracts HOLE-TABLE text from an ezdxf document, then delegates
-to tools.hole_ops to produce structured rows + atomic operations (in-memory).
+to scripts.hole_ops to produce structured rows + atomic operations (in-memory).
 """
 
 from typing import List, Tuple, Dict
 
-from tools.hole_ops import explode_rows_to_operations
+from scripts.hole_ops import explode_rows_to_operations
 
 # Import the same helpers you already use in geo_dump.py to find hole-table chunks.
 # If geo_dump helpers are local-private, paste minimal clones here (recommended),
