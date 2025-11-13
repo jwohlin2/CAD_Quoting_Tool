@@ -31,7 +31,7 @@ export.
    ```
 3. (Optional) Place Qwen GGUF weights in one of the recognised locations:
    * Set `QWEN_GGUF_PATH` and, for vision models, `QWEN_VL_MMPROJ_PATH`.
-   * Or copy the `.gguf` files into `models/` next to `appV5.py`.
+   * Or copy the `.gguf` files into `models/` next to `AppV7.py`.
    * Legacy installs under `D:\CAD_Quoting_Tool\models` continue to be
      auto-discovered.
 
@@ -114,12 +114,11 @@ integration guides for downstream teams.
 
 The quote breakdown includes a "Pass Through" table that exposes supplemental
 line items which are transferred directly to the customer.  Each entry is
-defined in `appV5.py` alongside its descriptive "basis" label.  For example, the
+defined in `AppV7.py` alongside its descriptive "basis" label.  For example, the
 "Outsourced Vendors" row is backed by the `outsourced_costs` aggregate which
 sums any detected heat treat, plating/coating, or passivation values parsed from
 the estimating worksheet.  The label shown in the UI ("Basis: Outside processing
-vendors") comes from the `pass_meta` dictionary declared near line 7,600 of the
-same file.
+vendors") comes from the `pass_meta` dictionary.
 
 When a pass-through field is populated in the workbook, the raw monetary value
 flows into the corresponding row unchanged.  That is why a small entry such as
