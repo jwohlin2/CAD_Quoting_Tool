@@ -1,6 +1,6 @@
 # Deployment Guide
 
-This document walks through moving the CAD Quoting Tool (`appV5.py`) to another
+This document walks through moving the CAD Quoting Tool (`AppV7.py`) to another
 workstation or air-gapped environment.
 
 ## 1. Collect the project assets
@@ -13,7 +13,7 @@ directory and supporting spreadsheets (for example
 2. If you use a local Qwen GGUF model, note its location so you can copy it to
 the target host. The application automatically searches for the model in
 `QWEN_GGUF_PATH`, `models/`, and the Windows-specific path documented in the
-source file.【F:appV5.py†L6-L15】
+source file.
 3. Optional vendor data such as `materials_backup.csv` or `vendor_prices.csv`
 should travel with the deployment if you rely on them for pricing fallbacks.
 
@@ -46,12 +46,12 @@ pip install -r requirements.txt
 The consolidated `requirements.txt` file installs the core runtime libraries
 used by the UI (Tkinter standard lib) and backend subsystems: pandas and
 openpyxl for spreadsheet ingestion, OCC/trimesh/ezdxf for CAD processing, and
-`llama-cpp-python` for the local LLM integration.【F:requirements.txt†L1-L18】
+`llama-cpp-python` for the local LLM integration.
 
 ## 4. Configure runtime variables
 
 The configuration helper exposes the following environment variables. Set them
-per your deployment needs before launching the application.【F:cad_quoter/config.py†L15-L62】【F:cad_quoter/pricing/metals_api.py†L16-L32】
+per your deployment needs before launching the application.
 
 | Variable | Purpose | Typical value |
 | --- | --- | --- |
@@ -71,38 +71,38 @@ Before handing the build over to end users, run the following checks inside the
 virtual environment:
 
 ```bash
-python appV5.py --print-env
-python appV5.py --no-gui
+python AppV7.py --print-env
+python AppV7.py --no-gui
 ```
 
 The `--print-env` command prints a redacted JSON summary of the active
 configuration, while `--no-gui` exercises pricing and geometry subsystems
 without launching the Tkinter interface. Both options are built into the entry
-point for headless smoke testing.【F:appV5.py†L13566-L13599】
+point for headless smoke testing.
 
 ## 6. Launch the application
 
 Once validation passes, launch the GUI with:
 
 ```bash
-python appV5.py
+python AppV7.py
 ```
 
 If required dependencies are missing, the start-up checks will raise descriptive
 errors that point to the missing package, prompting you to adjust the
-environment.【F:appV5.py†L62-L79】
+environment.
 
 ## 7. Optional integrations
 
 * **Metals API** – Provide the `METALS_API_KEY` environment variable to enable
   HTTPS price fetching. Without it, the registry falls back to offline CSV
-  pricing.【F:cad_quoter/pricing/__init__.py†L62-L130】
+  pricing.
 * **DXF/DWG enrichment** – Install `ezdxf` and the ODA File Converter binaries if
   you need automated DWG to DXF conversion. The geometry module exposes helper
-  diagnostics via `geometry.get_import_diagnostics_text()` to confirm availability.【F:cad_quoter/geometry/__init__.py†L19-L38】【F:cad_quoter/geometry/__init__.py†L462-L476】
+  diagnostics via `geometry.get_import_diagnostics_text()` to confirm availability.
 * **LLM suggestions** – Place the Qwen GGUF model alongside the application or
   configure `QWEN_GGUF_PATH`. The llama-cpp wrapper validates the presence of the
-  model file at startup.【F:cad_quoter/llm/__init__.py†L86-L129】
+  model file at startup.
 
 ## 8. Packaging tips
 
@@ -110,7 +110,7 @@ environment.【F:appV5.py†L62-L79】
   or include a `requirements.txt` snapshot and this guide for reproducible setup.
 * Document which optional integrations are enabled in your distribution so that
   operators know which environment variables or API keys must be provided.
-* Capture the output of `python appV5.py --print-env` as part of your deployment
+* Capture the output of `python AppV7.py --print-env` as part of your deployment
   verification record.
 
 * Confirm any auxiliary scripts or notebooks import helpers directly from the

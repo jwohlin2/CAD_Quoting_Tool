@@ -1,7 +1,7 @@
-# CAD Quoting Tool v5 – Security & Deployment Notes
+# CAD Quoting Tool – Security & Deployment Notes
 
 This document summarises the primary integration points and configuration
-surfaces for `appV5.py`.  It is intended to help reviewers quickly understand
+surfaces for `AppV7.py`.  It is intended to help reviewers quickly understand
 what the application touches and how to run it safely in a controlled
 environment.
 
@@ -30,7 +30,7 @@ variables include:
 | `DXF_EXTRUDE_THK_MM` | Overrides the default DXF extrusion thickness. |
 | `METALS_API_KEY` | Enables live metal price lookups via HTTPS. |
 
-Running `python appV5.py --print-env` is the quickest way to confirm the current
+Running `python AppV7.py --print-env` is the quickest way to confirm the current
 configuration prior to review.
 
 ## External communications
@@ -52,7 +52,7 @@ configuration prior to review.
    placement for offline LLM usage.
 3. Audit optional integrations (Metals API, DWG converters) and either supply
    vetted binaries/API credentials or disable the features before packaging.
-4. Encourage operators to run `appV5.py --print-env` and capture the output as
+4. Encourage operators to run `AppV7.py --print-env` and capture the output as
    part of security sign-off.
 
 ## Change log

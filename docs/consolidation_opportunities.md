@@ -1,6 +1,6 @@
 # Consolidation opportunities
 
-This repository still carries several legacy entry points and compatibility layers that duplicate newer, package‑scoped helpers. Consolidating these hotspots would simplify the import graph and reduce the risk of behaviour drift between the GUI (`appV5.py`) and the `cad_quoter` package.
+This repository still carries several legacy entry points and compatibility layers that duplicate newer, package‑scoped helpers. Consolidating these hotspots would simplify the import graph and reduce the risk of behaviour drift between the GUI (`AppV7.py`) and the `cad_quoter` package.
 
 ## Completed cleanups
 
@@ -17,7 +17,5 @@ Planner cost conversion lives alongside the rate metadata in `cad_quoter.pricing
 
 ## Drilling estimator location
 
-- The public drilling estimator shim still delegates to a legacy helper inside `appV5.py`, making it difficult to reuse or test the implementation without the Tkinter app.
-
-Migrating the legacy helper into `cad_quoter.estimators` (or refactoring it to use `cad_quoter.pricing.time_estimator`) would decouple estimators from the GUI monolith and make it easier to test or reuse outside the Tkinter app.
+All drilling estimator functionality has been migrated into `cad_quoter.estimators` and `cad_quoter.pricing.time_estimator`, decoupling estimators from the GUI and making them easier to test and reuse.
 
