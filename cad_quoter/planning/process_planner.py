@@ -1468,7 +1468,37 @@ def estimate_machine_hours_from_plan(
             # Spot drilling - quick operation
             time_breakdown['drilling'] += 2  # 2 minutes estimate
 
-        # Milling operations
+        # ---------- Punch Planner Operations (MUST be before general handlers) ----------
+        # Wire EDM profile for punch outline (before 'profile' check at line 1477)
+        elif op_type == 'wire_edm_profile':
+            from cad_quoter.pricing.time_estimator import estimate_wire_edm_minutes
+            material_group = op.get('material_group', '')
+            minutes = estimate_wire_edm_minutes(op, material, material_group)
+            time_breakdown['edm'] += minutes
+
+        # Face grinding (top/bottom surfaces)
+        elif op_type == 'grind_faces':
+            from cad_quoter.pricing.time_estimator import estimate_face_grind_minutes
+            material_group = op.get('material_group', '')
+            stock_total = op.get('stock_removed_total', 0.006)  # Conservative default
+            minutes = estimate_face_grind_minutes(L, W, stock_total, material, material_group, faces=2)
+            time_breakdown['grinding'] += minutes
+
+        # OD grinding for round pierce punches
+        elif op_type in ('grind_length', 'grind_od', 'od_grind_rough', 'od_grind_finish'):
+            from cad_quoter.pricing.time_estimator import estimate_od_grind_minutes
+            material_group = op.get('material_group', '')
+            meta = plan.get('meta', {})
+            minutes = estimate_od_grind_minutes(meta, material, material_group)
+            time_breakdown['grinding'] += minutes
+
+        # Optional: rough milling/turning operations (placeholder)
+        elif op_type in ('mill_rough_profile', 'mill_turn_rough', 'turn_rough'):
+            # Placeholder - can be expanded later with actual milling time estimates
+            # For now, use a simple conservative estimate
+            time_breakdown['milling'] += 5  # 5 minutes placeholder
+
+        # Milling operations (general handlers - must come after punch-specific ones)
         elif 'face_mill' in op_type or 'mill_face' in op_type:
             # Face milling
             area = L * W if (L and W) else 10  # Default 10 sq in
@@ -1478,7 +1508,7 @@ def estimate_machine_hours_from_plan(
             perimeter = 2 * ((L or 4) + (W or 3))
             time_breakdown['milling'] += calculate_milling_time(perimeter, 0.1, T or 0.5, material, "Endmill_Profile")
 
-        # EDM operations
+        # EDM operations (general handler - must come after specific punch handlers)
         elif 'wedm' in op_type or 'wire_edm' in op_type:
             num_windows = op.get('windows', 1)
             skims = op.get('skims', 0)
@@ -1624,7 +1654,7 @@ def estimate_machine_hours_from_plan(
                 'time_minutes': minutes
             })
 
-        # Grinding operations
+        # Grinding operations (general handler - punch-specific handlers are earlier)
         elif 'grind' in op_type or 'jig_grind' in op_type:
             # Grinding is slow and precise
             if 'bore' in op_type:

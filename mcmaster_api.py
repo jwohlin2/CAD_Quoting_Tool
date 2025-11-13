@@ -188,7 +188,53 @@ def print_tiers(tiers: List[Dict[str, Any]]) -> None:
             amt = f"{amt:.4f}"
         print(f"\nUnit price at qty=1: {amt} {one_tier['UnitOfMeasure']}")
 
+
+def prompt_volume(label: str) -> float:
+    """
+    Prompt for length, width, and thickness in inches and return volume in cubic inches.
+
+    Args:
+        label: Description for what volume is being prompted (e.g., "stock piece", "your part")
+
+    Returns:
+        Volume in cubic inches (length × width × thickness), or 0.0 if invalid input
+    """
+    print(f"\nEnter dimensions for {label} (in inches):")
+
+    try:
+        length_str = input("  Length (in): ").strip()
+        if not length_str:
+            return 0.0
+        length = float(length_str)
+
+        width_str = input("  Width (in): ").strip()
+        if not width_str:
+            return 0.0
+        width = float(width_str)
+
+        thickness_str = input("  Thickness (in): ").strip()
+        if not thickness_str:
+            return 0.0
+        thickness = float(thickness_str)
+
+        if length <= 0 or width <= 0 or thickness <= 0:
+            return 0.0
+
+        volume = length * width * thickness
+        print(f"  → Volume: {volume:.4f} in³")
+        return volume
+
+    except ValueError:
+        print("  Invalid input. Skipping volume calculation.")
+        return 0.0
+
 def main():
+    from cad_quoter.pricing.mcmaster_helpers import (
+        get_qty_one_tier,
+        compute_price_per_cubic_inch,
+        estimate_price_for_part_from_volume,
+    )
+
     env = load_env()
 
     api = McMasterAPI(
@@ -209,6 +255,37 @@ def main():
         api.login()
         tiers = api.get_price_tiers(part)
         print_tiers(tiers)
+
+        # Volume-based fallback if no qty-1 tier available
+        one_tier = get_qty_one_tier(tiers)
+        if one_tier is None and tiers:
+            print("\n" + "="*60)
+            print("No qty=1 unit price available.")
+            print("You can approximate using $/cubic inch.")
+            print("="*60)
+
+            stock_volume = prompt_volume("the McMaster stock piece")
+            if stock_volume > 0:
+                part_volume = prompt_volume("your machined part")
+
+                if part_volume > 0:
+                    price_per_cuin = compute_price_per_cubic_inch(tiers, stock_volume)
+                    estimated_price = estimate_price_for_part_from_volume(
+                        tiers, stock_volume, part_volume
+                    )
+
+                    if price_per_cuin is not None and estimated_price is not None:
+                        print(f"\n{'─'*60}")
+                        print(f"Approx price per cubic inch: ${price_per_cuin:.4f}/in³")
+                        print(f"Approx price for your part:  ${estimated_price:.2f}")
+                        print(f"{'─'*60}")
+                    else:
+                        print("\nCould not compute volume-based estimate.")
+                else:
+                    print("\nSkipping volume-based estimate (no part volume entered).")
+            else:
+                print("\nSkipping volume-based estimate (no stock volume entered).")
+
     except requests.HTTPError as e:
         # Surface helpful server responses
         try:

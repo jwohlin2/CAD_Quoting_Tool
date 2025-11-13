@@ -191,10 +191,6 @@ All 8 unit tests passing:
    - Mixed metals
    - Recycling rates
 
-3. **Blended Strategy**: Use both with weighting
-   - Average for common metals
-   - Wieland for new material
-   - SMB for scrap/recycled
 
 ## Performance Metrics
 

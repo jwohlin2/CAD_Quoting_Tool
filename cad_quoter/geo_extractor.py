@@ -77,10 +77,32 @@ def open_doc(path: Path):
         raise FileNotFoundError(path)
 
     def _readfile(p: Path):
-        """Return doc using whichever ezdxf interface is available."""
+        """Return doc using whichever ezdxf interface is available.
+
+        Tries normal readfile first, then falls back to recover.readfile
+        if the DXF file has structure errors (e.g., missing ENDSEC tags).
+        """
         reader = getattr(ezdxf, "readfile", None)
         if callable(reader):
-            return reader(str(p))
+            try:
+                return reader(str(p))
+            except Exception as e:
+                # Try recover mode for malformed DXF files
+                error_name = type(e).__name__
+                if "Structure" in error_name or "ENDSEC" in str(e):
+                    print(f"[INFO] DXF structure error, trying recovery mode: {e}")
+                    recover = getattr(ezdxf, "recover", None)
+                    if recover and hasattr(recover, "readfile"):
+                        try:
+                            doc, auditor = recover.readfile(str(p))
+                            if auditor and auditor.has_errors:
+                                print(f"[WARN] DXF recovered with {len(auditor.errors)} errors")
+                            return doc
+                        except Exception as recover_err:
+                            print(f"[ERROR] Recovery also failed: {recover_err}")
+                            raise e  # Raise original error
+                raise  # Re-raise if not a structure error
+
         require_fn = getattr(ezdxf, "require_ezdxf", None)
         if callable(require_fn):
             ez_mod = require_fn("DXF reading")

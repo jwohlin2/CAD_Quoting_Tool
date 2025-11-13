@@ -358,6 +358,168 @@ def get_mcmaster_price(
         return None
 
 
+def estimate_price_from_reference_part(
+    target_length: float,
+    target_width: float,
+    target_thickness: float,
+    material: str,
+    catalog_csv_path: Optional[str] = None,
+    verbose: bool = False
+) -> Optional[float]:
+    """
+    Estimate price for a large part using volume-based pricing from a smaller reference part.
+
+    When McMaster doesn't have the exact size or qty-1 pricing, this function finds
+    a smaller reference part of the same material and thickness, gets its pricing,
+    and estimates the cost based on material volume.
+
+    Args:
+        target_length: Desired length in inches
+        target_width: Desired width in inches
+        target_thickness: Desired thickness in inches
+        material: Material name (e.g., "aluminum MIC6")
+        catalog_csv_path: Optional path to catalog CSV
+        verbose: Print estimation details
+
+    Returns:
+        Estimated price as float, or None if unable to estimate
+
+    Example:
+        >>> # For a 36" x 36" x 6" piece with no direct pricing
+        >>> price = estimate_price_from_reference_part(36, 36, 6, "aluminum MIC6", verbose=True)
+        >>> print(f"Estimated price: ${price:.2f}")
+    """
+    from cad_quoter.pricing.mcmaster_helpers import (
+        load_mcmaster_catalog_rows,
+        estimate_price_for_part_from_volume
+    )
+    from cad_quoter.resources import default_catalog_csv
+    from mcmaster_api import McMasterAPI, load_env
+
+    if verbose:
+        print(f"\n[Volume-Based Price Estimation]")
+        print(f"Target: {target_length:.2f} × {target_width:.2f} × {target_thickness:.2f} in")
+        print(f"Material: {material}")
+
+    # Use explicit path if not provided
+    if catalog_csv_path is None:
+        catalog_csv_path = str(default_catalog_csv())
+
+    # Load catalog to find a reference part
+    catalog_rows = load_mcmaster_catalog_rows(catalog_csv_path)
+    if not catalog_rows:
+        if verbose:
+            print("  ERROR: Could not load catalog")
+        return None
+
+    # Find a smaller reference part with the same material and similar thickness
+    # We want a part that has pricing available (smaller parts usually do)
+    material_key = material.strip().lower()
+    target_volume = target_length * target_width * target_thickness
+
+    reference_part = None
+    from cad_quoter.pricing.mcmaster_helpers import _coerce_inches_value
+
+    for row in catalog_rows:
+        # Check material match
+        material_text = str(row.get("material") or row.get("Material") or "").strip().lower()
+        if not material_text:
+            continue
+
+        # Normalize material matching
+        variants = {material_key}
+        if "_" in material_key:
+            variants.add(material_key.replace("_", " "))
+        if " " in material_key:
+            variants.add(material_key.replace(" ", ""))
+        normalised_material = material_text.replace("_", " ")
+        if not any(variant and variant in normalised_material for variant in variants):
+            continue
+
+        # Get dimensions
+        length = _coerce_inches_value(row.get("length_in") or row.get("L_in") or row.get("len_in") or row.get("length"))
+        width = _coerce_inches_value(row.get("width_in") or row.get("W_in") or row.get("wid_in") or row.get("width"))
+        thickness = _coerce_inches_value(row.get("thickness_in") or row.get("T_in") or row.get("thk_in") or row.get("thickness"))
+
+        if not all([length, width, thickness]):
+            continue
+
+        # Check thickness match (within 20% tolerance)
+        if abs(thickness - target_thickness) / target_thickness > 0.2:
+            continue
+
+        # Get part number
+        part_no = str(row.get("mcmaster_part") or row.get("part") or row.get("sku") or "").strip()
+        if not part_no:
+            continue
+
+        # Calculate volume
+        stock_volume = length * width * thickness
+
+        # Prefer smaller parts (more likely to have qty-1 pricing)
+        # But not too small (should be at least 10% of target volume for reasonable accuracy)
+        if stock_volume < target_volume * 0.1:
+            continue
+
+        if reference_part is None or stock_volume < reference_part["volume"]:
+            reference_part = {
+                "part_number": part_no,
+                "length": length,
+                "width": width,
+                "thickness": thickness,
+                "volume": stock_volume
+            }
+
+    if not reference_part:
+        if verbose:
+            print("  ERROR: No suitable reference part found in catalog")
+        return None
+
+    if verbose:
+        print(f"  Reference part: {reference_part['part_number']}")
+        print(f"  Reference size: {reference_part['length']:.2f} × {reference_part['width']:.2f} × {reference_part['thickness']:.2f} in")
+        print(f"  Reference volume: {reference_part['volume']:.2f} in³")
+
+    # Get price tiers for reference part
+    try:
+        env = load_env()
+        api = McMasterAPI(
+            username=env["MCMASTER_USER"],
+            password=env["MCMASTER_PASS"],
+            pfx_path=env["MCMASTER_PFX_PATH"],
+            pfx_password=env["MCMASTER_PFX_PASS"],
+        )
+        api.login()
+        tiers = api.get_price_tiers(reference_part["part_number"])
+
+        if not tiers:
+            if verbose:
+                print("  ERROR: No price tiers available for reference part")
+            return None
+
+        # Estimate price using volume-based calculation
+        estimated_price = estimate_price_for_part_from_volume(
+            tiers=tiers,
+            stock_volume_cuin=reference_part["volume"],
+            part_volume_cuin=target_volume
+        )
+
+        if estimated_price is not None:
+            if verbose:
+                print(f"  Target volume: {target_volume:.2f} in³")
+                print(f"  Estimated price: ${estimated_price:.2f}")
+            return estimated_price
+        else:
+            if verbose:
+                print("  ERROR: Could not compute volume-based estimate")
+            return None
+
+    except Exception as e:
+        if verbose:
+            print(f"  ERROR: Failed to fetch pricing: {e}")
+        return None
+
+
 def get_mcmaster_part_and_price(
     length: float,
     width: float,

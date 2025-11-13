@@ -32,6 +32,10 @@ __all__ = [
     "OverheadParams",
     "ToolParams",
     "estimate_time_min",
+    "estimate_wire_edm_minutes",
+    "estimate_face_grind_minutes",
+    "estimate_od_grind_minutes",
+    "MIN_PER_CUIN_GRIND",
 ]
 
 
@@ -471,6 +475,204 @@ def time_wire_edm(
     passes = max(int(to_num(geom.pass_count_override, 0.0) or 1), 1)
     cut_min = (path_len / max(lcr, 1e-6)) * passes
     return cut_min + noncut_time_min(overhead, passes)
+
+
+# ---------- Punch Planner Estimation Stubs --------------------------------
+# These functions support time estimation for punch manufacturing processes
+# including Wire EDM profiling, face grinding, and OD grinding operations.
+
+MIN_PER_CUIN_GRIND = 3.0  # Global rule for volume-based grinding
+
+
+def _try_float(x: Any, default: float = 0.0) -> float:
+    """Convert value to float with fallback. Handles NaN and inf."""
+    try:
+        v = float(x)
+        # Treat NaN/inf as default
+        if v != v or v == float("inf") or v == float("-inf"):
+            return default
+        return v
+    except Exception:
+        return default
+
+
+def _csv_row(
+    material: str,
+    material_group: str,
+    operation_hint: str = "Generic",
+    *,
+    _get_speeds_feeds_fn: Any = None,
+) -> dict[str, Any]:
+    """Fetch CSV row for material and operation with fallback chain.
+
+    This is a helper that tries material first, then material_group, then GENERIC.
+    The _get_speeds_feeds_fn parameter allows injection for testing/flexibility.
+    """
+    # Import here to avoid circular dependency
+    if _get_speeds_feeds_fn is None:
+        try:
+            from cad_quoter.planning.process_planner import get_speeds_feeds
+            _get_speeds_feeds_fn = get_speeds_feeds
+        except ImportError:
+            return {}
+
+    # Try material first
+    row = _get_speeds_feeds_fn(material=material, operation=operation_hint)
+    if row:
+        return row
+
+    # Try material group
+    if material_group:
+        row = _get_speeds_feeds_fn(material=material_group, operation=operation_hint)
+        if row:
+            return row
+
+    # Fall back to GENERIC
+    row = _get_speeds_feeds_fn(material="GENERIC", operation=operation_hint)
+    return row or {}
+
+
+def _wire_mins_per_in(material: str, material_group: str, thickness_in: float) -> float:
+    """Calculate wire EDM minutes per inch based on material and thickness.
+
+    Uses banded thickness approach with fallback to conservative defaults.
+    """
+    row = _csv_row(material, material_group, operation_hint="Wire_EDM")
+
+    # Try generic wire_mins_per_in column first
+    base = _try_float(row.get("wire_mins_per_in"), default=None)
+    if base is not None and base > 0:
+        return max(0.01, base)
+
+    # Use thickness-based banding
+    if thickness_in <= 0.125:
+        band = "wire_mpi_thin"
+    elif thickness_in <= 0.500:
+        band = "wire_mpi_med"
+    else:
+        band = "wire_mpi_thick"
+
+    return max(0.01, _try_float(row.get(band), default=0.9))
+
+
+def estimate_wire_edm_minutes(
+    op: dict[str, Any],
+    material: str,
+    material_group: str,
+) -> float:
+    """Estimate Wire EDM time for punch profile cutting.
+
+    Args:
+        op: Operation dict containing wire_profile_perimeter_in and thickness_in
+        material: Material name
+        material_group: Material group (ISO group or similar)
+
+    Returns:
+        Estimated minutes for the wire EDM operation
+    """
+    perim = _try_float(op.get("wire_profile_perimeter_in", 0.0))
+    thk = _try_float(op.get("thickness_in", 0.0))
+    mpi = _wire_mins_per_in(material, material_group, thk)
+    return max(0.0, perim * mpi)
+
+
+def _grind_factor(material: str, material_group: str) -> float:
+    """Get material-specific grinding factor with fallback chain.
+
+    Searches for grind_factor, grind_material_factor, or material_factor.
+    Returns 1.0 if not found.
+    """
+    # Try Grinding operation first, then Generic
+    for op_hint in ("Grinding", "Generic"):
+        row = _csv_row(material, material_group, operation_hint=op_hint)
+        for k in ("grind_factor", "grind_material_factor", "material_factor"):
+            val = row.get(k)
+            if val not in (None, ""):
+                try:
+                    f = float(val)
+                    if f > 0:
+                        return f
+                except Exception:
+                    pass
+    return 1.0
+
+
+def estimate_face_grind_minutes(
+    length_in: float,
+    width_in: float,
+    stock_removed_total_in: float,
+    material: str,
+    material_group: str,
+    faces: int = 2,
+) -> float:
+    """Estimate face/surface grinding time based on volume removal.
+
+    Uses the canonical formula: minutes = volume × 3.0 × grind_factor
+
+    Args:
+        length_in: Part length in inches
+        width_in: Part width in inches
+        stock_removed_total_in: Total stock to remove (both faces combined)
+        material: Material name
+        material_group: Material group
+        faces: Number of faces (default 2 for top+bottom pair)
+
+    Returns:
+        Estimated minutes for face grinding
+    """
+    # Calculate volume: faces parameter represents pairs (2 faces = 1 pair)
+    volume_cuin = (length_in * width_in * stock_removed_total_in) * max(1, faces // 2)
+    factor = _grind_factor(material, material_group)
+    return max(0.0, volume_cuin * MIN_PER_CUIN_GRIND * factor)
+
+
+def estimate_od_grind_minutes(
+    meta: dict[str, Any],
+    material: str,
+    material_group: str,
+    prefer_circ_model: bool = False,
+) -> float:
+    """Estimate OD grinding time for round pierce punches.
+
+    Two models available:
+    1. Volume model (default): minutes = volume_removed × 3.0 × grind_factor
+    2. Circumference model (optional): minutes = (circumference × length) × min_per_circ_in × factor
+
+    Args:
+        meta: Metadata dict with od_grind_volume_removed_cuin, od_grind_circumference_in,
+              od_length_in, diameter, thickness, stock_allow_radial
+        material: Material name
+        material_group: Material group
+        prefer_circ_model: If True and CSV has grind_min_per_circ_in, use circumference model
+
+    Returns:
+        Estimated minutes for OD grinding
+    """
+    from math import pi
+
+    factor = _grind_factor(material, material_group)
+
+    # Check for circumference rate in CSV if user wants it
+    row = _csv_row(material, material_group, operation_hint="Grinding")
+    circ_rate = _try_float(row.get("grind_min_per_circ_in"), default=None)
+
+    if prefer_circ_model and circ_rate:
+        circ = _try_float(meta.get("od_grind_circumference_in"))
+        length = _try_float(meta.get("od_length_in"))
+        return max(0.0, circ * length * circ_rate * factor)
+
+    # Default volume model
+    vol = _try_float(meta.get("od_grind_volume_removed_cuin"))
+    if vol <= 0.0:
+        # If volume not present, try to infer from D, T, and radial stock
+        D = _try_float(meta.get("diameter"))
+        T = _try_float(meta.get("thickness"))
+        stock = _try_float(meta.get("stock_allow_radial"), default=0.003)
+        if D > 0 and T > 0 and stock > 0:
+            r = D / 2.0
+            vol = pi * (r * r - (r - stock) ** 2) * T
+
+    return max(0.0, vol * MIN_PER_CUIN_GRIND * factor)
 
 
 def estimate_time_min(

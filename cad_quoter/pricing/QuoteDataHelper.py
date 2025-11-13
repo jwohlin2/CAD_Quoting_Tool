@@ -57,6 +57,7 @@ class StockInfo:
     mcmaster_volume: float = 0.0
     mcmaster_part_number: Optional[str] = None
     mcmaster_price: Optional[float] = None  # Unit price
+    price_is_estimated: bool = False  # True if price was estimated from volume
 
     # Weights
     mcmaster_weight: float = 0.0  # lbs
@@ -639,6 +640,7 @@ def extract_quote_data_from_cad(
 
     mcmaster_part_num = None
     mcmaster_price = None
+    price_is_estimated = False
 
     # Use price override if provided, otherwise lookup from McMaster
     if mcmaster_price_override is not None:
@@ -649,6 +651,50 @@ def extract_quote_data_from_cad(
         mcmaster_part_num = mcmaster_result.get('mcmaster_part')
         if mcmaster_part_num:
             mcmaster_price = get_mcmaster_price(mcmaster_part_num, quantity=quantity)
+
+            # If direct pricing failed, try volume-based estimation
+            if mcmaster_price is None:
+                if verbose:
+                    print(f"  No direct pricing available for {mcmaster_part_num}")
+                    print(f"  Attempting volume-based price estimation...")
+
+                from cad_quoter.pricing.DirectCostHelper import estimate_price_from_reference_part
+
+                mcmaster_price = estimate_price_from_reference_part(
+                    target_length=scrap_calc.mcmaster_length,
+                    target_width=scrap_calc.mcmaster_width,
+                    target_thickness=scrap_calc.mcmaster_thickness,
+                    material=material,
+                    catalog_csv_path=catalog_csv_path,
+                    verbose=verbose
+                )
+
+                if mcmaster_price:
+                    price_is_estimated = True
+                    if verbose:
+                        print(f"  ✓ Estimated price from volume: ${mcmaster_price:.2f}")
+
+    # If we still don't have a price and no part was found, try volume-based estimation
+    if mcmaster_price is None and not mcmaster_part_num:
+        if verbose:
+            print(f"  No McMaster part found in catalog")
+            print(f"  Attempting volume-based price estimation...")
+
+        from cad_quoter.pricing.DirectCostHelper import estimate_price_from_reference_part
+
+        mcmaster_price = estimate_price_from_reference_part(
+            target_length=scrap_calc.mcmaster_length,
+            target_width=scrap_calc.mcmaster_width,
+            target_thickness=scrap_calc.mcmaster_thickness,
+            material=material,
+            catalog_csv_path=catalog_csv_path,
+            verbose=verbose
+        )
+
+        if mcmaster_price:
+            price_is_estimated = True
+            if verbose:
+                print(f"  ✓ Estimated price from volume: ${mcmaster_price:.2f}")
 
     # Populate stock info
     # Use McMaster dimensions from scrap_calc (which already did the catalog lookup)
@@ -663,6 +709,7 @@ def extract_quote_data_from_cad(
         mcmaster_volume=scrap_calc.mcmaster_length * scrap_calc.mcmaster_width * scrap_calc.mcmaster_thickness,
         mcmaster_part_number=mcmaster_part_num,
         mcmaster_price=mcmaster_price,
+        price_is_estimated=price_is_estimated,
         mcmaster_weight=scrap_calc.mcmaster_weight,
         final_part_weight=scrap_calc.final_part_weight
     )

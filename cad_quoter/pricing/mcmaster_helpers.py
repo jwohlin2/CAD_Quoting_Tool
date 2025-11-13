@@ -287,9 +287,125 @@ def resolve_mcmaster_plate_for_quote(
     return None
 
 
+def get_qty_one_tier(tiers: Sequence[Mapping[str, Any]]) -> Mapping[str, Any] | None:
+    """
+    Find the tier that applies at quantity 1 (if it exists).
+
+    Args:
+        tiers: List of price tier dictionaries from McMaster API
+
+    Returns:
+        The first tier where MinimumQuantity <= 1, or None if no such tier exists
+    """
+    if not tiers:
+        return None
+
+    for tier in tiers:
+        min_qty = tier.get("MinimumQuantity")
+        if min_qty is not None and min_qty <= 1:
+            return tier
+
+    return None
+
+
+def compute_price_per_cubic_inch(
+    tiers: Sequence[Mapping[str, Any]],
+    stock_volume_cuin: float
+) -> float | None:
+    """
+    Turn McMaster's pricing into a price per cubic inch of material.
+
+    Args:
+        tiers: List of price tier dictionaries from McMaster API
+        stock_volume_cuin: The cubic inches of the McMaster piece you're buying
+
+    Returns:
+        Price per cubic inch ($/in³), or None if cannot be computed
+    """
+    if not tiers or stock_volume_cuin <= 0:
+        return None
+
+    # First, check if there's a qty-1 tier
+    qty_one_tier = get_qty_one_tier(tiers)
+
+    if qty_one_tier is not None:
+        base_price = qty_one_tier.get("Amount")
+    else:
+        # Use the "largest price" tier (smallest minimum quantity)
+        # Tiers should already be sorted by MinimumQuantity ascending
+        base_price = tiers[0].get("Amount") if tiers else None
+
+    if base_price is None or not isinstance(base_price, (int, float)):
+        return None
+
+    return float(base_price) / float(stock_volume_cuin)
+
+
+def estimate_price_for_part_from_volume(
+    tiers: Sequence[Mapping[str, Any]],
+    stock_volume_cuin: float,
+    part_volume_cuin: float
+) -> float | None:
+    """
+    Use the $/in³ to estimate a price for your part.
+
+    Args:
+        tiers: List of price tier dictionaries from McMaster API
+        stock_volume_cuin: Volume of the McMaster stock piece in cubic inches
+        part_volume_cuin: Volume of your finished part in cubic inches
+
+    Returns:
+        Estimated part price, or None if cannot be computed
+    """
+    if part_volume_cuin <= 0:
+        return None
+
+    price_per_cuin = compute_price_per_cubic_inch(tiers, stock_volume_cuin)
+
+    if price_per_cuin is None:
+        return None
+
+    return price_per_cuin * float(part_volume_cuin)
+
+
+def collect_available_plate_thicknesses(
+    catalog_rows: Sequence[Mapping[str, Any]]
+) -> list[float]:
+    """
+    Extract and deduplicate all available plate thicknesses from catalog rows.
+
+    Args:
+        catalog_rows: List of catalog row dictionaries
+
+    Returns:
+        Sorted list of unique thickness values in inches
+    """
+    thicknesses = set()
+
+    for row in catalog_rows:
+        if not isinstance(row, Mapping):
+            continue
+
+        thickness = _coerce_inches_value(
+            row.get("thickness_in")
+            or row.get("T_in")
+            or row.get("thk_in")
+            or row.get("thickness")
+        )
+
+        if thickness is not None and thickness > 0:
+            thicknesses.add(thickness)
+
+    return sorted(thicknesses)
+
+
 __all__ = [
     "load_mcmaster_catalog_rows",
     "_coerce_inches_value",
     "pick_mcmaster_plate_sku",
     "resolve_mcmaster_plate_for_quote",
+    "get_qty_one_tier",
+    "compute_price_per_cubic_inch",
+    "estimate_price_for_part_from_volume",
+    "collect_available_plate_thicknesses",
 ]

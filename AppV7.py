@@ -881,9 +881,12 @@ class AppV7:
             if stock_info.mcmaster_price is None:
                 price_str = "Price N/A"
             else:
-                price_str = f"${stock_info.mcmaster_price:,.2f}"
                 if mcmaster_price_override is not None:
-                    price_str += " (MANUAL)"
+                    price_str = f"(MANUAL) ${stock_info.mcmaster_price:,.2f}"
+                elif hasattr(stock_info, 'price_is_estimated') and stock_info.price_is_estimated:
+                    price_str = f"(ESTIMATED) ${stock_info.mcmaster_price:,.2f}"
+                else:
+                    price_str = f"${stock_info.mcmaster_price:,.2f}"
 
             # Format the report
             report = []
@@ -909,26 +912,38 @@ class AppV7:
             report.append("")
 
             # Cost breakdown
-            report.append(f"  Stock Piece (McMaster part {stock_info.mcmaster_part_number or 'N/A'})".ljust(60) + f"{price_str:>14}")
+            # Format price with label handling - keep alignment consistent
+            if stock_info.mcmaster_price is None:
+                formatted_price = price_str  # "Price N/A"
+            else:
+                # Separate label from price for proper alignment
+                if mcmaster_price_override is not None:
+                    formatted_price = f"(MANUAL) ${stock_info.mcmaster_price:>8,.2f}"
+                elif hasattr(stock_info, 'price_is_estimated') and stock_info.price_is_estimated:
+                    formatted_price = f"(ESTIMATED) ${stock_info.mcmaster_price:>5,.2f}"
+                else:
+                    formatted_price = f"${stock_info.mcmaster_price:>13,.2f}"
+
+            report.append(f"  Stock Piece (McMaster part {stock_info.mcmaster_part_number or 'N/A'})".ljust(50) + f"{formatted_price:>24}")
 
             if stock_info.mcmaster_price is not None:
-                report.append(f"  Tax".ljust(60) + f"+${cost_breakdown.tax:>12.2f}")
-                report.append(f"  Shipping".ljust(60) + f"+${cost_breakdown.shipping:>12.2f}")
+                report.append(f"  Tax".ljust(50) + f"+${cost_breakdown.tax:>22.2f}")
+                report.append(f"  Shipping".ljust(50) + f"+${cost_breakdown.shipping:>22.2f}")
 
             if cost_breakdown.scrap_credit > 0:
                 scrap_credit_line = f"  Scrap Credit @ Wieland ${scrap_info.scrap_price_per_lb:.2f}/lb × {scrap_info.scrap_percentage:.1f}%"
                 if scrap_value_override is not None:
                     scrap_credit_line += " (MANUAL)"
-                report.append(f"{scrap_credit_line.ljust(60)}-${cost_breakdown.scrap_credit:>12.2f}")
+                report.append(f"{scrap_credit_line.ljust(50)}-${cost_breakdown.scrap_credit:>22.2f}")
 
-            report.append(" " * 60 + "-" * 14)
+            report.append(" " * 50 + "-" * 24)
 
             if stock_info.mcmaster_price is not None:
                 self.direct_cost_total = cost_breakdown.net_material_cost
-                report.append(f"  Total Material Cost :".ljust(60) + f"${cost_breakdown.net_material_cost:>13.2f}")
+                report.append(f"  Total Material Cost :".ljust(50) + f"${cost_breakdown.net_material_cost:>23.2f}")
             else:
                 self.direct_cost_total = None
-                report.append(f"  Total Material Cost :".ljust(60) + "Price N/A")
+                report.append(f"  Total Material Cost :".ljust(50) + "Price N/A".rjust(24))
 
             report.append("")
 
