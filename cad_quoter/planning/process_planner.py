@@ -155,11 +155,24 @@ def planner_die_plate(params: Dict[str, Any]) -> Plan:
 
     # Dimensions
     L, W = _read_plate_LW(params)
+    T = float(params.get("T") or params.get("thickness") or 0.0)
     profile_tol = params.get("profile_tol")  # float in inches
     flatness_spec = params.get("flatness_spec")
     parallelism_spec = params.get("parallelism_spec")
     windows_need_sharp = bool(params.get("windows_need_sharp", False))
     window_corner_radius_req = params.get("window_corner_radius_req")
+
+    # Squaring/Finishing strategy (added early, before features)
+    if L > 5.0 and W > 5.0 and T > 1.0:
+        # Mill-based squaring for larger parts
+        D = W / 3.0
+        axial_step = min(0.75, T / 2.0)
+        p.add("square_up_rough_sides", radial_stock=0.250, axial_step=axial_step, tool_diameter_in=D)
+        p.add("square_up_rough_faces", finish_doc=0.025, tool_diameter_in=D, target_pass_count=3)
+    else:
+        # Wet grind for smaller parts
+        p.add("wet_grind_square_all", stock_removed_total=0.050, faces=2)
+
     # 1) Face strategy (Blanchard vs mill) — big or tight spec → Blanchard first
     if max(L, W) > 10.0 or (flatness_spec is not None and flatness_spec <= 0.001):
         p.add("blanchard_pre")
@@ -1165,6 +1178,46 @@ def get_speeds_feeds(material: str, operation: str) -> Optional[Dict[str, Any]]:
     return None
 
 
+def get_grind_factor(material: str) -> float:
+    """
+    Look up grind material factor for wet grinding time calculations.
+
+    Searches for grind_material_factor, grind_factor, or material_factor columns.
+    Falls back to 1.0 if not found.
+
+    Args:
+        material: Material name (e.g., "P20 Tool Steel", "17-4 PH Stainless")
+
+    Returns:
+        Material factor for grinding (default 1.0)
+    """
+    data = load_speeds_feeds_data()
+
+    # Try to find factor for this material
+    for row in data:
+        if row.get('material') == material:
+            # Try different column names
+            for col_name in ['grind_material_factor', 'grind_factor', 'material_factor']:
+                if col_name in row and row[col_name]:
+                    try:
+                        return float(row[col_name])
+                    except (ValueError, TypeError):
+                        pass
+
+    # Fall back to GENERIC material
+    for row in data:
+        if row.get('material_group') == 'GENERIC':
+            for col_name in ['grind_material_factor', 'grind_factor', 'material_factor']:
+                if col_name in row and row[col_name]:
+                    try:
+                        return float(row[col_name])
+                    except (ValueError, TypeError):
+                        pass
+
+    # Default fallback
+    return 1.0
+
+
 def calculate_drill_time(
     diameter: float,
     depth: float,
@@ -1397,6 +1450,10 @@ def estimate_machine_hours_from_plan(
         'other': 0,
     }
 
+    # Lists to collect detailed operation breakdowns
+    milling_operations_detailed = []
+    grinding_operations_detailed = []
+
     for op in ops:
         op_type = op.get('op', '').lower()
 
@@ -1450,6 +1507,123 @@ def estimate_machine_hours_from_plan(
             qty = op.get('qty', 1)
             time_breakdown['drilling'] += calculate_drill_time(dia, depth, qty, material)
 
+        # Squaring operations (wet grind)
+        elif op_type == 'wet_grind_square_all':
+            # Wet grind squaring: time based on volume and material factor
+            stock_removed = op.get('stock_removed_total', 0.050)
+            faces = op.get('faces', 2)
+            volume_cuin = L * W * stock_removed
+            min_per_cuin = 3.0
+            material_factor = get_grind_factor(material)
+            grind_time = volume_cuin * min_per_cuin * material_factor
+            time_breakdown['grinding'] += grind_time
+
+            # Create detailed operation object
+            grinding_operations_detailed.append({
+                'op_name': 'wet_grind_square_all',
+                'op_description': 'Wet Grind - Top/Bottom Pair',
+                'length': L,
+                'width': W,
+                'area': L * W,
+                'stock_removed_total': stock_removed,
+                'faces': faces,
+                'volume_removed': volume_cuin,
+                'min_per_cuin': min_per_cuin,
+                'material_factor': material_factor,
+                'time_minutes': grind_time
+            })
+
+        # Squaring operations (mill - rough faces)
+        elif op_type == 'square_up_rough_faces':
+            # Face milling with enforced 3-pass rule
+            D = op.get('tool_diameter_in') or (W / 3.0 if W > 0 else 0.75)
+            target_passes = op.get('target_pass_count', 3)
+            path_in = target_passes * L if L > 0 else 0
+            stepover = (W / 3.0) * 0.95 if W > 0 else 0  # ~5% overlap for 3 stripes
+
+            # Look up face milling IPM
+            sf = get_speeds_feeds(material, "Endmill_Face")
+            if sf:
+                fz = sf.get('fz_ipr_0_25in', 0.004)
+                sfm = sf.get('sfm_start', 200)
+                rpm = (sfm * 12) / (3.14159 * D) if D > 0 else 1000
+                rpm = min(rpm, 8000)
+                ipm = fz * 4 * rpm  # 4 flutes typical for face mill
+            else:
+                ipm = 50  # Fallback IPM
+
+            minutes = (path_in / max(1e-6, ipm)) * 1.05
+            time_breakdown['milling'] += minutes
+
+            # Create detailed operation object
+            milling_operations_detailed.append({
+                'op_name': 'square_up_rough_faces',
+                'op_description': 'Face Mill - Top & Bottom',
+                'length': L,
+                'width': W,
+                'perimeter': 0,  # Not applicable for face ops
+                'tool_diameter': D,
+                'passes': target_passes,
+                'stepover': stepover,
+                'radial_stock': None,
+                'axial_step': None,
+                'axial_passes': None,
+                'radial_passes': None,
+                'path_length': path_in,
+                'feed_rate': ipm,
+                'time_minutes': minutes
+            })
+
+        # Squaring operations (mill - rough sides)
+        elif op_type == 'square_up_rough_sides':
+            # Side milling with radial and axial passes
+            D = op.get('tool_diameter_in', 0.75)
+            radial_stock = op.get('radial_stock', 0.250)
+            axial_step = op.get('axial_step', 0.75)
+
+            # Calculate number of passes
+            import math
+            woc = min(radial_stock, 0.5 * D)
+            axial_passes = max(1, math.ceil(T / axial_step) if axial_step > 0 else 1)
+            radial_passes = max(1, math.ceil(radial_stock / woc) if woc > 0 else 1)
+
+            # Path length: perimeter × passes
+            perimeter = 2 * (L + W)
+            path_in = perimeter * axial_passes * radial_passes
+
+            # Look up side milling IPM
+            sf = get_speeds_feeds(material, "Endmill_Profile")
+            if sf:
+                fz = sf.get('fz_ipr_0_25in', 0.003)
+                sfm = sf.get('sfm_start', 200)
+                rpm = (sfm * 12) / (3.14159 * D) if D > 0 else 1000
+                rpm = min(rpm, 8000)
+                ipm = fz * 4 * rpm
+            else:
+                ipm = 40  # Fallback IPM
+
+            minutes = (path_in / max(1e-6, ipm)) * 1.05
+            time_breakdown['milling'] += minutes
+
+            # Create detailed operation object
+            milling_operations_detailed.append({
+                'op_name': 'square_up_rough_sides',
+                'op_description': 'Side Mill - Square Up (Rough)',
+                'length': L,
+                'width': W,
+                'perimeter': perimeter,
+                'tool_diameter': D,
+                'passes': axial_passes * radial_passes,
+                'stepover': None,  # Not applicable for side ops
+                'radial_stock': radial_stock,
+                'axial_step': axial_step,
+                'axial_passes': axial_passes,
+                'radial_passes': radial_passes,
+                'path_length': path_in,
+                'feed_rate': ipm,
+                'time_minutes': minutes
+            })
+
         # Grinding operations
         elif 'grind' in op_type or 'jig_grind' in op_type:
             # Grinding is slow and precise
@@ -1479,6 +1653,8 @@ def estimate_machine_hours_from_plan(
         'total_hours': total_minutes / 60,
         'material': material,
         'dimensions': {'L': L, 'W': W, 'T': T},
+        'milling_operations': milling_operations_detailed,
+        'grinding_operations': grinding_operations_detailed,
     }
 
 

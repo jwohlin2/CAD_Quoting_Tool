@@ -11,8 +11,11 @@ from importlib import resources
 from pathlib import Path
 from typing import Any
 
-from cad_quoter.domain import MATERIAL_DISPLAY_BY_KEY
-from cad_quoter.pricing.speeds_feeds_init import (
+# Import MaterialMapper for centralized material handling
+from cad_quoter.pricing.MaterialMapper import material_mapper
+
+from cad_quoter.domain_models import MATERIAL_DISPLAY_BY_KEY
+from cad_quoter.speeds_feeds import (
     coerce_table_to_records,
     normalize_operation as _normalize_operation,
     normalize_records as _normalize_records,
@@ -90,10 +93,11 @@ def _load_material_map() -> tuple[dict[str, Any], ...]:
     normalised: list[dict[str, Any]] = []
     for row in records:
         clean = {k: (v.strip() if isinstance(v, str) else v) for k, v in row.items()}
-        input_label = str(clean.get("input_label", "")).strip().lower()
-        if not input_label:
+        # Try both 'input_term' (new) and 'input_label' (legacy) for compatibility
+        input_term = str(clean.get("input_term") or clean.get("input_label", "")).strip().lower()
+        if not input_term:
             continue
-        clean["_norm_input"] = input_label
+        clean["_norm_input"] = input_term
         normalised.append(clean)
     return tuple(normalised)
 
@@ -165,6 +169,12 @@ def material_group_for_speeds_feeds(material_key: str | None) -> str | None:
         group = _resolve_group(candidate)
         if group:
             return group
+
+    # Fallback: Try MaterialMapper's get_speeds_key for canonical lookup
+    speeds_key = material_mapper.get_speeds_key(material_key)
+    if speeds_key:
+        # Try to resolve the speeds_key to an ISO group
+        return _resolve_group(speeds_key)
 
     return None
 

@@ -114,21 +114,83 @@ class HoleOperation:
 
 
 @dataclass
+class MillingOperation:
+    """Detailed milling operation breakdown."""
+    op_name: str = ""  # e.g., "square_up_rough_faces", "square_up_rough_sides"
+    op_description: str = ""  # Human-readable description
+
+    # Geometry
+    length: float = 0.0  # inches
+    width: float = 0.0  # inches
+    perimeter: float = 0.0  # inches (for side ops)
+
+    # Tool parameters
+    tool_diameter: float = 0.0  # inches
+
+    # Cut parameters
+    passes: int = 1
+    stepover: Optional[float] = None  # inches
+    radial_stock: Optional[float] = None  # inches
+    axial_step: Optional[float] = None  # inches
+    axial_passes: Optional[int] = None
+    radial_passes: Optional[int] = None
+
+    # Path and feed
+    path_length: float = 0.0  # total inches
+    feed_rate: float = 0.0  # IPM
+
+    # Time
+    time_minutes: float = 0.0
+
+
+@dataclass
+class GrindingOperation:
+    """Detailed grinding operation breakdown."""
+    op_name: str = ""  # e.g., "wet_grind_square_all"
+    op_description: str = ""  # Human-readable description
+
+    # Geometry
+    length: float = 0.0  # inches
+    width: float = 0.0  # inches
+    area: float = 0.0  # square inches
+
+    # Grind parameters
+    stock_removed_total: float = 0.0  # inches
+    faces: int = 2  # number of faces
+    volume_removed: float = 0.0  # cubic inches
+
+    # Time calculation
+    min_per_cuin: float = 3.0
+    material_factor: float = 1.0
+    time_minutes: float = 0.0
+
+
+@dataclass
 class MachineHoursBreakdown:
     """Machine hours estimation breakdown."""
-    # Operations by type
-    drill_operations: List[HoleOperation] = None
-    tap_operations: List[HoleOperation] = None
-    cbore_operations: List[HoleOperation] = None
-    cdrill_operations: List[HoleOperation] = None
-    jig_grind_operations: List[HoleOperation] = None
+    # Operations by type (hole operations)
+    drill_operations: Optional[List[HoleOperation]] = None
+    tap_operations: Optional[List[HoleOperation]] = None
+    cbore_operations: Optional[List[HoleOperation]] = None
+    cdrill_operations: Optional[List[HoleOperation]] = None
+    jig_grind_operations: Optional[List[HoleOperation]] = None
 
-    # Time totals by operation type
+    # Operations by type (plan operations)
+    milling_operations: Optional[List[MillingOperation]] = None
+    grinding_operations: Optional[List[GrindingOperation]] = None
+
+    # Time totals by operation type (from hole table)
     total_drill_minutes: float = 0.0
     total_tap_minutes: float = 0.0
     total_cbore_minutes: float = 0.0
     total_cdrill_minutes: float = 0.0
     total_jig_grind_minutes: float = 0.0
+
+    # Time totals by operation category (from plan operations)
+    total_milling_minutes: float = 0.0  # Includes squaring ops
+    total_grinding_minutes: float = 0.0  # Includes wet grind squaring
+    total_edm_minutes: float = 0.0
+    total_other_minutes: float = 0.0
 
     # Overall totals
     total_minutes: float = 0.0
@@ -147,6 +209,10 @@ class MachineHoursBreakdown:
             self.cdrill_operations = []
         if self.jig_grind_operations is None:
             self.jig_grind_operations = []
+        if self.milling_operations is None:
+            self.milling_operations = []
+        if self.grinding_operations is None:
+            self.grinding_operations = []
 
 
 @dataclass
@@ -174,15 +240,23 @@ class LaborHoursBreakdown:
 @dataclass
 class CostSummary:
     """Overall cost summary."""
+    # Per-unit costs
     direct_cost: float = 0.0
     machine_cost: float = 0.0
     labor_cost: float = 0.0
     total_cost: float = 0.0
 
+    # Total costs (for quantity > 1)
+    total_direct_cost: float = 0.0
+    total_machine_cost: float = 0.0
+    total_labor_cost: float = 0.0
+    total_total_cost: float = 0.0
+
     # Margin and final price
     margin_rate: float = 0.15
     margin_amount: float = 0.0
-    final_price: float = 0.0
+    final_price: float = 0.0  # Per-unit price
+    total_final_price: float = 0.0  # Total price for all units
 
 
 @dataclass
@@ -197,6 +271,7 @@ class QuoteData:
     cad_file_path: str = ""
     cad_file_name: str = ""
     extraction_timestamp: str = ""
+    quantity: int = 1  # Number of parts to quote
 
     # Core data
     part_dimensions: PartDimensions = None
@@ -322,6 +397,7 @@ def extract_quote_data_from_cad(
     dimension_override: Optional[tuple[float, float, float]] = None,
     mcmaster_price_override: Optional[float] = None,
     scrap_value_override: Optional[float] = None,
+    quantity: int = 1,
     verbose: bool = False
 ) -> QuoteData:
     """
@@ -340,6 +416,7 @@ def extract_quote_data_from_cad(
         dimension_override: Optional (length, width, thickness) tuple to override OCR extraction
         mcmaster_price_override: Optional manual stock price - skips McMaster API lookup
         scrap_value_override: Optional manual scrap value - skips automatic scrap value calculation
+        quantity: Number of parts to quote (affects setup cost amortization and material pricing)
         verbose: Print extraction progress
 
     Returns:
@@ -361,7 +438,11 @@ def extract_quote_data_from_cad(
         extract_hole_operations_from_cad,
         estimate_hole_table_times
     )
-    from cad_quoter.planning.process_planner import LaborInputs, compute_labor_minutes
+    from cad_quoter.planning.process_planner import (
+        LaborInputs,
+        compute_labor_minutes,
+        estimate_machine_hours_from_plan
+    )
     from cad_quoter.pricing.DirectCostHelper import (
         extract_part_info_from_plan,
         get_mcmaster_part_number,
@@ -389,7 +470,8 @@ def extract_quote_data_from_cad(
     quote_data = QuoteData(
         cad_file_path=str(cad_file_path),
         cad_file_name=cad_file_path.name,
-        extraction_timestamp=datetime.now().isoformat()
+        extraction_timestamp=datetime.now().isoformat(),
+        quantity=quantity
     )
 
     # ========================================================================
@@ -414,14 +496,47 @@ def extract_quote_data_from_cad(
 
     # Apply dimension override if provided (useful when OCR fails)
     if dimension_override:
+        from cad_quoter.planning.process_planner import plan_job
+
         length, width, thickness = dimension_override
+        if verbose:
+            print(f"  Using dimension override: {length} x {width} x {thickness}")
+
+        # Update extracted dimensions
         if 'extracted_dims' not in plan:
             plan['extracted_dims'] = {}
         plan['extracted_dims']['L'] = length
         plan['extracted_dims']['W'] = width
         plan['extracted_dims']['T'] = thickness
+
+        # IMPORTANT: Regenerate plan with new dimensions
+        # The original plan was generated with OCR dimensions, but squaring logic
+        # depends on L/W/T, so we need to regenerate with the override dimensions
+        params = {
+            'plate_LxW': (length, width),
+            'T': thickness,
+            'profile_tol': plan.get('profile_tol'),
+            'flatness_spec': plan.get('flatness_spec'),
+            'parallelism_spec': plan.get('parallelism_spec'),
+            'windows_need_sharp': plan.get('windows_need_sharp', False),
+            'window_corner_radius_req': plan.get('window_corner_radius_req'),
+            'hole_sets': plan.get('hole_sets', []),
+        }
+
+        # Get the planner type from original plan
+        planner_type = plan.get('planner', 'die_plate')
+        regenerated_plan = plan_job(planner_type, params)
+
+        # Preserve extracted_dims and other metadata from original plan
+        regenerated_plan['extracted_dims'] = plan['extracted_dims']
+        if 'extracted_material' in plan:
+            regenerated_plan['extracted_material'] = plan['extracted_material']
+
+        # Replace plan with regenerated version
+        plan = regenerated_plan
+
         if verbose:
-            print(f"  Using dimension override: {length} x {width} x {thickness}")
+            print(f"  Plan regenerated with dimension overrides")
 
     # Material detection
     if material_override:
@@ -533,7 +648,7 @@ def extract_quote_data_from_cad(
     elif mcmaster_result:
         mcmaster_part_num = mcmaster_result.get('mcmaster_part')
         if mcmaster_part_num:
-            mcmaster_price = get_mcmaster_price(mcmaster_part_num, quantity=1)
+            mcmaster_price = get_mcmaster_price(mcmaster_part_num, quantity=quantity)
 
     # Populate stock info
     # Use McMaster dimensions from scrap_calc (which already did the catalog lookup)
@@ -595,6 +710,23 @@ def extract_quote_data_from_cad(
         print("[4/5] Calculating machine hours...")
 
     hole_table = extract_hole_operations_from_cad(cad_file_path)
+
+    # Initialize time accumulators
+    total_drill_min = 0.0
+    total_tap_min = 0.0
+    total_cbore_min = 0.0
+    total_cdrill_min = 0.0
+    total_jig_grind_min = 0.0
+    total_milling_min = 0.0
+    total_grinding_min = 0.0
+    total_edm_min = 0.0
+    total_other_min = 0.0
+
+    drill_ops = []
+    tap_ops = []
+    cbore_ops = []
+    cdrill_ops = []
+    jig_grind_ops = []
 
     if hole_table:
         times = estimate_hole_table_times(hole_table, material, part_info.thickness)
@@ -669,25 +801,73 @@ def extract_quote_data_from_cad(
             for g in times.get('jig_grind_groups', [])
         ]
 
-        quote_data.machine_hours = MachineHoursBreakdown(
-            drill_operations=drill_ops,
-            tap_operations=tap_ops,
-            cbore_operations=cbore_ops,
-            cdrill_operations=cdrill_ops,
-            jig_grind_operations=jig_grind_ops,
-            total_drill_minutes=times.get('total_drill_minutes', 0.0),
-            total_tap_minutes=times.get('total_tap_minutes', 0.0),
-            total_cbore_minutes=times.get('total_cbore_minutes', 0.0),
-            total_cdrill_minutes=times.get('total_cdrill_minutes', 0.0),
-            total_jig_grind_minutes=times.get('total_jig_grind_minutes', 0.0),
-            total_minutes=times.get('total_minutes', 0.0),
-            total_hours=times.get('total_hours', 0.0),
-            machine_cost=times.get('total_hours', 0.0) * machine_rate
-        )
+        # Accumulate hole operation times
+        total_drill_min = times.get('total_drill_minutes', 0.0)
+        total_tap_min = times.get('total_tap_minutes', 0.0)
+        total_cbore_min = times.get('total_cbore_minutes', 0.0)
+        total_cdrill_min = times.get('total_cdrill_minutes', 0.0)
+        total_jig_grind_min = times.get('total_jig_grind_minutes', 0.0)
 
-        if verbose:
-            print(f"  Machine hours: {times.get('total_hours', 0.0):.2f} hr")
-            print(f"  Machine cost: ${quote_data.machine_hours.machine_cost:.2f}")
+    # Calculate times for plan operations (squaring, face milling, EDM, etc.)
+    plan_machine_times = estimate_machine_hours_from_plan(
+        plan,
+        material=material,
+        plate_LxW=(part_info.length, part_info.width),
+        thickness=part_info.thickness
+    )
+
+    # Add plan operation times to totals
+    total_milling_min = plan_machine_times['breakdown_minutes'].get('milling', 0.0)
+    total_grinding_min = plan_machine_times['breakdown_minutes'].get('grinding', 0.0)
+    total_edm_min = plan_machine_times['breakdown_minutes'].get('edm', 0.0)
+    total_other_min = plan_machine_times['breakdown_minutes'].get('other', 0.0)
+
+    # Convert detailed operations to dataclass objects
+    milling_ops = [
+        MillingOperation(**op) for op in plan_machine_times.get('milling_operations', [])
+    ]
+    grinding_ops = [
+        GrindingOperation(**op) for op in plan_machine_times.get('grinding_operations', [])
+    ]
+
+    # Calculate grand totals
+    grand_total_minutes = (
+        total_drill_min + total_tap_min + total_cbore_min +
+        total_cdrill_min + total_jig_grind_min +
+        total_milling_min + total_grinding_min + total_edm_min + total_other_min
+    )
+    grand_total_hours = grand_total_minutes / 60.0
+
+    quote_data.machine_hours = MachineHoursBreakdown(
+        drill_operations=drill_ops,
+        tap_operations=tap_ops,
+        cbore_operations=cbore_ops,
+        cdrill_operations=cdrill_ops,
+        jig_grind_operations=jig_grind_ops,
+        milling_operations=milling_ops,
+        grinding_operations=grinding_ops,
+        total_drill_minutes=total_drill_min,
+        total_tap_minutes=total_tap_min,
+        total_cbore_minutes=total_cbore_min,
+        total_cdrill_minutes=total_cdrill_min,
+        total_jig_grind_minutes=total_jig_grind_min,
+        total_milling_minutes=total_milling_min,
+        total_grinding_minutes=total_grinding_min,
+        total_edm_minutes=total_edm_min,
+        total_other_minutes=total_other_min,
+        total_minutes=grand_total_minutes,
+        total_hours=grand_total_hours,
+        machine_cost=grand_total_hours * machine_rate
+    )
+
+    if verbose:
+        print(f"  Machine hours: {grand_total_hours:.2f} hr")
+        print(f"    - Drilling: {total_drill_min:.1f} min")
+        print(f"    - Tapping: {total_tap_min:.1f} min")
+        print(f"    - Milling (inc. squaring): {total_milling_min:.1f} min")
+        print(f"    - Grinding (inc. wet grind): {total_grinding_min:.1f} min")
+        print(f"    - EDM: {total_edm_min:.1f} min")
+        print(f"  Machine cost: ${quote_data.machine_hours.machine_cost:.2f}")
 
     # ========================================================================
     # STEP 5: Calculate labor hours
@@ -728,34 +908,78 @@ def extract_quote_data_from_cad(
         print(f"  Labor cost: ${quote_data.labor_hours.labor_cost:.2f}")
 
     # ========================================================================
-    # STEP 6: Calculate cost summary
+    # STEP 6: Calculate cost summary with quantity-aware amortization
     # ========================================================================
-    total_cost = (
-        quote_data.direct_cost_breakdown.net_material_cost +
-        quote_data.machine_hours.machine_cost +
-        quote_data.labor_hours.labor_cost
-    )
 
-    margin_amount = total_cost * margin_rate
-    final_price = total_cost + margin_amount
+    # Calculate amortized setup costs (spread across all parts)
+    setup_labor = (quote_data.labor_hours.setup_minutes / 60.0) * labor_rate
+    programming_labor = (quote_data.labor_hours.programming_minutes / 60.0) * labor_rate
+    amortized_setup_cost = (setup_labor + programming_labor) / quantity
+
+    # Calculate variable costs per unit (material, machining, inspection, finishing)
+    material_cost_per_unit = quote_data.direct_cost_breakdown.net_material_cost
+    machine_cost_per_unit = quote_data.machine_hours.machine_cost
+
+    # Variable labor costs per unit (machining, inspection, finishing)
+    machining_labor = (quote_data.labor_hours.machining_steps_minutes / 60.0) * labor_rate
+    inspection_labor = (quote_data.labor_hours.inspection_minutes / 60.0) * labor_rate
+    finishing_labor = (quote_data.labor_hours.finishing_minutes / 60.0) * labor_rate
+    variable_labor_per_unit = machining_labor + inspection_labor + finishing_labor
+
+    # Per-unit costs
+    per_unit_direct_cost = material_cost_per_unit
+    per_unit_machine_cost = machine_cost_per_unit
+    per_unit_labor_cost = amortized_setup_cost + variable_labor_per_unit
+    per_unit_total_cost = per_unit_direct_cost + per_unit_machine_cost + per_unit_labor_cost
+
+    # Total costs for all units
+    total_direct_cost = per_unit_direct_cost * quantity
+    total_machine_cost = per_unit_machine_cost * quantity
+    total_labor_cost = (setup_labor + programming_labor) + (variable_labor_per_unit * quantity)
+    total_total_cost = total_direct_cost + total_machine_cost + total_labor_cost
+
+    # Margin and pricing
+    per_unit_margin_amount = per_unit_total_cost * margin_rate
+    per_unit_final_price = per_unit_total_cost + per_unit_margin_amount
+
+    total_margin_amount = total_total_cost * margin_rate
+    total_final_price = total_total_cost + total_margin_amount
 
     quote_data.cost_summary = CostSummary(
-        direct_cost=quote_data.direct_cost_breakdown.net_material_cost,
-        machine_cost=quote_data.machine_hours.machine_cost,
-        labor_cost=quote_data.labor_hours.labor_cost,
-        total_cost=total_cost,
+        # Per-unit costs
+        direct_cost=per_unit_direct_cost,
+        machine_cost=per_unit_machine_cost,
+        labor_cost=per_unit_labor_cost,
+        total_cost=per_unit_total_cost,
+        # Total costs
+        total_direct_cost=total_direct_cost,
+        total_machine_cost=total_machine_cost,
+        total_labor_cost=total_labor_cost,
+        total_total_cost=total_total_cost,
+        # Margin and pricing
         margin_rate=margin_rate,
-        margin_amount=margin_amount,
-        final_price=final_price
+        margin_amount=per_unit_margin_amount,
+        final_price=per_unit_final_price,
+        total_final_price=total_final_price
     )
 
     if verbose:
         print(f"\n{'='*70}")
         print(f"EXTRACTION COMPLETE")
         print(f"{'='*70}")
-        print(f"Total cost: ${total_cost:.2f}")
-        print(f"Margin ({margin_rate:.0%}): ${margin_amount:.2f}")
-        print(f"Final price: ${final_price:.2f}")
+        if quantity > 1:
+            print(f"Quantity: {quantity} parts")
+            print(f"Per-unit cost: ${per_unit_total_cost:.2f}")
+            print(f"Per-unit margin ({margin_rate:.0%}): ${per_unit_margin_amount:.2f}")
+            print(f"Per-unit price: ${per_unit_final_price:.2f}")
+            print(f"---")
+            print(f"Total cost (all units): ${total_total_cost:.2f}")
+            print(f"Total margin: ${total_margin_amount:.2f}")
+            print(f"Total price: ${total_final_price:.2f}")
+        else:
+            print(f"Total cost: ${per_unit_total_cost:.2f}")
+            print(f"Margin ({margin_rate:.0%}): ${per_unit_margin_amount:.2f}")
+            print(f"Final price: ${per_unit_final_price:.2f}")
         print(f"{'='*70}\n")
 
     return quote_data

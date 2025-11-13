@@ -9,6 +9,9 @@ import platform
 from pathlib import Path
 from typing import Optional
 
+# Import MaterialMapper for material dropdown
+from cad_quoter.pricing.MaterialMapper import material_mapper
+
 
 class CreateToolTip:
     """Attach a lightweight tooltip to a Tk widget."""
@@ -360,14 +363,34 @@ class AppV7:
 
         # Define all the quote variables from the screenshot
         self.quote_fields = {}
+
+        # Part Family mapping (internal key -> display name)
+        self.part_families = {
+            "die_plate": "Die Plate / Shoe / Flat",
+            "punch": "Punch / Insert",
+            "pilot_punch": "Pilot Punch",
+            "bushing_id_critical": "Guide Bushing / Ring Gauge",
+            "cam_or_hemmer": "Cam / Hemming Component",
+            "flat_die_chaser": "Flat Die Chaser",
+            "pm_compaction_die": "PM Compaction Die",
+            "shear_blade": "Shear Blade",
+            "extrude_hone": "Extrude Hone",
+        }
+
         variables = [
+            # Part Family (dropdown)
+            ("Part Family", "die_plate", "Select the part family type for process planning"),
+
             # Part Dimensions (optional - leave blank for OCR auto-detection)
             ("Length (in)", "", "Part length in inches (optional - leave blank for OCR auto-detection)"),
             ("Width (in)", "", "Part width in inches (optional - leave blank for OCR auto-detection)"),
             ("Thickness (in)", "", "Part thickness in inches (optional - leave blank for OCR auto-detection)"),
 
+            # Quantity
+            ("Quantity", "1", "Number of parts to quote - setup costs will be amortized across quantity, and material quantity pricing will be applied"),
+
             # Material Override
-            ("Material", "", "Override auto-detected material (e.g., '17-4 PH Stainless Steel', 'Aluminum 6061'). Leave blank for auto-detection."),
+            ("Material", "", "Select material from dropdown to override auto-detection. Leave blank to use auto-detected material from CAD file."),
 
             # Rate Overrides
             ("Machine Rate ($/hr)", "90", "Override machine hourly rate (default: $90/hr)"),
@@ -388,8 +411,26 @@ class AppV7:
             label = ttk.Label(quote_frame, text=label_text)
             label.grid(row=row, column=0, sticky="w", padx=5, pady=5)
 
+            # Special handling for Part Family dropdown
+            if label_text == "Part Family":
+                # Create combobox with display names
+                display_names = list(self.part_families.values())
+                field = ttk.Combobox(quote_frame, width=30, values=display_names, state="readonly")
+                # Set default to the display name
+                if default_value in self.part_families:
+                    default_display = self.part_families[default_value]
+                    field.set(default_display)
+                else:
+                    field.set(display_names[0])
+            # Special handling for Material dropdown
+            elif label_text == "Material":
+                # Create combobox with material options from MaterialMapper
+                material_options = material_mapper.get_dropdown_options()
+                field = ttk.Combobox(quote_frame, width=30, values=material_options, state="readonly")
+                # Leave empty by default (auto-detection)
+                field.set("")
             # Entry field or dropdown
-            if default_value == "Number":
+            elif default_value == "Number":
                 field = ttk.Combobox(quote_frame, width=30, values=["Number"])
                 field.set("Number")
             else:
@@ -464,6 +505,7 @@ class AppV7:
             margin_rate = (margin_percent / 100.0) if margin_percent is not None else 0.15  # Convert percentage to decimal
             mcmaster_price_override = self._get_field_float("McMaster Price Override ($)")
             scrap_value_override = self._get_field_float("Scrap Value Override ($)")
+            quantity = self._get_quantity()
 
             try:
                 self._cached_quote_data = extract_quote_data_from_cad(
@@ -475,6 +517,7 @@ class AppV7:
                     dimension_override=dimension_override,
                     mcmaster_price_override=mcmaster_price_override,
                     scrap_value_override=scrap_value_override,
+                    quantity=quantity,
                     verbose=True
                 )
                 if dimension_override:
@@ -620,6 +663,47 @@ class AppV7:
 
         except Exception:
             return default
+
+    def _get_quantity(self) -> int:
+        """
+        Get the quantity value from Quote Editor field.
+
+        Returns:
+            Integer quantity value (minimum 1, default 1)
+        """
+        try:
+            quantity = self._get_field_float("Quantity", 1.0)
+            if quantity is None or quantity < 1:
+                return 1
+            return int(quantity)
+        except Exception:
+            return 1
+
+    def _get_part_family(self) -> str:
+        """
+        Get the selected part family, converting from display name to internal key.
+
+        Returns:
+            Part family internal key (e.g., "die_plate", "punch", etc.)
+        """
+        try:
+            field = self.quote_fields.get("Part Family", None)
+            if not field:
+                return "die_plate"  # Default
+
+            display_name = field.get().strip()
+            if not display_name:
+                return "die_plate"  # Default
+
+            # Convert display name back to internal key
+            for key, display in self.part_families.items():
+                if display == display_name:
+                    return key
+
+            return "die_plate"  # Default if not found
+
+        except Exception:
+            return "die_plate"  # Default on error
 
     def load_drawing_image_manual(self) -> None:
         """Manually select a drawing image file."""
@@ -901,6 +985,32 @@ class AppV7:
                         f"t/hole {op.time_per_hole:.2f} min | "
                         f"group {op.qty}x{op.time_per_hole:.2f} = {op.total_time:.2f} min")
 
+            def format_milling_op(op):
+                """Format milling operation with all details"""
+                lines = []
+                lines.append(f"{op.op_description} | W={op.width:.3f}\" | L={op.length:.3f}\"")
+
+                if op.perimeter > 0:
+                    # Side milling operation
+                    lines.append(f"  perimeter={op.perimeter:.3f}\" | D={op.tool_diameter:.3f}\" | radial_stock={op.radial_stock:.3f}\" | axial_step={op.axial_step:.3f}\"")
+                    lines.append(f"  axial_passes={op.axial_passes} | radial_passes={op.radial_passes} | total_path={op.path_length:.1f}\"")
+                else:
+                    # Face milling operation
+                    lines.append(f"  D={op.tool_diameter:.3f}\" | passes={op.passes} | stepover≈{op.stepover:.3f}\"")
+                    lines.append(f"  path/pass={op.length:.3f}\" | total_path={op.path_length:.1f}\"")
+
+                lines.append(f"  feed={op.feed_rate:.1f} ipm | time={op.time_minutes:.2f} min")
+                return "\n".join(lines)
+
+            def format_grinding_op(op):
+                """Format grinding operation with all details"""
+                lines = []
+                lines.append(f"{op.op_description} | L={op.length:.3f}\" | W={op.width:.3f}\" | Area={op.area:.2f} sq in")
+                lines.append(f"  stock_removed={op.stock_removed_total:.3f}\" | faces={op.faces} | volume={op.volume_removed:.3f} cu in")
+                lines.append(f"  min_per_cuin={op.min_per_cuin:.1f} | material_factor={op.material_factor:.2f}")
+                lines.append(f"  time = {op.volume_removed:.3f} × {op.min_per_cuin:.1f} × {op.material_factor:.2f} = {op.time_minutes:.2f} min")
+                return "\n".join(lines)
+
             # Build the report
             report = []
             report.append("MACHINE HOURS ESTIMATION - DETAILED HOLE TABLE BREAKDOWN")
@@ -953,6 +1063,26 @@ class AppV7:
                 for op in machine_hours.cdrill_operations:
                     report.append(format_cdrill_group(op))
                 report.append(f"\nTotal Center Drill Time: {machine_hours.total_cdrill_minutes:.2f} minutes")
+                report.append("")
+
+            # TIME PER OP - MILLING
+            if machine_hours.milling_operations:
+                report.append("TIME PER OP - MILLING")
+                report.append("-" * 74)
+                for op in machine_hours.milling_operations:
+                    report.append(format_milling_op(op))
+                    report.append("")
+                report.append(f"Total Milling Time (Square/Finish): {machine_hours.total_milling_minutes:.2f} minutes")
+                report.append("")
+
+            # TIME PER OP - GRINDING
+            if machine_hours.grinding_operations:
+                report.append("TIME PER OP - GRINDING")
+                report.append("-" * 74)
+                for op in machine_hours.grinding_operations:
+                    report.append(format_grinding_op(op))
+                    report.append("")
+                report.append(f"Total Wet Grind Time: {machine_hours.total_grinding_minutes:.2f} minutes")
                 report.append("")
 
             # Summary
@@ -1120,14 +1250,27 @@ class AppV7:
         margin_rate = (margin_percent / 100.0) if margin_percent is not None else 0.15
         margin_overridden = (margin_percent is not None and margin_percent != 15.0)
 
+        # Get quantity for display
+        quantity = self._get_quantity()
+        quantity_overridden = quantity > 1
+
         quick_margin_lines: list[str] = []
         summary_lines = [
             "COST SUMMARY",
             "=" * 74,
+        ]
+
+        # Show quantity if > 1
+        if quantity_overridden:
+            summary_lines.append(f"Quantity: {quantity} parts")
+            summary_lines.append("-" * 74)
+            summary_lines.append("PER-UNIT COSTS:")
+
+        summary_lines.extend([
             self._format_cost_summary_line("Direct Cost", self.direct_cost_total),
             self._format_cost_summary_line("Machine Cost", self.machine_cost_total),
             self._format_cost_summary_line("Labor Cost", self.labor_cost_total),
-        ]
+        ])
 
         if None not in (self.direct_cost_total, self.machine_cost_total, self.labor_cost_total):
             total_cost = (
@@ -1135,11 +1278,20 @@ class AppV7:
                 + (self.machine_cost_total or 0.0)
                 + (self.labor_cost_total or 0.0)
             )
+
+            # Use cost summary from quote_data for accurate per-unit and total costs
+            margin_amount = total_cost * margin_rate
+            final_cost = total_cost + margin_amount
+
+            quote_data = self._cached_quote_data
+            if quote_data and quote_data.cost_summary:
+                total_cost = quote_data.cost_summary.total_cost
+                margin_amount = quote_data.cost_summary.margin_amount
+                final_cost = quote_data.cost_summary.final_price
+
             quick_margin_lines = self._build_quick_margin_section(total_cost, margin_rate)
             summary_lines.append("-" * 74)
             summary_lines.append(self._format_cost_summary_line("Total Estimated Cost", total_cost))
-            margin_amount = total_cost * margin_rate
-            final_cost = total_cost + margin_amount
 
             # Add margin line with override indicator
             margin_label = f"Margin ({margin_rate:.0%})"
@@ -1148,7 +1300,20 @@ class AppV7:
             summary_lines.append(
                 self._format_cost_summary_line(margin_label, margin_amount)
             )
-            summary_lines.append(self._format_cost_summary_line("Final Cost", final_cost))
+            summary_lines.append(self._format_cost_summary_line("Final Price (per unit)", final_cost))
+
+            # Show total costs if quantity > 1
+            if quantity_overridden and quote_data and quote_data.cost_summary:
+                summary_lines.append("")
+                summary_lines.append("=" * 74)
+                summary_lines.append("TOTAL ORDER COSTS:")
+                summary_lines.append(self._format_cost_summary_line("Total Direct Cost", quote_data.cost_summary.total_direct_cost))
+                summary_lines.append(self._format_cost_summary_line("Total Machine Cost", quote_data.cost_summary.total_machine_cost))
+                summary_lines.append(self._format_cost_summary_line("Total Labor Cost", quote_data.cost_summary.total_labor_cost))
+                summary_lines.append("-" * 74)
+                summary_lines.append(self._format_cost_summary_line("Total Order Cost", quote_data.cost_summary.total_total_cost))
+                summary_lines.append(self._format_cost_summary_line(f"Total Margin ({margin_rate:.0%})", quote_data.cost_summary.total_total_cost * margin_rate))
+                summary_lines.append(self._format_cost_summary_line("Total Order Price", quote_data.cost_summary.total_final_price))
 
         if quick_margin_lines:
             self.output_text.insert(tk.END, "\n".join(quick_margin_lines))
