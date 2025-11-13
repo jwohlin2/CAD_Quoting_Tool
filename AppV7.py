@@ -795,7 +795,7 @@ class AppV7:
         print(f"[AppV7] No existing drawing image found for {base_name}, generating PNG...")
 
         try:
-            from tools.paddle_dims_extractor import DrawingRenderer
+            from scripts.paddle_dims_extractor import DrawingRenderer
 
             # Generate PNG in the same directory as the CAD file
             output_png = str(cad_path.parent / f"{base_name}.png")

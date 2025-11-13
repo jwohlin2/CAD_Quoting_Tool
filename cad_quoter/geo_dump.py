@@ -34,15 +34,15 @@ from fractions import Fraction
 from pathlib import Path
 from typing import List, Tuple
 
-# Add parent directory to path for tools imports
+# Add parent directory to path for scripts imports
 if str(Path(__file__).resolve().parent.parent) not in sys.path:
     sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 try:
-    from tools.hole_ops import explode_rows_to_operations
-    from tools.stock_dims import infer_stock_dims_from_lines, read_texts_from_csv
+    from scripts.hole_ops import explode_rows_to_operations
+    from scripts.stock_dims import infer_stock_dims_from_lines, read_texts_from_csv
 except ImportError:
-    # Fallback if tools module isn't available
+    # Fallback if scripts module isn't available
     explode_rows_to_operations = None  # type: ignore
     infer_stock_dims_from_lines = None  # type: ignore
     read_texts_from_csv = None  # type: ignore
@@ -523,7 +523,7 @@ def main() -> int:
                     writer.writerow(["", "", ""])
             print(f"[stock-dims] csv={stock_csv}")
     else:
-        print("[stock-dims] skipped (tools module not available)")
+        print("[stock-dims] skipped (scripts module not available)")
 
     # (Removed part-dims inference: no reading or computing of DIMENSION geometry)
 
