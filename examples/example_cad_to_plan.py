@@ -16,7 +16,7 @@ def example_basic():
     print("=" * 60)
 
     plan = plan_from_cad_file(
-        "Cad Files/301.dxf",  # Your CAD file
+        "tests/fixtures/cad_files/301_redacted.dxf",  # Your CAD file
         verbose=True           # Show extraction progress
     )
 
@@ -38,7 +38,7 @@ def example_no_ocr():
     print("=" * 60)
 
     plan = plan_from_cad_file(
-        "Cad Files/301.dxf",
+        "tests/fixtures/cad_files/301_redacted.dxf",
         use_paddle_ocr=False,  # Skip OCR (faster)
         verbose=False
     )
@@ -54,7 +54,7 @@ def example_with_family():
     print("=" * 60)
 
     plan = plan_from_cad_file(
-        "Cad Files/301.dxf",
+        "tests/fixtures/cad_files/301_redacted.dxf",
         fallback_family="punch",  # Force punch family
         verbose=False
     )
@@ -75,7 +75,7 @@ def example_components():
         extract_all_text_from_cad
     )
 
-    file_path = "Cad Files/301.dxf"
+    file_path = "tests/fixtures/cad_files/301_redacted.dxf"
 
     # Get dimensions
     dims = extract_dimensions_from_cad(file_path)
@@ -100,7 +100,7 @@ def example_save_json():
     print("\nExample 5: Save Plan to JSON")
     print("=" * 60)
 
-    plan = plan_from_cad_file("Cad Files/301.dxf", verbose=False)
+    plan = plan_from_cad_file("tests/fixtures/cad_files/301_redacted.dxf", verbose=False)
 
     output_file = "debug/example_plan.json"
     with open(output_file, "w") as f:

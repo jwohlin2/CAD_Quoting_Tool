@@ -20,8 +20,8 @@ Features
 
 CLI
 ---
-python tools/part_dims_ocr.py --input path/to/file.pdf --units auto --json-out dims.json
-python tools/part_dims_ocr.py --input page.png --prefer-stock --use-llm
+python scripts/part_dims_ocr.py --input path/to/file.pdf --units auto --json-out dims.json
+python scripts/part_dims_ocr.py --input page.png --prefer-stock --use-llm
 
 Env for LLM (optional):
   OPENAI_API_KEY=<your key>
