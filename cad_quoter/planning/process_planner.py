@@ -161,14 +161,54 @@ def planner_die_plate(params: Dict[str, Any]) -> Plan:
     parallelism_spec = params.get("parallelism_spec")
     windows_need_sharp = bool(params.get("windows_need_sharp", False))
     window_corner_radius_req = params.get("window_corner_radius_req")
+    material = params.get("material", "GENERIC")
 
-    # Squaring/Finishing strategy (added early, before features)
+    # Squaring/Finishing strategy with volume-based time calculation
     if L > 5.0 and W > 5.0 and T > 1.0:
-        # Mill-based squaring for larger parts
+        # Get starting stock dimensions (default: +0.50" L/W, +0.25" T)
+        stock_L = params.get('stock_length', L + 0.50)
+        stock_W = params.get('stock_width', W + 0.50)
+        stock_T = params.get('stock_thickness', T + 0.25)
+
+        # Calculate volume removed
+        volume_start = stock_L * stock_W * stock_T
+        volume_finish = L * W * T
+        volume_removed = volume_start - volume_finish
+
+        # Split: 90% milling (rough), 10% grinding (finish)
+        volume_milling = volume_removed * 0.90
+        volume_grinding = volume_removed * 0.10
+
+        # Get material-specific removal rates
+        rates = get_material_removal_rates(material)
+        milling_rate = rates['milling_min_per_cuin']
+        grinding_rate = rates['grinding_min_per_cuin']
+        setup_time = rates['setup_overhead_min']
+        flip_time = rates['flip_deburr_min']
+
+        # Calculate raw cutting times
+        milling_time = volume_milling * milling_rate
+        grinding_time = volume_grinding * grinding_rate
+
+        # Total time with overhead
+        total_square_up_time = milling_time + grinding_time + setup_time + flip_time
+
+        # Add operations with calculated times
         D = W / 3.0
         axial_step = min(0.75, T / 2.0)
-        p.add("square_up_rough_sides", radial_stock=0.250, axial_step=axial_step, tool_diameter_in=D)
-        p.add("square_up_rough_faces", finish_doc=0.025, tool_diameter_in=D, target_pass_count=3)
+
+        # Pass override times to suppress physics-based calc
+        p.add("square_up_rough_sides",
+              radial_stock=0.250,
+              axial_step=axial_step,
+              tool_diameter_in=D,
+              override_time_minutes=milling_time + (setup_time / 2))
+
+        p.add("square_up_rough_faces",
+              finish_doc=0.025,
+              tool_diameter_in=D,
+              target_pass_count=3,
+              override_time_minutes=grinding_time + (flip_time + setup_time / 2))
     else:
         # Wet grind for smaller parts
         p.add("wet_grind_square_all", stock_removed_total=0.050, faces=2)
@@ -909,37 +949,37 @@ class LaborInputs:
 
 def setup_minutes(i: LaborInputs) -> float:
     """
-    Calculate Setup / Prep labor minutes (base = 10).
+    Calculate Setup / Prep labor minutes (base = 15, multipliers increased 1.5x).
 
     NOTE: part_flips intentionally EXCLUDED from setup and counted in Machining.
 
     Setup minutes =
-        10
-      + 2·tool_changes
-      + 5·fixturing_complexity
-      + 2·edm_window_count
-      + 1·edm_skim_passes
-      + 3·grind_face_pairs
-      + 2·jig_grind_bore_qty
-      + 1·(tap_rigid + thread_mill)
-      + 2·tap_npt
-      + 1·(ream_press_dowel + ream_slip_dowel)
-      + 1·(counterbore_qty + counterdrill_qty)
-      + 4·outsource_touches
+        15                              (was 10)
+      + 3·tool_changes                  (was 2)
+      + 8·fixturing_complexity          (was 5)
+      + 3·edm_window_count              (was 2)
+      + 2·edm_skim_passes               (was 1)
+      + 5·grind_face_pairs              (was 3)
+      + 3·jig_grind_bore_qty            (was 2)
+      + 2·(tap_rigid + thread_mill)     (was 1)
+      + 3·tap_npt                       (was 2)
+      + 2·(ream_press_dowel + ream_slip_dowel)  (was 1)
+      + 2·(counterbore_qty + counterdrill_qty)  (was 1)
+      + 6·outsource_touches             (was 4)
     """
     return (
-        10
-        + 2 * i.tool_changes
-        + 5 * i.fixturing_complexity
-        + 2 * i.edm_window_count
-        + 1 * i.edm_skim_passes
-        + 3 * i.grind_face_pairs
-        + 2 * i.jig_grind_bore_qty
-        + 1 * (i.tap_rigid + i.thread_mill)
-        + 2 * i.tap_npt
-        + 1 * (i.ream_press_dowel + i.ream_slip_dowel)
-        + 1 * (i.counterbore_qty + i.counterdrill_qty)
-        + 4 * i.outsource_touches
+        15  # Was 10
+        + 3 * i.tool_changes  # Was 2
+        + 8 * i.fixturing_complexity  # Was 5
+        + 3 * i.edm_window_count  # Was 2
+        + 2 * i.edm_skim_passes  # Was 1
+        + 5 * i.grind_face_pairs  # Was 3
+        + 3 * i.jig_grind_bore_qty  # Was 2
+        + 2 * (i.tap_rigid + i.thread_mill)  # Was 1
+        + 3 * i.tap_npt  # Was 2
+        + 2 * (i.ream_press_dowel + i.ream_slip_dowel)  # Was 1
+        + 2 * (i.counterbore_qty + i.counterdrill_qty)  # Was 1
+        + 6 * i.outsource_touches  # Was 4
     )
 
 
@@ -1050,6 +1090,41 @@ def finishing_minutes(i: LaborInputs) -> float:
         + 1 * i.grind_face_pairs
         + 1 * i.outsource_touches
     )
+
+
+def cmm_inspection_minutes(holes_total: int) -> float:
+    """
+    Calculate CMM inspection machine time based on hole count.
+
+    Formula: CMM_time_min = base_block_min + holes_total × minutes_per_hole
+
+    Base time (~30 min) includes:
+    - Load, clamp, warm up: 5-10 min
+    - Pick up 3 datums/planes, coordinate system: 5-10 min
+    - Quick size/flatness/squareness checks: 10-15 min
+
+    Per hole time (~1.0 min):
+    - First article (building/debugging program)
+    - Move to position, take 4-6 circle touches, retract, process
+
+    Args:
+        holes_total: Total number of holes to inspect
+
+    Returns:
+        CMM inspection time in minutes
+
+    Example:
+        >>> cmm_inspection_minutes(88)
+        118.0  # ~2.0 hours for 88-hole die
+    """
+    base_block_min = 30  # Base setup and datum time
+    minutes_per_hole = 1.0  # First article inspection time per hole
+
+    # Only do CMM if there are holes to inspect (threshold: >20 holes)
+    if holes_total > 20:
+        return base_block_min + (holes_total * minutes_per_hole)
+    else:
+        return 0.0
 
 
 def compute_labor_minutes(i: LaborInputs) -> Dict[str, Any]:
@@ -1412,6 +1487,44 @@ def calculate_tap_time(
     return time_per_hole * qty
 
 
+def get_material_removal_rates(material: str) -> Dict[str, float]:
+    """
+    Get material-specific removal rates for square-up operations.
+
+    Returns:
+        Dict with 'milling_min_per_cuin' and 'grinding_min_per_cuin'
+
+    Rates based on typical die-shop practice:
+    - Milling: Rough removal to near size (~90% of total volume)
+    - Grinding: Finish last few thou for flatness/parallelism (~10% of volume)
+    """
+    # Default rates (conservative)
+    default_rates = {
+        'milling_min_per_cuin': 0.25,    # ~4 in³/min
+        'grinding_min_per_cuin': 4.0,    # ~0.25 in³/min (slow, precise)
+        'setup_overhead_min': 20,         # Setup, indicating, clamping
+        'flip_deburr_min': 15            # Flips, deburr, edge break
+    }
+
+    # Material-specific adjustments
+    # Use speeds_feeds lookup for grinding_time_factor
+    from cad_quoter.pricing.speeds_feeds import get_speeds_feeds
+    sf = get_speeds_feeds(material, "Endmill_Profile")
+
+    if sf:
+        grinding_factor = sf.get('grinding_time_factor', 1.0)
+        default_rates['grinding_min_per_cuin'] = 4.0 * grinding_factor
+
+        # Adjust milling rate based on SFM (harder materials = slower)
+        sfm = sf.get('sfm_start', 250)
+        if sfm < 150:  # Hard material (tool steel, stainless)
+            default_rates['milling_min_per_cuin'] = 0.35
+        elif sfm > 400:  # Soft material (aluminum)
+            default_rates['milling_min_per_cuin'] = 0.15
+
+    return default_rates
+
+
 def estimate_machine_hours_from_plan(
     plan: Dict[str, Any],
     material: str = "GENERIC",
@@ -1565,24 +1678,30 @@ def estimate_machine_hours_from_plan(
 
         # Squaring operations (mill - rough faces)
         elif op_type == 'square_up_rough_faces':
-            # Face milling with enforced 3-pass rule
-            D = op.get('tool_diameter_in') or (W / 3.0 if W > 0 else 0.75)
-            target_passes = op.get('target_pass_count', 3)
-            path_in = target_passes * L if L > 0 else 0
-            stepover = (W / 3.0) * 0.95 if W > 0 else 0  # ~5% overlap for 3 stripes
-
-            # Look up face milling IPM
-            sf = get_speeds_feeds(material, "Endmill_Face")
-            if sf:
-                fz = sf.get('fz_ipr_0_25in', 0.004)
-                sfm = sf.get('sfm_start', 200)
-                rpm = (sfm * 12) / (3.14159 * D) if D > 0 else 1000
-                rpm = min(rpm, 8000)
-                ipm = fz * 4 * rpm  # 4 flutes typical for face mill
+            # Check if time is overridden
+            override_time = op.get('override_time_minutes')
+            if override_time is not None:
+                minutes = override_time
             else:
-                ipm = 50  # Fallback IPM
+                # Face milling with enforced 3-pass rule
+                D = op.get('tool_diameter_in') or (W / 3.0 if W > 0 else 0.75)
+                target_passes = op.get('target_pass_count', 3)
+                path_in = target_passes * L if L > 0 else 0
+                stepover = (W / 3.0) * 0.95 if W > 0 else 0  # ~5% overlap for 3 stripes
 
-            minutes = (path_in / max(1e-6, ipm)) * 1.05
+                # Look up face milling IPM
+                sf = get_speeds_feeds(material, "Endmill_Face")
+                if sf:
+                    fz = sf.get('fz_ipr_0_25in', 0.004)
+                    sfm = sf.get('sfm_start', 200)
+                    rpm = (sfm * 12) / (3.14159 * D) if D > 0 else 1000
+                    rpm = min(rpm, 8000)
+                    ipm = fz * 4 * rpm  # 4 flutes typical for face mill
+                else:
+                    ipm = 50  # Fallback IPM
+
+                minutes = (path_in / max(1e-6, ipm)) * 1.05
+
             time_breakdown['milling'] += minutes
 
             # Create detailed operation object
@@ -1606,33 +1725,50 @@ def estimate_machine_hours_from_plan(
 
         # Squaring operations (mill - rough sides)
         elif op_type == 'square_up_rough_sides':
-            # Side milling with radial and axial passes
-            D = op.get('tool_diameter_in', 0.75)
-            radial_stock = op.get('radial_stock', 0.250)
-            axial_step = op.get('axial_step', 0.75)
-
-            # Calculate number of passes
-            import math
-            woc = min(radial_stock, 0.5 * D)
-            axial_passes = max(1, math.ceil(T / axial_step) if axial_step > 0 else 1)
-            radial_passes = max(1, math.ceil(radial_stock / woc) if woc > 0 else 1)
-
-            # Path length: perimeter × passes
-            perimeter = 2 * (L + W)
-            path_in = perimeter * axial_passes * radial_passes
-
-            # Look up side milling IPM
-            sf = get_speeds_feeds(material, "Endmill_Profile")
-            if sf:
-                fz = sf.get('fz_ipr_0_25in', 0.003)
-                sfm = sf.get('sfm_start', 200)
-                rpm = (sfm * 12) / (3.14159 * D) if D > 0 else 1000
-                rpm = min(rpm, 8000)
-                ipm = fz * 4 * rpm
+            # Check if time is overridden
+            override_time = op.get('override_time_minutes')
+            if override_time is not None:
+                minutes = override_time
+                # Still need these for detailed operation object
+                D = op.get('tool_diameter_in', 0.75)
+                radial_stock = op.get('radial_stock', 0.250)
+                axial_step = op.get('axial_step', 0.75)
+                import math
+                woc = min(radial_stock, 0.5 * D)
+                axial_passes = max(1, math.ceil(T / axial_step) if axial_step > 0 else 1)
+                radial_passes = max(1, math.ceil(radial_stock / woc) if woc > 0 else 1)
+                perimeter = 2 * (L + W)
+                path_in = perimeter * axial_passes * radial_passes
+                ipm = 0  # Not calculated when overridden
             else:
-                ipm = 40  # Fallback IPM
+                # Side milling with radial and axial passes
+                D = op.get('tool_diameter_in', 0.75)
+                radial_stock = op.get('radial_stock', 0.250)
+                axial_step = op.get('axial_step', 0.75)
 
-            minutes = (path_in / max(1e-6, ipm)) * 1.05
+                # Calculate number of passes
+                import math
+                woc = min(radial_stock, 0.5 * D)
+                axial_passes = max(1, math.ceil(T / axial_step) if axial_step > 0 else 1)
+                radial_passes = max(1, math.ceil(radial_stock / woc) if woc > 0 else 1)
+
+                # Path length: perimeter × passes
+                perimeter = 2 * (L + W)
+                path_in = perimeter * axial_passes * radial_passes
+
+                # Look up side milling IPM
+                sf = get_speeds_feeds(material, "Endmill_Profile")
+                if sf:
+                    fz = sf.get('fz_ipr_0_25in', 0.003)
+                    sfm = sf.get('sfm_start', 200)
+                    rpm = (sfm * 12) / (3.14159 * D) if D > 0 else 1000
+                    rpm = min(rpm, 8000)
+                    ipm = fz * 4 * rpm
+                else:
+                    ipm = 40  # Fallback IPM
+
+                minutes = (path_in / max(1e-6, ipm)) * 1.05
+
             time_breakdown['milling'] += minutes
 
             # Create detailed operation object
