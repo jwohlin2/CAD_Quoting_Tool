@@ -192,7 +192,8 @@ class MachineHoursBreakdown:
     total_grinding_minutes: float = 0.0  # Includes wet grind squaring
     total_edm_minutes: float = 0.0
     total_other_minutes: float = 0.0
-    total_cmm_minutes: float = 0.0  # CMM inspection time
+    total_cmm_minutes: float = 0.0  # CMM checking time (machine only, setup is in labor)
+    cmm_holes_checked: int = 0  # Number of holes inspected by CMM
 
     # Overall totals
     total_minutes: float = 0.0
@@ -882,16 +883,19 @@ def extract_quote_data_from_cad(
         GrindingOperation(**op) for op in plan_machine_times.get('grinding_operations', [])
     ]
 
-    # Calculate CMM inspection time
+    # Calculate CMM inspection time (split between labor setup and machine checking)
     from cad_quoter.planning.process_planner import cmm_inspection_minutes
-    total_cmm_min = cmm_inspection_minutes(holes_total)
+    cmm_breakdown = cmm_inspection_minutes(holes_total)
+    cmm_setup_labor_min = cmm_breakdown['setup_labor_min']
+    cmm_checking_machine_min = cmm_breakdown['checking_machine_min']
+    cmm_holes_checked = cmm_breakdown['holes_checked']
 
-    # Calculate grand totals
+    # Calculate grand totals (machine time only includes CMM checking, not setup)
     grand_total_minutes = (
         total_drill_min + total_tap_min + total_cbore_min +
         total_cdrill_min + total_jig_grind_min +
         total_milling_min + total_grinding_min + total_edm_min + total_other_min +
-        total_cmm_min
+        cmm_checking_machine_min
     )
     grand_total_hours = grand_total_minutes / 60.0
 
@@ -912,7 +916,8 @@ def extract_quote_data_from_cad(
         total_grinding_minutes=total_grinding_min,
         total_edm_minutes=total_edm_min,
         total_other_minutes=total_other_min,
-        total_cmm_minutes=total_cmm_min,
+        total_cmm_minutes=cmm_checking_machine_min,
+        cmm_holes_checked=cmm_holes_checked,
         total_minutes=grand_total_minutes,
         total_hours=grand_total_hours,
         machine_cost=grand_total_hours * machine_rate
@@ -925,7 +930,7 @@ def extract_quote_data_from_cad(
         print(f"    - Milling (inc. squaring): {total_milling_min:.1f} min")
         print(f"    - Grinding (inc. wet grind): {total_grinding_min:.1f} min")
         print(f"    - EDM: {total_edm_min:.1f} min")
-        print(f"    - CMM Inspection: {total_cmm_min:.1f} min")
+        print(f"    - CMM Inspection (checking only): {cmm_checking_machine_min:.1f} min")
         print(f"  Machine cost: ${quote_data.machine_hours.machine_cost:.2f}")
 
     # ========================================================================
@@ -942,7 +947,8 @@ def extract_quote_data_from_cad(
         ops_total=len(ops),
         holes_total=holes_total,
         tool_changes=len(ops) * 2,  # Rough estimate
-        fixturing_complexity=1
+        fixturing_complexity=1,
+        cmm_setup_min=cmm_setup_labor_min  # Add CMM setup to inspection labor
     )
 
     labor_result = compute_labor_minutes(labor_inputs)
