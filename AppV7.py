@@ -318,13 +318,26 @@ class AppV7:
         table_frame = ttk.Frame(self.geo_tab)
         table_frame.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
 
-        # Add a label
-        label = ttk.Label(table_frame, text="Hole Operations", font=("Arial", 12, "bold"))
-        label.grid(row=0, column=0, columnspan=2, sticky="w", pady=(0, 10))
+        # Header with label and copy button
+        header_frame = ttk.Frame(table_frame)
+        header_frame.grid(row=0, column=0, columnspan=2, sticky="ew", pady=(0, 10))
+        header_frame.columnconfigure(0, weight=1)
+
+        label = ttk.Label(header_frame, text="Hole Operations", font=("Arial", 12, "bold"))
+        label.grid(row=0, column=0, sticky="w")
+
+        copy_button = ttk.Button(
+            header_frame,
+            text="Copy Table",
+            command=self._copy_hole_table_to_clipboard
+        )
+        copy_button.grid(row=0, column=1, sticky="e")
 
         # Create a Treeview for the hole operations table
         columns = ("HOLE", "REF_DIAM", "QTY", "OPERATION")
         self.hole_table = ttk.Treeview(table_frame, columns=columns, show="headings", height=20)
+        self.hole_table.bind("<Control-c>", self._copy_hole_table_to_clipboard)
+        self.hole_table.bind("<Control-C>", self._copy_hole_table_to_clipboard)
 
         # Define column headings
         self.hole_table.heading("HOLE", text="HOLE")
@@ -848,6 +861,35 @@ class AppV7:
             self.hole_table.insert("", "end", values=(f"Error: {str(e)}", "", "", ""))
             self.status_bar.config(text=f"Error parsing hole table: {str(e)}")
             raise  # Re-raise so load_cad can provide detailed error message
+
+    def _copy_hole_table_to_clipboard(self, event: tk.Event | None = None) -> str | None:
+        """Copy selected rows (or the whole table) to the clipboard."""
+        if not hasattr(self, "hole_table"):
+            return "break" if event else None
+
+        selected_items = self.hole_table.selection()
+        if not selected_items:
+            selected_items = self.hole_table.get_children()
+            if not selected_items:
+                return "break" if event else None
+
+        headers = ("HOLE", "REF DIAM", "QTY", "OPERATION")
+        rows = ["\t".join(headers)]
+
+        for item in selected_items:
+            values = self.hole_table.item(item, "values")
+            rows.append("\t".join(str(value) for value in values))
+
+        clipboard_text = "\n".join(rows)
+
+        try:
+            self.root.clipboard_clear()
+            self.root.clipboard_append(clipboard_text)
+            self.status_bar.config(text=f"Copied {len(selected_items)} hole rows to clipboard.")
+        except Exception as e:
+            messagebox.showerror("Clipboard Error", f"Unable to copy hole table:\n{e}")
+
+        return "break" if event else None
 
     def _format_weight(self, weight_lbs: float) -> str:
         """Format weight in lb and oz."""
