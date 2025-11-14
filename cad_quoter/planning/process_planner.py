@@ -943,6 +943,9 @@ class LaborInputs:
     # Sampling — e.g., every 5th part => 0.2
     inspection_frequency: float = 0.0
 
+    # CMM inspection setup (labor)
+    cmm_setup_min: float = 0.0
+
     # Handling
     part_flips: int = 0
 
@@ -1040,7 +1043,7 @@ def inspection_minutes(i: LaborInputs) -> float:
     """
     Calculate Inspection labor minutes (base = 6 minutes).
 
-    Includes hole-driven and feature-driven checks.
+    Includes hole-driven and feature-driven checks, plus CMM setup.
 
     Inspection minutes =
         6
@@ -1053,6 +1056,7 @@ def inspection_minutes(i: LaborInputs) -> float:
       + 2·grind_face_pairs
       + 1·edm_window_count
       + inspection_frequency·ops_total
+      + cmm_setup_min (load, clamp, datum setup)
     """
     return (
         6
@@ -1065,6 +1069,7 @@ def inspection_minutes(i: LaborInputs) -> float:
         + 2 * i.grind_face_pairs
         + 1 * i.edm_window_count
         + i.inspection_frequency * i.ops_total
+        + i.cmm_setup_min
     )
 
 
@@ -1092,18 +1097,18 @@ def finishing_minutes(i: LaborInputs) -> float:
     )
 
 
-def cmm_inspection_minutes(holes_total: int) -> float:
+def cmm_inspection_minutes(holes_total: int) -> Dict[str, float]:
     """
-    Calculate CMM inspection machine time based on hole count.
+    Calculate CMM inspection time split into setup (labor) and checking (machine).
 
     Formula: CMM_time_min = base_block_min + holes_total × minutes_per_hole
 
-    Base time (~30 min) includes:
+    Base time (~30 min) - LABOR:
     - Load, clamp, warm up: 5-10 min
     - Pick up 3 datums/planes, coordinate system: 5-10 min
     - Quick size/flatness/squareness checks: 10-15 min
 
-    Per hole time (~1.0 min):
+    Per hole time (~1.0 min) - MACHINE:
     - First article (building/debugging program)
     - Move to position, take 4-6 circle touches, retract, process
 
@@ -1111,20 +1116,32 @@ def cmm_inspection_minutes(holes_total: int) -> float:
         holes_total: Total number of holes to inspect
 
     Returns:
-        CMM inspection time in minutes
+        Dict with 'setup_labor_min', 'checking_machine_min', 'total_min', 'holes_checked'
 
     Example:
         >>> cmm_inspection_minutes(88)
-        118.0  # ~2.0 hours for 88-hole die
+        {'setup_labor_min': 30, 'checking_machine_min': 88, 'total_min': 118, 'holes_checked': 88}
     """
-    base_block_min = 30  # Base setup and datum time
-    minutes_per_hole = 1.0  # First article inspection time per hole
+    base_block_min = 30  # Base setup and datum time (LABOR)
+    minutes_per_hole = 1.0  # First article inspection time per hole (MACHINE)
 
     # Only do CMM if there are holes to inspect (threshold: >20 holes)
     if holes_total > 20:
-        return base_block_min + (holes_total * minutes_per_hole)
+        checking_min = holes_total * minutes_per_hole
+        total_min = base_block_min + checking_min
+        return {
+            'setup_labor_min': base_block_min,
+            'checking_machine_min': checking_min,
+            'total_min': total_min,
+            'holes_checked': holes_total
+        }
     else:
-        return 0.0
+        return {
+            'setup_labor_min': 0.0,
+            'checking_machine_min': 0.0,
+            'total_min': 0.0,
+            'holes_checked': 0
+        }
 
 
 def compute_labor_minutes(i: LaborInputs) -> Dict[str, Any]:

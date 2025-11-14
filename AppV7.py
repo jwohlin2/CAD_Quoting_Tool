@@ -1164,6 +1164,17 @@ class AppV7:
                 report.append(f"Total Wet Grind Time: {machine_hours.total_grinding_minutes:.2f} minutes")
                 report.append("")
 
+            # CMM INSPECTION (if applicable)
+            if machine_hours.total_cmm_minutes > 0:
+                report.append("CMM INSPECTION")
+                report.append("-" * 74)
+                report.append(f"Holes to inspect: {machine_hours.cmm_holes_checked}")
+                report.append(f"Time per hole: 1.0 min (first article)")
+                report.append(f"Total CMM time: {machine_hours.cmm_holes_checked} holes × 1.0 min = {machine_hours.total_cmm_minutes:.2f} min")
+                report.append("")
+                report.append(f"Note: CMM setup time (30 min) is included in Labor → Inspection")
+                report.append("")
+
             # Summary
             machine_rate = self._get_field_float("Machine Rate ($/hr)", self.MACHINE_RATE)
             machine_rate_label = f"@ ${machine_rate:.2f}/hr"
