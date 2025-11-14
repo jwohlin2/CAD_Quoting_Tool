@@ -192,6 +192,7 @@ class MachineHoursBreakdown:
     total_grinding_minutes: float = 0.0  # Includes wet grind squaring
     total_edm_minutes: float = 0.0
     total_other_minutes: float = 0.0
+    total_cmm_minutes: float = 0.0  # CMM inspection time
 
     # Overall totals
     total_minutes: float = 0.0
@@ -878,11 +879,16 @@ def extract_quote_data_from_cad(
         GrindingOperation(**op) for op in plan_machine_times.get('grinding_operations', [])
     ]
 
+    # Calculate CMM inspection time
+    from cad_quoter.planning.process_planner import cmm_inspection_minutes
+    total_cmm_min = cmm_inspection_minutes(holes_total)
+
     # Calculate grand totals
     grand_total_minutes = (
         total_drill_min + total_tap_min + total_cbore_min +
         total_cdrill_min + total_jig_grind_min +
-        total_milling_min + total_grinding_min + total_edm_min + total_other_min
+        total_milling_min + total_grinding_min + total_edm_min + total_other_min +
+        total_cmm_min
     )
     grand_total_hours = grand_total_minutes / 60.0
 
@@ -903,6 +909,7 @@ def extract_quote_data_from_cad(
         total_grinding_minutes=total_grinding_min,
         total_edm_minutes=total_edm_min,
         total_other_minutes=total_other_min,
+        total_cmm_minutes=total_cmm_min,
         total_minutes=grand_total_minutes,
         total_hours=grand_total_hours,
         machine_cost=grand_total_hours * machine_rate
@@ -915,6 +922,7 @@ def extract_quote_data_from_cad(
         print(f"    - Milling (inc. squaring): {total_milling_min:.1f} min")
         print(f"    - Grinding (inc. wet grind): {total_grinding_min:.1f} min")
         print(f"    - EDM: {total_edm_min:.1f} min")
+        print(f"    - CMM Inspection: {total_cmm_min:.1f} min")
         print(f"  Machine cost: ${quote_data.machine_hours.machine_cost:.2f}")
 
     # ========================================================================
@@ -924,7 +932,8 @@ def extract_quote_data_from_cad(
         print("[5/5] Calculating labor hours...")
 
     ops = plan.get('ops', [])
-    holes_total = len(hole_table) if hole_table else 0
+    # Sum the QTY field from each hole entry to get total hole count
+    holes_total = sum(int(hole.get('QTY', 1)) for hole in hole_table) if hole_table else 0
 
     # Estimate labor inputs (simplified - could be more sophisticated)
     labor_inputs = LaborInputs(
