@@ -1677,17 +1677,18 @@ def estimate_machine_hours_from_plan(
 
         # Squaring operations (mill - rough faces)
         elif op_type == 'square_up_rough_faces':
+            # Get operation parameters (needed for detailed object regardless of override)
+            D = op.get('tool_diameter_in') or (W / 3.0 if W > 0 else 0.75)
+            target_passes = op.get('target_pass_count', 3)
+            path_in = target_passes * L if L > 0 else 0
+            stepover = (W / 3.0) * 0.95 if W > 0 else 0  # ~5% overlap for 3 stripes
+
             # Check if time is overridden
             override_time = op.get('override_time_minutes')
             if override_time is not None:
                 minutes = override_time
+                ipm = 0  # Not calculated when overridden
             else:
-                # Face milling with enforced 3-pass rule
-                D = op.get('tool_diameter_in') or (W / 3.0 if W > 0 else 0.75)
-                target_passes = op.get('target_pass_count', 3)
-                path_in = target_passes * L if L > 0 else 0
-                stepover = (W / 3.0) * 0.95 if W > 0 else 0  # ~5% overlap for 3 stripes
-
                 # Look up face milling IPM
                 sf = get_speeds_feeds(material, "Endmill_Face")
                 if sf:
@@ -1724,37 +1725,27 @@ def estimate_machine_hours_from_plan(
 
         # Squaring operations (mill - rough sides)
         elif op_type == 'square_up_rough_sides':
+            # Get operation parameters (needed for detailed object regardless of override)
+            import math
+            D = op.get('tool_diameter_in', 0.75)
+            radial_stock = op.get('radial_stock', 0.250)
+            axial_step = op.get('axial_step', 0.75)
+
+            # Calculate number of passes
+            woc = min(radial_stock, 0.5 * D)
+            axial_passes = max(1, math.ceil(T / axial_step) if axial_step > 0 else 1)
+            radial_passes = max(1, math.ceil(radial_stock / woc) if woc > 0 else 1)
+
+            # Path length: perimeter × passes
+            perimeter = 2 * (L + W)
+            path_in = perimeter * axial_passes * radial_passes
+
             # Check if time is overridden
             override_time = op.get('override_time_minutes')
             if override_time is not None:
                 minutes = override_time
-                # Still need these for detailed operation object
-                D = op.get('tool_diameter_in', 0.75)
-                radial_stock = op.get('radial_stock', 0.250)
-                axial_step = op.get('axial_step', 0.75)
-                import math
-                woc = min(radial_stock, 0.5 * D)
-                axial_passes = max(1, math.ceil(T / axial_step) if axial_step > 0 else 1)
-                radial_passes = max(1, math.ceil(radial_stock / woc) if woc > 0 else 1)
-                perimeter = 2 * (L + W)
-                path_in = perimeter * axial_passes * radial_passes
                 ipm = 0  # Not calculated when overridden
             else:
-                # Side milling with radial and axial passes
-                D = op.get('tool_diameter_in', 0.75)
-                radial_stock = op.get('radial_stock', 0.250)
-                axial_step = op.get('axial_step', 0.75)
-
-                # Calculate number of passes
-                import math
-                woc = min(radial_stock, 0.5 * D)
-                axial_passes = max(1, math.ceil(T / axial_step) if axial_step > 0 else 1)
-                radial_passes = max(1, math.ceil(radial_stock / woc) if woc > 0 else 1)
-
-                # Path length: perimeter × passes
-                perimeter = 2 * (L + W)
-                path_in = perimeter * axial_passes * radial_passes
-
                 # Look up side milling IPM
                 sf = get_speeds_feeds(material, "Endmill_Profile")
                 if sf:
