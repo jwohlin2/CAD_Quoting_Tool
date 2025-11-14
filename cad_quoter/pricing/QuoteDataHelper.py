@@ -760,6 +760,9 @@ def extract_quote_data_from_cad(
 
     hole_table = extract_hole_operations_from_cad(cad_file_path)
 
+    # Calculate total hole count (sum QTY field from each hole entry)
+    holes_total = sum(int(hole.get('QTY', 1)) for hole in hole_table) if hole_table else 0
+
     # Initialize time accumulators
     total_drill_min = 0.0
     total_tap_min = 0.0
@@ -932,8 +935,7 @@ def extract_quote_data_from_cad(
         print("[5/5] Calculating labor hours...")
 
     ops = plan.get('ops', [])
-    # Sum the QTY field from each hole entry to get total hole count
-    holes_total = sum(int(hole.get('QTY', 1)) for hole in hole_table) if hole_table else 0
+    # Note: holes_total is already calculated earlier in STEP 4
 
     # Estimate labor inputs (simplified - could be more sophisticated)
     labor_inputs = LaborInputs(
