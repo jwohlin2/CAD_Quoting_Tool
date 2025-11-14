@@ -420,6 +420,15 @@ def estimate_price_from_reference_part(
     reference_part = None
     from cad_quoter.pricing.mcmaster_helpers import _coerce_inches_value
 
+    # For exotic materials (carbide, titanium) with limited catalog availability,
+    # use relaxed thickness tolerance since large pieces may not exist
+    exotic_materials = ["carbide", "titanium", "tungsten"]
+    is_exotic = any(exotic in material_key for exotic in exotic_materials)
+    thickness_tolerance = 10.0 if is_exotic else 0.2  # 1000% vs 20%
+
+    if verbose and is_exotic:
+        print(f"  NOTE: Using relaxed thickness tolerance for exotic material ({material_key})")
+
     for row in catalog_rows:
         # Check material match
         material_text = str(row.get("material") or row.get("Material") or "").strip().lower()
@@ -444,8 +453,8 @@ def estimate_price_from_reference_part(
         if not all([length, width, thickness]):
             continue
 
-        # Check thickness match (within 20% tolerance)
-        if abs(thickness - target_thickness) / target_thickness > 0.2:
+        # Check thickness match (relaxed tolerance for exotic materials)
+        if abs(thickness - target_thickness) / target_thickness > thickness_tolerance:
             continue
 
         # Get part number
@@ -458,7 +467,9 @@ def estimate_price_from_reference_part(
 
         # Prefer smaller parts (more likely to have qty-1 pricing)
         # But not too small (should be at least 10% of target volume for reasonable accuracy)
-        if stock_volume < target_volume * 0.1:
+        # For exotic materials with limited sizes, accept any size (volume check disabled)
+        min_volume_ratio = 0.001 if is_exotic else 0.1  # 0.1% vs 10%
+        if stock_volume < target_volume * min_volume_ratio:
             continue
 
         if reference_part is None or stock_volume < reference_part["volume"]:
@@ -1108,7 +1119,7 @@ def calculate_scrap_value(
         >>> print(f"Scrap value: ${value_info['scrap_value']:.2f}")
         >>> print(f"Price source: {value_info['price_source']}")
     """
-    from cad_quoter.pricing.wieland_scraper import get_scrap_price_per_lb
+    from cad_quoter.pricing.scrap_pricing import get_unified_scrap_price_per_lb
 
     # Get Wieland key (material family) from MaterialMapper
     wieland_key = material_mapper.get_wieland_key(material)
@@ -1121,46 +1132,67 @@ def calculate_scrap_value(
         "TI": "titanium",
         "STEEL": "steel",
         "COPPER": "copper",
-        "BRASS": "brass"
+        "BRASS": "brass",
+        "CARBIDE": "carbide",
+        "HSS": "high_speed_steel",
+        "CERAMIC": "ceramic"
     }
+
+    # Override MaterialMapper for incorrectly mapped materials
+    material_lower = material.lower()
+    # Note: Hokotol should stay as aluminum per user requirements
 
     if wieland_key:
         material_family = wieland_to_family.get(wieland_key, "aluminum")
     else:
         # Fallback to keyword-based detection for materials not in mapper
+        # Order matters - more specific matches first!
         material_lower = material.lower()
-        if any(kw in material_lower for kw in ["aluminum", "aluminium", "6061", "7075", "2024", "mic6"]):
+        if any(kw in material_lower for kw in ["carbide", "tungsten carbide", "tungsten", "vm-15", "vm15"]):
+            material_family = "carbide"
+        elif any(kw in material_lower for kw in ["high speed steel", "hss", "tool steel a2"]) or material_lower == "a2":
+            material_family = "high_speed_steel"
+        elif any(kw in material_lower for kw in ["aluminum", "aluminium", "6061", "7075", "2024", "5083", "mic6", "hokotol"]):
             material_family = "aluminum"
-        elif any(kw in material_lower for kw in ["stainless", "304", "316", "17-4", "17 4"]):
+        elif any(kw in material_lower for kw in ["stainless", "303", "304", "316", "17-4", "17 4", "52100"]):
             material_family = "stainless"
-        elif any(kw in material_lower for kw in ["steel", "p20", "a36", "1018", "1045", "tool steel"]):
+        elif any(kw in material_lower for kw in ["mild steel", "low-carbon steel", "low carbon steel", "steel", "p20", "a36", "1018", "1045"]):
             material_family = "steel"
         elif any(kw in material_lower for kw in ["copper", "cu", "c110"]):
             material_family = "copper"
         elif any(kw in material_lower for kw in ["brass", "bronze"]):
             material_family = "brass"
-        elif any(kw in material_lower for kw in ["titanium", "ti"]):
+        elif any(kw in material_lower for kw in ["titanium", "ti-6", "ti-5", "grade 2 titanium", "grade 5 titanium"]):
             material_family = "titanium"
+        elif any(kw in material_lower for kw in ["ceramic"]):
+            material_family = "ceramic"
         else:
             material_family = "aluminum"  # Default
 
     if verbose:
         print(f"Detected material family: {material_family}")
 
-    # Look up scrap price from Wieland
-    scrap_price_per_lb = get_scrap_price_per_lb(material_family, fallback=fallback_scrap_price_per_lb)
+    # Special case: Ceramic has no scrap value
+    if material_family == "ceramic":
+        scrap_price_per_lb = 0.0
+        price_source = "worthless (ceramic has no scrap value)"
+    else:
+        # Look up scrap price from unified source (Wieland + ScrapMetalBuyers fallback)
+        scrap_price_per_lb, price_source = get_unified_scrap_price_per_lb(
+            material_family,
+            fallback=fallback_scrap_price_per_lb
+        )
 
     if scrap_price_per_lb is None:
         if verbose:
             print(f"Warning: No scrap price found for {material_family}")
-        price_source = "No price available"
+        price_source = price_source or "No price available"
         scrap_value = 0.0
     else:
-        price_source = f"Wieland {material_family} scrap"
         scrap_value = scrap_weight_lbs * scrap_price_per_lb
 
         if verbose:
-            print(f"Scrap price: ${scrap_price_per_lb:.4f}/lb")
+            print(f"Scrap price: ${scrap_price_per_lb:.4f}/lb (source: {price_source})")
             print(f"Scrap value: ${scrap_value:.2f}")
 
     return {
@@ -1186,7 +1218,7 @@ def calculate_total_scrap_with_value(
     verbose: bool = False
 ) -> Dict[str, Any]:
     """
-    Calculate total scrap including dollar value using Wieland scrap prices.
+    Calculate total scrap including dollar value using live scrap prices.
 
     This is a convenience function that combines calculate_total_scrap() and
     calculate_scrap_value() to provide a complete scrap analysis.

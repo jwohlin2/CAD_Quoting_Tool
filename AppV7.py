@@ -904,7 +904,17 @@ class AppV7:
             report.append(f"  Scrap Weight: {self._format_weight(scrap_info.total_scrap_weight)}")
 
             if scrap_info.scrap_price_per_lb is not None:
-                report.append(f"  Scrap Price: ${scrap_info.scrap_price_per_lb:.2f} / lb")
+                source_label = scrap_info.scrap_price_source if scrap_info.scrap_price_source else "Scrap"
+
+                # Abbreviate long source names for better formatting
+                if "ScrapMetalBuyers" in source_label:
+                    source_label = "SMB"
+                elif "Wieland" in source_label:
+                    source_label = "Wieland"
+                elif "house_rate" in source_label.lower():
+                    source_label = "house rate"
+
+                report.append(f"  Scrap Price: ${scrap_info.scrap_price_per_lb:.2f} / lb @ {source_label}")
             else:
                 report.append(f"  Scrap Price: N/A")
 
@@ -931,7 +941,19 @@ class AppV7:
                 report.append(f"  Shipping".ljust(50) + f"+${cost_breakdown.shipping:>22.2f}")
 
             if cost_breakdown.scrap_credit > 0:
-                scrap_credit_line = f"  Scrap Credit @ Wieland ${scrap_info.scrap_price_per_lb:.2f}/lb × {scrap_info.scrap_percentage:.1f}%"
+                # Use the scrap price source from scrap_info (could be Wieland, ScrapMetalBuyers, or house_rate)
+                source_label = scrap_info.scrap_price_source if scrap_info.scrap_price_source else "Scrap"
+
+                # Abbreviate long source names for better formatting
+                if "ScrapMetalBuyers" in source_label:
+                    source_label = "SMB"
+                elif "Wieland" in source_label:
+                    source_label = "Wieland"
+                elif "house_rate" in source_label.lower():
+                    source_label = "house rate"
+
+                scrap_weight_formatted = self._format_weight(scrap_info.total_scrap_weight)
+                scrap_credit_line = f"  Scrap Credit @ {source_label} ${scrap_info.scrap_price_per_lb:.2f}/lb × {scrap_weight_formatted}"
                 if scrap_value_override is not None:
                     scrap_credit_line += " (MANUAL)"
                 report.append(f"{scrap_credit_line.ljust(50)}-${cost_breakdown.scrap_credit:>22.2f}")

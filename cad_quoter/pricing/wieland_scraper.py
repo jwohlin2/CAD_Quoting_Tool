@@ -922,7 +922,8 @@ def _canonical_scrap_family(material_family: Optional[str]) -> str:
             return canonical
         if any(token in family for token in tokens):
             return canonical
-    return "aluminum"
+    # Return the material family as-is if not recognized (don't default to aluminum)
+    return family
 def _case_insensitive_lookup(mapping: Mapping[str, Any], key: str) -> Any:
     if key in mapping:
         return mapping[key]
@@ -973,7 +974,12 @@ def get_scrap_price_per_lb(material_family: Optional[str], *, fallback: Optional
 
     data = scrape_wieland_prices(force=False)
     family = _canonical_scrap_family(material_family)
-    lookup_plan = _SCRAP_LOOKUP_PRIORITY.get(family) or _SCRAP_LOOKUP_PRIORITY.get("aluminum", ())
+    lookup_plan = _SCRAP_LOOKUP_PRIORITY.get(family)
+
+    # If material family not supported by Wieland, return None (don't default to aluminum)
+    if lookup_plan is None:
+        return fallback
+
     keywords = _SCRAP_FAMILY_KEYWORDS.get(family, ())
 
     for bucket, keys, require_scrap in lookup_plan:

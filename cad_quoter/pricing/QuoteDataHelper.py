@@ -613,6 +613,7 @@ def extract_quote_data_from_cad(
     scrap_value_calc = calculate_scrap_value(
         scrap_weight_lbs=scrap_calc.total_scrap_weight,
         material=material,
+        fallback_scrap_price_per_lb=0.50,  # $0.50/lb default scrap rate
         verbose=verbose
     )
 

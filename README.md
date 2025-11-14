@@ -221,3 +221,77 @@ python -m cad_quoter.vendors.mcmaster_stock --part 86825K956
 
 The command honours `--qty` to pick the relevant pricing tier and will fall
 back to the interactive catalog flow when `--part` is omitted.
+
+## Scrap Metal Pricing
+
+The quoting tool automatically fetches live scrap metal prices to calculate scrap
+value credits. Two sources are supported:
+
+- **Wieland** (primary) - Comprehensive metal pricing from wieland.com
+- **ScrapMetalBuyers** (fallback) - Scrap prices from scrapmetalbuyers.com
+
+### Configuration
+
+Control which scrap price source(s) to use via the `SCRAP_PRICE_SOURCE` environment
+variable:
+
+```bash
+# Auto mode (default) - tries Wieland first, falls back to ScrapMetalBuyers
+export SCRAP_PRICE_SOURCE=auto
+
+# Use only Wieland
+export SCRAP_PRICE_SOURCE=wieland
+
+# Use only ScrapMetalBuyers
+export SCRAP_PRICE_SOURCE=scrapmetalbuyers
+```
+
+### How it works
+
+In **auto mode** (recommended):
+1. First attempts to fetch scrap price from Wieland
+2. If Wieland fails or returns no price, tries ScrapMetalBuyers
+3. Falls back to house rate if both sources fail
+
+The quote output will show which source provided the scrap price:
+- "Scrap Credit @ Wieland scrap price $X.XX/lb × Y.Y%"
+- "Scrap Credit @ ScrapMetalBuyers Copper $X.XX/lb × Y.Y%"
+
+### Cache Settings
+
+Both scrapers cache results for 30 minutes to minimize API calls:
+
+```bash
+# Wieland cache TTL (default: 1800 seconds = 30 minutes)
+export WIELAND_CACHE_TTL_S=1800
+
+# ScrapMetalBuyers cache TTL (default: 1800 seconds = 30 minutes)
+export SMB_CACHE_TTL_S=1800
+```
+
+### Testing the Scrapers
+
+Test the scrap price scrapers directly:
+
+```bash
+# Test unified pricing (recommended)
+python -m cad_quoter.pricing.scrap_pricing --material copper
+
+# Test individual scrapers
+python -m cad_quoter.pricing.wieland_scraper --material aluminum
+python -m cad_quoter.pricing.scrapmetalbuyers_scraper --material copper --debug
+
+# Or run as standalone scripts
+python cad_quoter/pricing/scrap_pricing.py --material copper
+```
+
+See [SCRAPER_USAGE.md](SCRAPER_USAGE.md) for detailed usage examples.
+
+### Troubleshooting
+
+If scrap prices fail to fetch:
+- Check your internet connection
+- Verify the websites are accessible
+- Check the console output for error messages
+- The tool will fall back to house rates if all sources fail
+- Run with `--debug` flag to save HTML snapshot for inspection
