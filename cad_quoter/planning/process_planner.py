@@ -1508,7 +1508,6 @@ def get_material_removal_rates(material: str) -> Dict[str, float]:
 
     # Material-specific adjustments
     # Use speeds_feeds lookup for grinding_time_factor
-    from cad_quoter.pricing.speeds_feeds import get_speeds_feeds
     sf = get_speeds_feeds(material, "Endmill_Profile")
 
     if sf:
