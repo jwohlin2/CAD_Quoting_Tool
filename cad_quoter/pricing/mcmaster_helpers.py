@@ -10,6 +10,7 @@ from typing import Any, Mapping, Sequence
 
 from cad_quoter.resources import default_catalog_csv
 from cad_quoter.vendors.mcmaster_stock import parse_inches as _parse_inches
+from cad_quoter.pricing.MaterialMapper import material_mapper
 
 
 @lru_cache(maxsize=1)
@@ -232,11 +233,14 @@ def pick_mcmaster_plate_sku(
 ) -> dict[str, Any] | None:
     """Return the smallest-area McMaster plate covering the requested envelope."""
 
+    # Map material to McMaster catalog key (e.g., "316" -> "303 Stainless Steel", "A2" -> "Tool Steel A2")
+    mcmaster_material = material_mapper.get_mcmaster_key(material_key) or material_key
+
     return _pick_mcmaster_plate_sku_impl(
         need_L_in,
         need_W_in,
         need_T_in,
-        material_key=material_key,
+        material_key=mcmaster_material,
         catalog_rows=catalog_rows,
         verbose=verbose,
     )

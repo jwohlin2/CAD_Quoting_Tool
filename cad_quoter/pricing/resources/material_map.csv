@@ -13,8 +13,8 @@ Ceramic,Ceramic Alumina,Ceramic,,Ceramic,0.22
 Grade 2 Titanium,Unalloyed titanium standard oxygen,Grade 2 Titanium,TI,Titanium,0.160
 Grade 5 Titanium,Titanium 6Al-4V,Grade 5 Titanium,TI,Titanium,0.160
 Ti-6Al-4V,Titanium 6Al-4V,Grade 5 Titanium,TI,Titanium,0.160
-Low-Carbon Steel,Low Carbon Steel,mild steel,,Stainless Steel,0.283
-Mild Steel,Low Carbon Steel,mild steel,,Stainless Steel,0.283
+Low-Carbon Steel,Low-Carbon Steel,Low-Carbon Steel,,Stainless Steel,0.283
+Mild Steel,Mild Steel,Low-Carbon Steel,,Stainless Steel,0.283
 A2,A2 Tool Steel,Tool Steel A2,,Tool Steel,0.289
 Tool Steel A2,A2 Tool Steel,Tool Steel A2,,Tool Steel,0.289
 GENERIC,GENERIC,,,GENERIC,0.283

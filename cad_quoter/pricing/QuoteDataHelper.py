@@ -456,6 +456,7 @@ def extract_quote_data_from_cad(
         DEFAULT_MATERIAL
     )
     from cad_quoter.pricing.KeywordDetector import detect_material_in_cad
+    from cad_quoter.pricing.MaterialMapper import material_mapper
     from cad_quoter.pricing.mcmaster_helpers import (
         pick_mcmaster_plate_sku,
         load_mcmaster_catalog_rows
@@ -663,11 +664,13 @@ def extract_quote_data_from_cad(
 
                 from cad_quoter.pricing.DirectCostHelper import estimate_price_from_reference_part
 
+                # Map material to McMaster catalog key for price estimation
+                mcmaster_material = material_mapper.get_mcmaster_key(material) or material
                 mcmaster_price = estimate_price_from_reference_part(
                     target_length=scrap_calc.mcmaster_length,
                     target_width=scrap_calc.mcmaster_width,
                     target_thickness=scrap_calc.mcmaster_thickness,
-                    material=material,
+                    material=mcmaster_material,
                     catalog_csv_path=catalog_csv_path,
                     verbose=verbose
                 )
@@ -685,11 +688,13 @@ def extract_quote_data_from_cad(
 
         from cad_quoter.pricing.DirectCostHelper import estimate_price_from_reference_part
 
+        # Map material to McMaster catalog key for price estimation
+        mcmaster_material = material_mapper.get_mcmaster_key(material) or material
         mcmaster_price = estimate_price_from_reference_part(
             target_length=scrap_calc.mcmaster_length,
             target_width=scrap_calc.mcmaster_width,
             target_thickness=scrap_calc.mcmaster_thickness,
-            material=material,
+            material=mcmaster_material,
             catalog_csv_path=catalog_csv_path,
             verbose=verbose
         )

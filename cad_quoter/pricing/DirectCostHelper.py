@@ -420,9 +420,9 @@ def estimate_price_from_reference_part(
     reference_part = None
     from cad_quoter.pricing.mcmaster_helpers import _coerce_inches_value
 
-    # For exotic materials (carbide, titanium) with limited catalog availability,
+    # For exotic materials (carbide, titanium, tool steel, stainless) with limited catalog availability,
     # use relaxed thickness tolerance since large pieces may not exist
-    exotic_materials = ["carbide", "titanium", "tungsten"]
+    exotic_materials = ["carbide", "titanium", "tungsten", "tool steel", "stainless"]
     is_exotic = any(exotic in material_key for exotic in exotic_materials)
     thickness_tolerance = 10.0 if is_exotic else 0.2  # 1000% vs 20%
 

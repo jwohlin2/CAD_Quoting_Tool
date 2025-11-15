@@ -34,6 +34,7 @@ from cad_quoter.material_density import (
     density_for_material as _density_for_material,
     normalize_material_key,
 )
+from cad_quoter.pricing.MaterialMapper import material_mapper
 try:  # Optional dependency: McMaster catalog helpers
     from cad_quoter.vendors.mcmaster_stock import lookup_sku_and_price_for_mm
 except Exception:  # pragma: no cover - optional dependency / environment specific
@@ -791,6 +792,8 @@ def pick_stock_from_mcmaster(
         dim_candidates.append(dims_without_scrap)
     L_need, W_need = dims_with_scrap
     material_label = str(material_display or "")
+    # Map material to McMaster catalog key (e.g., "316" -> "303 Stainless Steel")
+    mcmaster_material = material_mapper.get_mcmaster_key(material_label) or material_label
     catalog_path = _catalog_path_from_env()
 
     result: dict[str, Any] = {
@@ -818,7 +821,7 @@ def pick_stock_from_mcmaster(
                 for dims in dim_candidates:
                     try:
                         candidate = _mc.choose_item(
-                            catalog, material_label, dims[0], dims[1], thk_val
+                            catalog, mcmaster_material, dims[0], dims[1], thk_val
                         )
                     except Exception:
                         candidate = None
@@ -843,7 +846,7 @@ def pick_stock_from_mcmaster(
                     for dims in dim_candidates:
                         try:
                             forced_candidate = _mc.choose_item(
-                                catalog, material_label, dims[0], dims[1], need_thk
+                                catalog, mcmaster_material, dims[0], dims[1], need_thk
                             )
                         except Exception:
                             forced_candidate = None
@@ -979,8 +982,10 @@ def pick_stock_from_mcmaster(
             length_in = width_in = thk_in = 0.0
         if length_in > 0 and width_in > 0 and thk_in > 0:
             try:
+                # Map material to McMaster catalog key (e.g., "316" -> "303 Stainless Steel")
+                mcmaster_material = material_mapper.get_mcmaster_key(material_label) or material_label
                 sku, price_each, _, dims = _mc.lookup_sku_and_price_for_mm(
-                    material_label,
+                    mcmaster_material,
                     length_in * 25.4,
                     width_in * 25.4,
                     thk_in * 25.4,
