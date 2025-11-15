@@ -1228,7 +1228,8 @@ def load_speeds_feeds_data() -> List[Dict[str, Any]]:
         for row in reader:
             # Convert numeric fields
             for key in ['sfm_start', 'fz_ipr_0_125in', 'fz_ipr_0_25in', 'fz_ipr_0_5in',
-                       'doc_axial_in', 'woc_radial_pct', 'linear_cut_rate_ipm']:
+                       'doc_axial_in', 'woc_radial_pct', 'linear_cut_rate_ipm',
+                       'tap_sfm_start', 'tap_overhead_sec_per_hole', 'grinding_time_factor']:
                 if row.get(key) and row[key].strip():
                     try:
                         row[key] = float(row[key])
@@ -2013,15 +2014,33 @@ def estimate_hole_table_times(
 
             is_rigid = 'RIGID' in op_text
 
-            # Tapping speed (much slower than drilling)
-            tap_rpm = min(rpm * 0.3, 500)
-            tap_feed_rate = tap_rpm / tpi  # IPM
+            # Look up material-specific tapping speeds/feeds
+            sf_tap = get_speeds_feeds(material, "Tapping")
+            if sf_tap:
+                tap_sfm = sf_tap.get('sfm_start', 40)  # Use sfm_start for tapping
+                overhead_sec = sf_tap.get('tap_overhead_sec_per_hole', 3.0)
+            else:
+                # Fallback values if no speeds/feeds found
+                tap_sfm = 40
+                overhead_sec = 3.0
 
+            # Calculate tapping RPM from material-specific SFM
+            tap_rpm = (tap_sfm * 12) / (3.14159 * tap_dia) if tap_dia > 0 else 500
+            tap_rpm = min(tap_rpm, 1000)  # Cap at reasonable limit
+
+            # Feed rate = RPM × pitch (pitch = 1/TPI)
+            pitch = 1.0 / tpi if tpi > 0 else 0.05
+            tap_feed_rate = tap_rpm * pitch  # IPM
+
+            # Calculate cutting time
             time_per_hole = (tap_depth / tap_feed_rate) if tap_feed_rate > 0 else 2.0
-            time_per_hole += 0.5  # Add approach/retract/dwell
 
+            # Add material-specific overhead (approach/retract/dwell)
+            time_per_hole += overhead_sec / 60.0  # Convert seconds to minutes
+
+            # Rigid tap is faster (can reverse at full speed)
             if is_rigid:
-                time_per_hole *= 0.7  # Rigid tap is faster
+                time_per_hole *= 0.7
 
             total_time = time_per_hole * qty
 
@@ -2031,6 +2050,7 @@ def estimate_hole_table_times(
                 'depth': tap_depth,
                 'qty': qty,
                 'tpi': tpi,
+                'sfm': tap_sfm,
                 'rpm': tap_rpm,
                 'feed_rate': tap_feed_rate,
                 'time_per_hole': time_per_hole,

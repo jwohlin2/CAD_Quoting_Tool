@@ -809,6 +809,7 @@ def extract_quote_data_from_cad(
                 operation_type='tap',
                 time_per_hole=g['time_per_hole'],
                 total_time=g['total_time'],
+                sfm=g.get('sfm'),
                 tpi=g.get('tpi')
             )
             for g in times.get('tap_groups', [])

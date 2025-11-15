@@ -1,57 +1,57 @@
-material,material_group,operation,sfm_start,feed_type,fz_ipr_0_125in,fz_ipr_0_25in,fz_ipr_0_5in,doc_axial_in,woc_radial_pct,linear_cut_rate_ipm,flute_count,tap_sfm_start,tap_overhead_sec_per_hole,grinding_time_factor,,material,material_group
-52100 Bearing Steel,P3,Deep_Drill,75,ipr,0.001,0.0014,0.0018,,,,2,,,1.4,,,
-52100 Bearing Steel,P3,Drill,90,ipr,0.0012,0.0018,0.0024,,,,2,,,1.4,,,
-52100 Bearing Steel,P3,Endmill_Finish,200,fz,0.0006,0.001,0.0016,0.04,6,,4,,,1.4,,,
-52100 Bearing Steel,P3,Endmill_Profile,250,fz,0.0012,0.0018,0.0025,0.3,45,,3,,,1.4,,,
-52100 Bearing Steel,P3,Tapping,35,ipr,0.025,0.05,0.0769,,,,0,35,3,1.4,,,
-52100 Bearing Steel,P3,Wire_EDM_Rough,0,linear,,,,,,3.2,0,,,1.4,,,
-52100 Bearing Steel,P3,Wire_EDM_Skim,0,linear,,,,,,2.2,0,,,1.4,,,
-Aluminum,N2,Deep_Drill,300,ipr,0.0025,0.0035,0.005,,,,2,,,0.6,,,
-Aluminum,N2,Drill,350,ipr,0.003,0.0045,0.006,,, ,2,,,0.6,,,
-Aluminum,N2,Endmill_Finish,700,fz,0.0009,0.0014,0.002,0.05,5,,4,,,0.6,,,
-Aluminum,N2,Endmill_Profile,600,fz,0.0025,0.004,0.006,0.5,60,,3,,,0.6,,,
-Aluminum,N2,Endmill_Slot,550,fz,0.0023,0.0036,0.0055,0.375,100,,3,,,0.6,,,
-Aluminum,N2,Tapping,55,ipr,0.025,0.05,0.0769,,,,0,55,3,0.6,,,
-Aluminum,N2,Wire_EDM_Rough,0,linear,,,,,,5,0,,,0.6,,,
-Aluminum,N2,Wire_EDM_Skim,0,linear,,,,,,3,0,,,0.6,,,
-Carbide,H1,Wire_EDM_Rough,0,linear,,,,,,2.8,0,,,2.5,,,
-Carbide,H1,Wire_EDM_Skim,0,linear,,,,,,1.8,0,,,2.5,,,
-Ceramic,C1,Wire_EDM_Rough,0,linear,,,,,,2.6,0,,,3.5,,,
-Ceramic,C1,Wire_EDM_Skim,0,linear,,,,,,1.7,0,,,3.5,,,
-GENERIC,GENERIC,Endmill_Finish,335,fz,0.000725,0.00115,0.00175,0.0475,5.5,,4,,,1,,,
-GENERIC,GENERIC,Endmill_Profile,330,linear,0.001475,0.0023,0.00335,0.3375,47.5,,3,,,1,,,
-GENERIC,GENERIC,Endmill_Slot,550,fz,0.0023,0.0036,0.0055,0.375,100,,3,,,1,,,
-GENERIC,GENERIC,Deep_Drill,128.75,ipr,0.001325,0.001875,0.00255,,,,2,,,1,,,
-GENERIC,GENERIC,Drill,152.5,ipr,0.0016,0.002425,0.0032,,,,2,,,1,,,
-GENERIC,GENERIC,Tapping,42.5,ipr,0.025,0.05,0.0769,,,,0,42.5,3,1,,,
-GENERIC,GENERIC,Wire_EDM_Rough,0,linear,,,,,,3.383333333,0,,,1,,,
-GENERIC,GENERIC,Wire_EDM_Skim,0,linear,,,,,,2.216666667,0,,,1,,,
-Stainless Steel,M1,Deep_Drill,65,ipr,0.0008,0.0012,0.0016,,,,2,,,1.3,,,
-Stainless Steel,M1,Drill,80,ipr,0.001,0.0016,0.002,,,,2,,,1.3,,,
-Stainless Steel,M1,Endmill_Finish,220,fz,0.0006,0.001,0.0016,0.05,5,,4,,,1.3,,,
-Stainless Steel,M1,Tapping,40,ipr,0.025,0.05,0.0769,,,,0,40,3,1.3,,,
-Stainless Steel,M1,Wire_EDM_Rough,0,linear,,,,,,3.5,0,,,1.3,,,
-Stainless Steel,M1,Wire_EDM_Skim,0,linear,,,,,,2.4,0,,,1.3,,,
-Stainless Steel,M1,Endmill_Profile,220,fz,0.001,0.0016,0.0024,0.25,40,,3,,,1.3,,,
-Titanium,S3,Endmill_Profile,90,fz,0.0008,0.0012,0.0018,0.08,20,,3,,,1.7,,,
-Titanium,S3,Endmill_Finish,90,fz,0.0004,0.0008,0.0012,0.03,5,,4,,,1.7,,,
-Titanium,S3,Drill,50,ipr,0.0008,0.0012,0.0016,,,,2,,,1.7,,,
-Titanium,S3,Deep_Drill,40,ipr,0.0006,0.0009,0.0012,,,,2,,,1.7,,,
-Titanium,S3,Tapping,25,ipr,0.025,0.05,0.0769,,,,0,25,3.5,1.7,,,
-Titanium,S3,Wire_EDM_Rough,0,linear,,,,,,3,0,,,1.7,,,
-Titanium,S3,Wire_EDM_Skim,0,linear,,,,,,2.2,0,,,1.7,,,
-Tool Steel,P2,Deep_Drill,75,ipr,0.001,0.0014,0.0018,,,,2,,,1,,,
-Tool Steel,P2,Drill,90,ipr,0.0012,0.0018,0.0024,,,,2,,,1,,,
-Tool Steel,P2,Tapping,40,ipr,0.025,0.05,0.0769,,,,0,40,3,1,,,
-Tool Steel,P2,Wire_EDM_Rough,0,linear,,,,,,3.2,0,,,1,,,
-Tool Steel,P2,Wire_EDM_Skim,0,linear,,,,,,2.2,0,,,1,,,
-Tool Steel,P2,Endmill_Finish,220,fz,0.0008,0.0012,0.0018,0.05,6,,4,,,1,,,
-Tool Steel,P2,Endmill_Profile,250,fz,0.0012,0.0018,0.0025,0.3,45,,3,,,1,,,
-52100 Bearing Steel,P3,Grinding,0,linear,,,,,,,,,,1.4,,,
-Aluminum,N2,Grinding,0,linear,,,,,,,,,,0.6,,,
-Carbide,H1,Grinding,0,linear,,,,,,,,,,2.5,,,
-Ceramic,C1,Grinding,0,linear,,,,,,,,,,3.5,,,
-GENERIC,GENERIC,Grinding,0,linear,,,,,,,,,,1,,,
-Stainless Steel,M1,Grinding,0,linear,,,,,,,,,,1.3,,,
-Titanium,S3,Grinding,0,linear,,,,,,,,,,1.7,,,
-Tool Steel,P2,Grinding,0,linear,,,,,,,,,,1,,,
+material,material_group,operation,sfm_start,feed_type,fz_ipr_0_125in,fz_ipr_0_25in,fz_ipr_0_5in,doc_axial_in,woc_radial_pct,linear_cut_rate_ipm,flute_count,tap_sfm_start,tap_overhead_sec_per_hole,grinding_time_factor
+52100 Bearing Steel,P3,Deep_Drill,75,ipr,0.001,0.0014,0.0018,,,,2,,,1.4
+52100 Bearing Steel,P3,Drill,90,ipr,0.0012,0.0018,0.0024,,,,2,,,1.4
+52100 Bearing Steel,P3,Endmill_Finish,200,fz,0.0006,0.001,0.0016,0.04,6,,4,,,1.4
+52100 Bearing Steel,P3,Endmill_Profile,250,fz,0.0012,0.0018,0.0025,0.3,45,,3,,,1.4
+52100 Bearing Steel,P3,Tapping,35,ipr,0.025,0.05,0.0769,,,,0,35,3,1.4
+52100 Bearing Steel,P3,Wire_EDM_Rough,0,linear,,,,,,3.2,0,,,1.4
+52100 Bearing Steel,P3,Wire_EDM_Skim,0,linear,,,,,,2.2,0,,,1.4
+Aluminum,N2,Deep_Drill,300,ipr,0.0025,0.0035,0.005,,,,2,,,0.6
+Aluminum,N2,Drill,350,ipr,0.003,0.0045,0.006,,, ,2,,,0.6
+Aluminum,N2,Endmill_Finish,700,fz,0.0009,0.0014,0.002,0.05,5,,4,,,0.6
+Aluminum,N2,Endmill_Profile,600,fz,0.0025,0.004,0.006,0.5,60,,3,,,0.6
+Aluminum,N2,Endmill_Slot,550,fz,0.0023,0.0036,0.0055,0.375,100,,3,,,0.6
+Aluminum,N2,Tapping,55,ipr,0.025,0.05,0.0769,,,,0,55,3,0.6
+Aluminum,N2,Wire_EDM_Rough,0,linear,,,,,,5,0,,,0.6
+Aluminum,N2,Wire_EDM_Skim,0,linear,,,,,,3,0,,,0.6
+Carbide,H1,Wire_EDM_Rough,0,linear,,,,,,2.8,0,,,2.5
+Carbide,H1,Wire_EDM_Skim,0,linear,,,,,,1.8,0,,,2.5
+Ceramic,C1,Wire_EDM_Rough,0,linear,,,,,,2.6,0,,,3.5
+Ceramic,C1,Wire_EDM_Skim,0,linear,,,,,,1.7,0,,,3.5
+GENERIC,GENERIC,Endmill_Finish,335,fz,0.000725,0.00115,0.00175,0.0475,5.5,,4,,,1
+GENERIC,GENERIC,Endmill_Profile,330,linear,0.001475,0.0023,0.00335,0.3375,47.5,,3,,,1
+GENERIC,GENERIC,Endmill_Slot,550,fz,0.0023,0.0036,0.0055,0.375,100,,3,,,1
+GENERIC,GENERIC,Deep_Drill,128.75,ipr,0.001325,0.001875,0.00255,,,,2,,,1
+GENERIC,GENERIC,Drill,152.5,ipr,0.0016,0.002425,0.0032,,,,2,,,1
+GENERIC,GENERIC,Tapping,42.5,ipr,0.025,0.05,0.0769,,,,0,42.5,3,1
+GENERIC,GENERIC,Wire_EDM_Rough,0,linear,,,,,,3.383333333,0,,,1
+GENERIC,GENERIC,Wire_EDM_Skim,0,linear,,,,,,2.216666667,0,,,1
+Stainless Steel,M1,Deep_Drill,65,ipr,0.0008,0.0012,0.0016,,,,2,,,1.3
+Stainless Steel,M1,Drill,80,ipr,0.001,0.0016,0.002,,,,2,,,1.3
+Stainless Steel,M1,Endmill_Finish,220,fz,0.0006,0.001,0.0016,0.05,5,,4,,,1.3
+Stainless Steel,M1,Tapping,40,ipr,0.025,0.05,0.0769,,,,0,40,3,1.3
+Stainless Steel,M1,Wire_EDM_Rough,0,linear,,,,,,3.5,0,,,1.3
+Stainless Steel,M1,Wire_EDM_Skim,0,linear,,,,,,2.4,0,,,1.3
+Stainless Steel,M1,Endmill_Profile,220,fz,0.001,0.0016,0.0024,0.25,40,,3,,,1.3
+Titanium,S3,Endmill_Profile,90,fz,0.0008,0.0012,0.0018,0.08,20,,3,,,1.7
+Titanium,S3,Endmill_Finish,90,fz,0.0004,0.0008,0.0012,0.03,5,,4,,,1.7
+Titanium,S3,Drill,50,ipr,0.0008,0.0012,0.0016,,,,2,,,1.7
+Titanium,S3,Deep_Drill,40,ipr,0.0006,0.0009,0.0012,,,,2,,,1.7
+Titanium,S3,Tapping,25,ipr,0.025,0.05,0.0769,,,,0,25,3.5,1.7
+Titanium,S3,Wire_EDM_Rough,0,linear,,,,,,3,0,,,1.7
+Titanium,S3,Wire_EDM_Skim,0,linear,,,,,,2.2,0,,,1.7
+Tool Steel,P2,Deep_Drill,75,ipr,0.001,0.0014,0.0018,,,,2,,,1
+Tool Steel,P2,Drill,90,ipr,0.0012,0.0018,0.0024,,,,2,,,1
+Tool Steel,P2,Tapping,40,ipr,0.025,0.05,0.0769,,,,0,40,3,1
+Tool Steel,P2,Wire_EDM_Rough,0,linear,,,,,,3.2,0,,,1
+Tool Steel,P2,Wire_EDM_Skim,0,linear,,,,,,2.2,0,,,1
+Tool Steel,P2,Endmill_Finish,220,fz,0.0008,0.0012,0.0018,0.05,6,,4,,,1
+Tool Steel,P2,Endmill_Profile,250,fz,0.0012,0.0018,0.0025,0.3,45,,3,,,1
+52100 Bearing Steel,P3,Grinding,0,linear,,,,,,,,,,1.4
+Aluminum,N2,Grinding,0,linear,,,,,,,,,,0.6
+Carbide,H1,Grinding,0,linear,,,,,,,,,,2.5
+Ceramic,C1,Grinding,0,linear,,,,,,,,,,3.5
+GENERIC,GENERIC,Grinding,0,linear,,,,,,,,,,1
+Stainless Steel,M1,Grinding,0,linear,,,,,,,,,,1.3
+Titanium,S3,Grinding,0,linear,,,,,,,,,,1.7
+Tool Steel,P2,Grinding,0,linear,,,,,,,,,,1
