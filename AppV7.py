@@ -379,20 +379,16 @@ class AppV7:
 
         # Part Family mapping (internal key -> display name)
         self.part_families = {
-            "die_plate": "Die Plate / Shoe / Flat",
-            "punch": "Punch / Insert",
-            "pilot_punch": "Pilot Punch",
-            "bushing_id_critical": "Guide Bushing / Ring Gauge",
-            "cam_or_hemmer": "Cam / Hemming Component",
-            "flat_die_chaser": "Flat Die Chaser",
-            "pm_compaction_die": "PM Compaction Die",
-            "shear_blade": "Shear Blade",
-            "extrude_hone": "Extrude Hone",
+            "Plates": "Plates (Die Plate / Shoe / Retainer / Stripper)",
+            "Punches": "Punches (Punch / Pilot / Guide Post / Spring Pin)",
+            "bushing_id_critical": "Guide Bushing / Ring Gauge (ID Critical)",
+            "Sections_blocks": "Sections & Blocks (Cam / Hemmer / Die Chase / Sensor Block)",
+            "Special_processes": "Special Processes (PM Die / Shear Blade / Extrude Hone)",
         }
 
         variables = [
             # Part Family (dropdown)
-            ("Part Family", "die_plate", "Select the part family type for process planning"),
+            ("Part Family", "Plates", "Select the part family type for process planning"),
 
             # Part Dimensions (optional - leave blank for OCR auto-detection)
             ("Length (in)", "", "Part length in inches (optional - leave blank for OCR auto-detection)"),
@@ -697,26 +693,26 @@ class AppV7:
         Get the selected part family, converting from display name to internal key.
 
         Returns:
-            Part family internal key (e.g., "die_plate", "punch", etc.)
+            Part family internal key (e.g., "Plates", "Punches", etc.)
         """
         try:
             field = self.quote_fields.get("Part Family", None)
             if not field:
-                return "die_plate"  # Default
+                return "Plates"  # Default
 
             display_name = field.get().strip()
             if not display_name:
-                return "die_plate"  # Default
+                return "Plates"  # Default
 
             # Convert display name back to internal key
             for key, display in self.part_families.items():
                 if display == display_name:
                     return key
 
-            return "die_plate"  # Default if not found
+            return "Plates"  # Default if not found
 
         except Exception:
-            return "die_plate"  # Default on error
+            return "Plates"  # Default on error
 
     def load_drawing_image_manual(self) -> None:
         """Manually select a drawing image file."""

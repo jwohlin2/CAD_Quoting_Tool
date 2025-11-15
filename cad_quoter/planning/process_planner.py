@@ -8,13 +8,15 @@ Goals
 - Emit a stable plan schema: {ops: [...], fixturing: [...], qa: [...], warnings: [...], directs: {...}}
 
 Families supported (extensible):
-- die_plate  (main one used in CAD quoting flow)
-- punch, pilot_punch, bushing_id_critical, cam_or_hemmer, flat_die_chaser,
-  pm_compaction_die, shear_blade, extrude_hone   (lightweight placeholders)
+- Plates  (main one used in CAD quoting flow - die plates, shoes, flats)
+- Punches  (punch, pilot punch, spring punch, guide posts)
+- bushing_id_critical  (guide bushings, ring gauges)
+- Sections_blocks  (cam, hemmer, die chasers, sensor blocks, die sections)
+- Special_processes  (PM compaction dies, shear blades, extrude hone)
 
 Notes
 - This file stands alone; no external deps beyond stdlib.
-- The die_plate logic is practical and opinionated; tweak thresholds to your shop.
+- The Plates logic is practical and opinionated; tweak thresholds to your shop.
 """
 from __future__ import annotations
 from dataclasses import dataclass, field
@@ -29,13 +31,24 @@ def plan_job(family: str, params: Dict[str, Any]) -> Dict[str, Any]:
     """Route to a planner by family and return a normalized plan dict.
 
     Required (by family):
-      die_plate: expects at least plate_LxW=(L,W) OR L,W in params; optional hole_sets
+      Plates: expects at least plate_LxW=(L,W) OR L,W in params; optional hole_sets
 
     Returns a dict with keys: ops, fixturing, qa, warnings, directs
     """
-    family = (family or "").strip().lower()
+    family = (family or "").strip()
+    # Case-insensitive lookup - try exact match first, then case-insensitive
     if family not in PLANNERS:
-        raise ValueError(f"Unsupported family '{family}'. Known: {sorted(PLANNERS)}")
+        # Try case-insensitive match
+        family_lower = family.lower()
+        matched = None
+        for key in PLANNERS:
+            if key.lower() == family_lower:
+                matched = key
+                break
+        if matched:
+            family = matched
+        else:
+            raise ValueError(f"Unsupported family '{family}'. Known: {sorted(PLANNERS)}")
     plan = PLANNERS[family](params)
     return normalize_plan(plan)
 
@@ -296,49 +309,32 @@ def _stub_plan(name: str, note: str) -> Plan:
     return p
 
 
-def planner_punch(params: Dict[str, Any]) -> Plan:
-    return _stub_plan("punch", "Add WEDM outline, HT route, grind/lap bearing as needed.")
-
-
-def planner_pilot_punch(params: Dict[str, Any]) -> Plan:
-    return _stub_plan("pilot_punch", "Pilot runout defaults tight; grind to TIR if specified.")
+def planner_punches(params: Dict[str, Any]) -> Plan:
+    """Consolidated planner for Punches (punch + pilot_punch)."""
+    return _stub_plan("Punches", "Add WEDM outline, HT route, grind/lap bearing as needed. For pilot: tight runout/TIR.")
 
 
 def planner_bushing(params: Dict[str, Any]) -> Plan:
     return _stub_plan("bushing_id_critical", "Wire/drill open ID, jig grind to tol, lap for low Ra.")
 
 
-def planner_cam_or_hemmer(params: Dict[str, Any]) -> Plan:
-    return _stub_plan("cam_or_hemmer", "Decide WEDM vs finish-mill for slots; grind wear faces.")
+def planner_sections_blocks(params: Dict[str, Any]) -> Plan:
+    """Consolidated planner for Sections_blocks (cam_or_hemmer + flat_die_chaser)."""
+    return _stub_plan("Sections_blocks", "WEDM/mill slots/profiles → HT → profile grind → lap wear faces.")
 
 
-def planner_flat_die_chaser(params: Dict[str, Any]) -> Plan:
-    return _stub_plan("flat_die_chaser", "Standard route: mill/wire → HT → profile grind → lap.")
-
-
-def planner_pm_compaction_die(params: Dict[str, Any]) -> Plan:
-    return _stub_plan("pm_compaction_die", "Carbide ring route: wire, jig grind, lap to tenths.")
-
-
-def planner_shear_blade(params: Dict[str, Any]) -> Plan:
-    return _stub_plan("shear_blade", "HT → profile grind → match grind → hone.")
-
-
-def planner_extrude_hone(params: Dict[str, Any]) -> Plan:
-    return _stub_plan("extrude_hone", "Hone to target Ra; verify flow & geometry.")
+def planner_special_processes(params: Dict[str, Any]) -> Plan:
+    """Consolidated planner for Special_processes (pm_compaction_die + shear_blade + extrude_hone)."""
+    return _stub_plan("Special_processes", "Carbide/hardened parts: wire/grind/lap → HT → match grind → hone to Ra.")
 
 
 # Registry
 PLANNERS = {
-    "die_plate": planner_die_plate,
-    "punch": planner_punch,
-    "pilot_punch": planner_pilot_punch,
+    "Plates": planner_die_plate,
+    "Punches": planner_punches,
     "bushing_id_critical": planner_bushing,
-    "cam_or_hemmer": planner_cam_or_hemmer,
-    "flat_die_chaser": planner_flat_die_chaser,
-    "pm_compaction_die": planner_pm_compaction_die,
-    "shear_blade": planner_shear_blade,
-    "extrude_hone": planner_extrude_hone,
+    "Sections_blocks": planner_sections_blocks,
+    "Special_processes": planner_special_processes,
 }
 
 
@@ -370,7 +366,7 @@ def plan_from_helpers(dummy_dims_helper, dummy_hole_helper) -> Dict[str, Any]:
         "windows_need_sharp": False,
         "hole_sets": hole_sets,
     }
-    return plan_job("die_plate", params)
+    return plan_job("Plates", params)
 
 
 # Basic row→holeset translator (mirrors earlier adapter rules)
@@ -470,31 +466,45 @@ if __name__ == "__main__":
 
 from typing import Iterable
 
-# Minimal keyword sets; expand per your shop’s vocabulary.
+# Minimal keyword sets; expand per your shop's vocabulary.
 _FAM_KEYWORDS = {
-    "die_plate": {
+    "Plates": {
         "any": {
             # common plate words
             "plate", "shoe", "punch shoe", "die set", "punch holder", "stripper",
             # hole table signals (often present on plates)
             "hole table", "c'boRE", "counterbore", "c'drill", "counterdrill",
+            # new part name keywords
+            "retainer plate", "stripper", "stripper plate",
         },
         "none_of": set(),
     },
-    "punch": {
-        "any": {"punch detail", "pilot punch", "bearing land", "edge hone"},
+    "Punches": {
+        "any": {
+            "punch detail", "pilot punch", "bearing land", "edge hone",
+            # new part name keywords
+            "spring punch", "guide post", "spring pin", "punch",
+        },
         "none_of": {"shoe", "die set"},
     },
     "bushing_id_critical": {
         "any": {"bushing", "id grind", "jig grind id", "retainer"},
         "none_of": set(),
     },
-    "cam_or_hemmer": {
-        "any": {"cam", "hemmer", "slot cam", "cam slot"},
+    "Sections_blocks": {
+        "any": {
+            "cam", "hemmer", "slot cam", "cam slot",
+            # new part name keywords
+            "sensor block", "die section", "stock guide", "die chase",
+            "punch block", "stripper insert", "pressure pad",
+        },
         "none_of": set(),
     },
-    "shear_blade": {
-        "any": {"shear blade", "knife", "edge hone", "match grind"},
+    "Special_processes": {
+        "any": {
+            "shear blade", "knife", "edge hone", "match grind",
+            "pm compaction", "extrude hone", "carbide",
+        },
         "none_of": set(),
     },
 }
@@ -693,7 +703,7 @@ def extract_all_text_from_cad(file_path: str | Path) -> List[str]:
 
 def plan_from_cad_file(
     file_path: str | Path,
-    fallback_family: str = "die_plate",
+    fallback_family: str = "Plates",
     use_paddle_ocr: bool = True,
     verbose: bool = False
 ) -> Dict[str, Any]:
@@ -709,7 +719,7 @@ def plan_from_cad_file(
 
     Args:
         file_path: Path to DXF or DWG file
-        fallback_family: Family to use if auto-detection fails (default: "die_plate")
+        fallback_family: Family to use if auto-detection fails (default: "Plates")
         use_paddle_ocr: Whether to use PaddleOCR for dimensions (default: True)
         verbose: Print extraction progress (default: False)
 

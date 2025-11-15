@@ -389,72 +389,92 @@ def _minutes_bushing(plan, ops, g, t, material):
     minutes["Deburr"] = 5.0
     return minutes
 
-def _minutes_cam_or_hemmer(plan, ops, g, t, material):
-    # Cam plan: rough blocks, HT (if wear part), WEDM cam path or finish-mill, grind wear faces, jig-bore pivots.
+def _minutes_sections_blocks(plan, ops, g, t, material):
+    """Consolidated minutes estimation for Sections_blocks (cams, hemmers, die chasers, sensor blocks)."""
     mrr, grind_rate = _material_factor(material)
     thk = float(g["thickness_in"] or 0.0)
     minutes = {}
-    minutes["Inspection"] = 18.0 + 12.0 * log1p(1.0 / max(t.get("profile_tol") or 0.001, 1e-6))
-    # Cam slot/profile
-    if "wire_edm_cam_slot_or_profile" in ops:
-        skims = 0
-        for op in ops["wire_edm_cam_slot_or_profile"]:
-            txt = str(op.get("passes") or "")
-            if "R+" in txt and "S" in txt:
-                try:
-                    skims = max(skims, int(txt.split("R+")[1].split("S")[0]))
-                except Exception:
-                    pass
-        minutes["Wire EDM"] = _wedm_minutes(max(0.0, g["edge_len_in"]), thk, skims)
+
+    # Detect if this is a chaser type (has flank/relief operations)
+    is_chaser = ("mill_or_wire_rough_form" in ops or
+                 "profile_grind_flanks_and_reliefs_to_spec" in ops or
+                 "lap_edges" in ops)
+
+    if is_chaser:
+        # Die chaser route
+        minutes["Inspection"] = 12.0 + 8.0 * log1p(max(0.0, g["edge_len_in"]) / 30.0)
+        if "mill_or_wire_rough_form" in ops:
+            minutes["Milling"] = 18.0
+            minutes["Wire EDM"] = 18.0 if (t.get("profile_tol") and t["profile_tol"] <= 0.001) else 0.0
+        minutes["Grinding"] = _profile_grind_minutes(max(0.0, g["edge_len_in"]), precision_bonus=12.0)
+        minutes["Lapping/Honing"] = 10.0
+        minutes["Deburr"] = 4.0
     else:
-        minutes["Milling"] = _milling_minutes(g, thk, mrr) * 0.6  # finishing passes
-    # Wear faces grind + pivot bores
-    minutes["Grinding"] = (minutes.get("Grinding", 0.0)
-                           + _grind_minutes(g.get("plate_area_in2", 60.0), 1, grind_rate)
-                           + 24.0)  # jig-bore or grind pivots
-    minutes["Deburr"] = 6.0 + 0.02 * max(0.0, g["edge_len_in"])
+        # Cam/hemmer/sensor block route
+        minutes["Inspection"] = 18.0 + 12.0 * log1p(1.0 / max(t.get("profile_tol") or 0.001, 1e-6))
+        # Cam slot/profile
+        if "wire_edm_cam_slot_or_profile" in ops:
+            skims = 0
+            for op in ops["wire_edm_cam_slot_or_profile"]:
+                txt = str(op.get("passes") or "")
+                if "R+" in txt and "S" in txt:
+                    try:
+                        skims = max(skims, int(txt.split("R+")[1].split("S")[0]))
+                    except Exception:
+                        pass
+            minutes["Wire EDM"] = _wedm_minutes(max(0.0, g["edge_len_in"]), thk, skims)
+        else:
+            minutes["Milling"] = _milling_minutes(g, thk, mrr) * 0.6  # finishing passes
+        # Wear faces grind + pivot bores
+        minutes["Grinding"] = (minutes.get("Grinding", 0.0)
+                               + _grind_minutes(g.get("plate_area_in2", 60.0), 1, grind_rate)
+                               + 24.0)  # jig-bore or grind pivots
+        minutes["Deburr"] = 6.0 + 0.02 * max(0.0, g["edge_len_in"])
+
     return minutes
 
-def _minutes_flat_die_chaser(plan, ops, g, t, material):
-    # Chasers: rough by mill or wire, HT, profile-grind flanks/reliefs, lap edges.
+def _minutes_special_processes(plan, ops, g, t, material):
+    """Consolidated minutes estimation for Special_processes (PM dies, shear blades, extrude hone)."""
     thk = float(g["thickness_in"] or 0.0)
     minutes = {}
-    minutes["Inspection"] = 12.0 + 8.0 * log1p(max(0.0, g["edge_len_in"]) / 30.0)
-    # If rough via wire, add some WEDM time; else light milling
-    if "mill_or_wire_rough_form" in ops:
-        # assume some wire usage when very tight profiles show up
-        minutes["Milling"] = 18.0
-        minutes["Wire EDM"] = 18.0 if (t.get("profile_tol") and t["profile_tol"] <= 0.001) else 0.0
-    minutes["Grinding"] = _profile_grind_minutes(max(0.0, g["edge_len_in"]), precision_bonus=12.0)
-    minutes["Lapping/Honing"] = 10.0
-    minutes["Deburr"] = 4.0
-    return minutes
 
-def _minutes_pm_compaction_die(plan, ops, g, t, material):
-    # Carbide ring: wire ID leave, **tight jig grind** to tenths, lap land.
-    thk = float(g["thickness_in"] or 0.0)
-    minutes = {}
-    minutes["Inspection"] = 16.0 + 14.0 * log1p(1e-4 / 1e-4)  # modest bump
-    minutes["Wire EDM"] = 12.0 + 1.4 * max(0.0, g["edge_len_in"])  # short ID cut
-    minutes["Grinding"] = 40.0  # jig grind to 0.0001" + straightness
-    minutes["Lapping/Honing"] = 12.0
-    return minutes
+    # Detect process type from operations
+    is_pm_die = ("wire_edm_ID_leave" in ops or
+                 "jig_grind_ID_to_tenths_and_straightness" in ops or
+                 "start_ground_carbide_ring" in ops)
+    is_shear = ("waterjet_or_saw_blanks" in ops or
+                "match_grind_set_for_gap_and_parallelism" in ops or
+                "hone_edge" in ops)
+    is_extrude_hone = ("abrasive_flow_polish" in ops or
+                       "verify_connected_passage_and_masking" in ops or
+                       "clean_and_flush_media" in ops)
 
-def _minutes_shear_blade(plan, ops, g, t, material):
-    # Shear blades: waterjet/saw blanks, HT, profile grind edges/angles, match grind set, hone.
-    minutes = {}
-    minutes["Inspection"] = 12.0
-    minutes["Saw/Waterjet"] = 10.0
-    minutes["Grinding"] = _profile_grind_minutes(max(0.0, g["edge_len_in"]), precision_bonus=8.0) + 20.0  # match-grind set
-    minutes["Deburr"] = 6.0
-    return minutes
+    if is_pm_die:
+        # PM Compaction Die route
+        minutes["Inspection"] = 16.0 + 14.0 * log1p(1e-4 / 1e-4)  # modest bump
+        minutes["Wire EDM"] = 12.0 + 1.4 * max(0.0, g["edge_len_in"])  # short ID cut
+        minutes["Grinding"] = 40.0  # jig grind to 0.0001" + straightness
+        minutes["Lapping/Honing"] = 12.0
 
-def _minutes_extrude_hone(plan, ops, g, t, material):
-    # AFM: verify/mask, abrasive flow polish to target Ra, clean/flush.
-    minutes = {}
-    minutes["Inspection"] = 10.0
-    minutes["Abrasive Flow"] = 25.0 + (8.0 if (t.get("profile_tol") and t["profile_tol"] <= 0.001) else 0.0)
-    minutes["Deburr"] = 2.0
+    elif is_shear:
+        # Shear Blade route
+        minutes["Inspection"] = 12.0
+        minutes["Saw/Waterjet"] = 10.0
+        minutes["Grinding"] = _profile_grind_minutes(max(0.0, g["edge_len_in"]), precision_bonus=8.0) + 20.0  # match-grind set
+        minutes["Deburr"] = 6.0
+
+    elif is_extrude_hone:
+        # Extrude Hone route
+        minutes["Inspection"] = 10.0
+        minutes["Abrasive Flow"] = 25.0 + (8.0 if (t.get("profile_tol") and t["profile_tol"] <= 0.001) else 0.0)
+        minutes["Deburr"] = 2.0
+
+    else:
+        # Generic special process fallback
+        minutes["Inspection"] = 12.0
+        minutes["Special Process"] = 30.0
+        minutes["Deburr"] = 4.0
+
     return minutes
 
 # -------- main entry
@@ -479,23 +499,19 @@ def price_with_planner(
     }
     material = str(planner_inputs.get("material") or "").strip()
 
-    # family dispatch
-    if family in {"die_plate"}:
+    # family dispatch (case-insensitive)
+    family_lower = family.lower()
+
+    if family_lower in {"plates", "die_plate"}:
         minutes = _minutes_die_plate(plan, ops, g, t, material)
-    elif family in {"punch", "pilot_punch"}:
+    elif family_lower in {"punches", "punch", "pilot_punch"}:
         minutes = _minutes_punch_or_pilot(plan, ops, g, t, material)
-    elif family == "bushing_id_critical":
+    elif family_lower == "bushing_id_critical":
         minutes = _minutes_bushing(plan, ops, g, t, material)
-    elif family == "cam_or_hemmer":
-        minutes = _minutes_cam_or_hemmer(plan, ops, g, t, material)
-    elif family == "flat_die_chaser":
-        minutes = _minutes_flat_die_chaser(plan, ops, g, t, material)
-    elif family == "pm_compaction_die":
-        minutes = _minutes_pm_compaction_die(plan, ops, g, t, material)
-    elif family == "shear_blade":
-        minutes = _minutes_shear_blade(plan, ops, g, t, material)
-    elif family == "extrude_hone":
-        minutes = _minutes_extrude_hone(plan, ops, g, t, material)
+    elif family_lower in {"sections_blocks", "cam_or_hemmer", "flat_die_chaser"}:
+        minutes = _minutes_sections_blocks(plan, ops, g, t, material)
+    elif family_lower in {"special_processes", "pm_compaction_die", "shear_blade", "extrude_hone"}:
+        minutes = _minutes_special_processes(plan, ops, g, t, material)
     else:
         # fallback: light generic mapping
         minutes = {"Inspection": _inspection_minutes(g, t), "Deburr": 6.0}
