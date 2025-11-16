@@ -24,9 +24,13 @@ def load_mcmaster_catalog_rows(path: str | None = None) -> list[dict[str, Any]]:
         with open(csv_path, newline="", encoding="utf-8-sig") as handle:
             reader = csv.DictReader(handle)
             return [dict(row) for row in reader if row]
-    except FileNotFoundError:
+    except FileNotFoundError as e:
+        print(f"[Catalog Load] ERROR: File not found: {csv_path}")
+        print(f"  Exception: {e}")
         return []
-    except Exception:
+    except Exception as e:
+        print(f"[Catalog Load] ERROR: Failed to load catalog from {csv_path}")
+        print(f"  Exception: {e}")
         return []
 
 

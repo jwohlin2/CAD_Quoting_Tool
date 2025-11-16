@@ -710,7 +710,12 @@ def extract_quote_data_from_cad(
             print(f"  Volume-based estimation failed")
             print(f"  Attempting weight-based price estimation from largest catalog part...")
 
-        from cad_quoter.pricing.mcmaster_helpers import estimate_price_from_catalog_reference
+        from cad_quoter.pricing.mcmaster_helpers import estimate_price_from_catalog_reference, load_mcmaster_catalog_rows
+
+        # Load catalog rows
+        catalog_rows = load_mcmaster_catalog_rows(path=catalog_csv_path)
+        if verbose:
+            print(f"  Loaded {len(catalog_rows)} catalog rows from {catalog_csv_path}")
 
         # Get material density
         density_lb_in3 = material_mapper.get_density_lb_in3(material)
@@ -725,7 +730,7 @@ def extract_quote_data_from_cad(
             material_key=mcmaster_material,
             weight_lb=scrap_calc.mcmaster_weight,
             density_lb_in3=density_lb_in3,
-            catalog_rows=None,
+            catalog_rows=catalog_rows,
             verbose=verbose
         )
 
