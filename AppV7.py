@@ -209,6 +209,9 @@ class AppV7:
         # Cached CAD extraction results using QuoteDataHelper (to avoid redundant ODA/OCR calls)
         self._cached_quote_data = None
 
+        # Track previous quote inputs for smart cache invalidation
+        self._previous_quote_inputs: Optional[dict] = None
+
         # Default profit margin applied to the final price
         self.margin_rate: float = 0.15
 
@@ -714,6 +717,54 @@ class AppV7:
         except Exception:
             return "Plates"  # Default on error
 
+    def _get_current_quote_inputs(self) -> dict:
+        """
+        Capture all quote inputs that affect CAD extraction and pricing.
+
+        Returns a dictionary of current input values for comparison.
+        Used to determine if cache should be invalidated.
+        """
+        return {
+            'material': self._get_field_string("Material", ""),
+            'length': self._get_field_string("Length (in)", ""),
+            'width': self._get_field_string("Width (in)", ""),
+            'thickness': self._get_field_string("Thickness (in)", ""),
+            'machine_rate': self._get_field_string("Machine Rate ($/hr)", "90"),
+            'labor_rate': self._get_field_string("Labor Rate ($/hr)", "90"),
+            'margin': self._get_field_string("Margin (%)", "15"),
+            'mcmaster_override': self._get_field_string("McMaster Price Override ($)", ""),
+            'scrap_override': self._get_field_string("Scrap Value Override ($)", ""),
+            'quantity': self._get_field_string("Quantity", "1"),
+            'part_family': self._get_part_family(),
+        }
+
+    def _quote_inputs_changed(self) -> bool:
+        """
+        Check if any quote inputs have changed since last generation.
+
+        Returns:
+            True if inputs changed (cache should be cleared)
+            False if inputs unchanged (cache can be reused)
+        """
+        current_inputs = self._get_current_quote_inputs()
+
+        # First time generating quote - consider it changed
+        if self._previous_quote_inputs is None:
+            self._previous_quote_inputs = current_inputs
+            return True
+
+        # Compare current inputs to previous
+        if current_inputs != self._previous_quote_inputs:
+            if hasattr(self, 'status_bar'):
+                self.status_bar.config(text="Input changed - regenerating quote data...")
+            self._previous_quote_inputs = current_inputs
+            return True
+
+        # Inputs unchanged - can reuse cache
+        if hasattr(self, 'status_bar'):
+            self.status_bar.config(text="Using cached quote data (inputs unchanged)...")
+        return False
+
     def load_drawing_image_manual(self) -> None:
         """Manually select a drawing image file."""
         filename = filedialog.askopenfilename(
@@ -755,6 +806,9 @@ class AppV7:
 
                 # Clear cached CAD extraction results
                 self._clear_cad_cache()
+
+                # Reset previous quote inputs so cache will be regenerated
+                self._previous_quote_inputs = None
 
                 # Load and extract hole table data
                 self._extract_and_display_hole_table(filename)
@@ -1298,8 +1352,13 @@ class AppV7:
 
     def generate_quote(self) -> None:
         """Generate the quote."""
-        # Clear the cache to ensure we use the latest overrides from Quote Editor
-        self._clear_cad_cache()
+        # Smart cache invalidation - only clear if inputs changed
+        # This saves 40+ seconds by avoiding redundant ODA/OCR extraction
+        if self._quote_inputs_changed():
+            self._clear_cad_cache()
+            print("[AppV7] Cache cleared - quote inputs changed")
+        else:
+            print("[AppV7] Reusing cached quote data - inputs unchanged (saves ~40+ seconds)")
 
         # Collect values from quote editor
         quote_data = {}
