@@ -111,17 +111,34 @@ class MaterialMapper:
         # Clean input
         cleaned = input_material.strip()
 
-        # Try exact match first
+        # Check if input is already a canonical material name
+        # (exists in the canonical-to-vendor mappings)
+        if cleaned in self._canonical_to_mcmaster:
+            return cleaned
+
+        # Try exact match in input terms
         if cleaned in self._input_to_canonical:
             return self._input_to_canonical[cleaned]
 
-        # Try case-insensitive match
+        # Try case-insensitive match in canonical names
+        for canonical_name in self._canonical_to_mcmaster.keys():
+            if canonical_name.lower() == cleaned.lower():
+                return canonical_name
+
+        # Try case-insensitive match in input terms
         for input_term, canonical in self._input_to_canonical.items():
             if input_term.lower() == cleaned.lower():
                 return canonical
 
         # Try fuzzy matching (normalize and compare)
         normalized_input = self._normalize_material_key(cleaned)
+
+        # Check canonical names first
+        for canonical_name in self._canonical_to_mcmaster.keys():
+            if self._normalize_material_key(canonical_name) == normalized_input:
+                return canonical_name
+
+        # Then check input terms
         for input_term, canonical in self._input_to_canonical.items():
             if self._normalize_material_key(input_term) == normalized_input:
                 return canonical
