@@ -281,17 +281,40 @@ class AppV7:
         self._create_output_tab()
 
     def open_drawing_preview(self) -> None:
-        """Open the drawing preview image file with the system default viewer."""
-        if not self.drawing_image_path:
-            messagebox.showinfo(
-                "No Drawing Image",
-                "No drawing image found.\n\n"
-                "Load a CAD file first, and make sure there's a corresponding image file\n"
-                "(PNG, JPG, etc.) with the same name in the same directory.\n\n"
-                "Or use File > Load Drawing Image... to select an image manually."
-            )
-            return
+        """Open the drawing preview image file with the system default viewer.
 
+        If no image exists, it will be generated on-demand (lazy loading).
+        This saves 5-15 seconds during CAD file loading.
+        """
+        # If no image path set, try to generate from CAD file
+        if not self.drawing_image_path:
+            if not self.cad_file_path:
+                messagebox.showinfo(
+                    "No CAD File",
+                    "No CAD file loaded.\n\n"
+                    "Please load a CAD file first using 'Load CAD & Vars' button."
+                )
+                return
+
+            # Try to generate image on-demand
+            self.status_bar.config(text="Generating drawing preview (this may take 5-15 seconds)...")
+            self.root.update_idletasks()
+
+            success = self._generate_drawing_image(self.cad_file_path)
+
+            if not success:
+                messagebox.showerror(
+                    "Generation Failed",
+                    "Failed to generate drawing preview.\n\n"
+                    "Please check that the CAD file is valid and the DrawingRenderer is configured correctly."
+                )
+                self.status_bar.config(text="Drawing preview generation failed")
+                return
+
+            self.status_bar.config(text="Drawing preview generated successfully!")
+            self.root.update_idletasks()
+
+        # Verify image file exists
         if not os.path.exists(self.drawing_image_path):
             messagebox.showerror(
                 "File Not Found",
@@ -765,6 +788,75 @@ class AppV7:
             self.status_bar.config(text="Using cached quote data (inputs unchanged)...")
         return False
 
+    def _find_existing_drawing_image(self, cad_filename: str) -> bool:
+        """
+        Check if a drawing image already exists for the CAD file.
+
+        This is a fast operation (<1ms) that only checks for existing files.
+        Does NOT generate a new image if not found.
+
+        Args:
+            cad_filename: Path to CAD file
+
+        Returns:
+            True if existing image found, False otherwise
+        """
+        cad_path = Path(cad_filename)
+        base_name = cad_path.stem
+
+        # Common image extensions to check
+        image_extensions = ['.png', '.jpg', '.jpeg', '.bmp', '.tiff', '.gif']
+
+        # Check for existing image file in the same directory
+        for ext in image_extensions:
+            image_path = cad_path.parent / f"{base_name}{ext}"
+            if image_path.exists():
+                self.drawing_image_path = str(image_path)
+                print(f"[AppV7] Found existing drawing image: {image_path}")
+                return True
+
+        # No existing image found
+        self.drawing_image_path = None
+        print(f"[AppV7] No existing drawing image found for {base_name}")
+        return False
+
+    def _generate_drawing_image(self, cad_filename: str) -> bool:
+        """
+        Generate a drawing preview image for the CAD file.
+
+        This is a slow operation (5-15 seconds) that renders the CAD file to PNG.
+        Only called when user explicitly requests preview and no cached image exists.
+
+        Args:
+            cad_filename: Path to CAD file
+
+        Returns:
+            True if generation succeeded, False otherwise
+        """
+        cad_path = Path(cad_filename)
+        base_name = cad_path.stem
+
+        print(f"[AppV7] Generating drawing preview for {base_name}...")
+
+        try:
+            from tools.paddle_dims_extractor import DrawingRenderer
+
+            # Generate PNG in the same directory as the CAD file
+            output_png = str(cad_path.parent / f"{base_name}.png")
+
+            # Create renderer and generate image
+            renderer = DrawingRenderer(verbose=False)
+            renderer.render(str(cad_path), output_png)
+
+            self.drawing_image_path = output_png
+            print(f"[AppV7] Successfully generated drawing image: {output_png}")
+            return True
+
+        except Exception as e:
+            print(f"[AppV7] Failed to generate drawing image: {e}")
+            self.drawing_image_path = None
+            return False
+
     def load_drawing_image_manual(self) -> None:
         """Manually select a drawing image file."""
         filename = filedialog.askopenfilename(
@@ -813,14 +905,15 @@ class AppV7:
                 # Load and extract hole table data
                 self._extract_and_display_hole_table(filename)
 
-                # Try to load or generate a corresponding drawing image
-                self.status_bar.config(text="Generating drawing preview...")
-                self.root.update_idletasks()
-                self._try_load_drawing_image(filename)
+                # Check for existing drawing image (fast, <1ms)
+                # Image generation is now lazy - only happens when user clicks "Drawing Preview"
+                has_existing_image = self._find_existing_drawing_image(filename)
 
                 status_msg = "CAD file loaded. Review the Quote Editor and generate the quote."
-                if self.drawing_image_path:
+                if has_existing_image:
                     status_msg += " (Drawing preview available)"
+                else:
+                    status_msg += " (Drawing preview will be generated on-demand)"
                 self.status_bar.config(text=status_msg)
                 self.notebook.select(self.geo_tab)
             except Exception as e:
@@ -837,42 +930,6 @@ class AppV7:
                     )
                 self.status_bar.config(text=f"Error loading file: {Path(filename).name}")
                 messagebox.showerror("Error Loading CAD File", error_msg)
-
-    def _try_load_drawing_image(self, cad_filename: str) -> None:
-        """Try to find or create a drawing image for the CAD file."""
-        cad_path = Path(cad_filename)
-        base_name = cad_path.stem
-
-        # Common image extensions to check
-        image_extensions = ['.png', '.jpg', '.jpeg', '.bmp', '.tiff', '.gif']
-
-        # Check for existing image file in the same directory
-        for ext in image_extensions:
-            image_path = cad_path.parent / f"{base_name}{ext}"
-            if image_path.exists():
-                self.drawing_image_path = str(image_path)
-                print(f"[AppV7] Found existing drawing image: {image_path}")
-                return
-
-        # If no existing image found, try to generate one
-        print(f"[AppV7] No existing drawing image found for {base_name}, generating PNG...")
-
-        try:
-            from tools.paddle_dims_extractor import DrawingRenderer
-
-            # Generate PNG in the same directory as the CAD file
-            output_png = str(cad_path.parent / f"{base_name}.png")
-
-            # Create renderer and generate image
-            renderer = DrawingRenderer(verbose=False)
-            renderer.render(str(cad_path), output_png)
-
-            self.drawing_image_path = output_png
-            print(f"[AppV7] Successfully generated drawing image: {output_png}")
-
-        except Exception as e:
-            print(f"[AppV7] Failed to generate drawing image: {e}")
-            self.drawing_image_path = None
 
     def _extract_and_display_hole_table(self, filename: str) -> None:
         """Extract geometry and display hole operations."""
