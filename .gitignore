@@ -13,3 +13,10 @@ models/Qwen2.5-VL-7B-Instruct-mmproj-f16.gguf
 .gitignore
 tools/__pycache__/part_dims_ocr.cpython-311.pyc
 models/qwen2.5-vl-7b-instruct-q4_k_m.gguf
+
+# Python cache files
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
