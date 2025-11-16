@@ -246,6 +246,176 @@ def pick_mcmaster_plate_sku(
     )
 
 
+def find_largest_catalog_part_for_material(
+    material_key: str,
+    max_thickness_in: float = 6.0,
+    catalog_rows: Sequence[Mapping[str, Any]] | None = None,
+    verbose: bool = False,
+) -> dict[str, Any] | None:
+    """Find the largest available catalog part for a given material.
+
+    This is useful for estimating prices for oversized parts by finding
+    the closest available catalog part and using its $/lb as a reference.
+
+    Args:
+        material_key: Material identifier (e.g., "aluminum MIC6", "303 Stainless Steel")
+        max_thickness_in: Maximum thickness to consider (default 6.0 in) - helps find planar plates
+        catalog_rows: Optional pre-loaded catalog rows
+        verbose: Print debug information
+
+    Returns:
+        Dict with catalog part info (len_in, wid_in, thk_in, part), or None if not found
+    """
+    rows = list(catalog_rows) if catalog_rows is not None else load_mcmaster_catalog_rows()
+    if not rows:
+        if verbose:
+            print(f"[Largest Part Lookup] ERROR: No catalog rows loaded")
+        return None
+
+    target_key = str(material_key or "").strip().lower()
+    if not target_key:
+        if verbose:
+            print(f"[Largest Part Lookup] ERROR: Empty material key")
+        return None
+
+    # Find all matching material entries with reasonable thickness
+    matches = []
+    for row in rows:
+        mat = str(row.get("material", "")).strip().lower()
+        if target_key not in mat:
+            continue
+
+        len_in = _coerce_inches_value(row.get("length_in"))
+        wid_in = _coerce_inches_value(row.get("width_in"))
+        thk_in = _coerce_inches_value(row.get("thickness_in"))
+        part = str(row.get("part", "")).strip()
+
+        # Skip if thickness is too large (avoids very thick blocks)
+        if thk_in and thk_in > max_thickness_in:
+            continue
+
+        if len_in and wid_in and thk_in and len_in > 0 and wid_in > 0 and thk_in > 0:
+            area = float(len_in) * float(wid_in)
+            volume = area * float(thk_in)
+            matches.append({
+                "len_in": float(len_in),
+                "wid_in": float(wid_in),
+                "thk_in": float(thk_in),
+                "part": part,
+                "area": area,
+                "volume": volume,
+            })
+
+    if not matches:
+        if verbose:
+            print(f"[Largest Part Lookup] ERROR: No matching parts found for material '{material_key}' with thickness <= {max_thickness_in} in")
+        return None
+
+    # Sort by area (largest planar dimension), then by volume
+    matches.sort(key=lambda x: (x["area"], x["volume"]), reverse=True)
+    largest = matches[0]
+
+    if verbose:
+        print(f"[Largest Part Lookup] Found largest part for '{material_key}':")
+        print(f"  {largest['len_in']:.2f} × {largest['wid_in']:.2f} × {largest['thk_in']:.3f} in")
+        print(f"  Part: {largest['part']}")
+        print(f"  Area: {largest['area']:.2f} in²")
+        print(f"  Volume: {largest['volume']:.2f} in³")
+
+    return largest
+
+
+def estimate_price_from_catalog_reference(
+    material_key: str,
+    weight_lb: float,
+    density_lb_in3: float = 0.10,  # Default for aluminum
+    catalog_rows: Sequence[Mapping[str, Any]] | None = None,
+    verbose: bool = False,
+) -> tuple[float | None, str]:
+    """Estimate price for an oversized part using the largest catalog part's $/lb.
+
+    Args:
+        material_key: Material identifier
+        weight_lb: Weight of the part in pounds
+        density_lb_in3: Material density in lb/in³
+        catalog_rows: Optional pre-loaded catalog rows
+        verbose: Print debug information
+
+    Returns:
+        Tuple of (estimated_price, source_description) or (None, "") if cannot estimate
+    """
+    # Map material to McMaster catalog key
+    mcmaster_material = material_mapper.get_mcmaster_key(material_key) or material_key
+
+    # Find the largest catalog part for this material
+    largest_part = find_largest_catalog_part_for_material(
+        mcmaster_material,
+        catalog_rows=catalog_rows,
+        verbose=verbose
+    )
+
+    if not largest_part:
+        if verbose:
+            print(f"[Price Estimate] Cannot estimate - no catalog parts found for '{material_key}'")
+        return None, ""
+
+    # Try to get price for the largest catalog part
+    try:
+        from cad_quoter.vendors.mcmaster_stock import lookup_sku_and_price_for_mm
+
+        part_num = largest_part.get("part")
+        if not part_num:
+            if verbose:
+                print(f"[Price Estimate] No part number for largest catalog item")
+            return None, ""
+
+        # Get price for the catalog part
+        sku, price_each, uom, dims = lookup_sku_and_price_for_mm(
+            mcmaster_material,
+            largest_part["len_in"] * 25.4,  # Convert to mm
+            largest_part["wid_in"] * 25.4,
+            largest_part["thk_in"] * 25.4,
+            qty=1,
+        )
+
+        if not price_each or price_each <= 0:
+            if verbose:
+                print(f"[Price Estimate] No valid price returned for part {part_num}")
+            return None, ""
+
+        # Calculate weight of the catalog part
+        catalog_volume_in3 = largest_part["len_in"] * largest_part["wid_in"] * largest_part["thk_in"]
+        catalog_weight_lb = catalog_volume_in3 * density_lb_in3
+
+        if catalog_weight_lb <= 0:
+            if verbose:
+                print(f"[Price Estimate] Invalid catalog part weight: {catalog_weight_lb}")
+            return None, ""
+
+        # Calculate $/lb from catalog part
+        price_per_lb = float(price_each) / catalog_weight_lb
+
+        # Estimate price for oversized part
+        estimated_price = price_per_lb * weight_lb
+
+        source = f"Estimated from largest catalog part ({part_num}) @ ${price_per_lb:.2f}/lb"
+
+        if verbose:
+            print(f"[Price Estimate] Catalog part: {part_num}")
+            print(f"  Catalog price: ${price_each:.2f}")
+            print(f"  Catalog weight: {catalog_weight_lb:.1f} lb")
+            print(f"  Price per lb: ${price_per_lb:.2f}/lb")
+            print(f"  Your part weight: {weight_lb:.1f} lb")
+            print(f"  Estimated price: ${estimated_price:.2f}")
+
+        return estimated_price, source
+
+    except Exception as e:
+        if verbose:
+            print(f"[Price Estimate] Error during estimation: {e}")
+        return None, ""
+
+
 def resolve_mcmaster_plate_for_quote(
     need_L_in: float | None,
     need_W_in: float | None,

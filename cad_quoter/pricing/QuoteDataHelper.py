@@ -704,6 +704,38 @@ def extract_quote_data_from_cad(
             if verbose:
                 print(f"  ✓ Estimated price from volume: ${mcmaster_price:.2f}")
 
+    # If volume-based estimation also failed, try weight-based estimation using largest catalog part
+    if mcmaster_price is None:
+        if verbose:
+            print(f"  Volume-based estimation failed")
+            print(f"  Attempting weight-based price estimation from largest catalog part...")
+
+        from cad_quoter.pricing.mcmaster_helpers import estimate_price_from_catalog_reference
+
+        # Get material density
+        density_lb_in3 = material_mapper.get_density_lb_in3(material)
+        if density_lb_in3 is None or density_lb_in3 <= 0:
+            density_lb_in3 = 0.10  # Default to aluminum density
+
+        # Map material to McMaster catalog key
+        mcmaster_material = material_mapper.get_mcmaster_key(material) or material
+
+        # Estimate price based on weight
+        estimated_price, source = estimate_price_from_catalog_reference(
+            material_key=mcmaster_material,
+            weight_lb=scrap_calc.mcmaster_weight,
+            density_lb_in3=density_lb_in3,
+            catalog_rows=None,
+            verbose=verbose
+        )
+
+        if estimated_price and estimated_price > 0:
+            mcmaster_price = estimated_price
+            price_is_estimated = True
+            if verbose:
+                print(f"  ✓ Estimated price from weight: ${mcmaster_price:.2f}")
+                print(f"     ({source})")
+
     # Populate stock info
     # Use McMaster dimensions from scrap_calc (which already did the catalog lookup)
     quote_data.stock_info = StockInfo(
