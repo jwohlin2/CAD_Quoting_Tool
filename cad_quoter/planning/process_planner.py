@@ -35,9 +35,25 @@ def plan_job(family: str, params: Dict[str, Any]) -> Dict[str, Any]:
 
     Returns a dict with keys: ops, fixturing, qa, warnings, directs
     """
+    # Backward compatibility: map old family names to new ones
+    FAMILY_ALIASES = {
+        "die_plate": "Plates",
+        "punch": "Punches",
+        "pilot_punch": "Punches",
+        "cam_or_hemmer": "Sections_blocks",
+        "flat_die_chaser": "Sections_blocks",
+        "pm_compaction_die": "Special_processes",
+        "shear_blade": "Special_processes",
+        "extrude_hone": "Special_processes",
+    }
+
     family = (family or "").strip()
-    # Case-insensitive lookup - try exact match first, then case-insensitive
-    if family not in PLANNERS:
+
+    # First check if it's an old name that needs mapping
+    if family in FAMILY_ALIASES:
+        family = FAMILY_ALIASES[family]
+    # Then try exact match
+    elif family not in PLANNERS:
         # Try case-insensitive match
         family_lower = family.lower()
         matched = None
