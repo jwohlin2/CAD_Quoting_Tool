@@ -209,11 +209,16 @@ def plan_die_plate(p: Dict[str, Any]) -> Plan:
 # -----------------------------
 
 
-def plan_punch(p: Dict[str, Any]) -> Plan:
-    """Generate a plan for punches and inserts."""
+def plan_punches(p: Dict[str, Any]) -> Plan:
+    """Generate a plan for Punches (consolidated: punches, inserts, pilot punches)."""
 
     plan = base_plan()
     _init_directs(plan)
+
+    # Auto-detect if this is a pilot punch (tight runout requirement)
+    is_pilot = p.get("is_pilot_punch", False) or p.get("runout_to_shank") is not None
+    if is_pilot:
+        p.setdefault("runout_to_shank", 0.0003)
 
     mat = p.get("material", "tool_steel_annealed")
     overall_L = p.get("overall_length", 1.0)
@@ -269,7 +274,7 @@ def plan_punch(p: Dict[str, Any]) -> Plan:
     else:
         add(plan, "light_grind_cleanup")
 
-    # Pilots & runout
+    # Pilots & runout (for pilot punches)
     runout = p.get("runout_to_shank")
     if runout is not None and runout <= 0.0003:
         add(plan, "indicate_on_shank")
@@ -304,17 +309,6 @@ def plan_punch(p: Dict[str, Any]) -> Plan:
         add_direct(plan, "hardware", True)
 
     return plan
-
-
-# -----------------------------
-# FAMILY 3: PILOT PUNCHES (wrapper over punches with concentricity)
-# -----------------------------
-
-
-def plan_pilot_punch(p: Dict[str, Any]) -> Plan:
-    p2 = dict(p)
-    p2.setdefault("runout_to_shank", 0.0003)
-    return plan_punch(p2)
 
 
 # -----------------------------
@@ -366,25 +360,48 @@ def plan_bushing_id_critical(p: Dict[str, Any]) -> Plan:
 # -----------------------------
 
 
-def plan_cam_or_hemmer(p: Dict[str, Any]) -> Plan:
-    """Generate a plan for cams and hemming components."""
+def plan_sections_blocks(p: Dict[str, Any]) -> Plan:
+    """Generate a plan for Sections_blocks (consolidated: cams, hemmers, die chasers, sensor blocks)."""
 
     plan = base_plan()
     _init_directs(plan)
+
+    # Detect if this is a die chaser type (has flank/relief requirements)
+    is_chaser = p.get("is_die_chaser", False) or p.get("flank_angle") is not None
+
     add(plan, "saw_or_mill_rough_blocks")
+
     if p.get("material", "tool_steel") in {"D2", "A2", "PM", "tool_steel"}:
         add(plan, "heat_treat_if_wear_part")
 
+    # For die chasers, use simplified heat treat
+    if is_chaser and not any(o.get("op") == "heat_treat_if_wear_part" for o in plan.get("ops", [])):
+        add(plan, "heat_treat")
+
+    # Profile cutting strategy
     if needs_wedm_for_windows(p.get("windows_need_sharp", False), 0.0, p.get("profile_tol")):
         wire = choose_wire_size(0.0, None)
         skims = choose_skims(p.get("profile_tol"))
         add(plan, "wire_edm_cam_slot_or_profile", wire_in=wire, passes=f"R+{skims}S")
     else:
-        add(plan, "finish_mill_cam_slot_or_profile")
+        if is_chaser:
+            add(plan, "mill_or_wire_rough_form")
+        else:
+            add(plan, "finish_mill_cam_slot_or_profile")
 
-    add(plan, "profile_or_surface_grind_wear_faces")
-    add(plan, "jig_bore_or_grind_pivot_bores", tol=0.0005)
-    add_qa(plan, "Inspect cam path size/position; verify bore TIR and hardness.")
+    # Grinding operations
+    if is_chaser:
+        add(plan, "profile_grind_flanks_and_reliefs_to_spec")
+        add(plan, "lap_edges")
+    else:
+        add(plan, "profile_or_surface_grind_wear_faces")
+        add(plan, "jig_bore_or_grind_pivot_bores", tol=0.0005)
+
+    # QA
+    if is_chaser:
+        add_qa(plan, "Comparator flank angle/lead; hardness; edge condition.")
+    else:
+        add_qa(plan, "Inspect cam path size/position; verify bore TIR and hardness.")
 
     opnames = [o.get("op") for o in plan.get("ops", [])]
     if any(str(name).startswith("heat_treat") for name in opnames):
@@ -402,14 +419,45 @@ def plan_cam_or_hemmer(p: Dict[str, Any]) -> Plan:
 # -----------------------------
 
 
-def plan_flat_die_chaser(p: Optional[Dict[str, Any]] = None) -> Plan:
+def plan_special_processes(p: Dict[str, Any]) -> Plan:
+    """Generate a plan for Special_processes (consolidated: PM compaction dies, shear blades, extrude hone)."""
+
     plan = base_plan()
     _init_directs(plan)
-    add(plan, "mill_or_wire_rough_form")
-    add(plan, "heat_treat")
-    add(plan, "profile_grind_flanks_and_reliefs_to_spec")
-    add(plan, "lap_edges")
-    add_qa(plan, "Comparator flank angle/lead; hardness; edge condition.")
+
+    # Detect process type
+    is_pm_die = p.get("is_pm_compaction_die", False) or p.get("carbide_ring", False)
+    is_shear = p.get("is_shear_blade", False) or p.get("match_grind", False)
+    is_extrude_hone = p.get("is_extrude_hone", False) or p.get("abrasive_flow", False)
+
+    if is_pm_die:
+        # PM Compaction Die route
+        add(plan, "start_ground_carbide_ring")
+        add(plan, "wire_edm_ID_leave", leave=0.005)
+        add(plan, "jig_grind_ID_to_tenths_and_straightness", tol=0.0001)
+        add(plan, "lap_bearing_land", target_Ra=8)
+        add_qa(plan, "Measure taper/straightness over depth; Ra on land.")
+
+    elif is_shear:
+        # Shear Blade route
+        add(plan, "waterjet_or_saw_blanks")
+        add(plan, "heat_treat", material="A2/D2/PM")
+        add(plan, "profile_grind_cutting_edges_and_angles")
+        add(plan, "match_grind_set_for_gap_and_parallelism")
+        add(plan, "hone_edge")
+        add_qa(plan, "Parallelism & edge angle match; hardness.")
+
+    elif is_extrude_hone:
+        # Extrude Hone route
+        add(plan, "verify_connected_passage_and_masking")
+        add(plan, "abrasive_flow_polish", target_Ra=_safe(p.get("target_Ra"), 16))
+        add(plan, "clean_and_flush_media")
+        add_qa(plan, "Flow/pressure delta or Ra before/after report.")
+
+    else:
+        # Generic special process fallback
+        add(plan, "specialized_process_placeholder")
+        add_qa(plan, "Review special process requirements with engineering.")
 
     opnames = [o.get("op") for o in plan.get("ops", [])]
     if any(str(name).startswith("heat_treat") for name in opnames):
@@ -419,54 +467,6 @@ def plan_flat_die_chaser(p: Optional[Dict[str, Any]] = None) -> Plan:
         plan["directs"]["utilities"] = True
         plan["directs"]["consumables_flat"] = True
 
-    return plan
-
-
-def plan_pm_compaction_die(p: Dict[str, Any]) -> Plan:
-    plan = base_plan()
-    _init_directs(plan)
-    add(plan, "start_ground_carbide_ring")
-    add(plan, "wire_edm_ID_leave", leave=0.005)
-    add(plan, "jig_grind_ID_to_tenths_and_straightness", tol=0.0001)
-    add(plan, "lap_bearing_land", target_Ra=8)
-    add_qa(plan, "Measure taper/straightness over depth; Ra on land.")
-    if plan.get("ops"):
-        plan["directs"]["utilities"] = True
-        plan["directs"]["consumables_flat"] = True
-    return plan
-
-
-def plan_shear_blade(p: Optional[Dict[str, Any]] = None) -> Plan:
-    plan = base_plan()
-    _init_directs(plan)
-    add(plan, "waterjet_or_saw_blanks")
-    add(plan, "heat_treat", material="A2/D2/PM")
-    add(plan, "profile_grind_cutting_edges_and_angles")
-    add(plan, "match_grind_set_for_gap_and_parallelism")
-    add(plan, "hone_edge")
-    add_qa(plan, "Parallelism & edge angle match; hardness.")
-
-    opnames = [o.get("op") for o in plan.get("ops", [])]
-    if any(str(name).startswith("heat_treat") for name in opnames):
-        add_direct(plan, "outsourced", True)
-
-    if plan.get("ops"):
-        plan["directs"]["utilities"] = True
-        plan["directs"]["consumables_flat"] = True
-
-    return plan
-
-
-def plan_extrude_hone(p: Dict[str, Any]) -> Plan:
-    plan = base_plan()
-    _init_directs(plan)
-    add(plan, "verify_connected_passage_and_masking")
-    add(plan, "abrasive_flow_polish", target_Ra=_safe(p.get("target_Ra"), 16))
-    add(plan, "clean_and_flush_media")
-    add_qa(plan, "Flow/pressure delta or Ra before/after report.")
-    if plan.get("ops"):
-        plan["directs"]["utilities"] = True
-        plan["directs"]["consumables_flat"] = True
     return plan
 
 
@@ -476,15 +476,11 @@ def plan_extrude_hone(p: Dict[str, Any]) -> Plan:
 
 
 PLANNERS = {
-    "die_plate": plan_die_plate,
-    "punch": plan_punch,
-    "pilot_punch": plan_pilot_punch,
+    "Plates": plan_die_plate,
+    "Punches": plan_punches,
     "bushing_id_critical": plan_bushing_id_critical,
-    "cam_or_hemmer": plan_cam_or_hemmer,
-    "flat_die_chaser": plan_flat_die_chaser,
-    "pm_compaction_die": plan_pm_compaction_die,
-    "shear_blade": plan_shear_blade,
-    "extrude_hone": plan_extrude_hone,
+    "Sections_blocks": plan_sections_blocks,
+    "Special_processes": plan_special_processes,
 }
 
 
