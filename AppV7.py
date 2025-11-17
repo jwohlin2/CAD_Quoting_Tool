@@ -1596,8 +1596,21 @@ class AppV7:
         # Display in output tab
         self.output_text.delete(1.0, tk.END)
 
+        # CRITICAL: Extract quote data ONCE before parallel report generation
+        # This prevents race condition where all 3 threads try to extract simultaneously
+        try:
+            # This ensures _cached_quote_data is populated before threading
+            _ = self._get_or_create_quote_data()
+        except Exception as e:
+            # If extraction fails, show error and abort
+            error_msg = f"Error extracting quote data:\n{str(e)}"
+            self.output_text.insert(tk.END, error_msg)
+            self.status_bar.config(text="Quote generation failed - see Output tab")
+            return
+
         # Generate all three reports in parallel for 10-20 second speedup
         # The reports are independent and can run concurrently
+        # NOTE: Quote data is already cached, so no race conditions
         print("[AppV7] Generating reports in parallel...")
 
         with ThreadPoolExecutor(max_workers=3, thread_name_prefix="ReportGen") as executor:
