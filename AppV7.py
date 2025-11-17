@@ -1307,6 +1307,46 @@ class AppV7:
 
             machine_hours = quote_data.machine_hours
 
+            # Check if this is a punch part
+            is_punch = quote_data.raw_plan and quote_data.raw_plan.get("is_punch", False)
+
+            # For punch parts, show punch-specific machine hours report
+            if is_punch:
+                # Get machine rate for display
+                machine_rate = getattr(self, '_temp_machine_rate', self.MACHINE_RATE)
+                machine_rate_label = f"@ ${machine_rate:.2f}/hr"
+                if machine_rate != self.MACHINE_RATE:
+                    machine_rate_label += " (OVERRIDDEN)"
+
+                report = []
+                report.append("MACHINE HOURS ESTIMATION - PUNCH PART")
+                report.append("=" * 74)
+                report.append(f"Material: {quote_data.material_info.material_name}")
+                report.append(f"Part type: {quote_data.raw_plan.get('punch_features', {}).get('family', 'punch')}")
+                report.append(f"Shape: {quote_data.raw_plan.get('punch_features', {}).get('shape_type', 'round')}")
+                report.append("")
+
+                report.append("MACHINE TIME BREAKDOWN")
+                report.append("-" * 74)
+                report.append(f"  Turning (rough + finish):        {machine_hours.total_milling_minutes:>10.2f} minutes")
+                report.append(f"  Grinding (OD/ID/face):           {machine_hours.total_grinding_minutes:>10.2f} minutes")
+                report.append(f"  Drilling:                        {machine_hours.total_drill_minutes:>10.2f} minutes")
+                report.append(f"  Tapping:                         {machine_hours.total_tap_minutes:>10.2f} minutes")
+                report.append(f"  EDM:                             {machine_hours.total_edm_minutes:>10.2f} minutes")
+                report.append(f"  Other (chamfer/polish/saw):      {machine_hours.total_other_minutes:>10.2f} minutes")
+                report.append(f"  Inspection:                      {machine_hours.total_cmm_minutes:>10.2f} minutes")
+                report.append("-" * 74)
+                report.append(f"  TOTAL MACHINE TIME:              {machine_hours.total_minutes:>10.2f} minutes")
+                report.append(f"                                   {machine_hours.total_hours:>10.2f} hours")
+                report.append("")
+                report.append("=" * 74)
+                report.append(f"TOTAL MACHINE COST: ${machine_hours.machine_cost:.2f} {machine_rate_label}")
+                report.append("=" * 74)
+                report.append("")
+
+                self.machine_cost_total = machine_hours.machine_cost
+                return "\n".join(report)
+
             if not machine_hours.drill_operations and not machine_hours.tap_operations:
                 return "No hole operations found in CAD file."
 
