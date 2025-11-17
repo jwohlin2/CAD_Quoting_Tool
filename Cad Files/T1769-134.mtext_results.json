@@ -1,0 +1,70 @@
+{
+  "source_file": "C:\\Users\\JOHNWO~1\\AppData\\Local\\Temp\\dwg2dxf_00zystf7\\T1769-134.dxf",
+  "total_dimensions": 8,
+  "dimensions": [
+    {
+      "resolved_text": ".5193 \\Famgdt|c0;q",
+      "raw_text": "<> {\\Famgdt|c0;q}",
+      "measurement": 0.5193084667767383,
+      "measurement_in": 0.5193084667767383,
+      "dimtype": 6,
+      "is_diameter": false
+    },
+    {
+      "resolved_text": ".5193 \\Famgdt|c0;q",
+      "raw_text": "<> {\\Famgdt|c0;q}",
+      "measurement": 0.5193084667767334,
+      "measurement_in": 0.5193084667767334,
+      "dimtype": 6,
+      "is_diameter": false
+    },
+    {
+      "resolved_text": "3.225",
+      "raw_text": "",
+      "measurement": 3.224999999999995,
+      "measurement_in": 3.224999999999995,
+      "dimtype": 0,
+      "is_diameter": false
+    },
+    {
+      "resolved_text": ".91%%P.002",
+      "raw_text": "<>%%P.002",
+      "measurement": 0.9099999999999959,
+      "measurement_in": 0.9099999999999959,
+      "dimtype": 0,
+      "is_diameter": false
+    },
+    {
+      "resolved_text": ".19",
+      "raw_text": "",
+      "measurement": 0.18999999999999817,
+      "measurement_in": 0.18999999999999817,
+      "dimtype": 0,
+      "is_diameter": false
+    },
+    {
+      "resolved_text": "%%C.7",
+      "raw_text": "%%C<>",
+      "measurement": 0.700000000000001,
+      "measurement_in": 0.700000000000001,
+      "dimtype": 0,
+      "is_diameter": true
+    },
+    {
+      "resolved_text": "%%C.29",
+      "raw_text": "%%C<>",
+      "measurement": 0.2900000000000044,
+      "measurement_in": 0.2900000000000044,
+      "dimtype": 0,
+      "is_diameter": true
+    },
+    {
+      "resolved_text": "%%C.375",
+      "raw_text": "%%C<>",
+      "measurement": 0.375,
+      "measurement_in": 0.375,
+      "dimtype": 0,
+      "is_diameter": true
+    }
+  ]
+}

@@ -1,0 +1,62 @@
+{
+  "source_file": "C:\\Users\\JOHNWO~1\\AppData\\Local\\Temp\\dwg2dxf_34_el27a\\T1769-348.dxf",
+  "total_dimensions": 7,
+  "dimensions": [
+    {
+      "resolved_text": ".06",
+      "raw_text": "",
+      "measurement": 0.0600000000000008,
+      "measurement_in": 0.0600000000000008,
+      "dimtype": 6,
+      "is_diameter": false
+    },
+    {
+      "resolved_text": "1.2514",
+      "raw_text": "",
+      "measurement": 1.2514391715141744,
+      "measurement_in": 1.2514391715141744,
+      "dimtype": 6,
+      "is_diameter": false
+    },
+    {
+      "resolved_text": ".06",
+      "raw_text": "",
+      "measurement": 0.0600000000000024,
+      "measurement_in": 0.0600000000000024,
+      "dimtype": 6,
+      "is_diameter": false
+    },
+    {
+      "resolved_text": ".6826",
+      "raw_text": "",
+      "measurement": 0.6826419266350431,
+      "measurement_in": 0.6826419266350431,
+      "dimtype": 6,
+      "is_diameter": false
+    },
+    {
+      "resolved_text": ".7115",
+      "raw_text": "",
+      "measurement": 0.711494905111785,
+      "measurement_in": 0.711494905111785,
+      "dimtype": 6,
+      "is_diameter": false
+    },
+    {
+      "resolved_text": ".7115",
+      "raw_text": "",
+      "measurement": 0.7114949051117657,
+      "measurement_in": 0.7114949051117657,
+      "dimtype": 6,
+      "is_diameter": false
+    },
+    {
+      "resolved_text": "2.325 AT ASSEMBLY",
+      "raw_text": "<> AT ASSEMBLY",
+      "measurement": 2.3249999999999993,
+      "measurement_in": 2.3249999999999993,
+      "dimtype": 0,
+      "is_diameter": false
+    }
+  ]
+}

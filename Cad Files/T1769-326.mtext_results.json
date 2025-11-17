@@ -1,0 +1,206 @@
+{
+  "source_file": "C:\\Users\\JOHNWO~1\\AppData\\Local\\Temp\\dwg2dxf_pente32b\\T1769-326.dxf",
+  "total_dimensions": 25,
+  "dimensions": [
+    {
+      "resolved_text": "0",
+      "raw_text": "",
+      "measurement": 1.3608713048348718e-15,
+      "measurement_in": 1.3608713048348718e-15,
+      "dimtype": 6,
+      "is_diameter": false
+    },
+    {
+      "resolved_text": "0",
+      "raw_text": "",
+      "measurement": 9.498034205026577e-14,
+      "measurement_in": 9.498034205026577e-14,
+      "dimtype": 6,
+      "is_diameter": false
+    },
+    {
+      "resolved_text": ".06+.005/-.000",
+      "raw_text": "<>{}{\\H0.71x;\\C3;\\S+.005^ -.000;}",
+      "measurement": 0.05999999999999992,
+      "measurement_in": 0.05999999999999992,
+      "dimtype": 0,
+      "is_diameter": false
+    },
+    {
+      "resolved_text": ".09 TYP",
+      "raw_text": "<> TYP",
+      "measurement": 0.0900000000000003,
+      "measurement_in": 0.0900000000000003,
+      "dimtype": 4,
+      "is_diameter": false
+    },
+    {
+      "resolved_text": "2.043",
+      "raw_text": "",
+      "measurement": 2.043000000000001,
+      "measurement_in": 2.043000000000001,
+      "dimtype": 0,
+      "is_diameter": false
+    },
+    {
+      "resolved_text": ".76 STRAIGHT TYP",
+      "raw_text": "<> STRAIGHT TYP",
+      "measurement": 0.7600000000013372,
+      "measurement_in": 0.7600000000013372,
+      "dimtype": 0,
+      "is_diameter": false
+    },
+    {
+      "resolved_text": ".359",
+      "raw_text": "",
+      "measurement": 0.35900000000000887,
+      "measurement_in": 0.35900000000000887,
+      "dimtype": 0,
+      "is_diameter": false
+    },
+    {
+      "resolved_text": ".38",
+      "raw_text": "",
+      "measurement": 0.3799999999999919,
+      "measurement_in": 0.3799999999999919,
+      "dimtype": 0,
+      "is_diameter": false
+    },
+    {
+      "resolved_text": ".5016",
+      "raw_text": "",
+      "measurement": 0.5015974481593934,
+      "measurement_in": 0.5015974481593934,
+      "dimtype": 6,
+      "is_diameter": false
+    },
+    {
+      "resolved_text": ".7",
+      "raw_text": "",
+      "measurement": 0.7000000000000002,
+      "measurement_in": 0.7000000000000002,
+      "dimtype": 6,
+      "is_diameter": false
+    },
+    {
+      "resolved_text": ".7894",
+      "raw_text": "",
+      "measurement": 0.7893663544018756,
+      "measurement_in": 0.7893663544018756,
+      "dimtype": 6,
+      "is_diameter": false
+    },
+    {
+      "resolved_text": ".27+.0000/-.0002",
+      "raw_text": "<>{}{\\H0.71x;\\C3;\\S+.0000^ -.0002;}",
+      "measurement": 0.26999999999999946,
+      "measurement_in": 0.26999999999999946,
+      "dimtype": 0,
+      "is_diameter": false
+    },
+    {
+      "resolved_text": "1.7463",
+      "raw_text": "",
+      "measurement": 1.7462633870427071,
+      "measurement_in": 1.7462633870427071,
+      "dimtype": 6,
+      "is_diameter": false
+    },
+    {
+      "resolved_text": ".5+.0000/-.0002",
+      "raw_text": "<>{}{\\H0.71x;\\C3;\\S+.0000^ -.0002;}",
+      "measurement": 0.5,
+      "measurement_in": 0.5,
+      "dimtype": 0,
+      "is_diameter": false
+    },
+    {
+      "resolved_text": "1.7463 REF",
+      "raw_text": "<> REF",
+      "measurement": 1.7462633870427142,
+      "measurement_in": 1.7462633870427142,
+      "dimtype": 6,
+      "is_diameter": false
+    },
+    {
+      "resolved_text": ".0497",
+      "raw_text": "",
+      "measurement": 0.04972519619232885,
+      "measurement_in": 0.04972519619232885,
+      "dimtype": 0,
+      "is_diameter": false
+    },
+    {
+      "resolved_text": "1.7629+.000/-.005",
+      "raw_text": "<>{}{\\H0.71x;\\C3;\\S+.000^ -.005;}",
+      "measurement": 1.7628909981829084,
+      "measurement_in": 1.7628909981829084,
+      "dimtype": 6,
+      "is_diameter": false
+    },
+    {
+      "resolved_text": "1.7799 sc",
+      "raw_text": "<> sc",
+      "measurement": 1.7798634619400158,
+      "measurement_in": 1.7798634619400158,
+      "dimtype": 6,
+      "is_diameter": false
+    },
+    {
+      "resolved_text": "1.824 sc",
+      "raw_text": "<> sc",
+      "measurement": 1.824046713053828,
+      "measurement_in": 1.824046713053828,
+      "dimtype": 6,
+      "is_diameter": false
+    },
+    {
+      "resolved_text": ".0138",
+      "raw_text": "",
+      "measurement": 0.013799999999942969,
+      "measurement_in": 0.013799999999942969,
+      "dimtype": 0,
+      "is_diameter": false
+    },
+    {
+      "resolved_text": "145",
+      "raw_text": "<>",
+      "measurement": 144.99999999999693,
+      "measurement_in": 144.99999999999693,
+      "dimtype": 2,
+      "is_diameter": false
+    },
+    {
+      "resolved_text": ".005",
+      "raw_text": "<>",
+      "measurement": 0.00499999999999923,
+      "measurement_in": 0.00499999999999923,
+      "dimtype": 4,
+      "is_diameter": false
+    },
+    {
+      "resolved_text": ".0371",
+      "raw_text": "<>",
+      "measurement": 0.037129135354330864,
+      "measurement_in": 0.037129135354330864,
+      "dimtype": 4,
+      "is_diameter": false
+    },
+    {
+      "resolved_text": ".0849",
+      "raw_text": "",
+      "measurement": 0.08491810874015733,
+      "measurement_in": 0.08491810874015733,
+      "dimtype": 4,
+      "is_diameter": false
+    },
+    {
+      "resolved_text": "(2) .025",
+      "raw_text": "(2) <>",
+      "measurement": 0.02500000000000008,
+      "measurement_in": 0.02500000000000008,
+      "dimtype": 4,
+      "is_diameter": false
+    }
+  ]
+}

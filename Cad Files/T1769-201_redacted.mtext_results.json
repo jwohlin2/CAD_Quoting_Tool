@@ -1,0 +1,334 @@
+{
+  "source_file": "C:\\Users\\JOHNWO~1\\AppData\\Local\\Temp\\dwg2dxf__u4n55ae\\T1769-201_redacted.dxf",
+  "total_dimensions": 41,
+  "dimensions": [
+    {
+      "resolved_text": ".125",
+      "raw_text": "",
+      "measurement": 0.1250000000000073,
+      "measurement_in": 0.1250000000000073,
+      "dimtype": 6,
+      "is_diameter": false
+    },
+    {
+      "resolved_text": "19.0004",
+      "raw_text": "",
+      "measurement": 19.000411179761358,
+      "measurement_in": 19.000411179761358,
+      "dimtype": 6,
+      "is_diameter": false
+    },
+    {
+      "resolved_text": "11.5007",
+      "raw_text": "",
+      "measurement": 11.50067932776147,
+      "measurement_in": 11.50067932776147,
+      "dimtype": 6,
+      "is_diameter": false
+    },
+    {
+      "resolved_text": ".468",
+      "raw_text": "",
+      "measurement": 0.46799999999995023,
+      "measurement_in": 0.46799999999995023,
+      "dimtype": 0,
+      "is_diameter": false
+    },
+    {
+      "resolved_text": "(2) .308",
+      "raw_text": "(2) <>",
+      "measurement": 0.30800000000002115,
+      "measurement_in": 0.30800000000002115,
+      "dimtype": 0,
+      "is_diameter": false
+    },
+    {
+      "resolved_text": "26.6621",
+      "raw_text": "",
+      "measurement": 26.66214944737795,
+      "measurement_in": 26.66214944737795,
+      "dimtype": 6,
+      "is_diameter": false
+    },
+    {
+      "resolved_text": "26.2897",
+      "raw_text": "",
+      "measurement": 26.289670757600213,
+      "measurement_in": 26.289670757600213,
+      "dimtype": 6,
+      "is_diameter": false
+    },
+    {
+      "resolved_text": "27.2488",
+      "raw_text": "",
+      "measurement": 27.248765351008405,
+      "measurement_in": 27.248765351008405,
+      "dimtype": 6,
+      "is_diameter": false
+    },
+    {
+      "resolved_text": "27.0699",
+      "raw_text": "",
+      "measurement": 27.069850175850988,
+      "measurement_in": 27.069850175850988,
+      "dimtype": 6,
+      "is_diameter": false
+    },
+    {
+      "resolved_text": "1.125",
+      "raw_text": "",
+      "measurement": 1.125,
+      "measurement_in": 1.125,
+      "dimtype": 0,
+      "is_diameter": false
+    },
+    {
+      "resolved_text": ".125",
+      "raw_text": "",
+      "measurement": 0.1250000000000002,
+      "measurement_in": 0.1250000000000002,
+      "dimtype": 6,
+      "is_diameter": false
+    },
+    {
+      "resolved_text": ".25",
+      "raw_text": "",
+      "measurement": 0.24999999999969091,
+      "measurement_in": 0.24999999999969091,
+      "dimtype": 0,
+      "is_diameter": false
+    },
+    {
+      "resolved_text": ".12 HOLES",
+      "raw_text": "<> HOLES",
+      "measurement": 0.120000000000001,
+      "measurement_in": 0.120000000000001,
+      "dimtype": 0,
+      "is_diameter": false
+    },
+    {
+      "resolved_text": "(4) .03",
+      "raw_text": "(4) <>",
+      "measurement": 0.02999999999999174,
+      "measurement_in": 0.02999999999999174,
+      "dimtype": 4,
+      "is_diameter": false
+    },
+    {
+      "resolved_text": "(4) .03\\XX 45%%D",
+      "raw_text": "(4) <>\\XX 45%%D",
+      "measurement": 0.029999999999997584,
+      "measurement_in": 0.029999999999997584,
+      "dimtype": 0,
+      "is_diameter": false
+    },
+    {
+      "resolved_text": ".15",
+      "raw_text": "",
+      "measurement": 0.14999999999999147,
+      "measurement_in": 0.14999999999999147,
+      "dimtype": 0,
+      "is_diameter": false
+    },
+    {
+      "resolved_text": "1.488",
+      "raw_text": "",
+      "measurement": 1.488000000000042,
+      "measurement_in": 1.488000000000042,
+      "dimtype": 6,
+      "is_diameter": false
+    },
+    {
+      "resolved_text": "2.01",
+      "raw_text": "",
+      "measurement": 2.010000000000033,
+      "measurement_in": 2.010000000000033,
+      "dimtype": 6,
+      "is_diameter": false
+    },
+    {
+      "resolved_text": "5.1603",
+      "raw_text": "",
+      "measurement": 5.160316929352816,
+      "measurement_in": 5.160316929352816,
+      "dimtype": 6,
+      "is_diameter": false
+    },
+    {
+      "resolved_text": "5.2135",
+      "raw_text": "",
+      "measurement": 5.21352767436472,
+      "measurement_in": 5.21352767436472,
+      "dimtype": 6,
+      "is_diameter": false
+    },
+    {
+      "resolved_text": "5.0401",
+      "raw_text": "",
+      "measurement": 5.040065901304984,
+      "measurement_in": 5.040065901304984,
+      "dimtype": 6,
+      "is_diameter": false
+    },
+    {
+      "resolved_text": "6.5044",
+      "raw_text": "",
+      "measurement": 6.504403453776322,
+      "measurement_in": 6.504403453776322,
+      "dimtype": 6,
+      "is_diameter": false
+    },
+    {
+      "resolved_text": "6.2074",
+      "raw_text": "",
+      "measurement": 6.207422975760917,
+      "measurement_in": 6.207422975760917,
+      "dimtype": 6,
+      "is_diameter": false
+    },
+    {
+      "resolved_text": "7.9751",
+      "raw_text": "",
+      "measurement": 7.975092475953524,
+      "measurement_in": 7.975092475953524,
+      "dimtype": 6,
+      "is_diameter": false
+    },
+    {
+      "resolved_text": "8.5633",
+      "raw_text": "",
+      "measurement": 8.563321624951064,
+      "measurement_in": 8.563321624951064,
+      "dimtype": 6,
+      "is_diameter": false
+    },
+    {
+      "resolved_text": "10.9475",
+      "raw_text": "",
+      "measurement": 10.947526245364624,
+      "measurement_in": 10.947526245364624,
+      "dimtype": 6,
+      "is_diameter": false
+    },
+    {
+      "resolved_text": "10.4678",
+      "raw_text": "",
+      "measurement": 10.46779137402061,
+      "measurement_in": 10.46779137402061,
+      "dimtype": 6,
+      "is_diameter": false
+    },
+    {
+      "resolved_text": "12.3956",
+      "raw_text": "",
+      "measurement": 12.395633303707575,
+      "measurement_in": 12.395633303707575,
+      "dimtype": 6,
+      "is_diameter": false
+    },
+    {
+      "resolved_text": "13.155",
+      "raw_text": "",
+      "measurement": 13.154966539947699,
+      "measurement_in": 13.154966539947699,
+      "dimtype": 6,
+      "is_diameter": false
+    },
+    {
+      "resolved_text": "14.4851",
+      "raw_text": "",
+      "measurement": 14.485100782085155,
+      "measurement_in": 14.485100782085155,
+      "dimtype": 6,
+      "is_diameter": false
+    },
+    {
+      "resolved_text": "15.0899",
+      "raw_text": "",
+      "measurement": 15.089944392176701,
+      "measurement_in": 15.089944392176701,
+      "dimtype": 6,
+      "is_diameter": false
+    },
+    {
+      "resolved_text": "18.7634",
+      "raw_text": "",
+      "measurement": 18.763379892477953,
+      "measurement_in": 18.763379892477953,
+      "dimtype": 6,
+      "is_diameter": false
+    },
+    {
+      "resolved_text": "19.1504",
+      "raw_text": "",
+      "measurement": 19.150400126115493,
+      "measurement_in": 19.150400126115493,
+      "dimtype": 6,
+      "is_diameter": false
+    },
+    {
+      "resolved_text": "15.2748",
+      "raw_text": "",
+      "measurement": 15.274767595119416,
+      "measurement_in": 15.274767595119416,
+      "dimtype": 6,
+      "is_diameter": false
+    },
+    {
+      "resolved_text": "(2) 14.6994",
+      "raw_text": "(2) <>",
+      "measurement": 14.699376934834213,
+      "measurement_in": 14.699376934834213,
+      "dimtype": 6,
+      "is_diameter": false
+    },
+    {
+      "resolved_text": "12.5291",
+      "raw_text": "",
+      "measurement": 12.529075185342426,
+      "measurement_in": 12.529075185342426,
+      "dimtype": 6,
+      "is_diameter": false
+    },
+    {
+      "resolved_text": "10.9998",
+      "raw_text": "",
+      "measurement": 10.9997980095091,
+      "measurement_in": 10.9997980095091,
+      "dimtype": 6,
+      "is_diameter": false
+    },
+    {
+      "resolved_text": "11.5186",
+      "raw_text": "",
+      "measurement": 11.518562727542193,
+      "measurement_in": 11.518562727542193,
+      "dimtype": 6,
+      "is_diameter": false
+    },
+    {
+      "resolved_text": "6.1905",
+      "raw_text": "",
+      "measurement": 6.190484633693886,
+      "measurement_in": 6.190484633693886,
+      "dimtype": 6,
+      "is_diameter": false
+    },
+    {
+      "resolved_text": "8.0593",
+      "raw_text": "",
+      "measurement": 8.059286568921607,
+      "measurement_in": 8.059286568921607,
+      "dimtype": 6,
+      "is_diameter": false
+    },
+    {
+      "resolved_text": "8.3379",
+      "raw_text": "",
+      "measurement": 8.337940342774425,
+      "measurement_in": 8.337940342774425,
+      "dimtype": 6,
+      "is_diameter": false
+    }
+  ]
+}
