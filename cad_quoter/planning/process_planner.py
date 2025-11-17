@@ -841,6 +841,8 @@ def plan_from_cad_file(
         plan["extracted_dims"] = {"L": L, "W": W, "T": T}
     plan["extracted_holes"] = len(hole_table)
     plan["extracted_hole_operations"] = len(hole_operations)
+    # Add text dump for punch detection
+    plan["text_dump"] = "\n".join(all_text) if all_text else ""
 
     if verbose:
         print(f"[PLANNER] Plan complete: {len(plan['ops'])} operations")
