@@ -61,7 +61,8 @@ def debug_extraction(dxf_path: str, save_debug: bool = True):
 
         doc = open_doc(dxf_path)
         text_records = list(collect_all_text(doc))
-        text_lines = [rec.text for rec in text_records if rec.text]
+        # collect_all_text returns list of dicts, not TextRecord objects
+        text_lines = [rec["text"] for rec in text_records if rec.get("text")]
         text_dump = "\n".join(text_lines)
 
         print(f"   ✓ Extracted {len(text_records)} text records")
