@@ -35,6 +35,153 @@ except ImportError:
 
 
 # ============================================================================
+# MTEXT NORMALIZATION AND DIMENSION TEXT HELPERS
+# ============================================================================
+
+
+def normalize_acad_mtext(line: str) -> str:
+    """
+    Normalize AutoCAD MTEXT formatting codes into simpler plain text.
+
+    Handles:
+    - Strip outer {...}
+    - Remove \\Hxx; (height) and \\Cxx; (color)
+    - Convert stacked text \\S+.005^ -.000; -> '+.005/-.000'
+    - Remove leftover '{}' braces
+
+    Examples:
+        "{\\H0.71x;\\C3;\\S+.005^ -.000;}" -> "+.005/-.000"
+        "{\\H1.0x;TEXT}" -> "TEXT"
+
+    Args:
+        line: Raw MTEXT string with formatting codes
+
+    Returns:
+        Normalized plain text string
+    """
+    if not line:
+        return ""
+
+    # Strip single outer braces
+    if line.startswith("{") and line.endswith("}"):
+        line = line[1:-1]
+
+    # Remove height codes like \H0.71x;
+    line = re.sub(r"\\H[0-9.]+x;", "", line)
+
+    # Remove color codes like \C3;
+    line = re.sub(r"\\C\d+;", "", line)
+
+    # Convert stacked text: \S top ^ bottom ;
+    def repl_stack(m):
+        top = m.group(1).strip()
+        bot = m.group(2).strip()
+        return f"{top}/{bot}"
+
+    line = re.sub(r"\\S([^\\^]+)\^([^;]+);", repl_stack, line)
+
+    # Remove empty {} blocks
+    line = line.replace("{}", "").strip()
+
+    return line
+
+
+def units_to_inch_factor(insunits: int) -> float:
+    """
+    Convert DXF $INSUNITS code to inch conversion factor.
+
+    Args:
+        insunits: Value from $INSUNITS header variable
+            0 = Unitless
+            1 = Inches
+            2 = Feet
+            4 = Millimeters
+            5 = Centimeters
+            6 = Meters
+
+    Returns:
+        Multiplication factor to convert to inches
+    """
+    units_factors = {
+        0: 1.0,          # Unitless - assume inches
+        1: 1.0,          # Inches
+        2: 12.0,         # Feet -> inches
+        4: 1.0 / 25.4,   # Millimeters -> inches
+        5: 1.0 / 2.54,   # Centimeters -> inches
+        6: 39.3701,      # Meters -> inches
+    }
+    return units_factors.get(insunits, 1.0)
+
+
+def resolved_dimension_text(dim, unit_factor: float) -> str:
+    """
+    Given an ezdxf DIMENSION entity and a unit conversion factor,
+    return a resolved text string with:
+    - <> placeholder replaced by numeric measurement
+    - MTEXT formatting normalized
+
+    Examples:
+        dim.dxf.text = "(2) <>"
+        meas = 0.1480 (in drawing units)
+        unit_factor = 1.0 (inches)
+        Result: "(2) .148"
+
+        dim.dxf.text = "<> {\\H0.71x;\\C3;\\S+.0000^ -.0002;}"
+        meas = 0.4997
+        Result: ".4997 +.0000/-.0002"
+
+    Args:
+        dim: ezdxf DIMENSION entity
+        unit_factor: Multiplication factor to convert to inches
+
+    Returns:
+        Resolved dimension text string
+    """
+    raw_text = dim.dxf.text if hasattr(dim.dxf, 'text') else ""
+
+    # Get numeric measurement
+    try:
+        meas = dim.get_measurement()
+        if meas is None:
+            meas = 0
+
+        # Handle Vec3 objects
+        if hasattr(meas, 'magnitude'):
+            meas = meas.magnitude
+        elif hasattr(meas, 'x'):
+            meas = abs(meas.x)
+
+        meas = float(meas)
+    except Exception:
+        meas = 0
+
+    # Convert to inches
+    value_in = meas * unit_factor
+
+    # Format nominal value
+    # Use 4 decimal places, strip trailing zeros
+    nominal_str = f"{value_in:.4f}".rstrip("0").rstrip(".")
+
+    # If less than 1.0 and starts with "0.", convert to ".XXX" style
+    if nominal_str.startswith("0.") and value_in < 1.0:
+        nominal_str = nominal_str[1:]  # ".148" instead of "0.148"
+    elif not nominal_str or nominal_str == ".":
+        nominal_str = "0"
+
+    # First normalize MTEXT formatting
+    text = normalize_acad_mtext(raw_text) if raw_text else ""
+
+    # Replace <> placeholder with numeric value
+    if "<>" in text and nominal_str:
+        text = text.replace("<>", nominal_str)
+    elif not text and nominal_str:
+        # No override text at all; just use the numeric string
+        text = nominal_str
+
+    return text.strip()
+
+
+# ============================================================================
 # DATA STRUCTURES
 # ============================================================================
 
@@ -241,6 +388,7 @@ def extract_dimensions(dxf_path: Path) -> Dict[str, Any]:
         return {
             "linear_dims": [],
             "diameter_dims": [],
+            "resolved_dim_texts": [],
             "max_linear_dim": 0.0,
             "max_diameter_dim": 0.0,
             "min_dia_tol": None,
@@ -257,22 +405,33 @@ def extract_dimensions(dxf_path: Path) -> Dict[str, Any]:
         insunits = doc.header.get("$INSUNITS", 1)
         measurement = doc.header.get("$MEASUREMENT", 0)  # 0=Imperial, 1=Metric
 
-        # Check if we should convert from mm to inches
+        # Get unit conversion factor to inches
+        unit_factor = units_to_inch_factor(insunits)
+
+        # Also check $MEASUREMENT for additional validation
         is_metric = False
         if measurement == 1:  # $MEASUREMENT indicates metric
             is_metric = True
+            if insunits not in [4, 5, 6]:  # Not already metric
+                unit_factor = 1.0 / 25.4
         elif insunits == 4:  # Explicitly mm
             is_metric = True
-
-        mm_to_in = 1.0 / 25.4 if is_metric else 1.0
 
         linear_dims = []
         diameter_dims = []
         all_tolerances = []
+        resolved_dim_texts = []  # For tolerance/pattern detection
 
         for dim in msp.query("DIMENSION"):
             try:
-                # Get measurement value
+                # Get resolved dimension text (handles <> and MTEXT)
+                text_resolved = resolved_dimension_text(dim, unit_factor)
+                resolved_dim_texts.append(text_resolved)
+
+                # Get raw text for diameter detection
+                raw_text = dim.dxf.text if hasattr(dim.dxf, 'text') else ""
+
+                # Get measurement value (already converted to inches in resolved_dimension_text)
                 meas = dim.get_measurement()
                 if meas is None:
                     continue
@@ -281,40 +440,42 @@ def extract_dimensions(dxf_path: Path) -> Dict[str, Any]:
                 if hasattr(meas, 'magnitude'):
                     meas = meas.magnitude
                 elif hasattr(meas, 'x'):
-                    # If it's a vector, use the magnitude or first component
                     meas = abs(meas.x)
 
-                # Ensure meas is a number
                 meas = float(meas)
-
-                # Convert to inches if needed
-                meas_in = meas * mm_to_in
-
-                # Get display text
-                text = dim.get_text() if hasattr(dim, 'get_text') else str(dim.dxf.text)
+                meas_in = meas * unit_factor
 
                 # Get dimension type
                 # dimtype: 0=linear, 1=aligned, 3=diameter, 4=radius, etc.
                 dimtype = dim.dimtype
 
                 # Classify as linear or diameter
-                is_diameter = (dimtype == 3) or ("Ø" in text) or ("DIA" in text.upper())
+                # Check: dimtype, %%c (old DXF diameter symbol), Ø, DIA
+                is_diameter = (
+                    dimtype == 3 or
+                    "%%c" in raw_text.lower() or
+                    "Ø" in raw_text or
+                    "Ø" in text_resolved or
+                    "DIA" in raw_text.upper()
+                )
 
                 if is_diameter:
                     diameter_dims.append({
                         "measurement": meas_in,
-                        "text": text,
+                        "text": text_resolved,
+                        "raw_text": raw_text,
                         "type": "diameter"
                     })
                 else:
                     linear_dims.append({
                         "measurement": meas_in,
-                        "text": text,
+                        "text": text_resolved,
+                        "raw_text": raw_text,
                         "type": dimtype
                     })
 
-                # Extract tolerances from text
-                tolerances = parse_tolerances_from_text(text)
+                # Extract tolerances from resolved text
+                tolerances = parse_tolerances_from_text(text_resolved)
                 all_tolerances.extend(tolerances)
 
             except Exception as e:
@@ -357,6 +518,7 @@ def extract_dimensions(dxf_path: Path) -> Dict[str, Any]:
         return {
             "linear_dims": linear_dims,
             "diameter_dims": diameter_dims,
+            "resolved_dim_texts": resolved_dim_texts,  # For additional pattern matching
             "max_linear_dim": max_linear,
             "max_diameter_dim": max_diameter,
             "min_dia_tol": min_dia_tol,
@@ -368,6 +530,7 @@ def extract_dimensions(dxf_path: Path) -> Dict[str, Any]:
         return {
             "linear_dims": [],
             "diameter_dims": [],
+            "resolved_dim_texts": [],
             "max_linear_dim": 0.0,
             "max_diameter_dim": 0.0,
             "min_dia_tol": None,
@@ -648,7 +811,7 @@ def detect_pain_flags(text_dump: str) -> Dict[str, bool]:
     Detect quality/pain flags from text.
 
     Args:
-        text_dump: Combined text from drawing
+        text_dump: Combined text from drawing (including raw MTEXT)
 
     Returns:
         Dict with boolean flags:
@@ -683,11 +846,17 @@ def detect_pain_flags(text_dump: str) -> Dict[str, bool]:
         " SHARP "
     ])
 
-    # GD&T detection (symbols, callouts, or explicit mentions)
-    has_gdt = bool(re.search(
+    # GD&T detection (symbols, callouts, font codes, or explicit mentions)
+    # Check for \Famgdt (AutoCAD GD&T font code) in raw text
+    has_gdt_font = "\\Famgdt" in text_dump or "\\FAMGDT" in text_upper
+
+    # Check for GD&T symbols and keywords
+    has_gdt_symbols = bool(re.search(
         r'[⏥⌭⏄⌯⊕⌖]|GD&T|PERPENDICULARITY|FLATNESS|POSITION|CONCENTRICITY|RUNOUT|TIR',
         text_upper
     ))
+
+    has_gdt = has_gdt_font or has_gdt_symbols
 
     return {
         "has_polish_contour": has_polish,
@@ -857,8 +1026,15 @@ def extract_punch_features_from_dxf(
 
     # === PASS 3: OPS & PAIN FLAGS ===
 
+    # Combine text_dump with resolved dimension texts for comprehensive pattern detection
+    # This ensures dimension text overrides like "(2) <>" resolved to "(2) .148" are detected
+    resolved_dim_texts = dim_data.get("resolved_dim_texts", [])
+    combined_text = text_dump
+    if resolved_dim_texts:
+        combined_text = text_dump + "\n" + "\n".join(resolved_dim_texts)
+
     # Operations features
-    ops_features = detect_ops_features(text_dump)
+    ops_features = detect_ops_features(combined_text)
     summary.num_chamfers = ops_features["num_chamfers"]
     summary.num_small_radii = ops_features["num_small_radii"]
     summary.has_3d_surface = ops_features["has_3d_surface"]
@@ -866,14 +1042,14 @@ def extract_punch_features_from_dxf(
     summary.form_complexity_level = ops_features["form_complexity_level"]
 
     # Pain flags
-    pain_flags = detect_pain_flags(text_dump)
+    pain_flags = detect_pain_flags(combined_text)
     summary.has_polish_contour = pain_flags["has_polish_contour"]
     summary.has_no_step_permitted = pain_flags["has_no_step_permitted"]
     summary.has_sharp_edges = pain_flags["has_sharp_edges"]
     summary.has_gdt = pain_flags["has_gdt"]
 
     # Holes and taps
-    hole_data = parse_holes_from_text(text_dump)
+    hole_data = parse_holes_from_text(combined_text)
     summary.tap_count = hole_data["tap_count"]
     summary.tap_summary = hole_data["tap_summary"]
 
