@@ -666,6 +666,7 @@ def extract_quote_data_from_cad(
                 # Set machine hours from punch estimates
                 time_estimates = punch_data.get("time_estimates", {})
                 mh = time_estimates.get("machine_hours", {})
+                punch_machine_hours = mh.get("total_hours", 0.0)
                 quote_data.machine_hours = MachineHoursBreakdown(
                     total_milling_minutes=mh.get("total_milling_minutes", 0.0),
                     total_grinding_minutes=mh.get("total_grinding_minutes", 0.0),
@@ -675,11 +676,13 @@ def extract_quote_data_from_cad(
                     total_other_minutes=mh.get("total_other_minutes", 0.0),
                     total_cmm_minutes=mh.get("total_cmm_minutes", 0.0),
                     total_minutes=mh.get("total_minutes", 0.0),
-                    total_hours=mh.get("total_hours", 0.0),
+                    total_hours=punch_machine_hours,
+                    machine_cost=punch_machine_hours * machine_rate,
                 )
 
                 # Set labor hours from punch estimates
                 lh = time_estimates.get("labor_hours", {})
+                punch_labor_hours = lh.get("total_hours", 0.0)
                 quote_data.labor_hours = LaborHoursBreakdown(
                     setup_minutes=lh.get("total_setup_minutes", 0.0),
                     programming_minutes=lh.get("cam_programming_minutes", 0.0),
@@ -687,7 +690,8 @@ def extract_quote_data_from_cad(
                     inspection_minutes=lh.get("inspection_minutes", 0.0),
                     finishing_minutes=lh.get("deburring_minutes", 0.0),
                     total_minutes=lh.get("total_minutes", 0.0),
-                    total_hours=lh.get("total_hours", 0.0),
+                    total_hours=punch_labor_hours,
+                    labor_cost=punch_labor_hours * labor_rate,
                 )
 
                 # Store punch-specific data in quote_data
@@ -1030,222 +1034,229 @@ def extract_quote_data_from_cad(
     # ========================================================================
     # STEP 4: Calculate machine hours
     # ========================================================================
-    if verbose:
-        print("[4/5] Calculating machine hours...")
+    # Skip for punch parts - already calculated in punch extraction
+    if is_punch and punch_data and "error" not in punch_data:
+        if verbose:
+            print("[4/5] Calculating machine hours...")
+            print(f"  [PUNCH] Using punch-calculated machine hours: {quote_data.machine_hours.total_hours:.2f} hr")
+            print(f"  Machine cost: ${quote_data.machine_hours.machine_cost:.2f}")
+    else:
+        if verbose:
+            print("[4/5] Calculating machine hours...")
 
-    hole_table = extract_hole_operations_from_cad(cad_file_path)
+        hole_table = extract_hole_operations_from_cad(cad_file_path)
 
-    # Calculate total hole count (sum QTY field from each hole entry)
-    holes_total = sum(int(hole.get('QTY', 1)) for hole in hole_table) if hole_table else 0
+        # Calculate total hole count (sum QTY field from each hole entry)
+        holes_total = sum(int(hole.get('QTY', 1)) for hole in hole_table) if hole_table else 0
 
-    # Initialize time accumulators
-    total_drill_min = 0.0
-    total_tap_min = 0.0
-    total_cbore_min = 0.0
-    total_cdrill_min = 0.0
-    total_jig_grind_min = 0.0
-    total_milling_min = 0.0
-    total_grinding_min = 0.0
-    total_edm_min = 0.0
-    total_other_min = 0.0
+        # Initialize time accumulators
+        total_drill_min = 0.0
+        total_tap_min = 0.0
+        total_cbore_min = 0.0
+        total_cdrill_min = 0.0
+        total_jig_grind_min = 0.0
+        total_milling_min = 0.0
+        total_grinding_min = 0.0
+        total_edm_min = 0.0
+        total_other_min = 0.0
 
-    drill_ops = []
-    tap_ops = []
-    cbore_ops = []
-    cdrill_ops = []
-    jig_grind_ops = []
+        drill_ops = []
+        tap_ops = []
+        cbore_ops = []
+        cdrill_ops = []
+        jig_grind_ops = []
 
-    if hole_table:
-        times = estimate_hole_table_times(hole_table, material, part_info.thickness)
+        if hole_table:
+            times = estimate_hole_table_times(hole_table, material, part_info.thickness)
 
-        # Convert to HoleOperation objects
-        drill_ops = [
-            HoleOperation(
-                hole_id=g['hole_id'],
-                diameter=g['diameter'],
-                depth=g['depth'],
-                qty=g['qty'],
-                operation_type='drill',
-                time_per_hole=g['time_per_hole'],
-                total_time=g['total_time'],
-                sfm=g.get('sfm'),
-                ipr=g.get('ipr')
-            )
-            for g in times.get('drill_groups', [])
+            # Convert to HoleOperation objects
+            drill_ops = [
+                HoleOperation(
+                    hole_id=g['hole_id'],
+                    diameter=g['diameter'],
+                    depth=g['depth'],
+                    qty=g['qty'],
+                    operation_type='drill',
+                    time_per_hole=g['time_per_hole'],
+                    total_time=g['total_time'],
+                    sfm=g.get('sfm'),
+                    ipr=g.get('ipr')
+                )
+                for g in times.get('drill_groups', [])
+            ]
+
+            tap_ops = [
+                HoleOperation(
+                    hole_id=g['hole_id'],
+                    diameter=g['diameter'],
+                    depth=g['depth'],
+                    qty=g['qty'],
+                    operation_type='tap',
+                    time_per_hole=g['time_per_hole'],
+                    total_time=g['total_time'],
+                    sfm=g.get('sfm'),
+                    tpi=g.get('tpi')
+                )
+                for g in times.get('tap_groups', [])
+            ]
+
+            cbore_ops = [
+                HoleOperation(
+                    hole_id=g['hole_id'],
+                    diameter=g['diameter'],
+                    depth=g['depth'],
+                    qty=g['qty'],
+                    operation_type='cbore',
+                    time_per_hole=g['time_per_hole'],
+                    total_time=g['total_time'],
+                    sfm=g.get('sfm')
+                )
+                for g in times.get('cbore_groups', [])
+            ]
+
+            cdrill_ops = [
+                HoleOperation(
+                    hole_id=g['hole_id'],
+                    diameter=g['diameter'],
+                    depth=g['depth'],
+                    qty=g['qty'],
+                    operation_type='cdrill',
+                    time_per_hole=g['time_per_hole'],
+                    total_time=g['total_time']
+                )
+                for g in times.get('cdrill_groups', [])
+            ]
+
+            jig_grind_ops = [
+                HoleOperation(
+                    hole_id=g['hole_id'],
+                    diameter=g['diameter'],
+                    depth=g['depth'],
+                    qty=g['qty'],
+                    operation_type='jig_grind',
+                    time_per_hole=g['time_per_hole'],
+                    total_time=g['total_time']
+                )
+                for g in times.get('jig_grind_groups', [])
+            ]
+
+            # Accumulate hole operation times
+            total_drill_min = times.get('total_drill_minutes', 0.0)
+            total_tap_min = times.get('total_tap_minutes', 0.0)
+            total_cbore_min = times.get('total_cbore_minutes', 0.0)
+            total_cdrill_min = times.get('total_cdrill_minutes', 0.0)
+            total_jig_grind_min = times.get('total_jig_grind_minutes', 0.0)
+
+        # Calculate times for plan operations (squaring, face milling, EDM, etc.)
+        plan_machine_times = estimate_machine_hours_from_plan(
+            plan,
+            material=material,
+            plate_LxW=(part_info.length, part_info.width),
+            thickness=part_info.thickness
+        )
+
+        # Add plan operation times to totals
+        total_milling_min = plan_machine_times['breakdown_minutes'].get('milling', 0.0)
+        total_grinding_min = plan_machine_times['breakdown_minutes'].get('grinding', 0.0)
+        total_edm_min = plan_machine_times['breakdown_minutes'].get('edm', 0.0)
+        total_other_min = plan_machine_times['breakdown_minutes'].get('other', 0.0)
+
+        # Convert detailed operations to dataclass objects
+        milling_ops = [
+            MillingOperation(**op) for op in plan_machine_times.get('milling_operations', [])
+        ]
+        grinding_ops = [
+            GrindingOperation(**op) for op in plan_machine_times.get('grinding_operations', [])
         ]
 
-        tap_ops = [
-            HoleOperation(
-                hole_id=g['hole_id'],
-                diameter=g['diameter'],
-                depth=g['depth'],
-                qty=g['qty'],
-                operation_type='tap',
-                time_per_hole=g['time_per_hole'],
-                total_time=g['total_time'],
-                sfm=g.get('sfm'),
-                tpi=g.get('tpi')
-            )
-            for g in times.get('tap_groups', [])
-        ]
+        # Calculate CMM inspection time (split between labor setup and machine checking)
+        from cad_quoter.planning.process_planner import cmm_inspection_minutes
+        cmm_breakdown = cmm_inspection_minutes(holes_total)
+        cmm_setup_labor_min = cmm_breakdown['setup_labor_min']
+        cmm_checking_machine_min = cmm_breakdown['checking_machine_min']
+        cmm_holes_checked = cmm_breakdown['holes_checked']
 
-        cbore_ops = [
-            HoleOperation(
-                hole_id=g['hole_id'],
-                diameter=g['diameter'],
-                depth=g['depth'],
-                qty=g['qty'],
-                operation_type='cbore',
-                time_per_hole=g['time_per_hole'],
-                total_time=g['total_time'],
-                sfm=g.get('sfm')
-            )
-            for g in times.get('cbore_groups', [])
-        ]
+        # Calculate grand totals (machine time only includes CMM checking, not setup)
+        grand_total_minutes = (
+            total_drill_min + total_tap_min + total_cbore_min +
+            total_cdrill_min + total_jig_grind_min +
+            total_milling_min + total_grinding_min + total_edm_min + total_other_min +
+            cmm_checking_machine_min
+        )
+        grand_total_hours = grand_total_minutes / 60.0
 
-        cdrill_ops = [
-            HoleOperation(
-                hole_id=g['hole_id'],
-                diameter=g['diameter'],
-                depth=g['depth'],
-                qty=g['qty'],
-                operation_type='cdrill',
-                time_per_hole=g['time_per_hole'],
-                total_time=g['total_time']
-            )
-            for g in times.get('cdrill_groups', [])
-        ]
+        quote_data.machine_hours = MachineHoursBreakdown(
+            drill_operations=drill_ops,
+            tap_operations=tap_ops,
+            cbore_operations=cbore_ops,
+            cdrill_operations=cdrill_ops,
+            jig_grind_operations=jig_grind_ops,
+            milling_operations=milling_ops,
+            grinding_operations=grinding_ops,
+            total_drill_minutes=total_drill_min,
+            total_tap_minutes=total_tap_min,
+            total_cbore_minutes=total_cbore_min,
+            total_cdrill_minutes=total_cdrill_min,
+            total_jig_grind_minutes=total_jig_grind_min,
+            total_milling_minutes=total_milling_min,
+            total_grinding_minutes=total_grinding_min,
+            total_edm_minutes=total_edm_min,
+            total_other_minutes=total_other_min,
+            total_cmm_minutes=cmm_checking_machine_min,
+            cmm_holes_checked=cmm_holes_checked,
+            total_minutes=grand_total_minutes,
+            total_hours=grand_total_hours,
+            machine_cost=grand_total_hours * machine_rate
+        )
 
-        jig_grind_ops = [
-            HoleOperation(
-                hole_id=g['hole_id'],
-                diameter=g['diameter'],
-                depth=g['depth'],
-                qty=g['qty'],
-                operation_type='jig_grind',
-                time_per_hole=g['time_per_hole'],
-                total_time=g['total_time']
-            )
-            for g in times.get('jig_grind_groups', [])
-        ]
+        if verbose:
+            print(f"  Machine hours: {grand_total_hours:.2f} hr")
+            print(f"    - Drilling: {total_drill_min:.1f} min")
+            print(f"    - Tapping: {total_tap_min:.1f} min")
+            print(f"    - Milling (inc. squaring): {total_milling_min:.1f} min")
+            print(f"    - Grinding (inc. wet grind): {total_grinding_min:.1f} min")
+            print(f"    - EDM: {total_edm_min:.1f} min")
+            print(f"    - CMM Inspection (checking only): {cmm_checking_machine_min:.1f} min")
+            print(f"  Machine cost: ${quote_data.machine_hours.machine_cost:.2f}")
 
-        # Accumulate hole operation times
-        total_drill_min = times.get('total_drill_minutes', 0.0)
-        total_tap_min = times.get('total_tap_minutes', 0.0)
-        total_cbore_min = times.get('total_cbore_minutes', 0.0)
-        total_cdrill_min = times.get('total_cdrill_minutes', 0.0)
-        total_jig_grind_min = times.get('total_jig_grind_minutes', 0.0)
+        # ========================================================================
+        # STEP 5: Calculate labor hours
+        # ========================================================================
+        if verbose:
+            print("[5/5] Calculating labor hours...")
 
-    # Calculate times for plan operations (squaring, face milling, EDM, etc.)
-    plan_machine_times = estimate_machine_hours_from_plan(
-        plan,
-        material=material,
-        plate_LxW=(part_info.length, part_info.width),
-        thickness=part_info.thickness
-    )
+        ops = plan.get('ops', [])
+        # Note: holes_total is already calculated earlier in STEP 4
 
-    # Add plan operation times to totals
-    total_milling_min = plan_machine_times['breakdown_minutes'].get('milling', 0.0)
-    total_grinding_min = plan_machine_times['breakdown_minutes'].get('grinding', 0.0)
-    total_edm_min = plan_machine_times['breakdown_minutes'].get('edm', 0.0)
-    total_other_min = plan_machine_times['breakdown_minutes'].get('other', 0.0)
+        # Estimate labor inputs (simplified - could be more sophisticated)
+        labor_inputs = LaborInputs(
+            ops_total=len(ops),
+            holes_total=holes_total,
+            tool_changes=len(ops) * 2,  # Rough estimate
+            fixturing_complexity=1,
+            cmm_setup_min=cmm_setup_labor_min  # Add CMM setup to inspection labor
+        )
 
-    # Convert detailed operations to dataclass objects
-    milling_ops = [
-        MillingOperation(**op) for op in plan_machine_times.get('milling_operations', [])
-    ]
-    grinding_ops = [
-        GrindingOperation(**op) for op in plan_machine_times.get('grinding_operations', [])
-    ]
+        labor_result = compute_labor_minutes(labor_inputs)
+        minutes = labor_result['minutes']
 
-    # Calculate CMM inspection time (split between labor setup and machine checking)
-    from cad_quoter.planning.process_planner import cmm_inspection_minutes
-    cmm_breakdown = cmm_inspection_minutes(holes_total)
-    cmm_setup_labor_min = cmm_breakdown['setup_labor_min']
-    cmm_checking_machine_min = cmm_breakdown['checking_machine_min']
-    cmm_holes_checked = cmm_breakdown['holes_checked']
+        quote_data.labor_hours = LaborHoursBreakdown(
+            setup_minutes=minutes.get('Setup', 0.0),
+            programming_minutes=minutes.get('Programming', 0.0),
+            machining_steps_minutes=minutes.get('Machining_Steps', 0.0),
+            inspection_minutes=minutes.get('Inspection', 0.0),
+            finishing_minutes=minutes.get('Finishing', 0.0),
+            total_minutes=minutes.get('Labor_Total', 0.0),
+            total_hours=minutes.get('Labor_Total', 0.0) / 60.0,
+            labor_cost=(minutes.get('Labor_Total', 0.0) / 60.0) * labor_rate,
+            ops_total=len(ops),
+            holes_total=holes_total,
+            tool_changes=len(ops) * 2
+        )
 
-    # Calculate grand totals (machine time only includes CMM checking, not setup)
-    grand_total_minutes = (
-        total_drill_min + total_tap_min + total_cbore_min +
-        total_cdrill_min + total_jig_grind_min +
-        total_milling_min + total_grinding_min + total_edm_min + total_other_min +
-        cmm_checking_machine_min
-    )
-    grand_total_hours = grand_total_minutes / 60.0
-
-    quote_data.machine_hours = MachineHoursBreakdown(
-        drill_operations=drill_ops,
-        tap_operations=tap_ops,
-        cbore_operations=cbore_ops,
-        cdrill_operations=cdrill_ops,
-        jig_grind_operations=jig_grind_ops,
-        milling_operations=milling_ops,
-        grinding_operations=grinding_ops,
-        total_drill_minutes=total_drill_min,
-        total_tap_minutes=total_tap_min,
-        total_cbore_minutes=total_cbore_min,
-        total_cdrill_minutes=total_cdrill_min,
-        total_jig_grind_minutes=total_jig_grind_min,
-        total_milling_minutes=total_milling_min,
-        total_grinding_minutes=total_grinding_min,
-        total_edm_minutes=total_edm_min,
-        total_other_minutes=total_other_min,
-        total_cmm_minutes=cmm_checking_machine_min,
-        cmm_holes_checked=cmm_holes_checked,
-        total_minutes=grand_total_minutes,
-        total_hours=grand_total_hours,
-        machine_cost=grand_total_hours * machine_rate
-    )
-
-    if verbose:
-        print(f"  Machine hours: {grand_total_hours:.2f} hr")
-        print(f"    - Drilling: {total_drill_min:.1f} min")
-        print(f"    - Tapping: {total_tap_min:.1f} min")
-        print(f"    - Milling (inc. squaring): {total_milling_min:.1f} min")
-        print(f"    - Grinding (inc. wet grind): {total_grinding_min:.1f} min")
-        print(f"    - EDM: {total_edm_min:.1f} min")
-        print(f"    - CMM Inspection (checking only): {cmm_checking_machine_min:.1f} min")
-        print(f"  Machine cost: ${quote_data.machine_hours.machine_cost:.2f}")
-
-    # ========================================================================
-    # STEP 5: Calculate labor hours
-    # ========================================================================
-    if verbose:
-        print("[5/5] Calculating labor hours...")
-
-    ops = plan.get('ops', [])
-    # Note: holes_total is already calculated earlier in STEP 4
-
-    # Estimate labor inputs (simplified - could be more sophisticated)
-    labor_inputs = LaborInputs(
-        ops_total=len(ops),
-        holes_total=holes_total,
-        tool_changes=len(ops) * 2,  # Rough estimate
-        fixturing_complexity=1,
-        cmm_setup_min=cmm_setup_labor_min  # Add CMM setup to inspection labor
-    )
-
-    labor_result = compute_labor_minutes(labor_inputs)
-    minutes = labor_result['minutes']
-
-    quote_data.labor_hours = LaborHoursBreakdown(
-        setup_minutes=minutes.get('Setup', 0.0),
-        programming_minutes=minutes.get('Programming', 0.0),
-        machining_steps_minutes=minutes.get('Machining_Steps', 0.0),
-        inspection_minutes=minutes.get('Inspection', 0.0),
-        finishing_minutes=minutes.get('Finishing', 0.0),
-        total_minutes=minutes.get('Labor_Total', 0.0),
-        total_hours=minutes.get('Labor_Total', 0.0) / 60.0,
-        labor_cost=(minutes.get('Labor_Total', 0.0) / 60.0) * labor_rate,
-        ops_total=len(ops),
-        holes_total=holes_total,
-        tool_changes=len(ops) * 2
-    )
-
-    if verbose:
-        print(f"  Labor hours: {quote_data.labor_hours.total_hours:.2f} hr")
-        print(f"  Labor cost: ${quote_data.labor_hours.labor_cost:.2f}")
+        if verbose:
+            print(f"  Labor hours: {quote_data.labor_hours.total_hours:.2f} hr")
+            print(f"  Labor cost: ${quote_data.labor_hours.labor_cost:.2f}")
 
     # ========================================================================
     # STEP 6: Calculate cost summary with quantity-aware amortization
