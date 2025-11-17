@@ -681,9 +681,11 @@ def extract_quote_data_from_cad(
                 # Set labor hours from punch estimates
                 lh = time_estimates.get("labor_hours", {})
                 quote_data.labor_hours = LaborHoursBreakdown(
-                    total_setup_minutes=lh.get("total_setup_minutes", 0.0),
+                    setup_minutes=lh.get("total_setup_minutes", 0.0),
                     programming_minutes=lh.get("cam_programming_minutes", 0.0),
+                    machining_steps_minutes=lh.get("handling_minutes", 0.0),
                     inspection_minutes=lh.get("inspection_minutes", 0.0),
+                    finishing_minutes=lh.get("deburring_minutes", 0.0),
                     total_minutes=lh.get("total_minutes", 0.0),
                     total_hours=lh.get("total_hours", 0.0),
                 )
