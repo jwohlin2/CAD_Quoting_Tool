@@ -159,6 +159,8 @@ def extract_geometry_envelope(dxf_path: Path) -> Dict[str, Any]:
 
         # Determine units from DXF header
         insunits = doc.header.get("$INSUNITS", 1)  # 1=inches, 4=mm, 0=unitless
+        measurement = doc.header.get("$MEASUREMENT", 0)  # 0=Imperial, 1=Metric
+
         units_map = {
             0: "unitless",
             1: "inches",
@@ -169,11 +171,24 @@ def extract_geometry_envelope(dxf_path: Path) -> Dict[str, Any]:
         }
         units_name = units_map.get(insunits, "inches")
 
-        # Convert to inches if needed
-        if units_name == "mm":
+        # Robust units detection: if $MEASUREMENT says metric, trust that over $INSUNITS
+        # Also use heuristic: if dimensions are very large (>50), likely in mm
+        is_metric = False
+        if measurement == 1:  # $MEASUREMENT indicates metric
+            is_metric = True
+        elif insunits == 4:  # Explicitly mm
+            is_metric = True
+        elif insunits == 0 or insunits == 1:  # Unitless or inches - use heuristic
+            # If dimensions are suspiciously large, assume mm
+            if max(length, width) > 50:  # Unlikely to have 50+ inch punch
+                is_metric = True
+
+        # Convert to inches if metric
+        if is_metric:
             length /= 25.4
             width /= 25.4
             height /= 25.4
+            units_name = "mm (converted)"
         elif units_name == "feet":
             length *= 12
             width *= 12
@@ -238,9 +253,18 @@ def extract_dimensions(dxf_path: Path) -> Dict[str, Any]:
         doc = ezdxf.readfile(str(dxf_path))
         msp = doc.modelspace()
 
-        # Determine units
+        # Determine units - robust detection
         insunits = doc.header.get("$INSUNITS", 1)
-        mm_to_in = 1.0 / 25.4 if insunits == 4 else 1.0
+        measurement = doc.header.get("$MEASUREMENT", 0)  # 0=Imperial, 1=Metric
+
+        # Check if we should convert from mm to inches
+        is_metric = False
+        if measurement == 1:  # $MEASUREMENT indicates metric
+            is_metric = True
+        elif insunits == 4:  # Explicitly mm
+            is_metric = True
+
+        mm_to_in = 1.0 / 25.4 if is_metric else 1.0
 
         linear_dims = []
         diameter_dims = []
@@ -300,6 +324,17 @@ def extract_dimensions(dxf_path: Path) -> Dict[str, Any]:
         # Find max dimensions
         max_linear = max([d["measurement"] for d in linear_dims], default=0.0)
         max_diameter = max([d["measurement"] for d in diameter_dims], default=0.0)
+
+        # Heuristic check: if dimensions are very large and we didn't convert, do it now
+        # This catches cases where $INSUNITS and $MEASUREMENT are wrong
+        if not is_metric and (max_linear > 50 or max_diameter > 10):
+            # Suspiciously large dimensions - likely mm that wasn't converted
+            for d in linear_dims:
+                d["measurement"] /= 25.4
+            for d in diameter_dims:
+                d["measurement"] /= 25.4
+            max_linear /= 25.4
+            max_diameter /= 25.4
 
         # Find tightest tolerances
         min_tol = min(all_tolerances, default=None) if all_tolerances else None
@@ -910,7 +945,8 @@ def extract_punch_features(
             from cad_quoter.geo_extractor import open_doc, collect_all_text
             doc = open_doc(dxf_path)
             text_records = list(collect_all_text(doc))
-            text_lines = [rec.text for rec in text_records if rec.text]
+            # collect_all_text returns list of dicts, not TextRecord objects
+            text_lines = [rec["text"] for rec in text_records if rec.get("text")]
         except Exception as e:
             text_lines = []
 
