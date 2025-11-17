@@ -1302,6 +1302,8 @@ def extract_punch_features_from_dxf(
         summary.body_thickness_in = geo_envelope.get("overall_height_in", None)
 
     # Collect distinct ground diameters from DIMENSION entities with clustering
+    # Default unit_factor in case ezdxf read fails (e.g., for DWG files)
+    unit_factor = 1.0
     try:
         doc = ezdxf.readfile(str(dxf_path))
         insunits = doc.header.get("$INSUNITS", 1)
