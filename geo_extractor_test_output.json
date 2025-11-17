@@ -1,0 +1,1614 @@
+{
+  "file": "C:\\Users\\John Wohlin\\Downloads\\composinonimizer\\T1769-219.dwg",
+  "total_text_records": 99,
+  "all_text": [
+    {
+      "layout": "Model",
+      "layer": "AM_0",
+      "etype": "MTEXT",
+      "text": "5/16-18 TAP X .88 DEEP",
+      "x": -2.683406949732186,
+      "y": -1.173736506582754,
+      "height": 0.0666666666666667,
+      "rotation": 0.0,
+      "in_block": false,
+      "depth": 0,
+      "block_path": []
+    },
+    {
+      "layout": "Model",
+      "layer": "AM_0",
+      "etype": "MTEXT",
+      "text": "THIS SURFACE TO BE GROUND PERPENDICULAR TO CENTERLINE",
+      "x": -2.33702140152307,
+      "y": -1.813649992918778,
+      "height": 0.0666666666666667,
+      "rotation": 0.0,
+      "in_block": false,
+      "depth": 0,
+      "block_path": []
+    },
+    {
+      "layout": "Model",
+      "layer": "AM_0",
+      "etype": "DIMENSION",
+      "text": "<>%%P.001",
+      "x": 0.0,
+      "y": 0.0,
+      "height": 0.0,
+      "rotation": 0.0,
+      "in_block": false,
+      "depth": 0,
+      "block_path": []
+    },
+    {
+      "layout": "Model",
+      "layer": "AM_0",
+      "etype": "DIMENSION",
+      "text": "<>%%P1/32",
+      "x": 0.0,
+      "y": 0.0,
+      "height": 0.0,
+      "rotation": 0.0,
+      "in_block": false,
+      "depth": 0,
+      "block_path": []
+    },
+    {
+      "layout": "Model",
+      "layer": "AM_0",
+      "etype": "MTEXT",
+      "text": "SHARP",
+      "x": 0.260632115936362,
+      "y": -1.666856167476775,
+      "height": 0.0666666666666667,
+      "rotation": 0.0,
+      "in_block": false,
+      "depth": 0,
+      "block_path": []
+    },
+    {
+      "layout": "Model",
+      "layer": "AM_0",
+      "etype": "MTEXT",
+      "text": "CENTER PERMITTED",
+      "x": 3.009699085033981,
+      "y": -1.053765687547693,
+      "height": 0.0666666666666667,
+      "rotation": 0.0,
+      "in_block": false,
+      "depth": 0,
+      "block_path": []
+    },
+    {
+      "layout": "Model",
+      "layer": "AM_0",
+      "etype": "MTEXT",
+      "text": "NO STEP PERMITTED",
+      "x": -5.350352397332388,
+      "y": -1.13442323172415,
+      "height": 0.0666666666666667,
+      "rotation": 0.0,
+      "in_block": false,
+      "depth": 0,
+      "block_path": []
+    },
+    {
+      "layout": "Model",
+      "layer": "AM_0",
+      "etype": "DIMENSION",
+      "text": "%%C<>",
+      "x": 0.0,
+      "y": 0.0,
+      "height": 0.0,
+      "rotation": 0.0,
+      "in_block": false,
+      "depth": 0,
+      "block_path": []
+    },
+    {
+      "layout": "Model",
+      "layer": "AM_0",
+      "etype": "DIMENSION",
+      "text": "%%C<>",
+      "x": 0.0,
+      "y": 0.0,
+      "height": 0.0,
+      "rotation": 0.0,
+      "in_block": false,
+      "depth": 0,
+      "block_path": []
+    },
+    {
+      "layout": "Model",
+      "layer": "AM_0",
+      "etype": "DIMENSION",
+      "text": "%%C<>",
+      "x": 0.0,
+      "y": 0.0,
+      "height": 0.0,
+      "rotation": 0.0,
+      "in_block": false,
+      "depth": 0,
+      "block_path": []
+    },
+    {
+      "layout": "Model",
+      "layer": "AM_0",
+      "etype": "DIMENSION",
+      "text": "%%C<>{}{\\H0.71x;\\C3;\\S+.0000^ -.0002;}",
+      "x": 0.0,
+      "y": 0.0,
+      "height": 0.0,
+      "rotation": 0.0,
+      "in_block": false,
+      "depth": 0,
+      "block_path": []
+    },
+    {
+      "layout": "Model",
+      "layer": "AM_0",
+      "etype": "DIMENSION",
+      "text": "%%C<>{}{\\H0.71x;\\C3;\\S+.0000^ -.0002;}",
+      "x": 0.0,
+      "y": 0.0,
+      "height": 0.0,
+      "rotation": 0.0,
+      "in_block": false,
+      "depth": 0,
+      "block_path": []
+    },
+    {
+      "layout": "Model",
+      "layer": "AM_0",
+      "etype": "DIMENSION",
+      "text": "%%C<>%%P.0001",
+      "x": 0.0,
+      "y": 0.0,
+      "height": 0.0,
+      "rotation": 0.0,
+      "in_block": false,
+      "depth": 0,
+      "block_path": []
+    },
+    {
+      "layout": "Model",
+      "layer": "AM_0",
+      "etype": "DIMENSION",
+      "text": "%%C<>{}{\\H0.71x;\\C3;\\S+.0000^ -.0003;}",
+      "x": 0.0,
+      "y": 0.0,
+      "height": 0.0,
+      "rotation": 0.0,
+      "in_block": false,
+      "depth": 0,
+      "block_path": []
+    },
+    {
+      "layout": "SHEET (B)",
+      "layer": "AM_0",
+      "etype": "PROXYTEXT",
+      "text": "A 219 4 52100 GUIDE POST 59-61 ROCK \"C\" REV DETAIL QTY MATERIAL NAME MAT-CODE MATERIAL HARDNESS STANDARD # COMMENTS",
+      "x": 0.0,
+      "y": 0.0,
+      "height": 0.0,
+      "rotation": 0.0,
+      "in_block": false,
+      "depth": 0,
+      "block_path": []
+    },
+    {
+      "layout": "SHEET (B)",
+      "layer": "AM_BOR",
+      "etype": "TEXT",
+      "text": "JOB NUMBER",
+      "x": 9.684380972948317,
+      "y": 0.2602349399061774,
+      "height": 0.05905511811024,
+      "rotation": 0.0,
+      "in_block": true,
+      "depth": 1,
+      "block_path": [
+        "ansi_br_revisionlista0"
+      ]
+    },
+    {
+      "layout": "SHEET (B)",
+      "layer": "AM_BOR",
+      "etype": "TEXT",
+      "text": "#",
+      "x": 9.494380972205473,
+      "y": 0.2602349399061774,
+      "height": 0.05905511811024,
+      "rotation": 0.0,
+      "in_block": true,
+      "depth": 1,
+      "block_path": [
+        "ansi_br_revisionlista0"
+      ]
+    },
+    {
+      "layout": "SHEET (B)",
+      "layer": "AM_BOR",
+      "etype": "TEXT",
+      "text": "DESCRIPTION",
+      "x": 10.562013181811416,
+      "y": 0.25070737874398696,
+      "height": 0.05905511811024,
+      "rotation": 0.0,
+      "in_block": true,
+      "depth": 1,
+      "block_path": [
+        "ansi_br_revisionlista0"
+      ]
+    },
+    {
+      "layout": "SHEET (B)",
+      "layer": "AM_BOR",
+      "etype": "TEXT",
+      "text": "DATE",
+      "x": 11.553177563732097,
+      "y": 0.26023493779910534,
+      "height": 0.05905511811024,
+      "rotation": 0.0,
+      "in_block": true,
+      "depth": 1,
+      "block_path": [
+        "ansi_br_revisionlista0"
+      ]
+    },
+    {
+      "layout": "SHEET (B)",
+      "layer": "AM_BOR",
+      "etype": "TEXT",
+      "text": "APPROVED",
+      "x": 11.993177563732125,
+      "y": 0.26023493779910534,
+      "height": 0.05905511811024,
+      "rotation": 0.0,
+      "in_block": true,
+      "depth": 1,
+      "block_path": [
+        "ansi_br_revisionlista0"
+      ]
+    },
+    {
+      "layout": "SHEET (B)",
+      "layer": "0",
+      "etype": "TEXT",
+      "text": ".005",
+      "x": 12.944191624464196,
+      "y": 0.5087856120258218,
+      "height": 0.046875000000003,
+      "rotation": 0.0,
+      "in_block": true,
+      "depth": 1,
+      "block_path": [
+        "B_COMP"
+      ]
+    },
+    {
+      "layout": "SHEET (B)",
+      "layer": "0",
+      "etype": "TEXT",
+      "text": "3 PL TOL\u00b1",
+      "x": 12.519648448179666,
+      "y": 0.5087856120258218,
+      "height": 0.046875000000003,
+      "rotation": 0.0,
+      "in_block": true,
+      "depth": 1,
+      "block_path": [
+        "B_COMP"
+      ]
+    },
+    {
+      "layout": "SHEET (B)",
+      "layer": "0",
+      "etype": "TEXT",
+      "text": "T1769-219",
+      "x": 14.874302691912282,
+      "y": 0.2963747287877556,
+      "height": 0.055118110236224,
+      "rotation": 0.0,
+      "in_block": true,
+      "depth": 1,
+      "block_path": [
+        "B_COMP"
+      ]
+    },
+    {
+      "layout": "SHEET (B)",
+      "layer": "0",
+      "etype": "TEXT",
+      "text": "FILE NO.",
+      "x": 14.861524153948851,
+      "y": 0.40014570204548,
+      "height": 0.05905511811024,
+      "rotation": 0.0,
+      "in_block": true,
+      "depth": 1,
+      "block_path": [
+        "B_COMP"
+      ]
+    },
+    {
+      "layout": "SHEET (B)",
+      "layer": "0",
+      "etype": "TEXT",
+      "text": "of",
+      "x": 15.780897238374374,
+      "y": 0.27175412263160265,
+      "height": 0.0750000000000048,
+      "rotation": 0.0,
+      "in_block": true,
+      "depth": 1,
+      "block_path": [
+        "B_COMP"
+      ]
+    },
+    {
+      "layout": "SHEET (B)",
+      "layer": "0",
+      "etype": "TEXT",
+      "text": "SHEET NO.",
+      "x": 15.614024153953954,
+      "y": 0.40014570204548,
+      "height": 0.05905511811024,
+      "rotation": 0.0,
+      "in_block": true,
+      "depth": 1,
+      "block_path": [
+        "B_COMP"
+      ]
+    },
+    {
+      "layout": "SHEET (B)",
+      "layer": "0",
+      "etype": "TEXT",
+      "text": ".02",
+      "x": 12.944191624464196,
+      "y": 0.5837856120258268,
+      "height": 0.046875000000003,
+      "rotation": 0.0,
+      "in_block": true,
+      "depth": 1,
+      "block_path": [
+        "B_COMP"
+      ]
+    },
+    {
+      "layout": "SHEET (B)",
+      "layer": "0",
+      "etype": "TEXT",
+      "text": ".0001",
+      "x": 12.944191624464196,
+      "y": 0.35504545454549696,
+      "height": 0.046875000000003,
+      "rotation": 0.0,
+      "in_block": true,
+      "depth": 1,
+      "block_path": [
+        "B_COMP"
+      ]
+    },
+    {
+      "layout": "SHEET (B)",
+      "layer": "0",
+      "etype": "TEXT",
+      "text": ".00005",
+      "x": 12.944191624464196,
+      "y": 0.2800454545454927,
+      "height": 0.046875000000003,
+      "rotation": 0.0,
+      "in_block": true,
+      "depth": 1,
+      "block_path": [
+        "B_COMP"
+      ]
+    },
+    {
+      "layout": "SHEET (B)",
+      "layer": "0",
+      "etype": "TEXT",
+      "text": ".0002",
+      "x": 12.944191624464196,
+      "y": 0.4300454545455018,
+      "height": 0.046875000000003,
+      "rotation": 0.0,
+      "in_block": true,
+      "depth": 1,
+      "block_path": [
+        "B_COMP"
+      ]
+    },
+    {
+      "layout": "SHEET (B)",
+      "layer": "0",
+      "etype": "TEXT",
+      "text": "APOLLO, PA 15613",
+      "x": 14.270620463622167,
+      "y": 1.0235204545455394,
+      "height": 0.04500000000000288,
+      "rotation": 0.0,
+      "in_block": true,
+      "depth": 1,
+      "block_path": [
+        "B_COMP"
+      ]
+    },
+    {
+      "layout": "SHEET (B)",
+      "layer": "0",
+      "etype": "TEXT",
+      "text": "1295 ROUTE 380",
+      "x": 14.270620463622167,
+      "y": 1.0985204545455443,
+      "height": 0.04500000000000288,
+      "rotation": 0.0,
+      "in_block": true,
+      "depth": 1,
+      "block_path": [
+        "B_COMP"
+      ]
+    },
+    {
+      "layout": "SHEET (B)",
+      "layer": "0",
+      "etype": "TEXT",
+      "text": "COMPOSIDIE",
+      "x": 14.100530026557268,
+      "y": 1.2021842697748812,
+      "height": 0.1375000000000088,
+      "rotation": 0.0,
+      "in_block": true,
+      "depth": 1,
+      "block_path": [
+        "B_COMP"
+      ]
+    },
+    {
+      "layout": "SHEET (B)",
+      "layer": "0",
+      "etype": "TEXT",
+      "text": "CK'D.BY:",
+      "x": 13.314321955718105,
+      "y": 0.2670454545454716,
+      "height": 0.062500000000004,
+      "rotation": 0.0,
+      "in_block": true,
+      "depth": 1,
+      "block_path": [
+        "B_COMP"
+      ]
+    },
+    {
+      "layout": "SHEET (B)",
+      "layer": "0",
+      "etype": "TEXT",
+      "text": "DR BY:",
+      "x": 13.314321955718105,
+      "y": 0.3920454545454795,
+      "height": 0.062500000000004,
+      "rotation": 0.0,
+      "in_block": true,
+      "depth": 1,
+      "block_path": [
+        "B_COMP"
+      ]
+    },
+    {
+      "layout": "SHEET (B)",
+      "layer": "0",
+      "etype": "TEXT",
+      "text": "SCALE:",
+      "x": 15.44292865960837,
+      "y": 0.5170454545454874,
+      "height": 0.062500000000004,
+      "rotation": 0.0,
+      "in_block": true,
+      "depth": 1,
+      "block_path": [
+        "B_COMP"
+      ]
+    },
+    {
+      "layout": "SHEET (B)",
+      "layer": "0",
+      "etype": "TEXT",
+      "text": "INC",
+      "x": 15.541184595627193,
+      "y": 1.1938047671109238,
+      "height": 0.062500000000004,
+      "rotation": 0.0,
+      "in_block": true,
+      "depth": 1,
+      "block_path": [
+        "B_COMP"
+      ]
+    },
+    {
+      "layout": "SHEET (B)",
+      "layer": "0",
+      "etype": "TEXT",
+      "text": "2 PL TOL\u00b1",
+      "x": 12.519648448179666,
+      "y": 0.5837856120258268,
+      "height": 0.046875000000003,
+      "rotation": 0.0,
+      "in_block": true,
+      "depth": 1,
+      "block_path": [
+        "B_COMP"
+      ]
+    },
+    {
+      "layout": "SHEET (B)",
+      "layer": "0",
+      "etype": "TEXT",
+      "text": "5 PL TOL%%P",
+      "x": 12.519648448179666,
+      "y": 0.35504545454549696,
+      "height": 0.046875000000003,
+      "rotation": 0.0,
+      "in_block": true,
+      "depth": 1,
+      "block_path": [
+        "B_COMP"
+      ]
+    },
+    {
+      "layout": "SHEET (B)",
+      "layer": "0",
+      "etype": "TEXT",
+      "text": "6 PL TOL%%P",
+      "x": 12.519648448179666,
+      "y": 0.2800454545454927,
+      "height": 0.046875000000003,
+      "rotation": 0.0,
+      "in_block": true,
+      "depth": 1,
+      "block_path": [
+        "B_COMP"
+      ]
+    },
+    {
+      "layout": "SHEET (B)",
+      "layer": "0",
+      "etype": "TEXT",
+      "text": "4 PL TOL%%P",
+      "x": 12.519648448179666,
+      "y": 0.4300454545455018,
+      "height": 0.046875000000003,
+      "rotation": 0.0,
+      "in_block": true,
+      "depth": 1,
+      "block_path": [
+        "B_COMP"
+      ]
+    },
+    {
+      "layout": "SHEET (B)",
+      "layer": "0",
+      "etype": "TEXT",
+      "text": "UNLESS SPECIFIED:",
+      "x": 12.519648448179666,
+      "y": 0.6587856120258315,
+      "height": 0.046875000000003,
+      "rotation": 0.0,
+      "in_block": true,
+      "depth": 1,
+      "block_path": [
+        "B_COMP"
+      ]
+    },
+    {
+      "layout": "SHEET (B)",
+      "layer": "0",
+      "etype": "TEXT",
+      "text": "*FOR COMPOSIDIE USE ONLY*",
+      "x": 12.48445370700207,
+      "y": 0.7648233243340858,
+      "height": 0.043307086614176,
+      "rotation": 0.0,
+      "in_block": true,
+      "depth": 1,
+      "block_path": [
+        "B_COMP"
+      ]
+    },
+    {
+      "layout": "SHEET (B)",
+      "layer": "0",
+      "etype": "TEXT",
+      "text": "Nov 17, 2025 - 11:17am",
+      "x": 14.77477658770558,
+      "y": 0.15024750900408285,
+      "height": 0.05905511811024,
+      "rotation": 0.0,
+      "in_block": true,
+      "depth": 1,
+      "block_path": [
+        "B_BORDER"
+      ]
+    },
+    {
+      "layout": "SHEET (B)",
+      "layer": "0",
+      "etype": "TEXT",
+      "text": "C:/Users/John Wohlin/Downloads/composinonimizer/T1769-219.dwg",
+      "x": 10.538128194530387,
+      "y": 0.04132561203740239,
+      "height": 0.05905511811024,
+      "rotation": 0.0,
+      "in_block": true,
+      "depth": 1,
+      "block_path": [
+        "B_BORDER"
+      ]
+    },
+    {
+      "layout": "SHEET (B)",
+      "layer": "AM_BOR",
+      "etype": "TEXT",
+      "text": "!GENTITLE-LL",
+      "x": 0.0,
+      "y": 1.055118110236288e-15,
+      "height": 0.058948863636367387,
+      "rotation": 0.0,
+      "in_block": true,
+      "depth": 1,
+      "block_path": [
+        "B_BORDER"
+      ]
+    },
+    {
+      "layout": "SHEET (B)",
+      "layer": "AM_BOR",
+      "etype": "TEXT",
+      "text": "1",
+      "x": 0.6700079097441834,
+      "y": 0.12526633522728053,
+      "height": 0.058948863636367435,
+      "rotation": 0.0,
+      "in_block": true,
+      "depth": 1,
+      "block_path": [
+        "B_BORDER"
+      ]
+    },
+    {
+      "layout": "SHEET (B)",
+      "layer": "AM_BOR",
+      "etype": "TEXT",
+      "text": "J",
+      "x": 0.0981675038381949,
+      "y": 1.1568714488637102,
+      "height": 0.05894886363636751,
+      "rotation": 0.0,
+      "in_block": true,
+      "depth": 1,
+      "block_path": [
+        "B_BORDER"
+      ]
+    },
+    {
+      "layout": "SHEET (B)",
+      "layer": "AM_BOR",
+      "etype": "TEXT",
+      "text": "I",
+      "x": 0.0981675038381949,
+      "y": 2.100053267045589,
+      "height": 0.05894886363636751,
+      "rotation": 0.0,
+      "in_block": true,
+      "depth": 1,
+      "block_path": [
+        "B_BORDER"
+      ]
+    },
+    {
+      "layout": "SHEET (B)",
+      "layer": "AM_BOR",
+      "etype": "TEXT",
+      "text": "H",
+      "x": 0.0981675038381949,
+      "y": 3.043235085227468,
+      "height": 0.058948863636367234,
+      "rotation": 0.0,
+      "in_block": true,
+      "depth": 1,
+      "block_path": [
+        "B_BORDER"
+      ]
+    },
+    {
+      "layout": "SHEET (B)",
+      "layer": "AM_BOR",
+      "etype": "TEXT",
+      "text": "G",
+      "x": 0.0981675038381949,
+      "y": 3.9864169034093457,
+      "height": 0.05894886363636668,
+      "rotation": 0.0,
+      "in_block": true,
+      "depth": 1,
+      "block_path": [
+        "B_BORDER"
+      ]
+    },
+    {
+      "layout": "SHEET (B)",
+      "layer": "AM_BOR",
+      "etype": "TEXT",
+      "text": "2",
+      "x": 1.633107540743742,
+      "y": 0.12526633522728053,
+      "height": 0.058948863636367435,
+      "rotation": 0.0,
+      "in_block": true,
+      "depth": 1,
+      "block_path": [
+        "B_BORDER"
+      ]
+    },
+    {
+      "layout": "SHEET (B)",
+      "layer": "AM_BOR",
+      "etype": "TEXT",
+      "text": "3",
+      "x": 2.5962071717433015,
+      "y": 0.12526633522728053,
+      "height": 0.058948863636367435,
+      "rotation": 0.0,
+      "in_block": true,
+      "depth": 1,
+      "block_path": [
+        "B_BORDER"
+      ]
+    },
+    {
+      "layout": "SHEET (B)",
+      "layer": "AM_BOR",
+      "etype": "TEXT",
+      "text": "4",
+      "x": 3.559306802742861,
+      "y": 0.12526633522728053,
+      "height": 0.058948863636367435,
+      "rotation": 0.0,
+      "in_block": true,
+      "depth": 1,
+      "block_path": [
+        "B_BORDER"
+      ]
+    },
+    {
+      "layout": "SHEET (B)",
+      "layer": "AM_BOR",
+      "etype": "TEXT",
+      "text": "5",
+      "x": 4.522406433742419,
+      "y": 0.12526633522728053,
+      "height": 0.058948863636367435,
+      "rotation": 0.0,
+      "in_block": true,
+      "depth": 1,
+      "block_path": [
+        "B_BORDER"
+      ]
+    },
+    {
+      "layout": "SHEET (B)",
+      "layer": "AM_BOR",
+      "etype": "TEXT",
+      "text": "6",
+      "x": 5.485506064741981,
+      "y": 0.12526633522728053,
+      "height": 0.058948863636367435,
+      "rotation": 0.0,
+      "in_block": true,
+      "depth": 1,
+      "block_path": [
+        "B_BORDER"
+      ]
+    },
+    {
+      "layout": "SHEET (B)",
+      "layer": "AM_BOR",
+      "etype": "TEXT",
+      "text": "7",
+      "x": 6.448605695741538,
+      "y": 0.12526633522728053,
+      "height": 0.058948863636367435,
+      "rotation": 0.0,
+      "in_block": true,
+      "depth": 1,
+      "block_path": [
+        "B_BORDER"
+      ]
+    },
+    {
+      "layout": "SHEET (B)",
+      "layer": "AM_BOR",
+      "etype": "TEXT",
+      "text": "F",
+      "x": 0.0981675038381949,
+      "y": 4.9295987215912245,
+      "height": 0.05894886363636778,
+      "rotation": 0.0,
+      "in_block": true,
+      "depth": 1,
+      "block_path": [
+        "B_BORDER"
+      ]
+    },
+    {
+      "layout": "SHEET (B)",
+      "layer": "AM_BOR",
+      "etype": "TEXT",
+      "text": "E",
+      "x": 0.0981675038381949,
+      "y": 5.872780539773104,
+      "height": 0.05894886363636834,
+      "rotation": 0.0,
+      "in_block": true,
+      "depth": 1,
+      "block_path": [
+        "B_BORDER"
+      ]
+    },
+    {
+      "layout": "SHEET (B)",
+      "layer": "AM_BOR",
+      "etype": "TEXT",
+      "text": "D",
+      "x": 0.0981675038381949,
+      "y": 6.815962357954983,
+      "height": 0.058948863636367234,
+      "rotation": 0.0,
+      "in_block": true,
+      "depth": 1,
+      "block_path": [
+        "B_BORDER"
+      ]
+    },
+    {
+      "layout": "SHEET (B)",
+      "layer": "AM_BOR",
+      "etype": "TEXT",
+      "text": "C",
+      "x": 0.0981675038381949,
+      "y": 7.759144176136862,
+      "height": 0.058948863636367234,
+      "rotation": 0.0,
+      "in_block": true,
+      "depth": 1,
+      "block_path": [
+        "B_BORDER"
+      ]
+    },
+    {
+      "layout": "SHEET (B)",
+      "layer": "AM_BOR",
+      "etype": "TEXT",
+      "text": "B",
+      "x": 0.0981675038381949,
+      "y": 8.702325994318738,
+      "height": 0.05894886363636834,
+      "rotation": 0.0,
+      "in_block": true,
+      "depth": 1,
+      "block_path": [
+        "B_BORDER"
+      ]
+    },
+    {
+      "layout": "SHEET (B)",
+      "layer": "AM_BOR",
+      "etype": "TEXT",
+      "text": "A",
+      "x": 0.0981675038381949,
+      "y": 9.645507812500616,
+      "height": 0.05894886363636834,
+      "rotation": 0.0,
+      "in_block": true,
+      "depth": 1,
+      "block_path": [
+        "B_BORDER"
+      ]
+    },
+    {
+      "layout": "SHEET (B)",
+      "layer": "AM_BOR",
+      "etype": "TEXT",
+      "text": "1",
+      "x": 0.6700079097441834,
+      "y": 10.20552201704611,
+      "height": 0.058948863636366096,
+      "rotation": 0.0,
+      "in_block": true,
+      "depth": 1,
+      "block_path": [
+        "B_BORDER"
+      ]
+    },
+    {
+      "layout": "SHEET (B)",
+      "layer": "AM_BOR",
+      "etype": "TEXT",
+      "text": "2",
+      "x": 1.633107540743742,
+      "y": 10.20552201704611,
+      "height": 0.058948863636366096,
+      "rotation": 0.0,
+      "in_block": true,
+      "depth": 1,
+      "block_path": [
+        "B_BORDER"
+      ]
+    },
+    {
+      "layout": "SHEET (B)",
+      "layer": "AM_BOR",
+      "etype": "TEXT",
+      "text": "3",
+      "x": 2.5962071717433015,
+      "y": 10.20552201704611,
+      "height": 0.058948863636366096,
+      "rotation": 0.0,
+      "in_block": true,
+      "depth": 1,
+      "block_path": [
+        "B_BORDER"
+      ]
+    },
+    {
+      "layout": "SHEET (B)",
+      "layer": "AM_BOR",
+      "etype": "TEXT",
+      "text": "4",
+      "x": 3.559306802742861,
+      "y": 10.20552201704611,
+      "height": 0.058948863636366096,
+      "rotation": 0.0,
+      "in_block": true,
+      "depth": 1,
+      "block_path": [
+        "B_BORDER"
+      ]
+    },
+    {
+      "layout": "SHEET (B)",
+      "layer": "AM_BOR",
+      "etype": "TEXT",
+      "text": "5",
+      "x": 4.522406433742419,
+      "y": 10.20552201704611,
+      "height": 0.058948863636366096,
+      "rotation": 0.0,
+      "in_block": true,
+      "depth": 1,
+      "block_path": [
+        "B_BORDER"
+      ]
+    },
+    {
+      "layout": "SHEET (B)",
+      "layer": "AM_BOR",
+      "etype": "TEXT",
+      "text": "6",
+      "x": 5.485506064741981,
+      "y": 10.20552201704611,
+      "height": 0.058948863636366096,
+      "rotation": 0.0,
+      "in_block": true,
+      "depth": 1,
+      "block_path": [
+        "B_BORDER"
+      ]
+    },
+    {
+      "layout": "SHEET (B)",
+      "layer": "AM_BOR",
+      "etype": "TEXT",
+      "text": "7",
+      "x": 6.448605695741538,
+      "y": 10.20552201704611,
+      "height": 0.058948863636366096,
+      "rotation": 0.0,
+      "in_block": true,
+      "depth": 1,
+      "block_path": [
+        "B_BORDER"
+      ]
+    },
+    {
+      "layout": "SHEET (B)",
+      "layer": "AM_BOR",
+      "etype": "TEXT",
+      "text": "10",
+      "x": 9.315684638757437,
+      "y": 0.12526633522728053,
+      "height": 0.058948863636367435,
+      "rotation": 0.0,
+      "in_block": true,
+      "depth": 1,
+      "block_path": [
+        "B_BORDER"
+      ]
+    },
+    {
+      "layout": "SHEET (B)",
+      "layer": "AM_BOR",
+      "etype": "TEXT",
+      "text": "8",
+      "x": 7.411705326741096,
+      "y": 0.12526633522728053,
+      "height": 0.058948863636367435,
+      "rotation": 0.0,
+      "in_block": true,
+      "depth": 1,
+      "block_path": [
+        "B_BORDER"
+      ]
+    },
+    {
+      "layout": "SHEET (B)",
+      "layer": "AM_BOR",
+      "etype": "TEXT",
+      "text": "9",
+      "x": 8.374804957740658,
+      "y": 0.12526633522728053,
+      "height": 0.058948863636367435,
+      "rotation": 0.0,
+      "in_block": true,
+      "depth": 1,
+      "block_path": [
+        "B_BORDER"
+      ]
+    },
+    {
+      "layout": "SHEET (B)",
+      "layer": "AM_BOR",
+      "etype": "TEXT",
+      "text": "11",
+      "x": 10.278784269756995,
+      "y": 0.12526633522728053,
+      "height": 0.058948863636367435,
+      "rotation": 0.0,
+      "in_block": true,
+      "depth": 1,
+      "block_path": [
+        "B_BORDER"
+      ]
+    },
+    {
+      "layout": "SHEET (B)",
+      "layer": "AM_BOR",
+      "etype": "TEXT",
+      "text": "12",
+      "x": 11.239062319806362,
+      "y": 0.12526633522728053,
+      "height": 0.058948863636367435,
+      "rotation": 0.0,
+      "in_block": true,
+      "depth": 1,
+      "block_path": [
+        "B_BORDER"
+      ]
+    },
+    {
+      "layout": "SHEET (B)",
+      "layer": "AM_BOR",
+      "etype": "TEXT",
+      "text": "13",
+      "x": 12.202161950805921,
+      "y": 0.12526633522728053,
+      "height": 0.058948863636367435,
+      "rotation": 0.0,
+      "in_block": true,
+      "depth": 1,
+      "block_path": [
+        "B_BORDER"
+      ]
+    },
+    {
+      "layout": "SHEET (B)",
+      "layer": "AM_BOR",
+      "etype": "TEXT",
+      "text": "14",
+      "x": 13.16526158180548,
+      "y": 0.12526633522728053,
+      "height": 0.058948863636367435,
+      "rotation": 0.0,
+      "in_block": true,
+      "depth": 1,
+      "block_path": [
+        "B_BORDER"
+      ]
+    },
+    {
+      "layout": "SHEET (B)",
+      "layer": "AM_BOR",
+      "etype": "TEXT",
+      "text": "15",
+      "x": 14.128361212805041,
+      "y": 0.13388371618637887,
+      "height": 0.058948863636367435,
+      "rotation": 0.0,
+      "in_block": true,
+      "depth": 1,
+      "block_path": [
+        "B_BORDER"
+      ]
+    },
+    {
+      "layout": "SHEET (B)",
+      "layer": "AM_BOR",
+      "etype": "TEXT",
+      "text": "!GENTITLE-INSERT",
+      "x": 16.101821955719906,
+      "y": 0.2357954545454694,
+      "height": 0.058948863636367435,
+      "rotation": 0.0,
+      "in_block": true,
+      "depth": 1,
+      "block_path": [
+        "B_BORDER"
+      ]
+    },
+    {
+      "layout": "SHEET (B)",
+      "layer": "AM_BOR",
+      "etype": "TEXT",
+      "text": "I",
+      "x": 16.16989259614334,
+      "y": 2.100053267045589,
+      "height": 0.05894886363636751,
+      "rotation": 0.0,
+      "in_block": true,
+      "depth": 1,
+      "block_path": [
+        "B_BORDER"
+      ]
+    },
+    {
+      "layout": "SHEET (B)",
+      "layer": "AM_BOR",
+      "etype": "TEXT",
+      "text": "H",
+      "x": 16.16989259614334,
+      "y": 3.043235085227468,
+      "height": 0.058948863636367234,
+      "rotation": 0.0,
+      "in_block": true,
+      "depth": 1,
+      "block_path": [
+        "B_BORDER"
+      ]
+    },
+    {
+      "layout": "SHEET (B)",
+      "layer": "AM_BOR",
+      "etype": "TEXT",
+      "text": "G",
+      "x": 16.16989259614334,
+      "y": 3.9864169034093457,
+      "height": 0.05894886363636668,
+      "rotation": 0.0,
+      "in_block": true,
+      "depth": 1,
+      "block_path": [
+        "B_BORDER"
+      ]
+    },
+    {
+      "layout": "SHEET (B)",
+      "layer": "AM_BOR",
+      "etype": "TEXT",
+      "text": "10",
+      "x": 9.315684638757437,
+      "y": 10.20552201704611,
+      "height": 0.058948863636366096,
+      "rotation": 0.0,
+      "in_block": true,
+      "depth": 1,
+      "block_path": [
+        "B_BORDER"
+      ]
+    },
+    {
+      "layout": "SHEET (B)",
+      "layer": "AM_BOR",
+      "etype": "TEXT",
+      "text": "8",
+      "x": 7.411705326741096,
+      "y": 10.20552201704611,
+      "height": 0.058948863636366096,
+      "rotation": 0.0,
+      "in_block": true,
+      "depth": 1,
+      "block_path": [
+        "B_BORDER"
+      ]
+    },
+    {
+      "layout": "SHEET (B)",
+      "layer": "AM_BOR",
+      "etype": "TEXT",
+      "text": "9",
+      "x": 8.374804957740658,
+      "y": 10.20552201704611,
+      "height": 0.058948863636366096,
+      "rotation": 0.0,
+      "in_block": true,
+      "depth": 1,
+      "block_path": [
+        "B_BORDER"
+      ]
+    },
+    {
+      "layout": "SHEET (B)",
+      "layer": "AM_BOR",
+      "etype": "TEXT",
+      "text": "11",
+      "x": 10.278784269756995,
+      "y": 10.20552201704611,
+      "height": 0.058948863636366096,
+      "rotation": 0.0,
+      "in_block": true,
+      "depth": 1,
+      "block_path": [
+        "B_BORDER"
+      ]
+    },
+    {
+      "layout": "SHEET (B)",
+      "layer": "AM_BOR",
+      "etype": "TEXT",
+      "text": "12",
+      "x": 11.239062319806362,
+      "y": 10.20552201704611,
+      "height": 0.058948863636366096,
+      "rotation": 0.0,
+      "in_block": true,
+      "depth": 1,
+      "block_path": [
+        "B_BORDER"
+      ]
+    },
+    {
+      "layout": "SHEET (B)",
+      "layer": "AM_BOR",
+      "etype": "TEXT",
+      "text": "F",
+      "x": 16.16989259614334,
+      "y": 4.9295987215912245,
+      "height": 0.05894886363636778,
+      "rotation": 0.0,
+      "in_block": true,
+      "depth": 1,
+      "block_path": [
+        "B_BORDER"
+      ]
+    },
+    {
+      "layout": "SHEET (B)",
+      "layer": "AM_BOR",
+      "etype": "TEXT",
+      "text": "E",
+      "x": 16.16989259614334,
+      "y": 5.872780539773104,
+      "height": 0.05894886363636834,
+      "rotation": 0.0,
+      "in_block": true,
+      "depth": 1,
+      "block_path": [
+        "B_BORDER"
+      ]
+    },
+    {
+      "layout": "SHEET (B)",
+      "layer": "AM_BOR",
+      "etype": "TEXT",
+      "text": "D",
+      "x": 16.16989259614334,
+      "y": 6.815962357954983,
+      "height": 0.058948863636367234,
+      "rotation": 0.0,
+      "in_block": true,
+      "depth": 1,
+      "block_path": [
+        "B_BORDER"
+      ]
+    },
+    {
+      "layout": "SHEET (B)",
+      "layer": "AM_BOR",
+      "etype": "TEXT",
+      "text": "13",
+      "x": 12.202161950805921,
+      "y": 10.20552201704611,
+      "height": 0.058948863636366096,
+      "rotation": 0.0,
+      "in_block": true,
+      "depth": 1,
+      "block_path": [
+        "B_BORDER"
+      ]
+    },
+    {
+      "layout": "SHEET (B)",
+      "layer": "AM_BOR",
+      "etype": "TEXT",
+      "text": "14",
+      "x": 13.16526158180548,
+      "y": 10.20552201704611,
+      "height": 0.058948863636366096,
+      "rotation": 0.0,
+      "in_block": true,
+      "depth": 1,
+      "block_path": [
+        "B_BORDER"
+      ]
+    },
+    {
+      "layout": "SHEET (B)",
+      "layer": "AM_BOR",
+      "etype": "TEXT",
+      "text": "15",
+      "x": 14.128361212805041,
+      "y": 10.20552201704611,
+      "height": 0.058948863636366096,
+      "rotation": 0.0,
+      "in_block": true,
+      "depth": 1,
+      "block_path": [
+        "B_BORDER"
+      ]
+    },
+    {
+      "layout": "SHEET (B)",
+      "layer": "AM_BOR",
+      "etype": "TEXT",
+      "text": "C",
+      "x": 16.16989259614334,
+      "y": 7.759144176136862,
+      "height": 0.058948863636367234,
+      "rotation": 0.0,
+      "in_block": true,
+      "depth": 1,
+      "block_path": [
+        "B_BORDER"
+      ]
+    },
+    {
+      "layout": "SHEET (B)",
+      "layer": "AM_BOR",
+      "etype": "TEXT",
+      "text": "B",
+      "x": 16.16989259614334,
+      "y": 8.702325994318738,
+      "height": 0.05894886363636834,
+      "rotation": 0.0,
+      "in_block": true,
+      "depth": 1,
+      "block_path": [
+        "B_BORDER"
+      ]
+    },
+    {
+      "layout": "SHEET (B)",
+      "layer": "AM_BOR",
+      "etype": "TEXT",
+      "text": "!GENTITLE-RU",
+      "x": 16.101821955719906,
+      "y": 10.139204545455192,
+      "height": 0.058948863636366096,
+      "rotation": 0.0,
+      "in_block": true,
+      "depth": 1,
+      "block_path": [
+        "B_BORDER"
+      ]
+    },
+    {
+      "layout": "SHEET (B)",
+      "layer": "AM_BOR",
+      "etype": "TEXT",
+      "text": "A",
+      "x": 16.16989259614334,
+      "y": 9.645507812500616,
+      "height": 0.05894886363636834,
+      "rotation": 0.0,
+      "in_block": true,
+      "depth": 1,
+      "block_path": [
+        "B_BORDER"
+      ]
+    },
+    {
+      "layout": "SHEET (B)",
+      "layer": "AM_BOR",
+      "etype": "TEXT",
+      "text": "16",
+      "x": 15.091460843804603,
+      "y": 10.20552201704611,
+      "height": 0.058948863636366096,
+      "rotation": 0.0,
+      "in_block": true,
+      "depth": 1,
+      "block_path": [
+        "B_BORDER"
+      ]
+    },
+    {
+      "layout": "SHEET (B)",
+      "layer": "AM_BOR",
+      "etype": "TEXT",
+      "text": "!GENTITLE-MAX",
+      "x": 16.31250000000104,
+      "y": 10.375000000000663,
+      "height": 0.058948863636366096,
+      "rotation": 0.0,
+      "in_block": true,
+      "depth": 1,
+      "block_path": [
+        "B_BORDER"
+      ]
+    }
+  ],
+  "structured_holes": [
+    {
+      "ref": "A",
+      "diam": null,
+      "tap_thread": null,
+      "op": null,
+      "ops": [],
+      "depth": null,
+      "side": null,
+      "raw": "A 219 4 52100 GUIDE POST 59-61 ROCK \"C\" REV DETAIL QTY MATERIAL NAME MAT-CODE MATERIAL HARDNESS STANDARD # COMMENTS",
+      "qty": null,
+      "raw_fragments": [
+        "A 219 4 52100 GUIDE POST 59-61 ROCK \"C\" REV DETAIL QTY MATERIAL NAME MAT-CODE MATERIAL HARDNESS STANDARD # COMMENTS",
+        "A",
+        "A"
+      ]
+    },
+    {
+      "ref": "C",
+      "diam": null,
+      "tap_thread": null,
+      "op": null,
+      "ops": [],
+      "depth": null,
+      "side": null,
+      "raw": "C:/Users/John Wohlin/Downloads/composinonimizer/T1769-219.dwg",
+      "qty": null,
+      "raw_fragments": [
+        "C:/Users/John Wohlin/Downloads/composinonimizer/T1769-219.dwg",
+        "C",
+        "C"
+      ]
+    },
+    {
+      "ref": "J",
+      "diam": null,
+      "tap_thread": null,
+      "op": null,
+      "ops": [],
+      "depth": null,
+      "side": null,
+      "raw": "J",
+      "qty": null,
+      "raw_fragments": [
+        "J"
+      ]
+    },
+    {
+      "ref": "I",
+      "diam": null,
+      "tap_thread": null,
+      "op": null,
+      "ops": [],
+      "depth": null,
+      "side": null,
+      "raw": "I",
+      "qty": null,
+      "raw_fragments": [
+        "I",
+        "I"
+      ]
+    },
+    {
+      "ref": "H",
+      "diam": null,
+      "tap_thread": null,
+      "op": null,
+      "ops": [],
+      "depth": null,
+      "side": null,
+      "raw": "H",
+      "qty": null,
+      "raw_fragments": [
+        "H",
+        "H"
+      ]
+    },
+    {
+      "ref": "G",
+      "diam": null,
+      "tap_thread": null,
+      "op": null,
+      "ops": [],
+      "depth": null,
+      "side": null,
+      "raw": "G",
+      "qty": null,
+      "raw_fragments": [
+        "G",
+        "G"
+      ]
+    },
+    {
+      "ref": "F",
+      "diam": null,
+      "tap_thread": null,
+      "op": null,
+      "ops": [],
+      "depth": null,
+      "side": null,
+      "raw": "F",
+      "qty": null,
+      "raw_fragments": [
+        "F",
+        "F"
+      ]
+    },
+    {
+      "ref": "E",
+      "diam": null,
+      "tap_thread": null,
+      "op": null,
+      "ops": [],
+      "depth": null,
+      "side": null,
+      "raw": "E",
+      "qty": null,
+      "raw_fragments": [
+        "E",
+        "E"
+      ]
+    },
+    {
+      "ref": "D",
+      "diam": null,
+      "tap_thread": null,
+      "op": null,
+      "ops": [],
+      "depth": null,
+      "side": null,
+      "raw": "D",
+      "qty": null,
+      "raw_fragments": [
+        "D",
+        "D"
+      ]
+    },
+    {
+      "ref": "B",
+      "diam": null,
+      "tap_thread": null,
+      "op": null,
+      "ops": [],
+      "depth": null,
+      "side": null,
+      "raw": "B",
+      "qty": null,
+      "raw_fragments": [
+        "B",
+        "B"
+      ]
+    }
+  ]
+}
