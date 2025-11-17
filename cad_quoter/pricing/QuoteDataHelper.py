@@ -13,6 +13,18 @@ from typing import Optional, Dict, Any, List
 import json
 from datetime import datetime
 
+# Punch extraction imports
+try:
+    from cad_quoter.geometry.dwg_punch_extractor import (
+        extract_punch_features_from_dxf,
+        PunchFeatureSummary,
+    )
+    from cad_quoter.planning.punch_planner import create_punch_plan
+    from cad_quoter.pricing.punch_time_estimator import estimate_punch_times
+    PUNCH_EXTRACTION_AVAILABLE = True
+except ImportError:
+    PUNCH_EXTRACTION_AVAILABLE = False
+
 
 @dataclass
 class PartDimensions:
@@ -390,6 +402,122 @@ class QuoteData:
 # EXTRACTION FUNCTIONS
 # ============================================================================
 
+
+def detect_punch_drawing(cad_file_path: Path, text_dump: str = None) -> bool:
+    """
+    Detect if a CAD file is a punch drawing.
+
+    Detection is based on:
+    1. Filename containing 'punch', 'pilot', 'pin', etc.
+    2. Text content containing PUNCH, PILOT PIN, etc.
+
+    Args:
+        cad_file_path: Path to CAD file
+        text_dump: Optional text dump from drawing (if already extracted)
+
+    Returns:
+        True if file appears to be a punch drawing
+    """
+    # Check filename
+    filename = cad_file_path.stem.upper()
+    filename_indicators = ["PUNCH", "PILOT", "PIN", "FORM"]
+    if any(ind in filename for ind in filename_indicators):
+        return True
+
+    # Check text content if provided
+    if text_dump:
+        text_upper = text_dump.upper()
+        text_indicators = [
+            "PUNCH",
+            "PILOT PIN",
+            "FORM PUNCH",
+            "DIE PUNCH",
+            "PIERCING PUNCH",
+        ]
+        if any(ind in text_upper for ind in text_indicators):
+            return True
+
+    return False
+
+
+def extract_punch_quote_data(
+    cad_file_path: Path,
+    quote_data: 'QuoteData',
+    verbose: bool = False
+) -> Dict[str, Any]:
+    """
+    Extract punch-specific data and estimate times.
+
+    Args:
+        cad_file_path: Path to DXF/DWG file
+        quote_data: QuoteData object to populate
+        verbose: Print progress messages
+
+    Returns:
+        Dict with punch features, plan, and time estimates
+    """
+    if not PUNCH_EXTRACTION_AVAILABLE:
+        return {"error": "Punch extraction modules not available"}
+
+    try:
+        # Extract text from DXF
+        from cad_quoter.geo_extractor import open_doc, collect_all_text
+
+        doc = open_doc(cad_file_path)
+        text_records = list(collect_all_text(doc))
+        text_lines = [rec["text"] for rec in text_records if rec.get("text")]
+        text_dump = "\n".join(text_lines)
+
+        if verbose:
+            print(f"  Extracted {len(text_lines)} text lines from drawing")
+
+        # Extract punch features
+        punch_features = extract_punch_features_from_dxf(cad_file_path, text_dump)
+
+        if verbose:
+            print(f"  Punch features extracted:")
+            print(f"    - Family: {punch_features.family}")
+            print(f"    - Shape: {punch_features.shape_type}")
+            print(f"    - Length: {punch_features.overall_length_in:.3f}\"")
+            print(f"    - Max OD: {punch_features.max_od_or_width_in:.3f}\"")
+            print(f"    - Ground diameters: {punch_features.num_ground_diams}")
+            print(f"    - Confidence: {punch_features.confidence_score:.2f}")
+
+        # Convert PunchFeatureSummary to dict
+        from dataclasses import asdict
+        features_dict = asdict(punch_features)
+
+        # Create punch manufacturing plan
+        punch_plan = create_punch_plan(features_dict)
+
+        if verbose:
+            print(f"  Punch plan created with {len(punch_plan.get('ops', []))} operations")
+
+        # Estimate times
+        time_estimates = estimate_punch_times(punch_plan, features_dict)
+
+        if verbose:
+            mh = time_estimates.get("machine_hours", {})
+            lh = time_estimates.get("labor_hours", {})
+            print(f"  Time estimates:")
+            print(f"    - Machine hours: {mh.get('total_hours', 0):.2f}")
+            print(f"    - Labor hours: {lh.get('total_hours', 0):.2f}")
+
+        return {
+            "is_punch": True,
+            "punch_features": features_dict,
+            "punch_plan": punch_plan,
+            "time_estimates": time_estimates,
+            "text_dump": text_dump,
+        }
+
+    except Exception as e:
+        return {
+            "is_punch": True,
+            "error": str(e),
+        }
+
+
 def extract_quote_data_from_cad(
     cad_file_path: str | Path,
     machine_rate: float = 45.0,
@@ -493,13 +621,104 @@ def extract_quote_data_from_cad(
     quote_data.raw_plan = plan if verbose else None  # Only store if verbose
 
     # ========================================================================
+    # CHECK: Is this a punch drawing?
+    # ========================================================================
+    is_punch = False
+    punch_data = None
+
+    if PUNCH_EXTRACTION_AVAILABLE:
+        # First check by filename
+        is_punch = detect_punch_drawing(cad_file_path)
+
+        # If not detected by filename, check text content
+        if not is_punch and plan.get('text_dump'):
+            is_punch = detect_punch_drawing(cad_file_path, plan.get('text_dump'))
+
+        if is_punch:
+            if verbose:
+                print("[PUNCH] Detected punch drawing - using punch extraction pipeline")
+
+            # Extract punch-specific data
+            punch_data = extract_punch_quote_data(cad_file_path, quote_data, verbose)
+
+            if "error" not in punch_data:
+                # Use punch features for part dimensions
+                features = punch_data.get("punch_features", {})
+
+                # Set part dimensions from punch features
+                quote_data.part_dimensions = PartDimensions(
+                    length=features.get("overall_length_in", 0.0),
+                    width=features.get("max_od_or_width_in", 0.0),
+                    thickness=features.get("max_od_or_width_in", 0.0),  # OD for round
+                )
+
+                # Set material from punch features
+                punch_material = features.get("material_callout") or DEFAULT_MATERIAL
+                density = get_material_density(punch_material)
+                quote_data.material_info = MaterialInfo(
+                    material_name=punch_material,
+                    material_family="tool_steel",
+                    density=density,
+                    detected_from_cad=features.get("material_callout") is not None,
+                    is_default=features.get("material_callout") is None,
+                )
+
+                # Set machine hours from punch estimates
+                time_estimates = punch_data.get("time_estimates", {})
+                mh = time_estimates.get("machine_hours", {})
+                quote_data.machine_hours = MachineHoursBreakdown(
+                    total_milling_minutes=mh.get("total_milling_minutes", 0.0),
+                    total_grinding_minutes=mh.get("total_grinding_minutes", 0.0),
+                    total_tap_minutes=mh.get("total_tap_minutes", 0.0),
+                    total_drill_minutes=mh.get("total_drill_minutes", 0.0),
+                    total_edm_minutes=mh.get("total_edm_minutes", 0.0),
+                    total_other_minutes=mh.get("total_other_minutes", 0.0),
+                    total_cmm_minutes=mh.get("total_cmm_minutes", 0.0),
+                    total_minutes=mh.get("total_minutes", 0.0),
+                    total_hours=mh.get("total_hours", 0.0),
+                )
+
+                # Set labor hours from punch estimates
+                lh = time_estimates.get("labor_hours", {})
+                quote_data.labor_hours = LaborHoursBreakdown(
+                    total_setup_minutes=lh.get("total_setup_minutes", 0.0),
+                    programming_minutes=lh.get("cam_programming_minutes", 0.0),
+                    inspection_minutes=lh.get("inspection_minutes", 0.0),
+                    total_minutes=lh.get("total_minutes", 0.0),
+                    total_hours=lh.get("total_hours", 0.0),
+                )
+
+                # Store punch-specific data in quote_data
+                quote_data.raw_plan = {
+                    "is_punch": True,
+                    "punch_features": features,
+                    "punch_plan": punch_data.get("punch_plan", {}),
+                    "planner": "punch_planner",
+                }
+
+                if verbose:
+                    print(f"[PUNCH] Extraction complete")
+                    print(f"  Machine hours: {quote_data.machine_hours.total_hours:.2f}")
+                    print(f"  Labor hours: {quote_data.labor_hours.total_hours:.2f}")
+
+    # ========================================================================
     # STEP 2: Extract part dimensions and material
     # ========================================================================
     if verbose:
         print("[2/5] Extracting dimensions and material...")
 
+    # Skip standard extraction if punch data was successfully extracted
+    if is_punch and punch_data and "error" not in punch_data:
+        if verbose:
+            print("  [PUNCH] Using punch-extracted dimensions and material")
+        # Jump to cost calculation section
+        pass  # Continue with rest of function using punch data
+    else:
+        # Standard plate/die extraction path
+        pass
+
     # Apply dimension override if provided (useful when OCR fails)
-    if dimension_override:
+    if dimension_override and not (is_punch and punch_data and "error" not in punch_data):
         from cad_quoter.planning.process_planner import plan_job
 
         length, width, thickness = dimension_override
@@ -542,52 +761,63 @@ def extract_quote_data_from_cad(
         if verbose:
             print(f"  Plan regenerated with dimension overrides")
 
-    # Material detection
-    if material_override:
-        material = material_override
-        detected_from_cad = False
-    else:
-        material = detect_material_in_cad(cad_file_path)
-        detected_from_cad = True
-        if material == "GENERIC":
-            material = DEFAULT_MATERIAL
+    # Material detection and dimension extraction (skip for punch parts)
+    if not (is_punch and punch_data and "error" not in punch_data):
+        if material_override:
+            material = material_override
             detected_from_cad = False
+        else:
+            material = detect_material_in_cad(cad_file_path)
+            detected_from_cad = True
+            if material == "GENERIC":
+                material = DEFAULT_MATERIAL
+                detected_from_cad = False
 
-    # Get part info from plan
-    part_info = extract_part_info_from_plan(plan, material)
+        # Get part info from plan
+        part_info = extract_part_info_from_plan(plan, material)
 
-    # Populate part dimensions
-    quote_data.part_dimensions = PartDimensions(
-        length=part_info.length,
-        width=part_info.width,
-        thickness=part_info.thickness,
-        volume=part_info.volume,
-        area=part_info.area
-    )
+        # Populate part dimensions
+        quote_data.part_dimensions = PartDimensions(
+            length=part_info.length,
+            width=part_info.width,
+            thickness=part_info.thickness,
+            volume=part_info.volume,
+            area=part_info.area
+        )
 
-    # Populate material info
-    density = get_material_density(material)
-    material_lower = material.lower()
-    if any(kw in material_lower for kw in ["aluminum", "aluminium", "6061", "mic6"]):
-        material_family = "aluminum"
-    elif any(kw in material_lower for kw in ["stainless", "304", "316", "17-4"]):
-        material_family = "stainless"
-    elif any(kw in material_lower for kw in ["steel", "p20", "a36", "1018"]):
-        material_family = "steel"
+        # Populate material info
+        density = get_material_density(material)
+        material_lower = material.lower()
+        if any(kw in material_lower for kw in ["aluminum", "aluminium", "6061", "mic6"]):
+            material_family = "aluminum"
+        elif any(kw in material_lower for kw in ["stainless", "304", "316", "17-4"]):
+            material_family = "stainless"
+        elif any(kw in material_lower for kw in ["steel", "p20", "a36", "1018"]):
+            material_family = "steel"
+        else:
+            material_family = "aluminum"  # Default
+
+        quote_data.material_info = MaterialInfo(
+            material_name=material,
+            material_family=material_family,
+            density=density,
+            detected_from_cad=detected_from_cad,
+            is_default=(material == DEFAULT_MATERIAL and not material_override)
+        )
+
+        if verbose:
+            print(f"  Dimensions: {part_info.length:.2f} x {part_info.width:.2f} x {part_info.thickness:.2f} in")
+            print(f"  Material: {material} ({'detected' if detected_from_cad else 'default'})")
     else:
-        material_family = "aluminum"  # Default
-
-    quote_data.material_info = MaterialInfo(
-        material_name=material,
-        material_family=material_family,
-        density=density,
-        detected_from_cad=detected_from_cad,
-        is_default=(material == DEFAULT_MATERIAL and not material_override)
-    )
-
-    if verbose:
-        print(f"  Dimensions: {part_info.length:.2f} x {part_info.width:.2f} x {part_info.thickness:.2f} in")
-        print(f"  Material: {material} ({'detected' if detected_from_cad else 'default'})")
+        # For punch parts, use the already-set dimensions and material
+        material = quote_data.material_info.material_name
+        part_info = type('PartInfo', (), {
+            'length': quote_data.part_dimensions.length,
+            'width': quote_data.part_dimensions.width,
+            'thickness': quote_data.part_dimensions.thickness,
+            'volume': quote_data.part_dimensions.volume,
+            'area': quote_data.part_dimensions.area,
+        })()
 
     # ========================================================================
     # STEP 3: Calculate direct costs (McMaster stock, scrap, pricing)
