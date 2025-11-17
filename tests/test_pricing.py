@@ -19,7 +19,7 @@ from cad_quoter import rates  # noqa: E402  # pylint: disable=wrong-import-posit
 from cad_quoter.costing_glue import op_cost  # noqa: E402  # pylint: disable=wrong-import-position
 import cad_quoter.pricing.materials as materials  # noqa: E402  # pylint: disable=wrong-import-position
 from cad_quoter.pricing.materials import pick_stock_from_mcmaster  # noqa: E402  # pylint: disable=wrong-import-position
-from planner_pricing import price_with_planner  # noqa: E402  # pylint: disable=wrong-import-position
+from cad_quoter.pricing.planner import price_with_planner  # noqa: E402  # pylint: disable=wrong-import-position
 
 
 @pytest.mark.parametrize(
