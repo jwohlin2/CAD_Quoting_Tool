@@ -512,6 +512,10 @@ def extract_punch_quote_data(
         }
 
     except Exception as e:
+        if verbose:
+            import traceback
+            print(f"  [PUNCH ERROR] Failed to extract punch features: {str(e)}")
+            print(f"  {traceback.format_exc()}")
         return {
             "is_punch": True,
             "error": str(e),
