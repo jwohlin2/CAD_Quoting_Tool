@@ -708,6 +708,64 @@ def parse_tolerances_from_text(text: str) -> List[float]:
     return tolerances
 
 
+def parse_tolerance_pairs_max(text: str) -> List[float]:
+    """
+    Parse tolerance pairs from dimension text and return max(up, low) for each pair.
+
+    This is used for extracting the tightest tolerance from bilateral tolerances.
+    For "+.0000/-.0002", the tolerance is max(0.0000, 0.0002) = 0.0002.
+
+    Examples:
+        "±0.001" -> [0.001]
+        "+0.0000/-.0002" -> [0.0002]  # max(0.0000, 0.0002)
+        "+.005/-.000" -> [0.005]      # max(0.005, 0.000)
+        "1.234 +.0002/-.0003" -> [0.0003]  # max(0.0002, 0.0003)
+
+    Args:
+        text: Dimension text string
+
+    Returns:
+        List of max tolerance values (one per tolerance pair)
+    """
+    max_tolerances = []
+    matched_ranges = []  # Track matched spans to avoid duplicates
+
+    def add_max_match(start, end, tol_up, tol_low):
+        """Add max of tolerance pair if this range doesn't overlap existing matches."""
+        for s, e in matched_ranges:
+            if not (end <= s or start >= e):  # Overlaps
+                return False
+        matched_ranges.append((start, end))
+        max_tolerances.append(max(abs(tol_up), abs(tol_low)))
+        return True
+
+    # Pattern: ±0.000X or ± 0.000X (symmetric tolerance)
+    pm_pattern = r'±\s*(\d*\.?\d+)'
+    for match in re.finditer(pm_pattern, text):
+        tol = float(match.group(1))
+        max_tolerances.append(abs(tol))
+        matched_ranges.append((match.start(), match.end()))
+
+    # Pattern: +.0000/-.0002 or + .0000 / - .0002 (with slash separator) - PRIORITY
+    slash_pattern = r'\+\s*(\d*\.?\d+)\s*/\s*-\s*(\d*\.?\d+)'
+    for match in re.finditer(slash_pattern, text):
+        tol_plus = float(match.group(1))
+        tol_minus = float(match.group(2))
+        add_max_match(match.start(), match.end(), tol_plus, tol_minus)
+
+    # Pattern: +0.000X -0.000Y or +0.000X-0.000Y (without slash)
+    plus_minus_pattern = r'\+\s*(\d*\.?\d+)\s*-\s*(\d*\.?\d+)'
+    for match in re.finditer(plus_minus_pattern, text):
+        # Skip if already matched
+        if any(s <= match.start() < e or s < match.end() <= e for s, e in matched_ranges):
+            continue
+        tol_plus = float(match.group(1))
+        tol_minus = float(match.group(2))
+        add_max_match(match.start(), match.end(), tol_plus, tol_minus)
+
+    return max_tolerances
+
+
 def extract_tolerances_from_dimensions(
     dxf_path: Path,
     unit_factor: float,
@@ -747,16 +805,20 @@ def extract_tolerances_from_dimensions(
                 resolved_text = resolved_dim_texts[idx]
 
                 # Only process if text contains both + and - (indicating tolerance)
-                if '+' not in resolved_text or '-' not in resolved_text:
+                # Also accept ± symbol for symmetric tolerances
+                has_bilateral = ('+' in resolved_text and '-' in resolved_text)
+                has_symmetric = '±' in resolved_text
+                if not has_bilateral and not has_symmetric:
                     continue
 
-                # Parse tolerances from resolved text
-                tolerances = parse_tolerances_from_text(resolved_text)
-                if not tolerances:
+                # Parse tolerances using max(up, low) for each pair
+                # This ensures +.0000/-.0002 gives 0.0002, not 0.0000
+                tol_maxes = parse_tolerance_pairs_max(resolved_text)
+                if not tol_maxes:
                     continue
 
                 # Filter out zero tolerances
-                non_zero_tols = [t for t in tolerances if abs(t) > 1e-6]
+                non_zero_tols = [t for t in tol_maxes if abs(t) > 1e-6]
                 if not non_zero_tols:
                     continue
 
@@ -1007,24 +1069,47 @@ def detect_ops_features(text_dump: str) -> Dict[str, Any]:
         radius_count += len(re.findall(pattern, text_upper))
     features["num_small_radii"] = radius_count
 
-    # 3D surface / form
-    if any(kw in text_upper for kw in ["POLISH", "FORM", "COIN", "CONTOUR"]):
+    # 3D surface / form detection
+    # Look for specific indicators of complex nose/form geometry
+    has_3d_indicators = [
+        "POLISH CONTOUR",   # Specific polish contour callout
+        "POLISHED CONTOUR",
+        "POLISH",           # General polish
+        "FORM",             # Form detail
+        "COIN",             # Coining surface
+        "CONTOUR",          # Contour call
+        "OVER R",           # Over-radius detail in nose
+        "OVER-R",
+    ]
+    if any(kw in text_upper for kw in has_3d_indicators):
         features["has_3d_surface"] = True
 
     # Perpendicular face grind
     if "PERPENDICULAR" in text_upper or "PERP" in text_upper:
         features["has_perp_face_grind"] = True
 
-    # Form complexity (simple heuristic based on radius count)
-    # Count all radii including larger ones
+    # Form complexity based on R/Ø dimension counts
+    # Count radius callouts (R.XXX patterns)
     all_radius_pattern = r'R\s*(?:0)?\.?\d+'
-    total_radius_count = len(re.findall(all_radius_pattern, text_upper))
-    if total_radius_count > 10:
+    radius_count = len(re.findall(all_radius_pattern, text_upper))
+
+    # Count diameter callouts (Ø or %%c patterns)
+    diameter_pattern = r'[Ø]|%%C'
+    diameter_count = len(re.findall(diameter_pattern, text_upper, re.IGNORECASE))
+
+    # Total form features = radii + diameters
+    total_form_features = radius_count + diameter_count
+
+    # Set complexity level based on count
+    # 0 = none (0-2), 1 = few (3-5), 2 = moderate (6-10), 3 = many (>10)
+    if total_form_features > 10:
         features["form_complexity_level"] = 3
-    elif total_radius_count > 5:
+    elif total_form_features > 5:
         features["form_complexity_level"] = 2
-    elif total_radius_count > 2:
+    elif total_form_features > 2:
         features["form_complexity_level"] = 1
+    else:
+        features["form_complexity_level"] = 0
 
     return features
 
@@ -1233,6 +1318,14 @@ def extract_punch_features_from_dxf(
         # Cluster similar diameters (within ±0.0002")
         clustered_diameters = cluster_values(raw_diameters, tolerance=0.0002)
         summary.num_ground_diams = len(clustered_diameters)
+
+        # Sanity check: cap num_ground_diams at reasonable maximum
+        # Most punches have 1-6 distinct ground diameters; more suggests over-detection
+        MAX_GROUND_DIAMS = 6
+        if summary.num_ground_diams > MAX_GROUND_DIAMS:
+            original_count = summary.num_ground_diams
+            summary.num_ground_diams = MAX_GROUND_DIAMS
+            warnings.append(f"Capped num_ground_diams from {original_count} to {MAX_GROUND_DIAMS} (may indicate over-detection)")
 
         # Only use fallback if no diameters were found at all
         if summary.num_ground_diams == 0 and (summary.max_od_or_width_in > 0 or dim_diameter > 0):
