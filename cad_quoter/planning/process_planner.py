@@ -326,8 +326,33 @@ def _stub_plan(name: str, note: str) -> Plan:
 
 
 def planner_punches(params: Dict[str, Any]) -> Plan:
-    """Consolidated planner for Punches (punch + pilot_punch)."""
-    return _stub_plan("Punches", "Add WEDM outline, HT route, grind/lap bearing as needed. For pilot: tight runout/TIR.")
+    """
+    Enhanced planner for Punches (punch + pilot_punch + form_punch).
+
+    Uses DWG punch feature extraction when available.
+    Falls back to manual params if no DXF path provided.
+    """
+    try:
+        from cad_quoter.planning.punch_planner import planner_punches_enhanced
+
+        # Get plan dict from enhanced planner
+        plan_dict = planner_punches_enhanced(params)
+
+        # Convert to Plan dataclass
+        p = base_plan()
+        p.ops = plan_dict.get("ops", [])
+        p.fixturing = plan_dict.get("fixturing", [])
+        p.qa = plan_dict.get("qa", [])
+        p.warnings = plan_dict.get("warnings", [])
+        p.directs = plan_dict.get("directs", p.directs)
+
+        return p
+
+    except Exception as e:
+        # Fall back to stub if enhanced planner fails
+        p = _stub_plan("Punches", "Add WEDM outline, HT route, grind/lap bearing as needed. For pilot: tight runout/TIR.")
+        p.warnings.append(f"Enhanced punch planner failed: {str(e)}")
+        return p
 
 
 def planner_bushing(params: Dict[str, Any]) -> Plan:
