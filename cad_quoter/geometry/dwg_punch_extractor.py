@@ -253,6 +253,16 @@ def extract_dimensions(dxf_path: Path) -> Dict[str, Any]:
                 if meas is None:
                     continue
 
+                # Handle Vec3 objects (convert to scalar)
+                if hasattr(meas, 'magnitude'):
+                    meas = meas.magnitude
+                elif hasattr(meas, 'x'):
+                    # If it's a vector, use the magnitude or first component
+                    meas = abs(meas.x)
+
+                # Ensure meas is a number
+                meas = float(meas)
+
                 # Convert to inches if needed
                 meas_in = meas * mm_to_in
 
@@ -339,6 +349,8 @@ def parse_tolerances_from_text(text: str) -> List[float]:
     Examples:
         "±0.001" -> [0.001]
         "+0.0000-0.0002" -> [0.0000, 0.0002]
+        "+.0000/-.0002" -> [0.0000, 0.0002]
+        "+ .0002 / - .0000" -> [0.0002, 0.0000]
         "1.234±.0005" -> [0.0005]
 
     Args:
@@ -348,29 +360,40 @@ def parse_tolerances_from_text(text: str) -> List[float]:
         List of tolerance values (absolute, in inches)
     """
     tolerances = []
+    matched_ranges = []  # Track matched spans to avoid duplicates
 
-    # Pattern: ±0.000X
+    def add_match(start, end, values):
+        """Add tolerance values if this range doesn't overlap existing matches."""
+        for s, e in matched_ranges:
+            if not (end <= s or start >= e):  # Overlaps
+                return False
+        matched_ranges.append((start, end))
+        tolerances.extend(values)
+        return True
+
+    # Pattern: ±0.000X or ± 0.000X
     pm_pattern = r'±\s*(\d*\.?\d+)'
     for match in re.finditer(pm_pattern, text):
         tol = float(match.group(1))
-        tolerances.append(abs(tol))
+        add_match(match.start(), match.end(), [abs(tol)])
 
-    # Pattern: +0.000X -0.000Y or +0.000X-0.000Y
-    plus_minus_pattern = r'\+\s*(\d*\.?\d+)\s*-\s*(\d*\.?\d+)'
-    for match in re.finditer(plus_minus_pattern, text):
+    # Pattern: +.0000/-.0002 or + .0000 / - .0002 (with slash separator) - PRIORITY
+    slash_pattern = r'\+\s*(\d*\.?\d+)\s*/\s*-\s*(\d*\.?\d+)'
+    for match in re.finditer(slash_pattern, text):
         tol_plus = float(match.group(1))
         tol_minus = float(match.group(2))
-        tolerances.append(abs(tol_plus))
-        tolerances.append(abs(tol_minus))
+        add_match(match.start(), match.end(), [abs(tol_plus), abs(tol_minus)])
 
-    # Pattern: plain tolerance like .0001 or 0.0001 after dimension
-    # (be careful not to match the dimension itself)
-    # Look for very small decimals (.000X format)
-    small_tol_pattern = r'\.000\d+'
-    for match in re.finditer(small_tol_pattern, text):
-        tol = float(match.group(0))
-        if tol < 0.01:  # Only if it's a small tolerance-like value
-            tolerances.append(abs(tol))
+    # Pattern: +0.000X -0.000Y or +0.000X-0.000Y (without slash) - check for non-overlap
+    # Only match if not already matched by slash pattern
+    plus_minus_pattern = r'\+\s*(\d*\.?\d+)\s*-\s*(\d*\.?\d+)'
+    for match in re.finditer(plus_minus_pattern, text):
+        # Skip if this was already matched by slash pattern
+        if any(s <= match.start() < e or s < match.end() <= e for s, e in matched_ranges):
+            continue
+        tol_plus = float(match.group(1))
+        tol_minus = float(match.group(2))
+        add_match(match.start(), match.end(), [abs(tol_plus), abs(tol_minus)])
 
     return tolerances
 
@@ -383,6 +406,11 @@ def parse_tolerances_from_text(text: str) -> List[float]:
 def classify_punch_family(text_dump: str) -> Tuple[str, str]:
     """
     Classify punch family and shape type from text.
+
+    Priority order (check most specific first):
+    1. Specific multi-word terms (PILOT PIN, FORM PUNCH, etc.)
+    2. Form/contour indicators (COIN, FORM, INSERT)
+    3. Generic PUNCH (only if no other indicators)
 
     Args:
         text_dump: Combined text from drawing (title block, notes, etc.)
@@ -397,6 +425,7 @@ def classify_punch_family(text_dump: str) -> Tuple[str, str]:
         - die_section
         - guide_post
         - bushing
+        - die_insert
 
     Shapes:
         - round
@@ -404,35 +433,58 @@ def classify_punch_family(text_dump: str) -> Tuple[str, str]:
     """
     text_upper = text_dump.upper()
 
-    # Determine family based on keywords
-    family = "round_punch"  # default
+    # Determine family based on keywords (most specific first)
+    family = None
 
+    # Check for specific multi-word terms first
     if "PILOT PIN" in text_upper or "PILOT-PIN" in text_upper:
         family = "pilot_pin"
     elif "GUIDE POST" in text_upper:
         family = "guide_post"
-    elif "BUSHING" in text_upper or "GUIDE BUSHING" in text_upper:
+    elif "GUIDE BUSHING" in text_upper:
         family = "bushing"
     elif "FORM PUNCH" in text_upper or "COIN PUNCH" in text_upper:
         family = "form_punch"
-    elif "DIE SECTION" in text_upper or "SECTION" in text_upper:
+    elif "DIE SECTION" in text_upper:
         family = "die_section"
-    elif "INSERT" in text_upper:
-        family = "die_insert"
-    elif "PUNCH" in text_upper:
-        family = "round_punch"
+
+    # If not matched, check for form/insert indicators (these suggest NOT a simple round punch)
+    if family is None:
+        if "INSERT" in text_upper or "COIN" in text_upper:
+            # Check if it's punch-like or more of an insert/die component
+            if "PUNCH" in text_upper:
+                family = "form_punch"
+            else:
+                family = "die_insert"
+        elif "FORM" in text_upper and ("PUNCH" in text_upper or "DETAIL" in text_upper):
+            family = "form_punch"
+        elif "SECTION" in text_upper:
+            family = "die_section"
+
+    # If still not matched, check for simple terms
+    if family is None:
+        if "BUSHING" in text_upper:
+            family = "bushing"
+        elif "PUNCH" in text_upper:
+            # Default to round_punch only if we found "PUNCH" keyword
+            family = "round_punch"
+        else:
+            # No clear indicator, use most generic
+            family = "round_punch"
 
     # Determine shape
     shape = "round"  # default
 
     # Look for rectangular indicators
-    if "RECTANGULAR" in text_upper:
-        shape = "rectangular"
-    elif "SQUARE" in text_upper:
+    if "RECTANGULAR" in text_upper or "SQUARE" in text_upper:
         shape = "rectangular"
     # If we see thickness AND width dimensions, likely rectangular
-    elif ("THICKNESS" in text_upper or "THK" in text_upper) and "WIDTH" in text_upper:
+    elif ("THICKNESS" in text_upper or "THK" in text_upper) and ("WIDTH" in text_upper or " W " in text_upper):
         shape = "rectangular"
+    # Form punches with contours are often not simple rounds
+    elif family == "form_punch" and ("CONTOUR" in text_upper or "PROFILE" in text_upper):
+        # Keep as round unless explicitly rectangular
+        pass
 
     return family, shape
 
@@ -442,10 +494,10 @@ def detect_material(text_dump: str) -> Optional[str]:
     Detect material callout from text.
 
     Common materials:
-        - A2, A6, A10
-        - D2, D3
-        - M2, M4
-        - O1, S7
+        - A2, A-2, A6, A10
+        - D2, D-2, D3
+        - M2, M-2, M4
+        - O1, S7, H13
         - CARBIDE
         - 440C, 17-4
 
@@ -453,25 +505,33 @@ def detect_material(text_dump: str) -> Optional[str]:
         text_dump: Combined text from drawing
 
     Returns:
-        Material string or None
+        Material string or None (normalized without hyphens)
     """
     text_upper = text_dump.upper()
 
-    # Common tool steel patterns
+    # Common tool steel patterns (with and without hyphens)
     materials = [
-        r'\bA2\b', r'\bA6\b', r'\bA10\b',
-        r'\bD2\b', r'\bD3\b',
-        r'\bM2\b', r'\bM4\b',
-        r'\bO1\b', r'\bS7\b', r'\bH13\b',
-        r'\bCARBIDE\b',
-        r'\b440C\b', r'\b17-4\b',
-        r'\b4140\b', r'\b4340\b',
+        (r'\bA-?2\b', 'A2'),
+        (r'\bA-?6\b', 'A6'),
+        (r'\bA-?10\b', 'A10'),
+        (r'\bD-?2\b', 'D2'),
+        (r'\bD-?3\b', 'D3'),
+        (r'\bM-?2\b', 'M2'),
+        (r'\bM-?4\b', 'M4'),
+        (r'\bO-?1\b', 'O1'),
+        (r'\bS-?7\b', 'S7'),
+        (r'\bH-?13\b', 'H13'),
+        (r'\bCARBIDE\b', 'CARBIDE'),
+        (r'\b440-?C\b', '440C'),
+        (r'\b17-4\b', '17-4'),
+        (r'\b4140\b', '4140'),
+        (r'\b4340\b', '4340'),
     ]
 
-    for pattern in materials:
+    for pattern, normalized in materials:
         match = re.search(pattern, text_upper)
         if match:
-            return match.group(0)
+            return normalized
 
     return None
 
@@ -501,21 +561,30 @@ def detect_ops_features(text_dump: str) -> Dict[str, Any]:
         "form_complexity_level": 0,
     }
 
-    # Chamfers: (2) .010 X 45°
-    chamfer_pattern = r'\((\d+)\)\s*[\.\d]+\s*X\s*45'
-    for match in re.finditer(chamfer_pattern, text_upper):
+    # Chamfers with quantity: (2) .010 X 45°, (3) 0.040 X 45, etc.
+    # Allow optional leading zero, spaces, degree symbol
+    chamfer_qty_pattern = r'\((\d+)\)\s*(?:0)?\.?\d+\s*X\s*45'
+    for match in re.finditer(chamfer_qty_pattern, text_upper):
         qty = int(match.group(1))
         features["num_chamfers"] += qty
 
-    # Also count individual chamfer callouts without quantity
-    single_chamfer = r'[\.\d]+\s*X\s*45'
+    # Individual chamfer callouts without quantity
+    # Matches: .040 X 45, 0.040X45, .010 X 45°, etc.
+    single_chamfer = r'(?:0)?\.?\d+\s*X\s*45'
     single_count = len(re.findall(single_chamfer, text_upper))
     if single_count > features["num_chamfers"]:
         features["num_chamfers"] = single_count
 
-    # Small radii: R.005 or .005 R
-    small_radius_pattern = r'R\s*\.00\d+|\.00\d+\s*R'
-    features["num_small_radii"] = len(re.findall(small_radius_pattern, text_upper))
+    # Small radii: R.005, R .005, 0.005 R, .005R, etc.
+    # Allow optional leading zero, optional space after R
+    small_radius_patterns = [
+        r'R\s*(?:0)?\.00\d+',      # R.005, R .005, R0.005
+        r'(?:0)?\.00\d+\s*R',      # .005 R, 0.005R
+    ]
+    radius_count = 0
+    for pattern in small_radius_patterns:
+        radius_count += len(re.findall(pattern, text_upper))
+    features["num_small_radii"] = radius_count
 
     # 3D surface / form
     if any(kw in text_upper for kw in ["POLISH", "FORM", "COIN", "CONTOUR"]):
@@ -526,12 +595,14 @@ def detect_ops_features(text_dump: str) -> Dict[str, Any]:
         features["has_perp_face_grind"] = True
 
     # Form complexity (simple heuristic based on radius count)
-    radius_count = len(re.findall(r'R\s*[\.\d]+', text_upper))
-    if radius_count > 10:
+    # Count all radii including larger ones
+    all_radius_pattern = r'R\s*(?:0)?\.?\d+'
+    total_radius_count = len(re.findall(all_radius_pattern, text_upper))
+    if total_radius_count > 10:
         features["form_complexity_level"] = 3
-    elif radius_count > 5:
+    elif total_radius_count > 5:
         features["form_complexity_level"] = 2
-    elif radius_count > 2:
+    elif total_radius_count > 2:
         features["form_complexity_level"] = 1
 
     return features
@@ -553,11 +624,41 @@ def detect_pain_flags(text_dump: str) -> Dict[str, bool]:
     """
     text_upper = text_dump.upper()
 
+    # Polish detection (multiple variations)
+    has_polish = any(kw in text_upper for kw in [
+        "POLISH CONTOUR",
+        "POLISH CONTOURED",
+        "POLISHED",
+        "POLISH TO",
+        " POLISH "
+    ])
+
+    # No step permitted detection
+    has_no_step = any(kw in text_upper for kw in [
+        "NO STEP PERMITTED",
+        "NO STEP",
+        "NO STEPS",
+        "NO-STEP"
+    ])
+
+    # Sharp edge detection
+    has_sharp = any(kw in text_upper for kw in [
+        "SHARP EDGE",
+        "SHARP EDGES",
+        " SHARP "
+    ])
+
+    # GD&T detection (symbols, callouts, or explicit mentions)
+    has_gdt = bool(re.search(
+        r'[⏥⌭⏄⌯⊕⌖]|GD&T|PERPENDICULARITY|FLATNESS|POSITION|CONCENTRICITY|RUNOUT|TIR',
+        text_upper
+    ))
+
     return {
-        "has_polish_contour": "POLISH" in text_upper,
-        "has_no_step_permitted": "NO STEP" in text_upper,
-        "has_sharp_edges": "SHARP" in text_upper,
-        "has_gdt": bool(re.search(r'[⏥⌭⏄⌯]|GD&T', text_upper)),  # GD&T symbols or text
+        "has_polish_contour": has_polish,
+        "has_no_step_permitted": has_no_step,
+        "has_sharp_edges": has_sharp,
+        "has_gdt": has_gdt,
     }
 
 
@@ -693,9 +794,27 @@ def extract_punch_features_from_dxf(
     unique_diameters = set(round(d["measurement"], 4) for d in diameter_dims)
     summary.num_ground_diams = len(unique_diameters)
 
+    # Sanity check: if we have dimensions but num_ground_diams is 0, use fallback
+    if summary.num_ground_diams == 0 and (summary.max_od_or_width_in > 0 or dim_diameter > 0):
+        # At least one ground diameter must exist if we detected any diameter
+        summary.num_ground_diams = 1
+        warnings.append("No distinct diameters found from dimensions; defaulting to 1 ground diameter")
+
     # Rough estimate of total ground length
-    # For now, assume 50% of overall length (can refine later)
-    summary.total_ground_length_in = summary.overall_length_in * 0.5
+    # For round punches, assume most of the length is ground
+    # For form punches, use a smaller fraction
+    if summary.family == "form_punch" or summary.has_3d_surface:
+        ground_fraction = 0.3  # Form punches have less cylindrical ground area
+    elif summary.num_ground_diams > 2:
+        ground_fraction = 0.7  # Multiple diameters suggest most is ground
+    else:
+        ground_fraction = 0.5  # Default
+
+    summary.total_ground_length_in = summary.overall_length_in * ground_fraction
+
+    # Ensure total_ground_length_in is not zero if we have ground diameters
+    if summary.num_ground_diams > 0 and summary.total_ground_length_in == 0 and summary.overall_length_in > 0:
+        summary.total_ground_length_in = summary.overall_length_in * 0.5
 
     # Tolerances
     summary.min_dia_tol_in = dim_data.get("min_dia_tol")
@@ -726,16 +845,37 @@ def extract_punch_features_from_dxf(
     # === METADATA ===
     summary.warnings = warnings
 
+    # Add warning if text dump is suspiciously small
+    if len(text_dump) < 100:
+        warnings.append(f"Text dump is very small ({len(text_dump)} chars) - may be incomplete")
+        summary.warnings = warnings
+
     # Confidence score based on how much data we extracted
     confidence = 1.0
+
+    # Major penalties for missing critical data
     if summary.overall_length_in == 0:
         confidence -= 0.3
+        warnings.append("Overall length is 0 - dimension extraction may have failed")
+
     if summary.max_od_or_width_in == 0:
         confidence -= 0.3
+        warnings.append("Max OD/width is 0 - dimension extraction may have failed")
+
+    # Minor penalties for missing optional data
     if not summary.material_callout:
         confidence -= 0.1
 
-    summary.confidence_score = max(0.0, confidence)
+    # Bonus for successfully extracting detailed features
+    if summary.num_chamfers > 0 or summary.tap_count > 0:
+        confidence += 0.05  # Found specific features
+
+    if summary.min_dia_tol_in is not None or summary.min_len_tol_in is not None:
+        confidence += 0.05  # Found tolerances
+
+    # Ensure confidence is in valid range
+    summary.confidence_score = max(0.0, min(1.0, confidence))
+    summary.warnings = warnings
 
     return summary
 
