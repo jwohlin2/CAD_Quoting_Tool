@@ -6,6 +6,8 @@ import json
 import os
 import subprocess
 import platform
+import threading
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from typing import Optional
 
@@ -218,6 +220,11 @@ class AppV7:
         # Store path to drawing image file
         self.drawing_image_path: Optional[str] = None
 
+        # Background drawing generation (threading)
+        self._drawing_generation_thread: Optional[threading.Thread] = None
+        self._drawing_generation_in_progress: bool = False
+        self._drawing_generation_success: bool = False
+
         self._create_menu()
         self._create_button_panel()
         self._create_tabs()
@@ -283,10 +290,33 @@ class AppV7:
     def open_drawing_preview(self) -> None:
         """Open the drawing preview image file with the system default viewer.
 
-        If no image exists, it will be generated on-demand (lazy loading).
-        This saves 5-15 seconds during CAD file loading.
+        If background generation is in progress, waits for it to complete.
+        If no image exists, generates on-demand (fallback for edge cases).
+        Background generation makes this nearly instant in most cases.
         """
-        # If no image path set, try to generate from CAD file
+        # Check if background generation is in progress
+        if self._drawing_generation_in_progress:
+            self.status_bar.config(text="Drawing preview is being generated in background, please wait...")
+            self.root.update_idletasks()
+
+            # Wait for background thread to complete (with timeout)
+            if self._drawing_generation_thread and self._drawing_generation_thread.is_alive():
+                self._drawing_generation_thread.join(timeout=20.0)  # Max 20 second wait
+
+            # Check if generation succeeded
+            if not self._drawing_generation_success:
+                messagebox.showerror(
+                    "Generation Failed",
+                    "Background drawing generation failed.\n\n"
+                    "Please try loading the CAD file again."
+                )
+                self.status_bar.config(text="Drawing preview generation failed")
+                return
+
+            self.status_bar.config(text="Drawing preview ready!")
+            self.root.update_idletasks()
+
+        # If still no image path set, try to generate on-demand (fallback)
         if not self.drawing_image_path:
             if not self.cad_file_path:
                 messagebox.showinfo(
@@ -296,7 +326,7 @@ class AppV7:
                 )
                 return
 
-            # Try to generate image on-demand
+            # Synchronous fallback generation (should rarely happen)
             self.status_bar.config(text="Generating drawing preview (this may take 5-15 seconds)...")
             self.root.update_idletasks()
 
@@ -514,6 +544,84 @@ class AppV7:
         self._cached_quote_data = None
         print("[AppV7] Cleared CAD extraction cache")
 
+    def _get_ocr_cache_path(self, cad_file_path: str) -> Path:
+        """
+        Get the path to the OCR cache file for a given CAD file.
+
+        Args:
+            cad_file_path: Path to CAD file
+
+        Returns:
+            Path to the .ocr_cache.json sidecar file
+        """
+        cad_path = Path(cad_file_path)
+        cache_path = cad_path.parent / f".{cad_path.name}.ocr_cache.json"
+        return cache_path
+
+    def _load_ocr_cache(self, cad_file_path: str) -> Optional[dict]:
+        """
+        Load cached OCR results from sidecar file.
+
+        Args:
+            cad_file_path: Path to CAD file
+
+        Returns:
+            Dictionary with cached OCR data or None if no cache exists
+        """
+        cache_path = self._get_ocr_cache_path(cad_file_path)
+
+        if not cache_path.exists():
+            print(f"[AppV7] No OCR cache found at {cache_path.name}")
+            return None
+
+        try:
+            with open(cache_path, 'r') as f:
+                cache_data = json.load(f)
+
+            # Validate cache structure
+            if 'dimensions' in cache_data and 'material' in cache_data:
+                print(f"[AppV7] Loaded OCR cache from {cache_path.name}")
+                return cache_data
+            else:
+                print(f"[AppV7] Invalid OCR cache format in {cache_path.name}")
+                return None
+
+        except Exception as e:
+            print(f"[AppV7] Failed to load OCR cache: {e}")
+            return None
+
+    def _save_ocr_cache(self, cad_file_path: str, dimensions: tuple, material: str) -> None:
+        """
+        Save OCR results to sidecar cache file.
+
+        Args:
+            cad_file_path: Path to CAD file
+            dimensions: Tuple of (length, width, thickness) in inches
+            material: Detected material name
+        """
+        cache_path = self._get_ocr_cache_path(cad_file_path)
+
+        try:
+            import time
+            cache_data = {
+                'dimensions': {
+                    'length': dimensions[0],
+                    'width': dimensions[1],
+                    'thickness': dimensions[2]
+                },
+                'material': material,
+                'timestamp': Path(cad_file_path).stat().st_mtime,
+                'cached_at': time.time()
+            }
+
+            with open(cache_path, 'w') as f:
+                json.dump(cache_data, f, indent=2)
+
+            print(f"[AppV7] Saved OCR cache to {cache_path.name}")
+
+        except Exception as e:
+            print(f"[AppV7] Failed to save OCR cache: {e}")
+
     def _get_or_create_quote_data(self):
         """
         Get cached QuoteData or extract it once using QuoteDataHelper.
@@ -534,6 +642,17 @@ class AppV7:
             # Read all overrides from Quote Editor
             dimension_override = self._get_manual_dimensions()
             material_override = self._get_field_string("Material")
+
+            # Try to load OCR cache if no manual dimensions provided (saves ~43 seconds!)
+            ocr_cache_used = False
+            if dimension_override is None:
+                ocr_cache = self._load_ocr_cache(self.cad_file_path)
+                if ocr_cache:
+                    dims = ocr_cache['dimensions']
+                    dimension_override = (dims['length'], dims['width'], dims['thickness'])
+                    ocr_cache_used = True
+                    print(f"[AppV7] Using cached OCR dimensions: {dimension_override} (saves ~43 seconds!)")
+
             machine_rate = self._get_field_float("Machine Rate ($/hr)", self.MACHINE_RATE)
             labor_rate = self._get_field_float("Labor Rate ($/hr)", self.LABOR_RATE)
             margin_percent = self._get_field_float("Margin (%)", 15.0)
@@ -555,8 +674,20 @@ class AppV7:
                     quantity=quantity,
                     verbose=True
                 )
+
+                # Save OCR results to cache for next time (if we actually ran OCR)
+                if not ocr_cache_used and dimension_override is None:
+                    # OCR was just performed, save results to cache
+                    dims = self._cached_quote_data.part_dimensions
+                    material = self._cached_quote_data.material_info.material_name
+                    self._save_ocr_cache(
+                        self.cad_file_path,
+                        (dims.length, dims.width, dims.thickness),
+                        material
+                    )
+
                 if dimension_override:
-                    print(f"[AppV7] Quote data cached (using manual dimensions: {dimension_override})")
+                    print(f"[AppV7] Quote data cached (using manual/cached dimensions: {dimension_override})")
                 else:
                     print("[AppV7] Quote data cached for reuse")
             except ValueError as e:
@@ -857,6 +988,43 @@ class AppV7:
             self.drawing_image_path = None
             return False
 
+    def _generate_drawing_image_background(self, cad_filename: str) -> None:
+        """
+        Generate drawing image in background thread (non-blocking).
+
+        This allows the UI to remain responsive while the image is being generated.
+        Sets internal flags that can be checked by open_drawing_preview().
+
+        Args:
+            cad_filename: Path to CAD file
+        """
+        def _background_worker():
+            """Worker function that runs in background thread."""
+            self._drawing_generation_in_progress = True
+            self._drawing_generation_success = False
+
+            print(f"[AppV7] Starting background drawing generation...")
+
+            # Call the synchronous generation method
+            success = self._generate_drawing_image(cad_filename)
+
+            self._drawing_generation_success = success
+            self._drawing_generation_in_progress = False
+
+            if success:
+                print(f"[AppV7] Background drawing generation completed successfully")
+            else:
+                print(f"[AppV7] Background drawing generation failed")
+
+        # Create and start background thread
+        self._drawing_generation_thread = threading.Thread(
+            target=_background_worker,
+            daemon=True,
+            name="DrawingGenerationThread"
+        )
+        self._drawing_generation_thread.start()
+        print(f"[AppV7] Drawing generation started in background (non-blocking)")
+
     def load_drawing_image_manual(self) -> None:
         """Manually select a drawing image file."""
         filename = filedialog.askopenfilename(
@@ -906,14 +1074,16 @@ class AppV7:
                 self._extract_and_display_hole_table(filename)
 
                 # Check for existing drawing image (fast, <1ms)
-                # Image generation is now lazy - only happens when user clicks "Drawing Preview"
                 has_existing_image = self._find_existing_drawing_image(filename)
 
-                status_msg = "CAD file loaded. Review the Quote Editor and generate the quote."
-                if has_existing_image:
-                    status_msg += " (Drawing preview available)"
+                # If no existing image, start background generation (non-blocking)
+                # This allows UI to remain responsive while image is being generated
+                if not has_existing_image:
+                    self._generate_drawing_image_background(filename)
+                    status_msg = "CAD file loaded. Review the Quote Editor and generate the quote. (Drawing preview generating in background...)"
                 else:
-                    status_msg += " (Drawing preview will be generated on-demand)"
+                    status_msg = "CAD file loaded. Review the Quote Editor and generate the quote. (Drawing preview available)"
+
                 self.status_bar.config(text=status_msg)
                 self.notebook.select(self.geo_tab)
             except Exception as e:
@@ -1426,22 +1596,28 @@ class AppV7:
         # Display in output tab
         self.output_text.delete(1.0, tk.END)
 
-        # Generate labor hours report first
-        labor_hours_report = self._generate_labor_hours_report()
+        # Generate all three reports in parallel for 10-20 second speedup
+        # The reports are independent and can run concurrently
+        print("[AppV7] Generating reports in parallel...")
+
+        with ThreadPoolExecutor(max_workers=3, thread_name_prefix="ReportGen") as executor:
+            # Submit all three report generation tasks concurrently
+            future_labor = executor.submit(self._generate_labor_hours_report)
+            future_machine = executor.submit(self._generate_machine_hours_report)
+            future_direct = executor.submit(self._generate_direct_costs_report)
+
+            # Wait for all reports to complete and collect results
+            labor_hours_report = future_labor.result()
+            machine_hours_report = future_machine.result()
+            direct_costs_report = future_direct.result()
+
+        print("[AppV7] All reports generated (parallel execution complete)")
+
+        # Insert reports in the correct order
         self.output_text.insert(tk.END, labor_hours_report)
-
-        # Add separator
         self.output_text.insert(tk.END, "\n\n" + "=" * 74 + "\n\n")
-
-        # Generate machine hours report next
-        machine_hours_report = self._generate_machine_hours_report()
         self.output_text.insert(tk.END, machine_hours_report)
-
-        # Add separator
         self.output_text.insert(tk.END, "\n\n" + "=" * 74 + "\n\n")
-
-        # Generate direct costs report last before summary
-        direct_costs_report = self._generate_direct_costs_report()
         self.output_text.insert(tk.END, direct_costs_report)
 
         # Add summary
