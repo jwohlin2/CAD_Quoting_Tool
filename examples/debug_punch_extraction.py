@@ -123,8 +123,56 @@ def debug_extraction(dxf_path: str, save_debug: bool = True):
         for tap in hole_data['tap_summary']:
             print(f"      - {tap['size']} x {tap.get('depth_in', 'N/A')}\"")
 
+    # Show resolved dimension text samples (MTEXT normalization)
+    print("\n4. Resolved Dimension Text Samples (MTEXT Normalization):")
+    print("-" * 70)
+    try:
+        import ezdxf
+        from cad_quoter.geometry.dwg_punch_extractor import (
+            units_to_inch_factor,
+            resolved_dimension_text,
+        )
+
+        doc = ezdxf.readfile(str(dxf_path))
+        msp = doc.modelspace()
+        insunits = doc.header.get("$INSUNITS", 1)
+        unit_factor = units_to_inch_factor(insunits)
+
+        print(f"   Units: $INSUNITS={insunits}, conversion factor={unit_factor:.4f}")
+        print()
+
+        # Show first 10 dimension samples
+        dim_count = 0
+        for dim in msp.query("DIMENSION"):
+            if dim_count >= 10:
+                break
+
+            raw_text = dim.dxf.text if hasattr(dim.dxf, 'text') else ""
+            resolved_text = resolved_dimension_text(dim, unit_factor)
+            meas = dim.get_measurement()
+
+            # Handle Vec3
+            if hasattr(meas, 'magnitude'):
+                meas = meas.magnitude
+            elif hasattr(meas, 'x'):
+                meas = abs(meas.x)
+            meas = float(meas)
+
+            print(f"   Dim {dim_count + 1}:")
+            print(f"      Raw text: {raw_text!r}")
+            print(f"      Resolved: {resolved_text!r}")
+            print(f"      Measurement: {meas:.4f} (native units)")
+            print()
+
+            dim_count += 1
+
+        if dim_count == 0:
+            print("   No DIMENSION entities found")
+    except Exception as e:
+        print(f"   Error reading dimensions: {e}")
+
     # Tolerance examples (from text)
-    print("\n4. Tolerance Detection Examples:")
+    print("\n5. Tolerance Detection Examples:")
     print("-" * 70)
     # Find lines with common tolerance patterns
     tolerance_lines = [
@@ -138,7 +186,7 @@ def debug_extraction(dxf_path: str, save_debug: bool = True):
             print(f"   Tolerances: {tols}")
 
     # Run full extraction
-    print("\n5. Running Full Extraction:")
+    print("\n6. Running Full Extraction:")
     print("-" * 70)
     try:
         summary = extract_punch_features_from_dxf(dxf_path, text_dump)
@@ -184,7 +232,7 @@ def debug_extraction(dxf_path: str, save_debug: bool = True):
             print(f"\n✓ Saved results to: {json_file}")
 
         # Validation checks
-        print("\n6. Validation Checks:")
+        print("\n7. Validation Checks:")
         print("-" * 70)
         checks = []
 
@@ -220,7 +268,7 @@ def debug_extraction(dxf_path: str, save_debug: bool = True):
 
         # Warnings
         if summary.warnings:
-            print("\n7. Warnings:")
+            print("\n8. Warnings:")
             print("-" * 70)
             for warning in summary.warnings:
                 print(f"   ⚠ {warning}")
