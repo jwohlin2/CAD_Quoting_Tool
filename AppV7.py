@@ -1191,10 +1191,10 @@ class AppV7:
             scrap_info = quote_data.scrap_info
             cost_breakdown = quote_data.direct_cost_breakdown
 
-            # Check if overrides were used
-            material_override = self._get_field_string("Material")
-            mcmaster_price_override = self._get_field_float("McMaster Price Override ($)")
-            scrap_value_override = self._get_field_float("Scrap Value Override ($)")
+            # Check if overrides were used (read from temp variables set in main thread)
+            material_override = getattr(self, '_temp_material_override', None)
+            mcmaster_price_override = getattr(self, '_temp_mcmaster_override', None)
+            scrap_value_override = getattr(self, '_temp_scrap_override', None)
 
             # Check if we have valid price data
             if stock_info.mcmaster_price is None:
@@ -1452,8 +1452,8 @@ class AppV7:
                 report.append(f"Note: CMM setup time (30 min) is included in Labor → Inspection")
                 report.append("")
 
-            # Summary
-            machine_rate = self._get_field_float("Machine Rate ($/hr)", self.MACHINE_RATE)
+            # Summary (read from temp variable set in main thread to avoid Tkinter widget access)
+            machine_rate = getattr(self, '_temp_machine_rate', self.MACHINE_RATE)
             machine_rate_label = f"@ ${machine_rate:.2f}/hr"
             if machine_rate != self.MACHINE_RATE:
                 machine_rate_label += " (OVERRIDDEN)"
@@ -1503,8 +1503,8 @@ class AppV7:
             report.append(f"  TOTAL LABOR TIME:                {labor_hours.total_minutes:>10.2f} minutes")
             report.append(f"                                   {labor_hours.total_hours:>10.2f} hours")
 
-            # Show labor rate with override indicator
-            labor_rate = self._get_field_float("Labor Rate ($/hr)", self.LABOR_RATE)
+            # Show labor rate with override indicator (read from temp variable set in main thread)
+            labor_rate = getattr(self, '_temp_labor_rate', self.LABOR_RATE)
             labor_rate_label = f"@ ${labor_rate:.2f}/hr"
             if labor_rate != self.LABOR_RATE:
                 labor_rate_label += " (OVERRIDDEN)"
@@ -1593,6 +1593,15 @@ class AppV7:
             quote_data[label] = field.get()
         self.quote_vars = quote_data
 
+        # CRITICAL: Read all widget values in main thread BEFORE parallel execution
+        # Tkinter widgets are NOT thread-safe - must only be accessed from main thread
+        # Store values as instance variables that worker threads can safely read
+        self._temp_machine_rate = self._get_field_float("Machine Rate ($/hr)", self.MACHINE_RATE)
+        self._temp_labor_rate = self._get_field_float("Labor Rate ($/hr)", self.LABOR_RATE)
+        self._temp_material_override = self._get_field_string("Material")
+        self._temp_mcmaster_override = self._get_field_float("McMaster Price Override ($)")
+        self._temp_scrap_override = self._get_field_float("Scrap Value Override ($)")
+
         # Display in output tab
         self.output_text.delete(1.0, tk.END)
 
@@ -1611,6 +1620,7 @@ class AppV7:
         # Generate all three reports in parallel for 10-20 second speedup
         # The reports are independent and can run concurrently
         # NOTE: Quote data is already cached, so no race conditions
+        # NOTE: All widget values read above, so threads don't access Tkinter widgets
         print("[AppV7] Generating reports in parallel...")
 
         with ThreadPoolExecutor(max_workers=3, thread_name_prefix="ReportGen") as executor:
@@ -1625,6 +1635,13 @@ class AppV7:
             direct_costs_report = future_direct.result()
 
         print("[AppV7] All reports generated (parallel execution complete)")
+
+        # Clean up temporary variables
+        del self._temp_machine_rate
+        del self._temp_labor_rate
+        del self._temp_material_override
+        del self._temp_mcmaster_override
+        del self._temp_scrap_override
 
         # Insert reports in the correct order
         self.output_text.insert(tk.END, labor_hours_report)
