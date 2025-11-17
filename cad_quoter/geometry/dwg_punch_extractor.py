@@ -181,6 +181,118 @@ def resolved_dimension_text(dim, unit_factor: float) -> str:
     return text.strip()
 
 
+def cluster_values(values: List[float], tolerance: float = 0.0002) -> List[float]:
+    """
+    Cluster similar values within a tolerance and return representative values.
+
+    This groups measurements that are within ±tolerance of each other and returns
+    one representative value per cluster (the mean of the cluster).
+
+    Args:
+        values: List of numeric values to cluster
+        tolerance: Values within this range are considered the same
+
+    Returns:
+        List of representative values (one per cluster)
+
+    Example:
+        >>> cluster_values([0.500, 0.5001, 0.5002, 0.750, 0.7501])
+        [0.5001, 0.7501]
+    """
+    if not values:
+        return []
+
+    # Sort values
+    sorted_vals = sorted(values)
+    clusters = []
+    current_cluster = [sorted_vals[0]]
+
+    for val in sorted_vals[1:]:
+        # Check if this value is within tolerance of the cluster mean
+        cluster_mean = sum(current_cluster) / len(current_cluster)
+        if abs(val - cluster_mean) <= tolerance:
+            current_cluster.append(val)
+        else:
+            # Start a new cluster
+            clusters.append(current_cluster)
+            current_cluster = [val]
+
+    # Add the last cluster
+    clusters.append(current_cluster)
+
+    # Return representative values (mean of each cluster)
+    return [sum(cluster) / len(cluster) for cluster in clusters]
+
+
+def _collect_diameters_from_dimensions(doc, unit_factor: float) -> List[float]:
+    """
+    Collect diameter measurements from DIMENSION entities.
+
+    Identifies diameter dimensions by:
+    - dimtype == 3 (diameter dimension type)
+    - Raw text contains "%%c" (old DXF diameter symbol), "Ø", or "DIA"
+
+    Args:
+        doc: ezdxf document
+        unit_factor: Conversion factor to inches
+
+    Returns:
+        List of diameter values in inches
+    """
+    diameters = []
+    msp = doc.modelspace()
+
+    for dim in msp.query("DIMENSION"):
+        try:
+            # Get dimension type
+            dimtype = dim.dimtype
+
+            # Get raw text for diameter indicators
+            raw_text = dim.dxf.text if hasattr(dim.dxf, 'text') else ""
+
+            # Check if this is a diameter dimension
+            is_diameter = (
+                dimtype == 3 or  # Diameter dimension type
+                "%%c" in raw_text.lower() or  # Old DXF diameter symbol
+                "Ø" in raw_text or
+                "Ø" in raw_text or
+                " DIA" in raw_text.upper() or
+                "DIA " in raw_text.upper()
+            )
+
+            # Also check for radius dimensions (dimtype == 4) and double them
+            is_radius = (dimtype == 4 or "R" in raw_text[:5])  # "R" near start
+
+            if is_diameter or is_radius:
+                # Get measurement
+                meas = dim.get_measurement()
+                if meas is None:
+                    continue
+
+                # Handle Vec3 objects
+                if hasattr(meas, 'magnitude'):
+                    meas = meas.magnitude
+                elif hasattr(meas, 'x'):
+                    meas = abs(meas.x)
+
+                meas = float(meas)
+                meas_in = meas * unit_factor
+
+                # If radius, double it to get diameter
+                if is_radius and not is_diameter:
+                    meas_in *= 2.0
+
+                # Only include positive, reasonable diameters
+                if 0.01 <= meas_in <= 20.0:  # Between 0.01" and 20"
+                    diameters.append(meas_in)
+
+        except Exception:
+            # Skip dimensions that can't be processed
+            continue
+
+    return diameters
+
+
 # ============================================================================
 # DATA STRUCTURES
 # ============================================================================
@@ -596,6 +708,95 @@ def parse_tolerances_from_text(text: str) -> List[float]:
     return tolerances
 
 
+def extract_tolerances_from_dimensions(
+    dxf_path: Path,
+    unit_factor: float,
+    resolved_dim_texts: List[str]
+) -> Dict[str, Optional[float]]:
+    """
+    Extract diameter and length tolerances from DIMENSION entities.
+
+    This function:
+    - Scans resolved dimension texts for tolerance patterns
+    - Associates tolerances with diameter vs length dimensions
+    - Returns only non-zero tolerances (None if no tolerance found)
+
+    Args:
+        dxf_path: Path to DXF file
+        unit_factor: Conversion factor to inches
+        resolved_dim_texts: List of resolved dimension texts
+
+    Returns:
+        Dict with:
+            - min_dia_tol: Minimum diameter tolerance (or None)
+            - min_len_tol: Minimum length tolerance (or None)
+    """
+    try:
+        doc = ezdxf.readfile(str(dxf_path))
+        msp = doc.modelspace()
+
+        diameter_tolerances = []
+        length_tolerances = []
+
+        # Iterate through dimensions and match with resolved texts
+        for idx, dim in enumerate(msp.query("DIMENSION")):
+            if idx >= len(resolved_dim_texts):
+                break
+
+            try:
+                resolved_text = resolved_dim_texts[idx]
+
+                # Only process if text contains both + and - (indicating tolerance)
+                if '+' not in resolved_text or '-' not in resolved_text:
+                    continue
+
+                # Parse tolerances from resolved text
+                tolerances = parse_tolerances_from_text(resolved_text)
+                if not tolerances:
+                    continue
+
+                # Filter out zero tolerances
+                non_zero_tols = [t for t in tolerances if abs(t) > 1e-6]
+                if not non_zero_tols:
+                    continue
+
+                # Determine if this is a diameter or length dimension
+                dimtype = dim.dimtype
+                raw_text = dim.dxf.text if hasattr(dim.dxf, 'text') else ""
+
+                is_diameter = (
+                    dimtype == 3 or
+                    "%%c" in raw_text.lower() or
+                    "Ø" in raw_text or
+                    "Ø" in resolved_text or
+                    " DIA" in raw_text.upper()
+                )
+
+                # Add to appropriate list
+                if is_diameter:
+                    diameter_tolerances.extend(non_zero_tols)
+                else:
+                    length_tolerances.extend(non_zero_tols)
+
+            except Exception:
+                continue
+
+        # Find minimum non-zero tolerances
+        min_dia_tol = min(diameter_tolerances) if diameter_tolerances else None
+        min_len_tol = min(length_tolerances) if length_tolerances else None
+
+        return {
+            "min_dia_tol": min_dia_tol,
+            "min_len_tol": min_len_tol,
+        }
+
+    except Exception:
+        return {
+            "min_dia_tol": None,
+            "min_len_tol": None,
+        }
+
+
 # ============================================================================
 # TEXT-BASED CLASSIFICATION & FEATURE DETECTION
 # ============================================================================
@@ -691,6 +892,11 @@ def detect_material(text_dump: str) -> Optional[str]:
     """
     Detect material callout from text.
 
+    Strategy:
+    1. Look for title-block lines with pattern: "<part#> <qty> <material> PUNCH"
+       Example: "316A 2 VM-15M PUNCH" → material = "VM-15M"
+    2. Fall back to common material patterns (A2, D2, M2, etc.)
+
     Common materials:
         - A2, A-2, A6, A10
         - D2, D-2, D3
@@ -698,16 +904,33 @@ def detect_material(text_dump: str) -> Optional[str]:
         - O1, S7, H13
         - CARBIDE
         - 440C, 17-4
+        - VM-15M, P2, etc. (custom punch materials)
 
     Args:
         text_dump: Combined text from drawing
 
     Returns:
-        Material string or None (normalized without hyphens)
+        Material string or None
     """
     text_upper = text_dump.upper()
 
-    # Common tool steel patterns (with and without hyphens)
+    # Strategy 1: Extract from title-block pattern
+    # Look for lines containing " PUNCH" and extract material code
+    lines = text_dump.split('\n')
+    for line in lines:
+        line_upper = line.upper()
+        if ' PUNCH' in line_upper:
+            # Split into tokens
+            tokens = line_upper.split()
+            # If last token is "PUNCH" and there are at least 3 tokens
+            # Treat tokens[-2] as material code
+            if len(tokens) >= 3 and tokens[-1] == 'PUNCH':
+                material_candidate = tokens[-2]
+                # Validate: material code should be alphanumeric with possible hyphens
+                if re.match(r'^[A-Z0-9-]+$', material_candidate):
+                    return material_candidate
+
+    # Strategy 2: Common tool steel patterns (with and without hyphens)
     materials = [
         (r'\bA-?2\b', 'A2'),
         (r'\bA-?6\b', 'A6'),
@@ -993,16 +1216,35 @@ def extract_punch_features_from_dxf(
         summary.body_width_in = geo_width
         summary.body_thickness_in = geo_envelope.get("overall_height_in", None)
 
-    # Estimate num_ground_diams from distinct diameter dimensions
-    diameter_dims = dim_data.get("diameter_dims", [])
-    unique_diameters = set(round(d["measurement"], 4) for d in diameter_dims)
-    summary.num_ground_diams = len(unique_diameters)
+    # Collect distinct ground diameters from DIMENSION entities with clustering
+    try:
+        doc = ezdxf.readfile(str(dxf_path))
+        insunits = doc.header.get("$INSUNITS", 1)
+        measurement = doc.header.get("$MEASUREMENT", 0)
+        unit_factor = units_to_inch_factor(insunits)
 
-    # Sanity check: if we have dimensions but num_ground_diams is 0, use fallback
-    if summary.num_ground_diams == 0 and (summary.max_od_or_width_in > 0 or dim_diameter > 0):
-        # At least one ground diameter must exist if we detected any diameter
-        summary.num_ground_diams = 1
-        warnings.append("No distinct diameters found from dimensions; defaulting to 1 ground diameter")
+        # Override unit_factor if $MEASUREMENT indicates metric
+        if measurement == 1 and insunits not in [4, 5, 6]:
+            unit_factor = 1.0 / 25.4
+
+        # Collect all diameter measurements
+        raw_diameters = _collect_diameters_from_dimensions(doc, unit_factor)
+
+        # Cluster similar diameters (within ±0.0002")
+        clustered_diameters = cluster_values(raw_diameters, tolerance=0.0002)
+        summary.num_ground_diams = len(clustered_diameters)
+
+        # Only use fallback if no diameters were found at all
+        if summary.num_ground_diams == 0 and (summary.max_od_or_width_in > 0 or dim_diameter > 0):
+            # At least one ground diameter must exist if we detected any diameter from max_od
+            summary.num_ground_diams = 1
+            warnings.append("No DIMENSION entities found with diameters; using fallback of 1 ground diameter")
+    except Exception as e:
+        # If diameter collection fails, use old simple method as fallback
+        diameter_dims = dim_data.get("diameter_dims", [])
+        unique_diameters = set(round(d["measurement"], 4) for d in diameter_dims)
+        summary.num_ground_diams = len(unique_diameters) if unique_diameters else 1
+        warnings.append(f"Diameter collection error: {e}; using fallback")
 
     # Rough estimate of total ground length
     # For round punches, assume most of the length is ground
@@ -1020,9 +1262,11 @@ def extract_punch_features_from_dxf(
     if summary.num_ground_diams > 0 and summary.total_ground_length_in == 0 and summary.overall_length_in > 0:
         summary.total_ground_length_in = summary.overall_length_in * 0.5
 
-    # Tolerances
-    summary.min_dia_tol_in = dim_data.get("min_dia_tol")
-    summary.min_len_tol_in = dim_data.get("min_len_tol")
+    # Tolerances - extract from resolved dimension texts
+    resolved_dim_texts = dim_data.get("resolved_dim_texts", [])
+    tolerance_data = extract_tolerances_from_dimensions(dxf_path, unit_factor, resolved_dim_texts)
+    summary.min_dia_tol_in = tolerance_data.get("min_dia_tol")
+    summary.min_len_tol_in = tolerance_data.get("min_len_tol")
 
     # === PASS 3: OPS & PAIN FLAGS ===
 
@@ -1061,30 +1305,44 @@ def extract_punch_features_from_dxf(
         warnings.append(f"Text dump is very small ({len(text_dump)} chars) - may be incomplete")
         summary.warnings = warnings
 
-    # Confidence score based on how much data we extracted
-    confidence = 1.0
+    # Confidence score based on extraction quality
+    # Start from base confidence of 0.7 and add boosts for quality indicators
+    confidence = 0.7
 
-    # Major penalties for missing critical data
-    if summary.overall_length_in == 0:
-        confidence -= 0.3
+    # Critical data: overall dimensions (major boost if present)
+    if summary.overall_length_in > 0:
+        confidence += 0.1
+    else:
         warnings.append("Overall length is 0 - dimension extraction may have failed")
 
-    if summary.max_od_or_width_in == 0:
-        confidence -= 0.3
+    if summary.max_od_or_width_in > 0:
+        confidence += 0.1
+    else:
         warnings.append("Max OD/width is 0 - dimension extraction may have failed")
 
-    # Minor penalties for missing optional data
-    if not summary.material_callout:
-        confidence -= 0.1
+    # Quality indicators: add small boosts for detailed extraction
+    used_fallback_diameter = any("fallback" in w.lower() for w in warnings)
+    if summary.num_ground_diams > 0 and not used_fallback_diameter:
+        confidence += 0.05  # Real diameter dimensions found (no fallback)
 
-    # Bonus for successfully extracting detailed features
+    if summary.min_dia_tol_in is not None:
+        confidence += 0.025  # Diameter tolerance found
+
+    if summary.min_len_tol_in is not None:
+        confidence += 0.025  # Length tolerance found
+
+    if summary.material_callout:
+        confidence += 0.05  # Material detected
+
+    # Bonus for detailed features
     if summary.num_chamfers > 0 or summary.tap_count > 0:
-        confidence += 0.05  # Found specific features
+        confidence += 0.025  # Found specific operations features
 
-    if summary.min_dia_tol_in is not None or summary.min_len_tol_in is not None:
-        confidence += 0.05  # Found tolerances
+    # Cap confidence at 0.9 if we had to use fallbacks or missing tolerances
+    if used_fallback_diameter or (summary.min_dia_tol_in is None and summary.min_len_tol_in is None):
+        confidence = min(confidence, 0.9)
 
-    # Ensure confidence is in valid range
+    # Ensure confidence is in valid range [0.0, 1.0]
     summary.confidence_score = max(0.0, min(1.0, confidence))
     summary.warnings = warnings
 
