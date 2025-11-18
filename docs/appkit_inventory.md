@@ -1,38 +1,40 @@
 # appkit module inventory and production usage
 
-The legacy `appkit/` package has been evaluated module-by-module to document how each
-piece of functionality is used in production code (primarily `AppV7.py` and the
-`cad_quoter/` package). The table below captures the primary responsibilities and
-callers for every module that currently ships under `appkit/`.
+> **Status: CONSOLIDATION COMPLETE**
+>
+> The legacy `appkit/` package has been fully consolidated into the `cad_quoter/` package
+> and removed from the repository. This document is retained for historical reference only.
 
-> **Update:** the Tk-based desktop interface has been removed from this repository.
-> References to `appkit/ui/*` now exist only for historical context.
+## Consolidation Summary
 
-| Module | Key responsibilities | Primary production consumers |
+All functionality from the legacy `appkit/` package has been migrated to the modern
+`cad_quoter/` package structure. The table below shows where each module's functionality
+now resides.
+
+| Original Module | New Location | Status |
 | --- | --- | --- |
-| `appkit/data/__init__.py` | Package resource helpers (`load_text`, `load_json`). | `cad_quoter/domain_models/materials.py`, `cad_quoter/estimators/drilling_legacy.py`, `cad_quoter/material_density.py`, `cad_quoter/llm/__init__.py`. |
-| `appkit/debug/debug_tables.py` | JSON-friendly debug serialization helpers and drilling debug table formatter. | `appkit/utils.__init__` (re-export), `AppV7.py` (debug table rendering). |
-| `appkit/effective.py` | LLM suggestion acceptance flags, guardrail-aware merge, and conversion to overrides. | `AppV7.py`, `cad_quoter/domain.py`, `tests/domain/test_effective_state.py`. |
-| `appkit/env_utils.py` | (Retired) Legacy environment toggles that used to force planner/estimator selection. | _No longer used; behavior lives in `cad_quoter/app/planner_adapter.py`._ |
-| `appkit/guardrails.py` | Guardrail calculations for drilling/tapping floors, setup minimums, and finish pass cost enforcement. | `appkit/effective.py`, `appkit/merge_utils.py`, `AppV7.py`. |
-| `appkit/llm_adapter.py` | Integration surface for LLM-based hour inference, normalization/clamping helpers. | _Retired_: superseded by `cad_quoter/app/llm_helpers.py` after the Tk UI removal. |
-| `appkit/llm_converters.py` | Utilities for converting quote state data into LLM payloads and interpreting results. | `cad_quoter/domain.py` (lazy imports). |
-| `appkit/merge_utils.py` | Core merge algorithm for baseline vs LLM suggestions vs overrides plus helper constants. | `appkit/effective.py`, `appkit/ui/suggestions.py`, `AppV7.py`, `tests/domain/test_effective_state.py`. |
-| `appkit/occ_compat.py` | Thin compatibility layer for OCC/trimesh geometry operations used by the viewer. | `cad_quoter/geometry/__init__.py`. |
-| `appkit/planner_adapter.py` | Glue code for planner and pricing source resolution against modern container APIs. | `cad_quoter/app/quote_doc.py`, `AppV7.py`, `tests/unit/test_pricing_source_resolution.py`. |
-| `appkit/planner_helpers.py` | Planner-related orchestration helpers (process plan job execution). | `AppV7.py`. |
-| `appkit/ui/editor_controls.py` | Tk widget metadata derivation for editor panes. | `AppV7.py`, `tests/test_editor_controls.py`. |
-| `appkit/ui/llm_panel.py` | Tk UI components for LLM configuration/status. | `AppV7.py`. |
-| `appkit/ui/planner_render.py` | Rendering helpers for planner/process tables. | `cad_quoter/pricing/process_view.py`, `AppV7.py`, `tests/app/test_planner_render.py`. |
-| `appkit/ui/services.py` | Quote configuration data class and helpers used by UI and quote document. | `cad_quoter/app/quote_doc.py`, `AppV7.py`. |
-| `appkit/ui/session_io.py` | Serialize/deserialize quote sessions and file dialogs. | `AppV7.py`, `tests/integration/test_app_smoke.py`. |
-| `appkit/ui/suggestions.py` | Build/iterate UI suggestion rows. | `AppV7.py`, `tests/unit/test_suggestion_rows.py`. |
-| `appkit/ui/tk_compat.py` | Tk compatibility imports/shims for UI modules. | `appkit/ui/*`, `AppV7.py`. |
-| `appkit/ui/widgets.py` | Miscellaneous Tk widget helpers (scroll frames, etc.). | `AppV7.py`. |
-| `appkit/utils/__init__.py` | Machining math helpers (feeds/speeds), numeric parsing, debug JSON adapters. | `cad_quoter/app/legacy_hole_support.py`, `cad_quoter/estimators/drilling_legacy.py`, `AppV7.py`. |
-| `appkit/utils/text_rules.py` | Text normalization rules for amortized cost labels. | `appkit/ui/planner_render.py`, `AppV7.py`. |
-| `appkit/vendor_utils.py` | Lead-time heuristics and partner metadata. | `tests/app/test_vendor_utils_lead_times.py`, `AppV7.py`. |
-| `appkit/graveyard.py` | Historical helpers kept for reference (unused in production). | (Not imported by production modules; safe to drop or archive.) |
+| `appkit/data/__init__.py` | `cad_quoter/resources/loading.py` | Migrated |
+| `appkit/debug/debug_tables.py` | `cad_quoter/utils/debug_tables.py` | Migrated |
+| `appkit/effective.py` | `cad_quoter/app/effective.py` | Migrated |
+| `appkit/env_utils.py` | _(removed)_ | Retired |
+| `appkit/guardrails.py` | `cad_quoter/app/guardrails.py` | Migrated |
+| `appkit/llm_adapter.py` | `cad_quoter/llm/__init__.py` | Migrated |
+| `appkit/llm_converters.py` | `cad_quoter/llm/converters.py` | Migrated |
+| `appkit/merge_utils.py` | `cad_quoter/app/merge_utils.py` | Migrated |
+| `appkit/occ_compat.py` | `cad_quoter/geometry/occ_compat.py` | Migrated |
+| `appkit/planner_adapter.py` | _(removed)_ | Retired |
+| `appkit/planner_helpers.py` | _(removed)_ | Retired |
+| `appkit/ui/editor_controls.py` | _(removed)_ | Removed with Tk UI |
+| `appkit/ui/llm_panel.py` | _(removed)_ | Removed with Tk UI |
+| `appkit/ui/planner_render.py` | `cad_quoter/pricing/planner_render.py` | Migrated |
+| `appkit/ui/services.py` | _(removed)_ | Removed with Tk UI |
+| `appkit/ui/session_io.py` | _(removed)_ | Removed with Tk UI |
+| `appkit/ui/suggestions.py` | `cad_quoter/app/suggestions.py` | Migrated |
+| `appkit/ui/tk_compat.py` | _(removed)_ | Removed with Tk UI |
+| `appkit/ui/widgets.py` | _(removed)_ | Removed with Tk UI |
+| `appkit/utils/__init__.py` | `cad_quoter/utils/machining.py` | Migrated |
+| `appkit/utils/text_rules.py` | `cad_quoter/utils/text_rules.py` | Migrated |
+| `appkit/vendor_utils.py` | `cad_quoter/pricing/vendor_utils.py` | Migrated |
+| `appkit/graveyard.py` | _(removed)_ | Archived/Deleted |
 
-This inventory informs the relocation of each module into the modern `cad_quoter/`
-package so that the legacy `appkit/` directory can be removed.
+The `appkit/` directory has been completely removed from the repository.
