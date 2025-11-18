@@ -1,0 +1,272 @@
+================================================================================
+PROCESS RENDERING MODULES CONSOLIDATION - EXECUTIVE SUMMARY
+================================================================================
+
+PROJECT: CAD_Quoting_Tool
+BRANCH: claude/consolidate-duplicate-modules-01SewqDwGLKqsdggPq9sZHSc
+ANALYSIS DATE: 2025-11-18
+
+================================================================================
+MODULES ANALYZED
+================================================================================
+
+1. cad_quoter/pricing/process_cost_renderer.py (206 lines)
+   - Purpose: Pricing engine's process cost rendering
+   - Public API: canonicalize_costs(), render_process_costs(), ORDER, HIDE_IN_COST
+   - Status: Well-defined, clean separation of concerns
+
+2. cad_quoter/pricing/process_view.py (411 lines)
+   - Purpose: Planner UI cost recording and metadata management
+   - Public API: _ProcessCostTableRecorder, metadata functions (_merge, _fold, etc.)
+   - Status: Complex metadata handling, cross-module imports
+
+================================================================================
+KEY FINDINGS
+================================================================================
+
+DUPLICATE CODE:
+  • ~90 lines of duplicate code across both modules
+  • 14-15% code duplication rate
+  • Main areas: float coercion, bucket canonicalization, planner meta detection
+
+PROBLEMATIC IMPORTS:
+  • process_view imports _canonical_bucket_key from planner_render (WRONG!)
+  • Should use canonical_bucket_key from process_buckets (CORRECT)
+  • 4 call sites affected in process_view.py
+
+CANONICALIZATION ISSUE:
+  • process_cost_renderer: Uses process_buckets.canonical_bucket_key() ✓
+  • process_view: Uses planner_render._canonical_bucket_key() ✗
+  • planner_render: Wraps shared canonicalize_costs() with options ✓
+
+UNIQUE FUNCTIONALITY (process_view):
+  • _merge_process_meta() - Complex metadata merging (85 lines)
+  • _fold_process_meta() - Metadata structure building
+  • _merge_applied_process_entries() - Applied process merging
+  • _fold_applied_process() - Applied process organization
+  • _lookup_process_meta() - Multi-strategy metadata lookup
+  → These are planner-specific, no equivalent in pricing renderer
+
+DEPENDENCY GRAPH:
+  process_buckets.py (canonical source)
+       ↓
+  ├─→ process_cost_renderer.py (uses canonical_bucket_key)
+  │       ↓ (imports render_process_costs)
+  │       └─→ process_view.py (SHOULD use canonical_bucket_key)
+  │           ↓ (but uses _canonical_bucket_key from planner_render)
+  │           └─→ ??? (circular-ish dependency)
+  │
+  └─→ planner_render.py (wraps canonicalize_costs)
+
+================================================================================
+RECOMMENDED CONSOLIDATION STRATEGY
+================================================================================
+
+PHASE 1: UNIFY BASE UTILITIES IN process_cost_renderer.py
+  ✓ Add _is_planner_meta_key() - Centralized planner meta detection
+  ✓ Add _safe_float() - Unified float coercion utility
+  ✓ Keep existing utilities: _iter_items(), _to_float() renamed
+
+PHASE 2: UPDATE process_view.py IMPORTS & CALLS
+  ✓ Import canonical_bucket_key from process_buckets (not planner_render)
+  ✓ Import _is_planner_meta_key from process_cost_renderer
+  ✓ Update 4 call sites: lines 72, 91, 124, 196
+  ✓ Simplify _is_planner_meta() to delegate to shared function
+
+PHASE 3: KEEP UNIQUE METADATA FUNCTIONS IN process_view.py
+  ✓ No consolidation needed for metadata merging/folding functions
+  ✓ These are planner-specific; no equivalent in pricing renderer
+
+PHASE 4: NO CHANGES TO planner_render.py
+  ✓ Already using shared canonicalize_costs() correctly
+  ✓ Keep _display_rate_for_row() as planner-specific utility
+  ✓ Could update imports if desired, but not critical
+
+================================================================================
+CONSOLIDATION BENEFITS
+================================================================================
+
+✓ Single Source of Truth: All canonicalization through process_buckets
+✓ Reduced Code Duplication: Remove 90 lines of duplicate logic
+✓ Easier Maintenance: Bug fixes in one place, not multiple
+✓ Clearer Dependencies: No more cross-imports between siblings
+✓ Backward Compatible: No public API changes; internal refactoring only
+✓ Better Test Coverage: Existing tests validate behavior preservation
+✓ Cleaner Architecture: process_buckets → process_cost_renderer → process_view
+
+================================================================================
+IMPACT ASSESSMENT
+================================================================================
+
+PUBLIC API CHANGES:          NONE (fully backward compatible)
+FUNCTION SIGNATURE CHANGES:  NONE
+TEST FILE CHANGES:           NONE (existing tests remain valid)
+CALLERS AFFECTED:            NONE (process_view is internal only)
+
+FILES TO MODIFY:
+  1. cad_quoter/pricing/process_cost_renderer.py (+2 functions)
+  2. cad_quoter/pricing/process_view.py (+4 import updates, +4 call updates)
+  3. Tests: No changes required
+
+NET CODE CHANGES:
+  - Lines added: 15 (new shared utilities)
+  - Lines removed: 60 (simplifications + imports updated)
+  - Net change: -45 lines
+
+================================================================================
+EFFORT ESTIMATE
+================================================================================
+
+Phase 1 (Add shared utilities):      15 minutes   [LOW RISK]
+Phase 2 (Update imports & calls):    15 minutes   [LOW RISK]
+Phase 3 (Testing & verification):    30 minutes   [MEDIUM RISK]
+─────────────────────────────────
+TOTAL:                               60 minutes   [LOW RISK]
+
+================================================================================
+MIGRATION PATH FOR CALLERS
+================================================================================
+
+STEP 1: Update process_view.py imports
+  FROM:
+    from cad_quoter.pricing.process_cost_renderer import render_process_costs
+    from cad_quoter.pricing.planner_render import (
+        _canonical_bucket_key,
+        _display_rate_for_row,
+    )
+  
+  TO:
+    from cad_quoter.pricing.process_cost_renderer import (
+        render_process_costs,
+        _is_planner_meta_key,
+        _safe_float,
+    )
+    from cad_quoter.pricing.process_buckets import canonical_bucket_key
+    from cad_quoter.pricing.planner_render import _display_rate_for_row
+
+STEP 2: Update call sites in _ProcessCostTableRecorder
+  Line 72:   _canonical_bucket_key() → canonical_bucket_key()
+  Line 91:   _canonical_bucket_key() → canonical_bucket_key()
+  Line 124:  _canonical_bucket_key() → canonical_bucket_key()
+  Line 196:  _canonical_bucket_key() → canonical_bucket_key()
+
+STEP 3: Simplify _is_planner_meta() function
+  FROM:
+    def _is_planner_meta(key: str) -> bool:
+        canonical_key = _canonical_bucket_key(key)
+        if not canonical_key:
+            return False
+        return canonical_key.startswith("planner_") or canonical_key == "planner_total"
+  
+  TO:
+    def _is_planner_meta(key: str) -> bool:
+        return _is_planner_meta_key(key)
+
+STEP 4: Verify no external callers
+  ✓ process_view.py is not imported anywhere directly
+  ✓ Only render_process_costs is re-exported from __init__.py
+  ✓ That function signature doesn't change
+
+STEP 5: Run tests
+  ✓ pytest tests/pricing/test_process_cost_renderer.py
+  ✓ pytest tests/ (full suite)
+
+================================================================================
+RISK ASSESSMENT
+================================================================================
+
+RISK:                              MITIGATION:
+─────────────────────────────────────────────────────────────────────────────
+Circular imports                   Moving toward process_buckets as single
+                                   source reduces import dependencies
+
+Function signature changes         None - only internal refactoring
+
+Behavioral changes                 Using shared utilities instead of
+                                   duplicates; should be identical
+
+Test failures                      Existing tests validate behavior
+                                   preservation; low risk
+
+Missed consolidation targets       Analysis is comprehensive; all
+                                   duplications identified
+
+OVERALL RISK LEVEL: LOW
+
+================================================================================
+FILES INCLUDED IN THIS ANALYSIS
+================================================================================
+
+1. consolidation_analysis.md (520 lines)
+   → Comprehensive technical analysis with dependency graphs, phase-by-phase
+     consolidation strategy, migration path for callers, and risk assessment
+
+2. duplicate_functions_summary.md (252 lines)
+   → Side-by-side comparison of duplicate code blocks, impact analysis,
+     implementation checklist, and effort estimate
+
+3. consolidation_summary.txt (THIS FILE)
+   → High-level executive summary with key findings and recommendations
+
+================================================================================
+NEXT STEPS
+================================================================================
+
+1. ✓ [COMPLETE] Code analysis and documentation
+2. [ ] Code review of this analysis
+3. [ ] Implement Phase 1: Add shared utilities to process_cost_renderer
+4. [ ] Implement Phase 2: Update process_view imports and call sites
+5. [ ] Run test suite: pytest tests/pricing/test_process_cost_renderer.py
+6. [ ] Run full test suite: pytest tests/
+7. [ ] Final code review
+8. [ ] Commit: "Consolidate bucket canonicalization logic in process modules"
+
+================================================================================
+RECOMMENDATIONS
+================================================================================
+
+1. PRIORITY: HIGH - Fix canonicalization import in process_view.py
+   → Currently uses planner_render._canonical_bucket_key (wrong source)
+   → Should use process_buckets.canonical_bucket_key (canonical source)
+   → 4 locations need updating
+
+2. PRIORITY: HIGH - Unify planner meta detection
+   → Extract _is_planner_meta_key() to process_cost_renderer
+   → Use consistently across both modules
+   → Eliminates 2 independent implementations
+
+3. PRIORITY: MEDIUM - Extract shared float coercion utility
+   → Move _safe_float() to process_cost_renderer
+   → Use in process_view instead of inline try/except blocks
+   → Improves code clarity and testability
+
+4. PRIORITY: LOW - Document metadata functions in process_view.py
+   → These are planner-specific, correctly isolated
+   → Add docstrings clarifying why not consolidated
+
+5. PRIORITY: LOW - Consider renaming process_view.py
+   → Current name suggests it's a view renderer
+   → Better names might be: process_metadata.py, process_recorder.py
+   → Out of scope for this consolidation
+
+================================================================================
+CONCLUSION
+================================================================================
+
+The two process rendering modules have significant overlapping functionality
+that should be consolidated. The primary issues are:
+
+1. process_view imports canonicalization from wrong source (planner_render)
+2. Duplicate float coercion and planner meta detection logic
+3. No clear single source of truth for bucket canonicalization
+
+The consolidation is LOW RISK because:
+- Only internal refactoring (no public API changes)
+- Well-tested existing code
+- Clear dependencies (all point to process_buckets)
+- Simple migration path for internal callers
+
+Estimated effort: 60 minutes
+Expected benefit: Cleaner architecture, reduced duplication, easier maintenance
+
+================================================================================
