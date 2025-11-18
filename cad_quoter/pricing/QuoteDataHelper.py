@@ -1123,7 +1123,13 @@ def extract_quote_data_from_cad(
         if verbose:
             print("[4/5] Calculating machine hours...")
 
-        hole_table = extract_hole_operations_from_cad(cad_file_path)
+        # Use cached hole operations from plan if available (avoids redundant ODA conversion)
+        if 'hole_operations_data' in plan and plan['hole_operations_data']:
+            hole_table = plan['hole_operations_data']
+            if verbose:
+                print("  Using cached hole operations from plan")
+        else:
+            hole_table = extract_hole_operations_from_cad(cad_file_path)
 
         # Calculate total hole count (sum QTY field from each hole entry)
         holes_total = sum(int(hole.get('QTY', 1)) for hole in hole_table) if hole_table else 0
