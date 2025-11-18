@@ -988,6 +988,9 @@ def plan_from_cad_file(
 
     # Add source info to plan
     plan["source_file"] = str(file_path)
+    # Store cached DXF path if DWG was converted (avoids redundant ODA conversions)
+    if cad_path_for_extraction != file_path:
+        plan["cached_dxf_path"] = str(cad_path_for_extraction)
     if dims:
         plan["extracted_dims"] = {"L": L, "W": W, "T": T}
     plan["extracted_holes"] = len(hole_table)

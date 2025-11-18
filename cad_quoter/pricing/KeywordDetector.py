@@ -260,7 +260,8 @@ def detect_keywords_in_cad(
 def detect_material_in_cad(
     cad_file_path: str | Path,
     material_csv_path: Optional[str | Path] = None,
-    default_material: str = "GENERIC"
+    default_material: str = "GENERIC",
+    text_list: Optional[List[str]] = None
 ) -> str:
     """
     Detect material from CAD file text, defaulting to GENERIC if not found.
@@ -271,6 +272,7 @@ def detect_material_in_cad(
         cad_file_path: Path to CAD file (DXF/DWG)
         material_csv_path: Path to material_map.csv (deprecated, uses MaterialMapper)
         default_material: Material to return if none found (default: "GENERIC")
+        text_list: Optional pre-extracted text list (avoids ODA conversion if provided)
 
     Returns:
         Canonical material name (e.g., "17-4 PH Stainless Steel", "GENERIC")
@@ -280,9 +282,10 @@ def detect_material_in_cad(
         >>> print(f"Material: {material}")
         Material: GENERIC
     """
-    # Extract text from CAD file
-    from cad_quoter.planning import extract_all_text_from_cad
-    text_list = extract_all_text_from_cad(cad_file_path)
+    # Use pre-extracted text if provided, otherwise extract from CAD file
+    if text_list is None:
+        from cad_quoter.planning import extract_all_text_from_cad
+        text_list = extract_all_text_from_cad(cad_file_path)
 
     # Get all dropdown materials from MaterialMapper to search for
     material_options = material_mapper.get_dropdown_options()
