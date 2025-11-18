@@ -449,6 +449,21 @@ def iter_text_records(
         elif et == "DIMENSION":
             # Some variants carry measurement text at .dxf.text
             txt = getattr(ent.dxf, "text", "") or ""
+            # Resolve <> placeholder with actual dimension measurement
+            if "<>" in txt:
+                try:
+                    meas = ent.get_measurement()
+                    if meas is not None:
+                        if hasattr(meas, "magnitude"):
+                            meas = meas.magnitude
+                        # Assume drawing units are inches
+                        meas_in = float(meas)
+                        meas_str = f"{meas_in:.4f}".rstrip("0").rstrip(".")
+                        if meas_str.startswith("0."):
+                            meas_str = meas_str[1:]
+                        txt = txt.replace("<>", meas_str)
+                except Exception:
+                    pass
 
         if txt:
             txt = _decode_uplus(_plain(str(txt)))
