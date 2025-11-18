@@ -3,24 +3,22 @@
 ```mermaid
 flowchart TB
     %% Input
-    A["CAD File<br/><small>.dxf/.dwg/.pdf/.step</small>"] --> B & C & D & E1
+    A["CAD File<br/><small>.dxf/.dwg/.pdf/.step</small>"] --> B & C & D
 
     %% Primary Extraction
     B["Keyword Finder<br/><small>KeywordDetector.py</small>"]
     C["GEO Dump<br/><small>geo_dump.py</small>"]
     D["PaddleOCR<br/><small>paddle_dims_extractor.py</small>"]
-    E1["CAD Feature Extractor<br/><small>cad_feature_extractor.py</small>"]
 
     %% Secondary Processing
     B --> E & G
     C --> F & E & G & H1
     D --> E
-    E1 --> E & G & H1
 
     E["Direct Costs<br/><small>DirectCostHelper.py</small>"]
     F["GEO Page<br/><small>geo_extractor.py</small>"]
     G["Planner Picker<br/><small>process_planner.py<br/>pick_family_and_hints()</small>"]
-    H1["Hole Ops<br/><small>hole_ops.py</small>"]
+    H1["Hole Ops<br/><small>hole_operations.py</small>"]
 
     %% Part Analysis
     E --> H
@@ -46,7 +44,7 @@ flowchart TB
     n3["McMaster API<br/><small>mcmaster_api.py</small>"]
 
     %% Material Data
-    n2["Material Density<br/><small>material_density.py<br/>resources/materials.json</small>"]
+    n2["Material Data<br/><small>materials.py<br/>resources/materials.json</small>"]
     n2 --> n4
 
     %% Scrap Calculations
@@ -62,15 +60,15 @@ flowchart TB
     n6 --> n8 & n15 & R1
 
     %% Rate Infrastructure
-    R1["Rate Buckets<br/><small>rate_buckets.py<br/>rates.py</small>"]
+    R1["Rate Buckets<br/><small>rates.py</small>"]
     R1 --> n9 & n10
 
     %% Speeds and Feeds
-    n15["Speeds & Feeds<br/><small>speeds_feeds_selector.py<br/>speeds_feeds_merged.csv</small>"]
+    n15["Speeds & Feeds<br/><small>process_planner.py<br/>speeds_feeds_merged.csv</small>"]
     n15 --> n8
 
     %% Operation Tables
-    n8["Hole/Tap/Cut Tables<br/><small>hole_ops.py<br/>resources/*.json</small>"]
+    n8["Hole/Tap/Cut Tables<br/><small>hole_operations.py<br/>resources/*.json</small>"]
     H1 --> n8
     n8 --> n9 & n4
 
@@ -100,7 +98,7 @@ flowchart TB
     %% Overrides & Final
     n11["Cost Summary<br/><small>QuoteDataHelper.py<br/>CostSummary class</small>"]
 
-    OV["LLM Overrides<br/><small>llm_overrides.py<br/>llm_suggest.py</small>"]
+    OV["LLM Overrides<br/><small>llm_overrides.py<br/>llm/</small>"]
     OV --> n11
 
     n11 --> n18
@@ -124,7 +122,7 @@ flowchart TB
     classDef output fill:#f5f5f5,stroke:#212121
 
     class A input
-    class B,C,D,E1,H1 extraction
+    class B,C,D,H1 extraction
     class E,F,G,H,I,J,K,L processing
     class n1,n2,n3,n5,n7,n8,n15,R1 data
     class n4,n6,n9,n10,n12,n13,n11,OV,QTY,MRG cost
@@ -140,7 +138,6 @@ flowchart TB
 | Keyword Finder | `cad_quoter/pricing/KeywordDetector.py` | Detects process keywords from CAD |
 | GEO Dump | `cad_quoter/geo_dump.py` | Extracts geometric data |
 | PaddleOCR | `tools/paddle_dims_extractor.py` | OCR for dimension extraction |
-| CAD Feature Extractor | `cad_quoter/cad_feature_extractor.py` | Comprehensive feature analysis |
 
 ### Planning & Operations
 | Component | File | Description |
@@ -151,31 +148,30 @@ flowchart TB
 | Process Planner | `cad_quoter/planning/process_planner.py` | Main planning logic |
 | Machine Ops | `cad_quoter/pricing/time_estimator.py` | Machine time estimation |
 | Labor Ops | `cad_quoter/planning/process_planner.py` | `labor_minutes()` functions |
-| Hole Ops | `tools/hole_ops.py` | Hole/tap/cut operations |
+| Hole Ops | `cad_quoter/geometry/hole_operations.py` | Hole/tap/cut operations |
 
 ### Material & Pricing
 | Component | File | Description |
 |-----------|------|-------------|
 | Material Mapper | `cad_quoter/pricing/MaterialMapper.py` | Maps materials to sources |
 | McMaster Catalog | `cad_quoter/pricing/mcmaster_helpers.py` | McMaster catalog lookup |
-| McMaster API | `cad_quoter/mcmaster_api.py` | API interface |
-| Material Density | `cad_quoter/material_density.py` | Density calculations |
+| McMaster API | `mcmaster_api.py` | API interface |
+| Material Data | `cad_quoter/materials.py` | Density calculations and material data |
 | Scrap Pricing | `cad_quoter/pricing/scrap_pricing.py` | Scrap value calculations |
 | Wieland Scraper | `cad_quoter/pricing/wieland_scraper.py` | Scrap price scraping |
 
 ### Cost Calculation
 | Component | File | Description |
 |-----------|------|-------------|
-| Rate Buckets | `cad_quoter/pricing/rate_buckets.py` | Machine/labor rates |
-| Rates | `cad_quoter/pricing/rates.py` | Rate definitions |
-| Speeds & Feeds | `cad_quoter/pricing/speeds_feeds_selector.py` | Machining parameters |
+| Rate Buckets | `cad_quoter/rates.py` | Machine/labor rates and rate definitions |
+| Speeds & Feeds | `cad_quoter/planning/process_planner.py` | Machining parameters |
 | Cost Summary | `cad_quoter/pricing/QuoteDataHelper.py` | `CostSummary` class |
 
 ### Overrides & Output
 | Component | File | Description |
 |-----------|------|-------------|
 | LLM Overrides | `cad_quoter/llm_overrides.py` | AI-driven adjustments |
-| LLM Suggest | `cad_quoter/llm_suggest.py` | AI suggestions |
+| LLM Suggest | `cad_quoter/llm/` | AI suggestions (`run_llm_suggestions()`) |
 | Final Price | `cad_quoter/pricing/QuoteDataHelper.py` | Final quote calculation |
 | GUI Output | `AppV7.py` | Tkinter GUI display |
 
