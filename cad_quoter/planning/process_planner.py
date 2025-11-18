@@ -1818,16 +1818,117 @@ def estimate_machine_hours_from_plan(
             from cad_quoter.pricing.time_estimator import estimate_face_grind_minutes
             material_group = op.get('material_group', '')
             stock_total = op.get('stock_removed_total', 0.006)  # Conservative default
-            minutes = estimate_face_grind_minutes(L, W, stock_total, material, material_group, faces=2)
+            op_L = op.get('width_in', L)
+            op_W = op.get('thickness_in', W)
+            minutes = estimate_face_grind_minutes(op_L, op_W, stock_total, material, material_group, faces=2)
             time_breakdown['grinding'] += minutes
 
-        # OD grinding for round pierce punches
-        elif op_type in ('grind_length', 'grind_od', 'od_grind_rough', 'od_grind_finish'):
-            from cad_quoter.pricing.time_estimator import estimate_od_grind_minutes
+            # Add detailed operation for renderer
+            volume_cuin = op_L * op_W * stock_total
+            from cad_quoter.pricing.time_estimator import _grind_factor
+            factor = _grind_factor(material, material_group)
+            grinding_operations_detailed.append({
+                'op_name': 'grind_faces',
+                'op_description': 'Face Grind - Final Kiss',
+                'length': op_L,
+                'width': op_W,
+                'stock_removed_total': stock_total,
+                'faces': 2,
+                'volume_removed': volume_cuin,
+                'grind_material_factor': factor,
+                'time_minutes': minutes,
+            })
+
+        # Grind_reference_faces - Establish datums before profile (punch datum heuristics)
+        elif op_type == 'grind_reference_faces':
+            from cad_quoter.pricing.time_estimator import estimate_face_grind_minutes, _grind_factor
             material_group = op.get('material_group', '')
-            meta = plan.get('meta', {})
+            stock_total = op.get('stock_removed_total', 0.006)
+            faces = op.get('faces', 2)
+            op_L = op.get('length_in', L)
+            op_W = op.get('width_in', W)
+            minutes = estimate_face_grind_minutes(op_L, op_W, stock_total, material, material_group, faces=faces)
+            time_breakdown['grinding'] += minutes
+
+            # Add detailed operation for renderer (DATUM line)
+            volume_cuin = op_L * op_W * stock_total
+            factor = _grind_factor(material, material_group)
+            grinding_operations_detailed.append({
+                'op_name': 'grind_reference_faces',
+                'op_description': 'Grind Reference Faces (Datum)',
+                'length': op_L,
+                'width': op_W,
+                'stock_removed_total': stock_total,
+                'faces': faces,
+                'volume_removed': volume_cuin,
+                'grind_material_factor': factor,
+                'time_minutes': minutes,
+                'is_datum': True,  # Flag for renderer
+            })
+
+        # Grind_length - End face grinding for both round and non-round punches
+        elif op_type == 'grind_length':
+            from cad_quoter.pricing.time_estimator import estimate_face_grind_minutes, _grind_factor
+            material_group = op.get('material_group', '')
+            stock_total = op.get('stock_removed_total', 0.006)
+            faces = op.get('faces', 2)
+            # Use diameter for round or width/thickness for rectangular
+            if op.get('diameter'):
+                # Round punch - use diameter as both L and W for face area
+                d = op.get('diameter', 0)
+                op_L = op_W = d
+            else:
+                op_L = op.get('width_in', L)
+                op_W = op.get('thickness_in', W)
+            minutes = estimate_face_grind_minutes(op_L, op_W, stock_total, material, material_group, faces=faces)
+            time_breakdown['grinding'] += minutes
+
+            # Add detailed operation
+            volume_cuin = op_L * op_W * stock_total
+            factor = _grind_factor(material, material_group)
+            grinding_operations_detailed.append({
+                'op_name': 'grind_length',
+                'op_description': 'Grind to Length (End Faces)',
+                'length': op_L,
+                'width': op_W,
+                'stock_removed_total': stock_total,
+                'faces': faces,
+                'volume_removed': volume_cuin,
+                'grind_material_factor': factor,
+                'time_minutes': minutes,
+            })
+
+        # OD grinding for round pierce punches (rough and finish)
+        elif op_type in ('grind_od', 'od_grind', 'od_grind_rough', 'od_grind_finish'):
+            from cad_quoter.pricing.time_estimator import estimate_od_grind_minutes, _grind_factor
+            material_group = op.get('material_group', '')
+            # Build meta dict from op parameters
+            meta = {
+                'od_grind_volume_removed_cuin': op.get('od_grind_volume_removed_cuin', 0),
+                'diameter': op.get('diameter', op.get('total_length_in', 0)),
+                'thickness': op.get('total_length_in', L),
+                'stock_allow_radial': 0.003,
+            }
+            # Also check plan meta
+            plan_meta = plan.get('meta', {})
+            for k, v in plan_meta.items():
+                if k not in meta or not meta[k]:
+                    meta[k] = v
+
             minutes = estimate_od_grind_minutes(meta, material, material_group)
             time_breakdown['grinding'] += minutes
+
+            # Add detailed operation
+            factor = _grind_factor(material, material_group)
+            op_desc = 'OD Grind - Rough' if 'rough' in op_type else 'OD Grind - Finish'
+            grinding_operations_detailed.append({
+                'op_name': op_type,
+                'op_description': op_desc,
+                'num_diams': op.get('num_diams', 1),
+                'total_length_in': op.get('total_length_in', L),
+                'grind_material_factor': factor,
+                'time_minutes': minutes,
+            })
 
         # Optional: rough milling/turning operations (placeholder)
         elif op_type in ('mill_rough_profile', 'mill_turn_rough', 'turn_rough'):
@@ -2169,6 +2270,118 @@ def render_square_up_block(
     # Total line
     lines.append("")
     lines.append(f"TOTAL Square/Finish Time: {total_time:.2f} minutes")
+
+    return lines
+
+
+def render_punch_datum_block(
+    grinding_ops: List[Dict[str, Any]],
+) -> List[str]:
+    """Render DATUM line for punch reference face grinding.
+
+    When punch plan includes Grind_reference_faces, prints a one-liner:
+    DATUM: Grind 2 faces | L×W×stock → min | factor {grind_factor}
+
+    Args:
+        grinding_ops: Detailed grinding operations from estimate_machine_hours_from_plan
+
+    Returns:
+        List of formatted strings for display (single line for DATUM)
+    """
+    lines = []
+
+    # Find datum operation (Grind_reference_faces)
+    datum_op = None
+    for op in grinding_ops:
+        if op.get('op_name') == 'grind_reference_faces' or op.get('is_datum'):
+            datum_op = op
+            break
+
+    if not datum_op:
+        return []
+
+    L = datum_op.get('length', 0)
+    W = datum_op.get('width', 0)
+    stock = datum_op.get('stock_removed_total', 0.006)
+    factor = datum_op.get('grind_material_factor', 1.0)
+    time_min = datum_op.get('time_minutes', 0)
+    faces = datum_op.get('faces', 2)
+
+    # Format: DATUM: Grind 2 faces | L×W×stock → min | factor {grind_factor}
+    line = f"DATUM: Grind {faces} faces | {L:.3f}×{W:.3f}×{stock:.3f} → {time_min:.2f} min | factor {factor:.2f}"
+    lines.append(line[:106])
+
+    return lines
+
+
+def render_punch_grind_block(
+    grinding_ops: List[Dict[str, Any]],
+) -> List[str]:
+    """Render grinding operations for punches (OD grind, length grind, etc.).
+
+    Shows OD/length grinds for round punches without plate-style square-up block.
+
+    Args:
+        grinding_ops: Detailed grinding operations from estimate_machine_hours_from_plan
+
+    Returns:
+        List of formatted strings for display
+    """
+    lines = []
+    total_time = 0.0
+
+    # Group operations
+    od_ops = []
+    length_ops = []
+    face_ops = []
+
+    for op in grinding_ops:
+        op_name = op.get('op_name', '')
+        if 'od_grind' in op_name:
+            od_ops.append(op)
+        elif op_name == 'grind_length':
+            length_ops.append(op)
+        elif op_name == 'grind_faces':
+            face_ops.append(op)
+
+    # OD Grind operations
+    for op in od_ops:
+        op_desc = op.get('op_description', 'OD Grind')
+        num_diams = op.get('num_diams', 1)
+        length = op.get('total_length_in', 0)
+        factor = op.get('grind_material_factor', 1.0)
+        time_min = op.get('time_minutes', 0)
+
+        line = f"  {op_desc}: {num_diams} diam(s) × {length:.2f}\" | factor {factor:.2f} | {time_min:.2f} min"
+        lines.append(line[:106])
+        total_time += time_min
+
+    # Length grind operations
+    for op in length_ops:
+        L = op.get('length', 0)
+        W = op.get('width', 0)
+        stock = op.get('stock_removed_total', 0.006)
+        factor = op.get('grind_material_factor', 1.0)
+        time_min = op.get('time_minutes', 0)
+
+        line = f"  Grind Length: {L:.3f}×{W:.3f}×{stock:.3f} | factor {factor:.2f} | {time_min:.2f} min"
+        lines.append(line[:106])
+        total_time += time_min
+
+    # Face grind operations (kiss pass)
+    for op in face_ops:
+        L = op.get('length', 0)
+        W = op.get('width', 0)
+        stock = op.get('stock_removed_total', 0.004)
+        factor = op.get('grind_material_factor', 1.0)
+        time_min = op.get('time_minutes', 0)
+
+        line = f"  Face Grind: {L:.3f}×{W:.3f}×{stock:.3f} | factor {factor:.2f} | {time_min:.2f} min"
+        lines.append(line[:106])
+        total_time += time_min
+
+    if lines:
+        lines.append(f"  TOTAL Punch Grind Time: {total_time:.2f} minutes")
 
     return lines
 
@@ -2526,10 +2739,22 @@ class PunchPlannerParams:
     min_dia_tol_in: Optional[float] = None
     min_len_tol_in: Optional[float] = None
     material: str = "A2"
+    material_group: str = ""
+    # Punch datum heuristics fields
+    has_flats: bool = False  # Round punches with machined flats
+    has_wire_profile: bool = False  # Requires wire EDM profiling
+    wire_profile_perimeter_in: float = 0.0  # Perimeter for wire EDM
 
     def __post_init__(self):
         if self.tap_summary is None:
             self.tap_summary = []
+
+
+def _is_carbide(material: str, material_group: str) -> bool:
+    """Check if material is carbide (disallow milling for datum faces)."""
+    mat_upper = (material or "").upper()
+    group_upper = (material_group or "").upper()
+    return "CARBIDE" in mat_upper or "CARBIDE" in group_upper
 
 
 def create_punch_plan(params: Dict[str, Any]) -> Dict[str, Any]:
@@ -2584,6 +2809,10 @@ def _extract_punch_params(params: Dict[str, Any]) -> PunchPlannerParams:
         min_dia_tol_in=params.get("min_dia_tol_in"),
         min_len_tol_in=params.get("min_len_tol_in"),
         material=params.get("material", "A2"),
+        material_group=params.get("material_group", ""),
+        has_flats=bool(params.get("has_flats", False)),
+        has_wire_profile=bool(params.get("has_wire_profile", False)),
+        wire_profile_perimeter_in=float(params.get("wire_profile_perimeter_in", 0.0)),
     )
 
 
@@ -2642,9 +2871,49 @@ def _add_punch_heat_treat_ops(plan: Dict[str, Any], p: PunchPlannerParams) -> No
         plan["directs"]["outsourced"] = True
 
 
+def _add_punch_wire_edm_ops(plan: Dict[str, Any], p: PunchPlannerParams) -> None:
+    """Add wire EDM profile operations for punches with flats or form profiles."""
+    if not p.has_wire_profile and not p.has_flats:
+        return
+
+    # Calculate perimeter if not provided
+    perimeter = p.wire_profile_perimeter_in
+    if perimeter <= 0:
+        if p.shape_type == "round":
+            # Round with flats: approximate perimeter
+            perimeter = 3.14159 * p.max_od_or_width_in + (p.max_od_or_width_in * 0.5)
+        else:
+            # Rectangular: 2(L + W)
+            w = p.body_width_in or p.max_od_or_width_in
+            t = p.body_thickness_in or w
+            perimeter = 2 * (p.overall_length_in + max(w, t))
+
+    plan["ops"].append({
+        "op": "Wire_EDM_profile",
+        "wire_profile_perimeter_in": perimeter,
+        "thickness_in": p.body_thickness_in or p.max_od_or_width_in,
+        "note": f"Wire EDM profile cut, perimeter {perimeter:.2f}\""
+    })
+
+
 def _add_punch_grinding_ops(plan: Dict[str, Any], p: PunchPlannerParams) -> None:
-    """Add grinding operations."""
+    """Add grinding operations with punch datum heuristics.
+
+    Implements:
+    - Round punches: OD + end faces only (no side square-up)
+    - Non-round/form punches: Grind_reference_faces before profiling
+    - Carbide punches: only grind + WEDM (no milling)
+    - Very small parts: prefer Grind_reference_faces over mill
+    """
+    is_carbide = _is_carbide(p.material, p.material_group)
+
     if p.shape_type == "round":
+        # ROUND PUNCHES: OD grind + face grind (Grind_length)
+        # If has_flats, Wire_EDM_profile comes BEFORE OD grind
+
+        if p.has_flats:
+            _add_punch_wire_edm_ops(plan, p)
+
         if p.num_ground_diams > 0:
             tol_factor = 1.0
             if p.min_dia_tol_in and p.min_dia_tol_in < 0.0002:
@@ -2652,28 +2921,81 @@ def _add_punch_grinding_ops(plan: Dict[str, Any], p: PunchPlannerParams) -> None
             if p.has_no_step_permitted:
                 tol_factor *= 1.3
 
+            # Add rough and finish OD grind
             plan["ops"].append({
-                "op": "od_grind",
+                "op": "OD_grind_rough",
                 "num_diams": p.num_ground_diams,
                 "total_length_in": p.total_ground_length_in,
                 "tol_factor": tol_factor,
-                "note": f"Grind {p.num_ground_diams} diameters, {p.total_ground_length_in:.2f}\" total length"
+                "note": f"Rough grind {p.num_ground_diams} diameters"
+            })
+            plan["ops"].append({
+                "op": "OD_grind_finish",
+                "num_diams": p.num_ground_diams,
+                "total_length_in": p.total_ground_length_in,
+                "tol_factor": tol_factor,
+                "note": f"Finish grind {p.num_ground_diams} diameters, {p.total_ground_length_in:.2f}\" total"
             })
 
+        # Grind_length: faces both ends
+        plan["ops"].append({
+            "op": "Grind_length",
+            "diameter": p.max_od_or_width_in,
+            "length_in": p.overall_length_in,
+            "stock_removed_total": 0.006,
+            "faces": 2,
+            "note": "Grind both end faces to length"
+        })
+
+        # Do NOT emit square_up_* for round punches
+
+    else:
+        # NON-ROUND / FORM PUNCHES
+        # Determine dimensions for small-part check
+        w = p.body_width_in or p.max_od_or_width_in
+        t = p.body_thickness_in or w
+        min_dim = min(w, t) if w and t else 1.0
+
+        # Insert Grind_reference_faces BEFORE Wire_EDM_profile
+        # For carbide or very small parts, always use grind (no mill)
+        use_grind_datum = is_carbide or min_dim < 1.0
+
+        if use_grind_datum or p.has_wire_profile:
+            # Establish datum faces by grinding
+            plan["ops"].append({
+                "op": "Grind_reference_faces",
+                "stock_removed_total": 0.006,
+                "faces": 2,
+                "length_in": p.overall_length_in,
+                "width_in": w,
+                "note": "Establish datums before profile"
+            })
+
+        # Wire EDM profile after datum establishment
+        if p.has_wire_profile:
+            _add_punch_wire_edm_ops(plan, p)
+
+        # Final surface grind (Grind_length for non-round)
+        plan["ops"].append({
+            "op": "Grind_length",
+            "width_in": w,
+            "thickness_in": t,
+            "length_in": p.overall_length_in,
+            "stock_removed_total": 0.004,
+            "faces": 2,
+            "note": "Grind to final length"
+        })
+
+        # Optional final kiss grind on faces
         if p.has_perp_face_grind:
             plan["ops"].append({
-                "op": "face_grind",
-                "diameter": p.max_od_or_width_in,
-                "note": "Grind face perpendicular to centerline"
+                "op": "Grind_faces",
+                "width_in": w,
+                "thickness_in": t,
+                "stock_removed_total": 0.004,
+                "faces": 2,
+                "note": "Final face grind (kiss pass)"
             })
-    else:
-        plan["ops"].append({
-            "op": "surface_grind",
-            "width_in": p.body_width_in,
-            "thickness_in": p.body_thickness_in,
-            "length_in": p.overall_length_in,
-            "note": "Surface grind all faces"
-        })
 
 
 def _add_punch_hole_ops(plan: Dict[str, Any], p: PunchPlannerParams) -> None:
