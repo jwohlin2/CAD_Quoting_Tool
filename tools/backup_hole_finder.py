@@ -229,6 +229,91 @@ def parse_mtext_hole_description(mtext: str) -> BackupHoleFeature:
 # DWG/DXF HOLE EXTRACTION
 # =============================================================================
 
+def extract_holes_from_text_records(text_records: List[Dict[str, Any]]) -> List[BackupHoleFeature]:
+    """
+    Extract hole features from geo_extractor text records.
+
+    This is designed to work with text records from geo_dump/geo_extractor
+    when no formal HOLE TABLE is found. It looks for dimension annotations
+    that describe holes.
+
+    Args:
+        text_records: List of text record dicts with 'text' and 'etype' keys
+
+    Returns:
+        List of extracted BackupHoleFeature objects
+    """
+    holes: List[BackupHoleFeature] = []
+
+    for record in text_records:
+        text = record.get("text", "")
+        if not text:
+            continue
+
+        # Check if this looks like a hole description
+        if _is_hole_description(text):
+            feature = parse_mtext_hole_description(text)
+            if feature.diameter or feature.is_thru or feature.operations:
+                holes.append(feature)
+
+    return holes
+
+
+def convert_to_hole_operations(holes: List[BackupHoleFeature]) -> List[List[str]]:
+    """
+    Convert BackupHoleFeature list to hole operations format.
+
+    This matches the format expected by explode_rows_to_operations output:
+    [HOLE_LETTER, REF_DIAM, QTY, OPERATION]
+
+    Args:
+        holes: List of BackupHoleFeature objects
+
+    Returns:
+        List of [hole_letter, ref_diam, qty, operation] lists
+    """
+    operations: List[List[str]] = []
+    hole_letter = ord('A')
+
+    for hole in holes:
+        letter = chr(hole_letter)
+        hole_letter += 1
+
+        # Format diameter
+        if hole.diameter and hole.diameter != "<>":
+            ref_diam = f"Ø{hole.diameter}"
+        elif hole.diameter_mm:
+            inches = hole.diameter_mm / INCH_TO_MM
+            ref_diam = f"Ø{inches:.4f}".rstrip("0").rstrip(".")
+        else:
+            ref_diam = "Ø?"
+
+        qty = str(hole.qty)
+
+        # Build operation description
+        op_parts = []
+
+        if hole.is_thru:
+            op_parts.append("THRU")
+
+        for op in hole.operations:
+            if op == "JIG GRIND":
+                op_parts.append("(JIG GRIND)")
+            elif op == "C'BORE" and hole.cbore_diameter:
+                cbore_desc = f"Ø{hole.cbore_diameter} C'BORE"
+                if hole.cbore_depth_in:
+                    cbore_desc += f" X {hole.cbore_depth_in} DEEP"
+                if hole.from_face:
+                    cbore_desc += f" FROM {hole.from_face}"
+                op_parts.append(cbore_desc)
+
+        operation = " ".join(op_parts) if op_parts else hole.raw_text
+
+        operations.append([letter, ref_diam, qty, operation])
+
+    return operations
+
+
 def extract_holes_from_dwg(filepath: str) -> List[BackupHoleFeature]:
     """
     Extract hole features from a DWG/DXF file using ezdxf.
