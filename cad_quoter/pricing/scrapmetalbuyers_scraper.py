@@ -486,7 +486,7 @@ MATERIAL_KEYWORDS: Dict[str, List[str]] = {
     "battery": ["battery", "batteries"],
     "carbide": ["carbide", "tungsten carbide", "tungsten"],
     "titanium": ["titanium", "titanium scrap"],
-    "high_speed_steel": ["high speed steel", "hss"],
+    "high_speed_steel": ["high speed steel", "hss", "a2", "tool steel", "tool steel a2"],
     "ceramic": ["ceramic"],
 }
 
