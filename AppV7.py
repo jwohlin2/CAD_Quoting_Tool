@@ -660,6 +660,7 @@ class AppV7:
             mcmaster_price_override = self._get_field_float("McMaster Price Override ($)")
             scrap_value_override = self._get_field_float("Scrap Value Override ($)")
             quantity = self._get_quantity()
+            family_override = self._get_part_family()
 
             try:
                 self._cached_quote_data = extract_quote_data_from_cad(
@@ -672,6 +673,7 @@ class AppV7:
                     mcmaster_price_override=mcmaster_price_override,
                     scrap_value_override=scrap_value_override,
                     quantity=quantity,
+                    family_override=family_override,
                     verbose=True
                 )
 
