@@ -2132,8 +2132,9 @@ def estimate_hole_table_times(
         # For drilling, assume 2 flutes
         feed_rate = rpm * 2 * feed_per_tooth  # IPM
 
-        # DRILL operations (main hole) - skip if it's a jig grind operation
-        if not is_jig_grind:
+        # DRILL operations (main hole) - skip if it's a jig grind or standalone cbore operation
+        # C'BORE entries should not be added to drill_groups (they go in cbore_groups)
+        if not is_jig_grind and not is_cbore:
             # Time per hole: depth / feed_rate gives minutes (since feed_rate is IPM)
             time_per_hole = (depth / feed_rate) if feed_rate > 0 else 1.0
             time_per_hole += 0.1  # Add approach/retract time
