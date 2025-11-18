@@ -405,25 +405,27 @@ def _is_hole_description(text: str) -> bool:
 
     upper = text.upper()
 
-    # Keywords that indicate hole descriptions
-    hole_keywords = [
+    # Must have a quantity marker like (2), (3), etc.
+    has_qty = bool(re.search(r"\(\d+\)", text))
+    if not has_qty:
+        return False
+
+    # Must have a diameter indicator (Ø, ∅) or placeholder (<>)
+    has_diameter = bool(re.search(r"[∅Ø]", text) or "<>" in text)
+
+    # Must have a hole operation keyword
+    hole_op_keywords = [
         "THRU",
         "JIG GRIND",
         "C'BORE",
         "CBORE",
         "C'DRILL",
         "TAP",
-        "DEEP",
-        "FROM FRONT",
-        "FROM BACK",
     ]
+    has_op_keyword = any(kw in upper for kw in hole_op_keywords)
 
-    # Diameter indicators
-    has_diameter = bool(re.search(r"[∅Ø]", text) or "<>" in text)
-    has_qty = bool(re.search(r"\(\d+\)", text))
-    has_keyword = any(kw in upper for kw in hole_keywords)
-
-    return has_diameter or has_keyword or (has_qty and has_keyword)
+    # Require both diameter/placeholder AND operation keyword
+    return has_diameter and has_op_keyword
 
 
 # =============================================================================
