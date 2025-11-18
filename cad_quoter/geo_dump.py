@@ -47,6 +47,15 @@ except ImportError:
     infer_stock_dims_from_lines = None  # type: ignore
     read_texts_from_csv = None  # type: ignore
 
+try:
+    from tools.backup_hole_finder import (
+        extract_holes_from_text_records,
+        convert_to_hole_operations,
+    )
+except ImportError:
+    extract_holes_from_text_records = None  # type: ignore
+    convert_to_hole_operations = None  # type: ignore
+
 from cad_quoter import geo_extractor
 
 # Repository root (parent of cad_quoter directory)
@@ -274,6 +283,9 @@ def extract_hole_operations_from_file(file_path: str | Path) -> List[dict]:
     This function parses the hole table and breaks it down into atomic
     machining operations (drill, tap, counterbore, etc.) using hole_ops logic.
 
+    If no formal HOLE TABLE is found, it falls back to the backup hole finder
+    which can extract holes from dimension annotations.
+
     Args:
         file_path: Path to DXF or DWG file
 
@@ -305,25 +317,41 @@ def extract_hole_operations_from_file(file_path: str | Path) -> List[dict]:
     # Find and parse hole table
     header_chunks, body_chunks = _find_hole_table_chunks(text_records)
 
-    if not header_chunks:
-        return []
+    if header_chunks:
+        # Use traditional HOLE TABLE parsing
+        text_rows = header_chunks + body_chunks
+        ops_rows = explode_rows_to_operations(text_rows)
 
-    # Explode into operations using hole_ops
-    text_rows = header_chunks + body_chunks
-    ops_rows = explode_rows_to_operations(text_rows)
+        # Convert to list of dicts
+        result = []
+        for row in ops_rows:
+            if len(row) >= 4:
+                result.append({
+                    "HOLE": row[0],
+                    "REF_DIAM": row[1],
+                    "QTY": row[2],
+                    "OPERATION": row[3],
+                })
 
-    # Convert to list of dicts
-    result = []
-    for row in ops_rows:
-        if len(row) >= 4:
-            result.append({
-                "HOLE": row[0],
-                "REF_DIAM": row[1],
-                "QTY": row[2],
-                "OPERATION": row[3],
-            })
+        return result
 
-    return result
+    # Fallback: Use backup hole finder to extract from dimension text
+    if extract_holes_from_text_records and convert_to_hole_operations:
+        holes = extract_holes_from_text_records(text_records)
+        if holes:
+            ops_rows = convert_to_hole_operations(holes)
+            result = []
+            for row in ops_rows:
+                if len(row) >= 4:
+                    result.append({
+                        "HOLE": row[0],
+                        "REF_DIAM": row[1],
+                        "QTY": row[2],
+                        "OPERATION": row[3],
+                    })
+            return result
+
+    return []
 
 
 def extract_all_text_from_file(
