@@ -5,21 +5,20 @@ from __future__ import annotations
 import math
 from collections import Counter
 from collections.abc import Mapping as _MappingABC, Sequence
-from dataclasses import replace
+from dataclasses import dataclass, field, replace
 from types import SimpleNamespace
-from typing import Any, Mapping, TypeAlias
+from typing import Any, Mapping, MutableMapping, TypeAlias
 
 try:  # pragma: no cover - optional dependency
     from pandas import DataFrame as PandasDataFrame  # type: ignore
 except Exception:  # pragma: no cover - fallback when pandas is unavailable
     PandasDataFrame = Any  # type: ignore[misc, assignment]
 
-from cad_quoter.resources.loading import load_json
+from cad_quoter.resources import load_json
 from cad_quoter.utils.machining import _jsonify_debug_value
 from cad_quoter.domain_models import MATERIAL_DISPLAY_BY_KEY, normalize_material_key
 from cad_quoter.domain_models import coerce_float_or_none as _coerce_float_or_none
 from cad_quoter.domain_models.values import to_float
-from cad_quoter.estimators.base import SpeedsFeedsUnavailableError
 from cad_quoter.pricing import time_estimator as _time_estimator
 from cad_quoter.pricing.speeds_feeds_selector import (
     pick_speeds_row as _pick_speeds_row,
@@ -39,6 +38,27 @@ from cad_quoter.pricing.time_estimator import (
     estimate_time_min as _estimate_time_min,
 )
 
+
+class SpeedsFeedsUnavailableError(RuntimeError):
+    """Raised when a machining estimator requires a speeds/feeds table."""
+
+
+@dataclass(slots=True)
+class EstimatorInput:
+    """Normalized payload consumed by estimator plugins."""
+
+    material_key: str
+    geometry: Mapping[str, Any] = field(default_factory=dict)
+    material_group: str | None = None
+    tables: MutableMapping[str, Any] = field(default_factory=dict)
+    coefficients: Mapping[str, Any] = field(default_factory=dict)
+    machine_params: Any = None
+    overhead_params: Any = None
+    warnings: list[str] | None = None
+    debug_lines: list[str] | None = None
+    debug_summary: dict[str, dict[str, Any]] | None = None
+
+
 __all__ = [
     "_clean_hole_groups",
     "_coerce_overhead_dataclass",
@@ -47,7 +67,10 @@ __all__ = [
     "_drill_overhead_from_params",
     "_legacy_estimate_drilling_hours",
     "_machine_params_from_params",
+    "estimate",
+    "EstimatorInput",
     "legacy_estimate_drilling_hours",
+    "SpeedsFeedsUnavailableError",
 ]
 
 _NormalizedKey = str
@@ -1735,4 +1758,50 @@ def _legacy_estimate_drilling_hours(
 
 
 legacy_estimate_drilling_hours = _legacy_estimate_drilling_hours
+
+
+def _resolve_speeds_feeds_table(tables: Mapping[str, Any] | None) -> PandasDataFrame | None:
+    if not tables:
+        return None
+    try:
+        table = tables.get("speeds_feeds")
+    except AttributeError:
+        try:
+            table = tables["speeds_feeds"]  # type: ignore[index]
+        except Exception:
+            table = None
+    return table if isinstance(table, PandasDataFrame) else None
+
+
+def estimate(input_data: EstimatorInput) -> float:
+    """Estimate drilling hours using the legacy implementation."""
+
+    geometry = dict(input_data.geometry or {})
+    hole_diams_mm = list(geometry.get("hole_diams_mm") or [])
+    thickness_raw = geometry.get("thickness_in", 0.0)
+    try:
+        thickness_in = float(thickness_raw)
+    except (TypeError, ValueError):
+        thickness_in = 0.0
+    raw_groups = geometry.get("hole_groups")
+    groups = None
+    if isinstance(raw_groups, list):
+        groups = [g for g in raw_groups if isinstance(g, Mapping)]
+        if not groups:
+            groups = None
+    speeds_feeds_table = _resolve_speeds_feeds_table(input_data.tables)
+
+    return legacy_estimate_drilling_hours(
+        hole_diams_mm,
+        thickness_in,
+        input_data.material_key,
+        material_group=input_data.material_group,
+        hole_groups=groups,
+        speeds_feeds_table=speeds_feeds_table,
+        machine_params=input_data.machine_params,
+        overhead_params=input_data.overhead_params,
+        warnings=input_data.warnings,
+        debug_lines=input_data.debug_lines,
+        debug_summary=input_data.debug_summary,
+    )
 

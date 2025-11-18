@@ -2,12 +2,31 @@
 
 from __future__ import annotations
 
+import json
+from functools import lru_cache
 from pathlib import Path
-from typing import Iterable
-
-from .loading import load_json, load_text
+from typing import Any, Iterable
 
 _RESOURCE_ROOT = Path(__file__).resolve().parent
+
+
+@lru_cache(maxsize=None)
+def _read_text(name: str) -> str:
+    path = _RESOURCE_ROOT / name
+    with path.open("r", encoding="utf-8") as handle:
+        return handle.read()
+
+
+def load_text(name: str) -> str:
+    """Return the contents of ``name`` from the data directory."""
+
+    return _read_text(name)
+
+
+def load_json(name: str) -> Any:
+    """Parse ``name`` (relative to the data directory) as JSON."""
+
+    return json.loads(_read_text(name))
 
 
 def _build_path(parts: Iterable[str]) -> Path:
