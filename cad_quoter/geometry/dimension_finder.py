@@ -535,17 +535,53 @@ class DimensionFinder:
         # Sort by SCORE first, then by value for ties
         candidates.sort(key=lambda x: (x[1], x[0]), reverse=True)
 
-        # Get unique values, preserving score order
-        # Return more candidates for better matching
+        # Get unique values with SIZE DIVERSITY
+        # A bbox needs L, W, H which are typically different sizes
+        # Ensure we have candidates from different size ranges
         seen = set()
         top_dims = []
+
+        # First: add top scored unique values (up to 10)
         for val, score, _ in candidates:
             rounded = round(val, 4)
             if rounded not in seen:
                 seen.add(rounded)
                 top_dims.append((val, score))
-                if len(top_dims) >= 20:  # Return top 20 candidates
+                if len(top_dims) >= 10:
                     break
+
+        # Second: ensure we have diversity by adding best from each size bucket
+        # Size buckets: [0.05-0.3), [0.3-0.6), [0.6-1.5), [1.5-4), [4+)
+        buckets = [
+            (0.05, 0.3),
+            (0.3, 0.6),
+            (0.6, 1.5),
+            (1.5, 4.0),
+            (4.0, float('inf'))
+        ]
+
+        for low, high in buckets:
+            # Find best candidate in this bucket not already included
+            for val, score, _ in candidates:
+                if low <= val < high:
+                    rounded = round(val, 4)
+                    if rounded not in seen:
+                        seen.add(rounded)
+                        top_dims.append((val, score))
+                        break  # Only add one per bucket
+
+        # Third: also include ALL dimensions above a decent score threshold
+        # This ensures we don't miss dimensions that exist but scored lower
+        score_threshold = 0.5
+        for val, score, _ in candidates:
+            if score >= score_threshold:
+                rounded = round(val, 4)
+                if rounded not in seen:
+                    seen.add(rounded)
+                    top_dims.append((val, score))
+
+        # Sort final list by score
+        top_dims.sort(key=lambda x: x[1], reverse=True)
 
         return top_dims
 
@@ -656,9 +692,9 @@ def analyze_file(
 
     if expected:
         result["comparison"] = finder.compare_with_expected(expected, tolerance)
-        result["inferred_bbox"] = finder.find_bounding_box()[:5]  # Top 5 candidates
+        result["inferred_bbox"] = finder.find_bounding_box()  # All candidates for matching
     else:
-        result["inferred_bbox"] = finder.find_bounding_box()[:5]
+        result["inferred_bbox"] = finder.find_bounding_box()  # All candidates
 
     return result
 
