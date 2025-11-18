@@ -998,12 +998,20 @@ def extract_quote_data_from_cad(
     if catalog_csv_path is None:
         catalog_csv_path = str(default_catalog_csv())
 
+    # Calculate desired stock dimensions (with machining allowances)
+    # These are the actual dimensions needed for the starting stock
+    desired_L = part_info.length + 0.50   # +0.50" face milling allowance
+    desired_W = part_info.width + 0.50    # +0.50" face milling allowance
+    desired_T = part_info.thickness + 0.25  # +0.25" thickness allowance
+
     # Calculate scrap info
-    # Always pass dimensions to avoid redundant OCR extraction
-    # Dimensions are already extracted from the process plan above (line 429)
+    # Pass desired dimensions explicitly to ensure catalog lookup uses correct values
     scrap_calc = calculate_total_scrap(
         cad_file_path=cad_file_path,
         material=material,
+        desired_length=desired_L,
+        desired_width=desired_W,
+        desired_thickness=desired_T,
         part_length=part_info.length,
         part_width=part_info.width,
         part_thickness=part_info.thickness,
@@ -1029,9 +1037,6 @@ def extract_quote_data_from_cad(
     # Note: McMaster stock dimensions are already calculated in scrap_calc from calculate_total_scrap()
     # We just need to get the part number for pricing lookup
     catalog_rows = load_mcmaster_catalog_rows(catalog_csv_path)
-    desired_L = part_info.length + 0.50
-    desired_W = part_info.width + 0.50
-    desired_T = part_info.thickness + 0.25
 
     mcmaster_result = pick_mcmaster_plate_sku(
         need_L_in=desired_L,
