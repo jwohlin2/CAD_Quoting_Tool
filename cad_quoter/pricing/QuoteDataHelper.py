@@ -15,12 +15,12 @@ from datetime import datetime
 
 # Punch extraction imports
 try:
-    from cad_quoter.geometry.dwg_punch_extractor import (
+    from cad_quoter.geometry.dxf_enrich import (
         extract_punch_features_from_dxf,
         PunchFeatureSummary,
     )
-    from cad_quoter.planning.punch_planner import create_punch_plan
-    from cad_quoter.pricing.punch_time_estimator import estimate_punch_times
+    from cad_quoter.planning.process_planner import create_punch_plan
+    from cad_quoter.pricing.time_estimator import estimate_punch_times
     PUNCH_EXTRACTION_AVAILABLE = True
 except ImportError:
     PUNCH_EXTRACTION_AVAILABLE = False
@@ -802,7 +802,7 @@ def extract_quote_data_from_cad(
 
                     # Regenerate punch plan with new dimensions
                     from dataclasses import asdict
-                    from cad_quoter.planning.punch_planner import create_punch_plan
+                    from cad_quoter.planning.process_planner import create_punch_plan
 
                     updated_features_dict = features  # Already a dict
                     punch_plan = create_punch_plan(updated_features_dict)

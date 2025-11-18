@@ -25,15 +25,17 @@ from pprint import pprint
 # Add parent directory to path
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from cad_quoter.geometry.dwg_punch_extractor import (
+from cad_quoter.geometry.dxf_enrich import (
     extract_punch_features,
     extract_punch_features_from_dxf,
     classify_punch_family,
-    detect_material,
-    detect_ops_features,
-    detect_pain_flags,
-    parse_holes_from_text,
-    parse_tolerances_from_text,
+    detect_punch_material as detect_material,
+    detect_punch_ops_features as detect_ops_features,
+    detect_punch_pain_flags as detect_pain_flags,
+    parse_punch_holes_from_text as parse_holes_from_text,
+    parse_punch_tolerances_from_text as parse_tolerances_from_text,
+    units_to_inch_factor,
+    resolved_dimension_text,
 )
 
 
@@ -128,10 +130,7 @@ def debug_extraction(dxf_path: str, save_debug: bool = True):
     print("-" * 70)
     try:
         import ezdxf
-        from cad_quoter.geometry.dwg_punch_extractor import (
-            units_to_inch_factor,
-            resolved_dimension_text,
-        )
+        # units_to_inch_factor and resolved_dimension_text already imported at top
 
         doc = ezdxf.readfile(str(dxf_path))
         msp = doc.modelspace()
