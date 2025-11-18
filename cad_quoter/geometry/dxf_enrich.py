@@ -1,4 +1,7 @@
-"""Shared DXF enrichment helpers used by the CLI and GUI flows."""
+"""Shared DXF enrichment helpers used by the CLI and GUI flows.
+
+Also includes DWG/DXF punch feature extraction for automated quoting.
+"""
 
 from __future__ import annotations
 
@@ -6,9 +9,10 @@ import csv
 import math
 import re
 from collections import Counter
+from dataclasses import dataclass, field
 from fractions import Fraction
 from pathlib import Path
-from typing import Any, Dict, Iterable, Iterator, List, Mapping, Sequence
+from typing import Any, Dict, Iterable, Iterator, List, Mapping, Optional, Sequence, Tuple
 
 from cad_quoter.geo_extractor import collect_all_text
 
@@ -1187,6 +1191,684 @@ def build_geo_from_dxf(path: str) -> Dict[str, Any]:
     return build_geo_from_doc(doc)
 
 
+# ============================================================================
+# DWG PUNCH FEATURE EXTRACTION
+# ============================================================================
+
+
+def normalize_acad_mtext(line: str) -> str:
+    """
+    Normalize AutoCAD MTEXT formatting codes into simpler plain text.
+
+    Handles:
+    - Strip outer {...}
+    - Remove \\Hxx; (height) and \\Cxx; (color)
+    - Convert stacked text \\S+.005^ -.000; -> '+.005/-.000'
+    - Remove leftover '{}' braces
+    """
+    if not line:
+        return ""
+
+    if line.startswith("{") and line.endswith("}"):
+        line = line[1:-1]
+
+    line = re.sub(r"\\H[0-9.]+x;", "", line)
+    line = re.sub(r"\\C\d+;", "", line)
+
+    def repl_stack(m):
+        top = m.group(1).strip()
+        bot = m.group(2).strip()
+        return f"{top}/{bot}"
+
+    line = re.sub(r"\\S([^\\^]+)\^([^;]+);", repl_stack, line)
+    line = line.replace("{}", "").strip()
+
+    return line
+
+
+def units_to_inch_factor(insunits: int) -> float:
+    """Convert DXF $INSUNITS code to inch conversion factor."""
+    units_factors = {
+        0: 1.0,
+        1: 1.0,
+        2: 12.0,
+        4: 1.0 / 25.4,
+        5: 1.0 / 2.54,
+        6: 39.3701,
+    }
+    return units_factors.get(insunits, 1.0)
+
+
+def resolved_dimension_text(dim, unit_factor: float) -> str:
+    """Resolve dimension text with <> placeholder replaced by numeric measurement."""
+    raw_text = dim.dxf.text if hasattr(dim.dxf, 'text') else ""
+
+    try:
+        meas = dim.get_measurement()
+        if meas is None:
+            meas = 0
+        if hasattr(meas, 'magnitude'):
+            meas = meas.magnitude
+        elif hasattr(meas, 'x'):
+            meas = abs(meas.x)
+        meas = float(meas)
+    except Exception:
+        meas = 0
+
+    value_in = meas * unit_factor
+    nominal_str = f"{value_in:.4f}".rstrip("0").rstrip(".")
+
+    if nominal_str.startswith("0.") and value_in < 1.0:
+        nominal_str = nominal_str[1:]
+    elif not nominal_str or nominal_str == ".":
+        nominal_str = "0"
+
+    text = normalize_acad_mtext(raw_text) if raw_text else ""
+
+    if "<>" in text and nominal_str:
+        text = text.replace("<>", nominal_str)
+    elif not text and nominal_str:
+        text = nominal_str
+
+    return text.strip()
+
+
+def cluster_values(values: List[float], tolerance: float = 0.0002) -> List[float]:
+    """Cluster similar values within a tolerance and return representative values."""
+    if not values:
+        return []
+
+    sorted_vals = sorted(values)
+    clusters = []
+    current_cluster = [sorted_vals[0]]
+
+    for val in sorted_vals[1:]:
+        cluster_mean = sum(current_cluster) / len(current_cluster)
+        if abs(val - cluster_mean) <= tolerance:
+            current_cluster.append(val)
+        else:
+            clusters.append(current_cluster)
+            current_cluster = [val]
+
+    clusters.append(current_cluster)
+    return [sum(cluster) / len(cluster) for cluster in clusters]
+
+
+def _collect_diameters_from_dimensions(doc, unit_factor: float) -> List[float]:
+    """Collect diameter measurements from DIMENSION entities."""
+    diameters = []
+    msp = doc.modelspace()
+
+    for dim in msp.query("DIMENSION"):
+        try:
+            dimtype = dim.dimtype
+            raw_text = dim.dxf.text if hasattr(dim.dxf, 'text') else ""
+
+            is_diameter = (
+                dimtype == 3 or
+                "%%c" in raw_text.lower() or
+                "Ø" in raw_text or
+                "Ø" in raw_text or
+                " DIA" in raw_text.upper() or
+                "DIA " in raw_text.upper()
+            )
+            is_radius = (dimtype == 4 or "R" in raw_text[:5])
+
+            if is_diameter or is_radius:
+                meas = dim.get_measurement()
+                if meas is None:
+                    continue
+                if hasattr(meas, 'magnitude'):
+                    meas = meas.magnitude
+                elif hasattr(meas, 'x'):
+                    meas = abs(meas.x)
+
+                meas = float(meas)
+                meas_in = meas * unit_factor
+
+                if is_radius and not is_diameter:
+                    meas_in *= 2.0
+
+                if 0.01 <= meas_in <= 20.0:
+                    diameters.append(meas_in)
+        except Exception:
+            continue
+
+    return diameters
+
+
+@dataclass
+class PunchFeatureSummary:
+    """Comprehensive feature summary for punch parts extracted from DWG/DXF."""
+
+    family: str = "round_punch"
+    shape_type: str = "round"
+    overall_length_in: float = 0.0
+    max_od_or_width_in: float = 0.0
+    body_width_in: Optional[float] = None
+    body_thickness_in: Optional[float] = None
+    form_length_in: Optional[float] = None
+    num_ground_diams: int = 0
+    total_ground_length_in: float = 0.0
+    has_perp_face_grind: bool = False
+    has_3d_surface: bool = False
+    form_complexity_level: int = 0
+    tap_count: int = 0
+    tap_summary: List[Dict[str, Any]] = field(default_factory=list)
+    num_undercuts: int = 0
+    num_chamfers: int = 0
+    num_small_radii: int = 0
+    min_dia_tol_in: Optional[float] = None
+    min_len_tol_in: Optional[float] = None
+    has_polish_contour: bool = False
+    has_no_step_permitted: bool = False
+    has_sharp_edges: bool = False
+    has_gdt: bool = False
+    material_callout: Optional[str] = None
+    extraction_source: str = "dxf_geometry_and_text"
+    confidence_score: float = 1.0
+    warnings: List[str] = field(default_factory=list)
+
+
+def extract_geometry_envelope(dxf_path: Path) -> Dict[str, Any]:
+    """Extract bounding box and envelope dimensions from DXF geometry."""
+    if _EZDXF is None:
+        return {
+            "overall_length_in": 0.0, "overall_width_in": 0.0, "overall_height_in": 0.0,
+            "bbox_min": (0, 0, 0), "bbox_max": (0, 0, 0), "units": "inches",
+            "error": "ezdxf not available"
+        }
+
+    try:
+        from ezdxf.bbox import extents
+        doc = _EZDXF.readfile(str(dxf_path))
+        msp = doc.modelspace()
+
+        outline_entities = msp.query("LINE ARC CIRCLE LWPOLYLINE POLYLINE SPLINE")
+        if not outline_entities:
+            return {
+                "overall_length_in": 0.0, "overall_width_in": 0.0, "overall_height_in": 0.0,
+                "bbox_min": (0, 0, 0), "bbox_max": (0, 0, 0), "units": "inches",
+                "error": "no geometry entities found"
+            }
+
+        bbox = extents(outline_entities)
+        min_pt = bbox.extmin
+        max_pt = bbox.extmax
+
+        length = max_pt.x - min_pt.x
+        width = max_pt.y - min_pt.y
+        height = max_pt.z - min_pt.z if len(max_pt) > 2 else 0.0
+
+        insunits = doc.header.get("$INSUNITS", 1)
+        measurement = doc.header.get("$MEASUREMENT", 0)
+
+        is_metric = measurement == 1 or insunits == 4
+        if insunits in (0, 1) and max(length, width) > 50:
+            is_metric = True
+
+        if is_metric:
+            length /= 25.4
+            width /= 25.4
+            height /= 25.4
+
+        return {
+            "overall_length_in": length, "overall_width_in": width, "overall_height_in": height,
+            "bbox_min": tuple(min_pt), "bbox_max": tuple(max_pt), "units": "inches",
+        }
+    except Exception as e:
+        return {
+            "overall_length_in": 0.0, "overall_width_in": 0.0, "overall_height_in": 0.0,
+            "bbox_min": (0, 0, 0), "bbox_max": (0, 0, 0), "units": "inches", "error": str(e)
+        }
+
+
+def extract_punch_dimensions(dxf_path: Path) -> Dict[str, Any]:
+    """Extract dimension measurements and tolerances from DIMENSION entities."""
+    if _EZDXF is None:
+        return {
+            "linear_dims": [], "diameter_dims": [], "resolved_dim_texts": [],
+            "max_linear_dim": 0.0, "max_diameter_dim": 0.0,
+            "min_dia_tol": None, "min_len_tol": None, "all_tolerances": [],
+            "error": "ezdxf not available"
+        }
+
+    try:
+        doc = _EZDXF.readfile(str(dxf_path))
+        msp = doc.modelspace()
+
+        insunits = doc.header.get("$INSUNITS", 1)
+        measurement = doc.header.get("$MEASUREMENT", 0)
+        unit_factor = units_to_inch_factor(insunits)
+
+        is_metric = measurement == 1
+        if is_metric and insunits not in [4, 5, 6]:
+            unit_factor = 1.0 / 25.4
+
+        linear_dims = []
+        diameter_dims = []
+        all_tolerances = []
+        resolved_dim_texts = []
+
+        for dim in msp.query("DIMENSION"):
+            try:
+                text_resolved = resolved_dimension_text(dim, unit_factor)
+                resolved_dim_texts.append(text_resolved)
+
+                raw_text = dim.dxf.text if hasattr(dim.dxf, 'text') else ""
+                meas = dim.get_measurement()
+                if meas is None:
+                    continue
+
+                if hasattr(meas, 'magnitude'):
+                    meas = meas.magnitude
+                elif hasattr(meas, 'x'):
+                    meas = abs(meas.x)
+
+                meas = float(meas)
+                meas_in = meas * unit_factor
+                dimtype = dim.dimtype
+
+                is_diameter = (
+                    dimtype == 3 or "%%c" in raw_text.lower() or
+                    "Ø" in raw_text or "Ø" in text_resolved or "DIA" in raw_text.upper()
+                )
+
+                if is_diameter:
+                    diameter_dims.append({"measurement": meas_in, "text": text_resolved, "raw_text": raw_text, "type": "diameter"})
+                else:
+                    linear_dims.append({"measurement": meas_in, "text": text_resolved, "raw_text": raw_text, "type": dimtype})
+
+                tolerances = parse_punch_tolerances_from_text(text_resolved)
+                all_tolerances.extend(tolerances)
+            except Exception:
+                continue
+
+        max_linear = max([d["measurement"] for d in linear_dims], default=0.0)
+        max_diameter = max([d["measurement"] for d in diameter_dims], default=0.0)
+
+        if not is_metric and (max_linear > 50 or max_diameter > 10):
+            for d in linear_dims:
+                d["measurement"] /= 25.4
+            for d in diameter_dims:
+                d["measurement"] /= 25.4
+            max_linear /= 25.4
+            max_diameter /= 25.4
+
+        return {
+            "linear_dims": linear_dims, "diameter_dims": diameter_dims,
+            "resolved_dim_texts": resolved_dim_texts,
+            "max_linear_dim": max_linear, "max_diameter_dim": max_diameter,
+            "min_dia_tol": min([parse_punch_tolerances_from_text(d["text"]) for d in diameter_dims], default=[None])[0] if diameter_dims else None,
+            "min_len_tol": min([parse_punch_tolerances_from_text(d["text"]) for d in linear_dims], default=[None])[0] if linear_dims else None,
+            "all_tolerances": all_tolerances,
+        }
+    except Exception as e:
+        return {
+            "linear_dims": [], "diameter_dims": [], "resolved_dim_texts": [],
+            "max_linear_dim": 0.0, "max_diameter_dim": 0.0,
+            "min_dia_tol": None, "min_len_tol": None, "all_tolerances": [], "error": str(e)
+        }
+
+
+def parse_punch_tolerances_from_text(text: str) -> List[float]:
+    """Parse tolerance values from dimension text."""
+    tolerances = []
+    matched_ranges = []
+
+    def add_match(start, end, values):
+        for s, e in matched_ranges:
+            if not (end <= s or start >= e):
+                return False
+        matched_ranges.append((start, end))
+        tolerances.extend(values)
+        return True
+
+    pm_pattern = r'±\s*(\d*\.?\d+)'
+    for match in re.finditer(pm_pattern, text):
+        tol = float(match.group(1))
+        add_match(match.start(), match.end(), [abs(tol)])
+
+    slash_pattern = r'\+\s*(\d*\.?\d+)\s*/\s*-\s*(\d*\.?\d+)'
+    for match in re.finditer(slash_pattern, text):
+        tol_plus = float(match.group(1))
+        tol_minus = float(match.group(2))
+        add_match(match.start(), match.end(), [abs(tol_plus), abs(tol_minus)])
+
+    plus_minus_pattern = r'\+\s*(\d*\.?\d+)\s*-\s*(\d*\.?\d+)'
+    for match in re.finditer(plus_minus_pattern, text):
+        if any(s <= match.start() < e or s < match.end() <= e for s, e in matched_ranges):
+            continue
+        tol_plus = float(match.group(1))
+        tol_minus = float(match.group(2))
+        add_match(match.start(), match.end(), [abs(tol_plus), abs(tol_minus)])
+
+    return tolerances
+
+
+def parse_tolerance_pairs_max(text: str) -> List[float]:
+    """Parse tolerance pairs and return max(up, low) for each pair."""
+    max_tolerances = []
+    matched_ranges = []
+
+    def add_max_match(start, end, tol_up, tol_low):
+        for s, e in matched_ranges:
+            if not (end <= s or start >= e):
+                return False
+        matched_ranges.append((start, end))
+        max_tolerances.append(max(abs(tol_up), abs(tol_low)))
+        return True
+
+    pm_pattern = r'±\s*(\d*\.?\d+)'
+    for match in re.finditer(pm_pattern, text):
+        tol = float(match.group(1))
+        max_tolerances.append(abs(tol))
+        matched_ranges.append((match.start(), match.end()))
+
+    slash_pattern = r'\+\s*(\d*\.?\d+)\s*/\s*-\s*(\d*\.?\d+)'
+    for match in re.finditer(slash_pattern, text):
+        add_max_match(match.start(), match.end(), float(match.group(1)), float(match.group(2)))
+
+    plus_minus_pattern = r'\+\s*(\d*\.?\d+)\s*-\s*(\d*\.?\d+)'
+    for match in re.finditer(plus_minus_pattern, text):
+        if any(s <= match.start() < e or s < match.end() <= e for s, e in matched_ranges):
+            continue
+        add_max_match(match.start(), match.end(), float(match.group(1)), float(match.group(2)))
+
+    return max_tolerances
+
+
+def classify_punch_family(text_dump: str) -> Tuple[str, str]:
+    """Classify punch family and shape type from text."""
+    text_upper = text_dump.upper()
+    family = None
+
+    if "PILOT PIN" in text_upper or "PILOT-PIN" in text_upper:
+        family = "pilot_pin"
+    elif "SPRING PIN" in text_upper or "SPRING-PIN" in text_upper:
+        family = "round_punch"
+    elif "GUIDE POST" in text_upper:
+        family = "guide_post"
+    elif "GUIDE BUSHING" in text_upper:
+        family = "bushing"
+    elif "FORM PUNCH" in text_upper or "COIN PUNCH" in text_upper:
+        family = "form_punch"
+    elif "DIE SECTION" in text_upper:
+        family = "die_section"
+
+    if family is None:
+        if "INSERT" in text_upper or "COIN" in text_upper:
+            family = "form_punch" if "PUNCH" in text_upper else "die_insert"
+        elif "FORM" in text_upper and ("PUNCH" in text_upper or "DETAIL" in text_upper):
+            family = "form_punch"
+        elif "SECTION" in text_upper:
+            family = "die_section"
+
+    if family is None:
+        if "BUSHING" in text_upper:
+            family = "bushing"
+        elif "PUNCH" in text_upper:
+            family = "round_punch"
+        else:
+            family = "round_punch"
+
+    shape = "round"
+    if "RECTANGULAR" in text_upper or "SQUARE" in text_upper:
+        shape = "rectangular"
+    elif ("THICKNESS" in text_upper or "THK" in text_upper) and ("WIDTH" in text_upper or " W " in text_upper):
+        shape = "rectangular"
+
+    return family, shape
+
+
+def detect_punch_material(text_dump: str) -> Optional[str]:
+    """Detect material callout from text."""
+    text_upper = text_dump.upper()
+
+    lines = text_dump.split('\n')
+    for line in lines:
+        line_upper = line.upper()
+        if ' PUNCH' in line_upper:
+            tokens = line_upper.split()
+            if len(tokens) >= 3 and tokens[-1] == 'PUNCH':
+                material_candidate = tokens[-2]
+                if re.match(r'^[A-Z0-9-]+$', material_candidate):
+                    return material_candidate
+
+    materials = [
+        (r'\bA-?2\b', 'A2'), (r'\bA-?6\b', 'A6'), (r'\bA-?10\b', 'A10'),
+        (r'\bD-?2\b', 'D2'), (r'\bD-?3\b', 'D3'), (r'\bM-?2\b', 'M2'),
+        (r'\bM-?4\b', 'M4'), (r'\bO-?1\b', 'O1'), (r'\bS-?7\b', 'S7'),
+        (r'\bH-?13\b', 'H13'), (r'\bCARBIDE\b', 'CARBIDE'),
+        (r'\b440-?C\b', '440C'), (r'\b17-4\b', '17-4'),
+        (r'\b4140\b', '4140'), (r'\b4340\b', '4340'),
+    ]
+
+    for pattern, normalized in materials:
+        if re.search(pattern, text_upper):
+            return normalized
+
+    return None
+
+
+def detect_punch_ops_features(text_dump: str) -> Dict[str, Any]:
+    """Detect operations-driving features from text."""
+    text_upper = text_dump.upper()
+
+    features = {
+        "num_chamfers": 0, "num_small_radii": 0, "has_3d_surface": False,
+        "has_perp_face_grind": False, "form_complexity_level": 0,
+    }
+
+    chamfer_qty_pattern = r'\((\d+)\)\s*(?:0)?\.?\d+\s*X\s*45'
+    for match in re.finditer(chamfer_qty_pattern, text_upper):
+        features["num_chamfers"] += int(match.group(1))
+
+    single_chamfer = r'(?:0)?\.?\d+\s*X\s*45'
+    single_count = len(re.findall(single_chamfer, text_upper))
+    if single_count > features["num_chamfers"]:
+        features["num_chamfers"] = single_count
+
+    small_radius_patterns = [r'R\s*(?:0)?\.00\d+', r'(?:0)?\.00\d+\s*R']
+    for pattern in small_radius_patterns:
+        features["num_small_radii"] += len(re.findall(pattern, text_upper))
+
+    has_3d_indicators = ["POLISH CONTOUR", "POLISHED CONTOUR", "POLISH", "FORM", "COIN", "CONTOUR", "OVER R", "OVER-R"]
+    if any(kw in text_upper for kw in has_3d_indicators):
+        features["has_3d_surface"] = True
+
+    if "PERPENDICULAR" in text_upper or "PERP" in text_upper:
+        features["has_perp_face_grind"] = True
+
+    radius_count = len(re.findall(r'R\s*(?:0)?\.?\d+', text_upper))
+    diameter_count = len(re.findall(r'[Ø]|%%C', text_upper, re.IGNORECASE))
+    total_form_features = radius_count + diameter_count
+
+    if total_form_features > 10:
+        features["form_complexity_level"] = 3
+    elif total_form_features > 5:
+        features["form_complexity_level"] = 2
+    elif total_form_features > 2:
+        features["form_complexity_level"] = 1
+
+    return features
+
+
+def detect_punch_pain_flags(text_dump: str) -> Dict[str, bool]:
+    """Detect quality/pain flags from text."""
+    text_upper = text_dump.upper()
+
+    has_polish = any(kw in text_upper for kw in [
+        "POLISH CONTOUR", "POLISH CONTOURED", "POLISHED", "POLISH TO", " POLISH "
+    ])
+    has_no_step = any(kw in text_upper for kw in [
+        "NO STEP PERMITTED", "NO STEP", "NO STEPS", "NO-STEP"
+    ])
+    has_sharp = any(kw in text_upper for kw in ["SHARP EDGE", "SHARP EDGES", " SHARP "])
+
+    has_gdt_font = "\\Famgdt" in text_dump or "\\FAMGDT" in text_upper
+    has_gdt_symbols = bool(re.search(
+        r'[⏥⌭⏄⌯⊕⌖]|GD&T|PERPENDICULARITY|FLATNESS|POSITION|CONCENTRICITY|RUNOUT|TIR',
+        text_upper
+    ))
+
+    return {
+        "has_polish_contour": has_polish,
+        "has_no_step_permitted": has_no_step,
+        "has_sharp_edges": has_sharp,
+        "has_gdt": has_gdt_font or has_gdt_symbols,
+    }
+
+
+def parse_punch_holes_from_text(text_dump: str) -> Dict[str, Any]:
+    """Parse hole and tap specifications from free text."""
+    taps = []
+    holes = []
+
+    tap_pattern = r'(\d+/\d+-\d+)\s+TAP\s+X\s+([\d\.]+)\s+DEEP'
+    for match in re.finditer(tap_pattern, text_dump, re.IGNORECASE):
+        taps.append({"size": match.group(1), "depth_in": float(match.group(2))})
+
+    tap_pattern_no_depth = r'(\d+/\d+-\d+)\s+TAP'
+    for match in re.finditer(tap_pattern_no_depth, text_dump, re.IGNORECASE):
+        size = match.group(1)
+        if not any(t["size"] == size for t in taps):
+            taps.append({"size": size, "depth_in": None})
+
+    hole_thru_pattern = r'Ø\s*([\d\.]+)\s+THRU'
+    for match in re.finditer(hole_thru_pattern, text_dump, re.IGNORECASE):
+        holes.append({"diameter": float(match.group(1)), "depth_in": None, "thru": True})
+
+    hole_depth_pattern = r'Ø\s*([\d\.]+)\s+X\s+([\d\.]+)\s+(?:DP|DEEP)'
+    for match in re.finditer(hole_depth_pattern, text_dump, re.IGNORECASE):
+        holes.append({"diameter": float(match.group(1)), "depth_in": float(match.group(2)), "thru": False})
+
+    return {"tap_count": len(taps), "tap_summary": taps, "hole_count": len(holes), "hole_summary": holes}
+
+
+def extract_punch_features_from_dxf(dxf_path: Path, text_dump: str) -> PunchFeatureSummary:
+    """Main function to extract punch features from DXF + text."""
+    summary = PunchFeatureSummary()
+    warnings = []
+
+    family, shape = classify_punch_family(text_dump)
+    summary.family = family
+    summary.shape_type = shape
+    summary.material_callout = detect_punch_material(text_dump)
+
+    geo_envelope = extract_geometry_envelope(dxf_path)
+    if "error" in geo_envelope:
+        warnings.append(f"Geometry extraction: {geo_envelope['error']}")
+
+    dim_data = extract_punch_dimensions(dxf_path)
+    if "error" in dim_data:
+        warnings.append(f"Dimension extraction: {dim_data['error']}")
+
+    geo_length = geo_envelope.get("overall_length_in", 0.0)
+    geo_width = geo_envelope.get("overall_width_in", 0.0)
+
+    MAX_REASONABLE_PUNCH_LENGTH = 12.0
+    MAX_REASONABLE_PUNCH_OD = 3.0
+
+    linear_dims = dim_data.get("linear_dims", [])
+    diameter_dims = dim_data.get("diameter_dims", [])
+
+    reasonable_linear = [d["measurement"] for d in linear_dims if 0 < d["measurement"] <= MAX_REASONABLE_PUNCH_LENGTH]
+    dim_length = max(reasonable_linear) if reasonable_linear else 0.0
+
+    reasonable_diameters = [d["measurement"] for d in diameter_dims if 0 < d["measurement"] <= MAX_REASONABLE_PUNCH_OD]
+    dim_diameter = max(reasonable_diameters) if reasonable_diameters else 0.0
+
+    def select_punch_dimension(geo_val, dim_val, max_reasonable):
+        if 0 < dim_val <= max_reasonable:
+            return dim_val
+        if 0 < geo_val <= max_reasonable:
+            return geo_val
+        if geo_val > 0 and dim_val > 0:
+            return min(geo_val, dim_val)
+        return dim_val if dim_val > 0 else geo_val
+
+    summary.overall_length_in = select_punch_dimension(geo_length, dim_length, MAX_REASONABLE_PUNCH_LENGTH)
+
+    if summary.shape_type == "round":
+        summary.max_od_or_width_in = select_punch_dimension(geo_width, dim_diameter, MAX_REASONABLE_PUNCH_OD)
+    else:
+        summary.max_od_or_width_in = select_punch_dimension(geo_width, dim_diameter, MAX_REASONABLE_PUNCH_OD)
+        summary.body_width_in = summary.max_od_or_width_in
+        summary.body_thickness_in = geo_envelope.get("overall_height_in")
+
+    unit_factor = 1.0
+    try:
+        doc = _EZDXF.readfile(str(dxf_path))
+        insunits = doc.header.get("$INSUNITS", 1)
+        measurement = doc.header.get("$MEASUREMENT", 0)
+        unit_factor = units_to_inch_factor(insunits)
+        if measurement == 1 and insunits not in [4, 5, 6]:
+            unit_factor = 1.0 / 25.4
+
+        raw_diameters = _collect_diameters_from_dimensions(doc, unit_factor)
+        clustered_diameters = cluster_values(raw_diameters, tolerance=0.0002)
+        summary.num_ground_diams = min(len(clustered_diameters), 6)
+
+        if summary.num_ground_diams == 0 and summary.max_od_or_width_in > 0:
+            summary.num_ground_diams = 1
+    except Exception:
+        diameter_dims = dim_data.get("diameter_dims", [])
+        unique_diameters = set(round(d["measurement"], 4) for d in diameter_dims)
+        summary.num_ground_diams = len(unique_diameters) if unique_diameters else 1
+
+    ground_fraction = 0.3 if summary.family == "form_punch" else (0.7 if summary.num_ground_diams > 2 else 0.5)
+    summary.total_ground_length_in = summary.overall_length_in * ground_fraction
+
+    ops_features = detect_punch_ops_features(text_dump)
+    summary.num_chamfers = ops_features["num_chamfers"]
+    summary.num_small_radii = ops_features["num_small_radii"]
+    summary.has_3d_surface = ops_features["has_3d_surface"]
+    summary.has_perp_face_grind = ops_features["has_perp_face_grind"]
+    summary.form_complexity_level = ops_features["form_complexity_level"]
+
+    pain_flags = detect_punch_pain_flags(text_dump)
+    summary.has_polish_contour = pain_flags["has_polish_contour"]
+    summary.has_no_step_permitted = pain_flags["has_no_step_permitted"]
+    summary.has_sharp_edges = pain_flags["has_sharp_edges"]
+    summary.has_gdt = pain_flags["has_gdt"]
+
+    hole_data = parse_punch_holes_from_text(text_dump)
+    summary.tap_count = hole_data["tap_count"]
+    summary.tap_summary = hole_data["tap_summary"]
+
+    summary.warnings = warnings
+    confidence = 0.7
+    if summary.overall_length_in > 0:
+        confidence += 0.1
+    if summary.max_od_or_width_in > 0:
+        confidence += 0.1
+    if summary.material_callout:
+        confidence += 0.05
+    summary.confidence_score = min(1.0, confidence)
+
+    return summary
+
+
+def extract_punch_features(dxf_path: str | Path, text_lines: Optional[List[str]] = None) -> PunchFeatureSummary:
+    """Convenience function for extracting punch features."""
+    dxf_path = Path(dxf_path)
+
+    if text_lines is None:
+        try:
+            doc = _EZDXF.readfile(str(dxf_path)) if _EZDXF else None
+            if doc:
+                text_records = list(collect_all_text(doc))
+                text_lines = [rec["text"] for rec in text_records if rec.get("text")]
+            else:
+                text_lines = []
+        except Exception:
+            text_lines = []
+
+    text_dump = "\n".join(text_lines)
+    return extract_punch_features_from_dxf(dxf_path, text_dump)
+
+
 __all__ = [
     "detect_units_scale",
     "iter_spaces",
@@ -1200,4 +1882,18 @@ __all__ = [
     "iter_table_entities",
     "build_geo_from_doc",
     "build_geo_from_dxf",
+    # Punch extraction
+    "PunchFeatureSummary",
+    "extract_punch_features",
+    "extract_punch_features_from_dxf",
+    "extract_geometry_envelope",
+    "extract_punch_dimensions",
+    "classify_punch_family",
+    "detect_punch_material",
+    "detect_punch_ops_features",
+    "detect_punch_pain_flags",
+    "parse_punch_holes_from_text",
+    "normalize_acad_mtext",
+    "units_to_inch_factor",
+    "cluster_values",
 ]

@@ -7,14 +7,14 @@ Tests the punch-specific feature extraction system for DWG/DXF drawings.
 
 import pytest
 from pathlib import Path
-from cad_quoter.geometry.dwg_punch_extractor import (
+from cad_quoter.geometry.dxf_enrich import (
     PunchFeatureSummary,
     classify_punch_family,
-    detect_material,
-    detect_ops_features,
-    detect_pain_flags,
-    parse_holes_from_text,
-    parse_tolerances_from_text,
+    detect_punch_material as detect_material,
+    detect_punch_ops_features as detect_ops_features,
+    detect_punch_pain_flags as detect_pain_flags,
+    parse_punch_holes_from_text as parse_holes_from_text,
+    parse_punch_tolerances_from_text as parse_tolerances_from_text,
     extract_punch_features_from_dxf,
 )
 

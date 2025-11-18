@@ -36,6 +36,15 @@ __all__ = [
     "estimate_face_grind_minutes",
     "estimate_od_grind_minutes",
     "MIN_PER_CUIN_GRIND",
+    # Punch time estimation
+    "PunchMachineHours",
+    "PunchLaborHours",
+    "PUNCH_TIME_CONSTANTS",
+    "estimate_punch_machine_hours",
+    "estimate_punch_labor_hours",
+    "convert_punch_to_quote_machine_hours",
+    "convert_punch_to_quote_labor_hours",
+    "estimate_punch_times",
 ]
 
 
@@ -754,4 +763,228 @@ def estimate_time_min(
     if "turn_finish" in op:
         return time_turn_finish(row_view, geom, tool, machine, overhead)
     return 0.0
+
+
+# ============================================================================
+# PUNCH TIME ESTIMATION
+# ============================================================================
+
+
+@dataclass
+class PunchMachineHours:
+    """Machine hours breakdown for punch manufacturing."""
+    rough_turning_min: float = 0.0
+    finish_turning_min: float = 0.0
+    od_grinding_min: float = 0.0
+    id_grinding_min: float = 0.0
+    face_grinding_min: float = 0.0
+    drilling_min: float = 0.0
+    tapping_min: float = 0.0
+    chamfer_min: float = 0.0
+    polishing_min: float = 0.0
+    edm_min: float = 0.0
+    sawing_min: float = 0.0
+    inspection_min: float = 0.0
+    total_minutes: float = 0.0
+    total_hours: float = 0.0
+
+    def calculate_totals(self):
+        """Calculate total minutes and hours."""
+        self.total_minutes = (
+            self.rough_turning_min + self.finish_turning_min +
+            self.od_grinding_min + self.id_grinding_min + self.face_grinding_min +
+            self.drilling_min + self.tapping_min + self.chamfer_min +
+            self.polishing_min + self.edm_min + self.sawing_min + self.inspection_min
+        )
+        self.total_hours = self.total_minutes / 60.0
+
+
+@dataclass
+class PunchLaborHours:
+    """Labor hours breakdown for punch manufacturing."""
+    lathe_setup_min: float = 0.0
+    grinder_setup_min: float = 0.0
+    edm_setup_min: float = 0.0
+    cam_programming_min: float = 0.0
+    handling_min: float = 0.0
+    deburring_min: float = 0.0
+    inspection_setup_min: float = 0.0
+    first_article_min: float = 0.0
+    total_minutes: float = 0.0
+    total_hours: float = 0.0
+
+    def calculate_totals(self):
+        """Calculate total minutes and hours."""
+        self.total_minutes = (
+            self.lathe_setup_min + self.grinder_setup_min + self.edm_setup_min +
+            self.cam_programming_min + self.handling_min + self.deburring_min +
+            self.inspection_setup_min + self.first_article_min
+        )
+        self.total_hours = self.total_minutes / 60.0
+
+
+PUNCH_TIME_CONSTANTS = {
+    "rough_turning_per_diam": 8.0,
+    "finish_turning_per_diam": 5.0,
+    "od_grinding_per_inch": 3.0,
+    "id_grinding_per_inch": 6.0,
+    "face_grinding_per_face": 4.0,
+    "drilling_per_hole": 2.0,
+    "tapping_per_hole": 3.0,
+    "chamfer_per_edge": 1.5,
+    "small_radius_per_edge": 2.0,
+    "polish_contour_base": 30.0,
+    "polish_per_sq_inch": 5.0,
+    "form_complexity_multiplier": {0: 1.0, 1: 1.5, 2: 2.0, 3: 3.0},
+    "sawing_base": 5.0,
+    "inspection_per_diam": 3.0,
+    "tight_tolerance_multiplier": {0.0001: 2.0, 0.0002: 1.5, 0.0005: 1.2, 0.001: 1.0},
+    "lathe_setup": 30.0,
+    "grinder_setup": 20.0,
+    "edm_setup": 45.0,
+    "cam_programming_base": 30.0,
+    "cam_per_operation": 5.0,
+    "handling_per_operation": 2.0,
+    "deburring_per_edge": 1.0,
+    "inspection_setup": 10.0,
+    "first_article_base": 20.0,
+}
+
+
+def estimate_punch_machine_hours(punch_plan: dict[str, Any], punch_features: dict[str, Any]) -> PunchMachineHours:
+    """Estimate machine hours for punch manufacturing."""
+    hours = PunchMachineHours()
+    tc = PUNCH_TIME_CONSTANTS
+
+    num_diams = punch_features.get("num_ground_diams", 1)
+    ground_length = punch_features.get("total_ground_length_in", 0.0)
+    tap_count = punch_features.get("tap_count", 0)
+    num_chamfers = punch_features.get("num_chamfers", 0)
+    num_radii = punch_features.get("num_small_radii", 0)
+    has_polish = punch_features.get("has_polish_contour", False)
+    has_3d = punch_features.get("has_3d_surface", False)
+    has_perp_face = punch_features.get("has_perp_face_grind", False)
+    form_level = punch_features.get("form_complexity_level", 0)
+    min_dia_tol = punch_features.get("min_dia_tol_in")
+    overall_length = punch_features.get("overall_length_in", 0.0)
+    max_od = punch_features.get("max_od_or_width_in", 0.0)
+
+    tol_mult = 1.0
+    if min_dia_tol is not None:
+        for threshold, mult in sorted(tc["tight_tolerance_multiplier"].items()):
+            if min_dia_tol <= threshold:
+                tol_mult = mult
+                break
+
+    hours.sawing_min = tc["sawing_base"]
+
+    if num_diams > 0:
+        hours.rough_turning_min = num_diams * tc["rough_turning_per_diam"]
+        hours.finish_turning_min = num_diams * tc["finish_turning_per_diam"] * tol_mult
+
+    if ground_length > 0:
+        hours.od_grinding_min = ground_length * tc["od_grinding_per_inch"] * tol_mult
+
+    if has_perp_face:
+        hours.face_grinding_min = tc["face_grinding_per_face"] * 2
+
+    if tap_count > 0:
+        hours.drilling_min = tap_count * tc["drilling_per_hole"]
+        hours.tapping_min = tap_count * tc["tapping_per_hole"]
+
+    hours.chamfer_min = num_chamfers * tc["chamfer_per_edge"]
+    hours.chamfer_min += num_radii * tc["small_radius_per_edge"]
+
+    if has_polish or has_3d:
+        contour_area = max_od * (overall_length * 0.3)
+        form_mult = tc["form_complexity_multiplier"].get(form_level, 1.0)
+        hours.polishing_min = (tc["polish_contour_base"] + contour_area * tc["polish_per_sq_inch"]) * form_mult
+
+    hours.inspection_min = num_diams * tc["inspection_per_diam"]
+    hours.calculate_totals()
+
+    return hours
+
+
+def estimate_punch_labor_hours(punch_plan: dict[str, Any], punch_features: dict[str, Any], machine_hours: PunchMachineHours) -> PunchLaborHours:
+    """Estimate labor hours for punch manufacturing."""
+    labor = PunchLaborHours()
+    tc = PUNCH_TIME_CONSTANTS
+
+    ops = punch_plan.get("ops", [])
+    num_ops = len(ops)
+    num_chamfers = punch_features.get("num_chamfers", 0)
+    num_radii = punch_features.get("num_small_radii", 0)
+    tap_count = punch_features.get("tap_count", 0)
+    has_polish = punch_features.get("has_polish_contour", False)
+
+    needs_lathe = machine_hours.rough_turning_min > 0 or machine_hours.finish_turning_min > 0
+    needs_grinder = machine_hours.od_grinding_min > 0 or machine_hours.face_grinding_min > 0
+    needs_edm = machine_hours.edm_min > 0
+
+    if needs_lathe:
+        labor.lathe_setup_min = tc["lathe_setup"]
+    if needs_grinder:
+        labor.grinder_setup_min = tc["grinder_setup"]
+    if needs_edm:
+        labor.edm_setup_min = tc["edm_setup"]
+
+    labor.cam_programming_min = tc["cam_programming_base"] + num_ops * tc["cam_per_operation"]
+    labor.handling_min = num_ops * tc["handling_per_operation"]
+
+    total_edges = num_chamfers + num_radii + tap_count * 2
+    labor.deburring_min = total_edges * tc["deburring_per_edge"]
+
+    labor.inspection_setup_min = tc["inspection_setup"]
+    labor.first_article_min = tc["first_article_base"]
+
+    if has_polish:
+        labor.first_article_min *= 1.5
+
+    labor.calculate_totals()
+    return labor
+
+
+def convert_punch_to_quote_machine_hours(machine_hours: PunchMachineHours, labor_hours: PunchLaborHours) -> dict[str, Any]:
+    """Convert PunchMachineHours to QuoteDataHelper format."""
+    return {
+        "total_drill_minutes": machine_hours.drilling_min,
+        "total_tap_minutes": machine_hours.tapping_min,
+        "total_cbore_minutes": 0.0,
+        "total_cdrill_minutes": 0.0,
+        "total_jig_grind_minutes": 0.0,
+        "total_milling_minutes": machine_hours.rough_turning_min + machine_hours.finish_turning_min,
+        "total_grinding_minutes": machine_hours.od_grinding_min + machine_hours.id_grinding_min + machine_hours.face_grinding_min,
+        "total_edm_minutes": machine_hours.edm_min,
+        "total_other_minutes": machine_hours.sawing_min + machine_hours.chamfer_min + machine_hours.polishing_min,
+        "total_cmm_minutes": machine_hours.inspection_min,
+        "total_minutes": machine_hours.total_minutes,
+        "total_hours": machine_hours.total_hours,
+    }
+
+
+def convert_punch_to_quote_labor_hours(labor_hours: PunchLaborHours) -> dict[str, Any]:
+    """Convert PunchLaborHours to QuoteDataHelper format."""
+    return {
+        "total_setup_minutes": labor_hours.lathe_setup_min + labor_hours.grinder_setup_min + labor_hours.edm_setup_min,
+        "cam_programming_minutes": labor_hours.cam_programming_min,
+        "handling_minutes": labor_hours.handling_min,
+        "deburring_minutes": labor_hours.deburring_min,
+        "inspection_minutes": labor_hours.inspection_setup_min + labor_hours.first_article_min,
+        "total_minutes": labor_hours.total_minutes,
+        "total_hours": labor_hours.total_hours,
+    }
+
+
+def estimate_punch_times(punch_plan: dict[str, Any], punch_features: dict[str, Any]) -> dict[str, Any]:
+    """Main entry point for punch time estimation."""
+    machine = estimate_punch_machine_hours(punch_plan, punch_features)
+    labor = estimate_punch_labor_hours(punch_plan, punch_features, machine)
+
+    return {
+        "machine_hours": convert_punch_to_quote_machine_hours(machine, labor),
+        "labor_hours": convert_punch_to_quote_labor_hours(labor),
+        "punch_machine_breakdown": machine,
+        "punch_labor_breakdown": labor,
+    }
 

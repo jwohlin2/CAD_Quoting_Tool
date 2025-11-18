@@ -14,12 +14,11 @@ Date: 2025-11-17
 
 from pathlib import Path
 from pprint import pprint
-from cad_quoter.geometry.dwg_punch_extractor import (
+from cad_quoter.geometry.dxf_enrich import (
     extract_punch_features_from_dxf,
     PunchFeatureSummary,
 )
-from cad_quoter.planning.punch_planner import create_punch_plan
-from cad_quoter.planning.process_planner import plan_job
+from cad_quoter.planning.process_planner import create_punch_plan, plan_job
 
 
 def example_1_text_based_extraction():
