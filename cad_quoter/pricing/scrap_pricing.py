@@ -34,13 +34,8 @@ from cad_quoter.config import logger
 from cad_quoter.pricing import wieland_scraper
 from cad_quoter.pricing import scrapmetalbuyers_scraper
 
-# Try to import Selenium scraper (optional)
-try:
-    from cad_quoter.pricing import scrapmetalbuyers_scraper_selenium
-    SELENIUM_AVAILABLE = True
-except ImportError:
-    SELENIUM_AVAILABLE = False
-    scrapmetalbuyers_scraper_selenium = None  # type: ignore
+# Check if Selenium is available in the consolidated scraper
+SELENIUM_AVAILABLE = scrapmetalbuyers_scraper.SELENIUM_AVAILABLE
 
 
 # --------------------------------- config ------------------------------------
@@ -188,50 +183,51 @@ def _get_from_scrapmetalbuyers(
     """
     Get scrap price from ScrapMetalBuyers scraper.
 
-    Tries basic scraper first (fast), then Selenium (slower but works with JavaScript).
+    Tries urllib method first (fast), then Selenium (slower but works with JavaScript).
 
     Returns (price, source_string) where source indicates it came from ScrapMetalBuyers.
     """
     fallback_lb = fallback if fallback is not None else 0.50
 
-    # Try basic scraper first (fast, but may not work with JavaScript sites)
+    # Try urllib method first (fast, but may not work with JavaScript sites)
     try:
         price, source = scrapmetalbuyers_scraper.get_live_scrap_price_usd_per_lb(
             material_family,
-            fallback_usd_per_lb=fallback_lb
+            fallback_usd_per_lb=fallback_lb,
+            method="urllib"
         )
 
         # If we got a real price (not house_rate), use it
         if price is not None and "house_rate" not in source.lower():
-            logger.debug(f"Got price from basic ScrapMetalBuyers scraper: ${price:.4f}/lb")
+            logger.debug(f"Got price from ScrapMetalBuyers (urllib): ${price:.4f}/lb")
             return (price, source)
 
-        logger.debug("Basic scraper returned house_rate, trying Selenium...")
+        logger.debug("urllib method returned house_rate, trying Selenium...")
 
     except Exception as e:
-        logger.debug(f"Basic ScrapMetalBuyers scraper failed: {e}, trying Selenium...")
+        logger.debug(f"ScrapMetalBuyers urllib method failed: {e}, trying Selenium...")
 
-    # Try Selenium scraper if available (slower but works with JavaScript)
+    # Try Selenium method if available (slower but works with JavaScript)
     if SELENIUM_AVAILABLE:
         try:
-            price, source = scrapmetalbuyers_scraper_selenium.get_live_scrap_price_usd_per_lb_selenium(  # type: ignore
+            price, source = scrapmetalbuyers_scraper.get_live_scrap_price_usd_per_lb(
                 material_family,
                 fallback_usd_per_lb=fallback_lb,
-                use_cache=True  # Use cached results if available
+                method="selenium"
             )
 
             # If we got a real price, use it
             if price is not None and "house_rate" not in source.lower():
-                logger.debug(f"Got price from Selenium ScrapMetalBuyers scraper: ${price:.4f}/lb")
+                logger.debug(f"Got price from ScrapMetalBuyers (selenium): ${price:.4f}/lb")
                 return (price, source)
 
         except Exception as e:
-            logger.warning(f"Selenium ScrapMetalBuyers scraper failed: {e}")
+            logger.warning(f"ScrapMetalBuyers selenium method failed: {e}")
     else:
         logger.debug("Selenium not available (install with: pip install selenium webdriver-manager)")
 
-    # Both scrapers failed
-    return (None, "not found in ScrapMetalBuyers (basic and Selenium both failed)")
+    # Both methods failed
+    return (None, "not found in ScrapMetalBuyers (urllib and selenium both failed)")
 
 
 # ---------------------------- compatibility alias ----------------------------
