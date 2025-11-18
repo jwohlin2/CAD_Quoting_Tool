@@ -485,6 +485,8 @@ class DimensionFinder:
         max_ordinate = max(ordinate_values) if ordinate_values else 1.0
 
         # Second pass: score candidates
+        # PRIORITY: Linear dimensions are direct measurements, best for bbox
+        # Ordinate dimensions are positions from datum - only max values are extents
         for measurement, dimtype, resolved_text, dim in valid_dims:
             score = 0.0
 
@@ -496,27 +498,39 @@ class DimensionFinder:
                 score += 3.0  # Strong bonus for toleranced dimensions
 
             # Dimension type scoring
-            if dimtype == 0:
-                # Linear dimensions - direct measurements, good for bbox
-                score += 1.0
-                # Size bonus for linear dims
-                if measurement > 1.0:
-                    score += 0.3
+            if dimtype == 0 or dimtype == 1:
+                # Linear/Aligned dimensions - DIRECT measurements, best for bbox
+                score += 2.5  # Strong base bonus for linear dims
+                # Size bonus for linear dims (larger = more likely bbox)
+                if measurement > 0.5:
+                    score += 0.5
+                if measurement > 2.0:
+                    score += 0.5
                 if measurement > 5.0:
-                    score += 0.2
+                    score += 0.5
+                if measurement > 10.0:
+                    score += 0.5
             elif dimtype == 6:
-                # Ordinate dimensions - larger ones are likely extents
-                if has_tolerance:
-                    score += 1.5  # Good if toleranced
-                else:
-                    # Give bonus based on relative size
-                    # Largest ordinate dims are most likely to be overall extents
-                    relative_size = measurement / max_ordinate if max_ordinate > 0 else 0
-                    score += relative_size * 1.5  # Up to +1.5 for largest
+                # Ordinate dimensions - positions from datum
+                # Only the LARGEST ordinates are overall extents
+                # Smaller ordinates are intermediate positions - not useful for bbox
+                relative_size = measurement / max_ordinate if max_ordinate > 0 else 0
 
-                    # Small bonus for being a "round" number (likely overall dim)
-                    if measurement == round(measurement, 1):
-                        score += 0.2
+                if relative_size > 0.95:
+                    # This is likely a max extent
+                    score += 1.5
+                    if has_tolerance:
+                        score += 1.0
+                elif relative_size > 0.7:
+                    # Could be an extent
+                    score += 0.5
+                else:
+                    # Intermediate position - not bbox
+                    score -= 1.0
+
+                # Bonus for being a "round" number (likely overall dim)
+                if measurement == round(measurement, 1):
+                    score += 0.2
 
             # Penalize reference dimensions and scale markers
             if 'REF' in resolved_text.upper():
