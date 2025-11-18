@@ -653,13 +653,28 @@ def extract_dimensions_from_cad(file_path: str | Path) -> Optional[Tuple[float, 
 
         elif ext == '.dwg':
             # For DWG files, look for pre-extracted mtext_results.json
-            json_path = file_path.with_suffix('.mtext_results.json')
-            if not json_path.exists():
-                # Try in Cad Files directory
-                cad_files_dir = Path(__file__).resolve().parent.parent.parent / "Cad Files"
-                json_path = cad_files_dir / f"{file_path.stem}.mtext_results.json"
+            # Try multiple naming patterns
+            cad_files_dir = Path(__file__).resolve().parent.parent.parent / "Cad Files"
+            stem = file_path.stem
+            stem_no_redacted = stem.replace('_redacted', '')
 
-            if json_path.exists():
+            json_candidates = [
+                file_path.with_suffix('.mtext_results.json'),
+                file_path.parent / f"{stem}.mtext_results.json",
+                file_path.parent / f"{stem_no_redacted}.mtext_results.json",
+                file_path.parent / f"{stem_no_redacted}_mtext_results.json",
+                cad_files_dir / f"{stem}.mtext_results.json",
+                cad_files_dir / f"{stem_no_redacted}.mtext_results.json",
+                cad_files_dir / f"{stem_no_redacted}_mtext_results.json",
+            ]
+
+            json_path = None
+            for candidate in json_candidates:
+                if candidate.exists():
+                    json_path = candidate
+                    break
+
+            if json_path:
                 finder.load_results(json_path)
             else:
                 # Try to convert DWG to DXF using ODA

@@ -656,6 +656,27 @@ def extract_quote_data_from_cad(
                     thickness=features.get("max_od_or_width_in", 0.0),  # OD for round
                 )
 
+                # If punch dimensions are zero, fall back to DimensionFinder
+                if (quote_data.part_dimensions.length == 0.0 and
+                    quote_data.part_dimensions.width == 0.0):
+                    if verbose:
+                        print("  [PUNCH] Punch dimensions are zero, falling back to DimensionFinder...")
+
+                    from cad_quoter.planning.process_planner import extract_dimensions_from_cad
+                    dims = extract_dimensions_from_cad(cad_file_path)
+                    if dims:
+                        L, W, T = dims
+                        quote_data.part_dimensions = PartDimensions(
+                            length=L,
+                            width=W,
+                            thickness=T,
+                        )
+                        if verbose:
+                            print(f"  [PUNCH] DimensionFinder found: {L:.3f} x {W:.3f} x {T:.3f}")
+                    else:
+                        if verbose:
+                            print("  [PUNCH] DimensionFinder also failed to extract dimensions")
+
                 # Set material from punch features
                 punch_material = features.get("material_callout") or DEFAULT_MATERIAL
                 density = get_material_density(punch_material)
