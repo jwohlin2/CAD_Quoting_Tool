@@ -652,84 +652,59 @@ def extract_dimensions_from_cad(file_path: str | Path) -> Optional[Tuple[float, 
             finder.load_dxf(file_path)
 
         elif ext == '.dwg':
-            # For DWG files, look for pre-extracted mtext_results.json
-            # Try multiple naming patterns
-            cad_files_dir = Path(__file__).resolve().parent.parent.parent / "Cad Files"
-            stem = file_path.stem
-            stem_no_redacted = stem.replace('_redacted', '')
+            # Convert DWG to DXF using ODA for fresh extraction
+            import tempfile
+            import subprocess
+            import shutil
+            import os
 
-            json_candidates = [
-                file_path.with_suffix('.mtext_results.json'),
-                file_path.parent / f"{stem}.mtext_results.json",
-                file_path.parent / f"{stem_no_redacted}.mtext_results.json",
-                file_path.parent / f"{stem_no_redacted}_mtext_results.json",
-                cad_files_dir / f"{stem}.mtext_results.json",
-                cad_files_dir / f"{stem_no_redacted}.mtext_results.json",
-                cad_files_dir / f"{stem_no_redacted}_mtext_results.json",
-            ]
+            # Find ODA converter
+            oda_exe = os.getenv("ODA_FILE_CONVERTER")
+            if not oda_exe:
+                common_paths = [
+                    r"D:\ODA\ODAFileConverter 26.8.0\ODAFileConverter.exe",
+                    r"C:\Program Files\ODA\OdaFileConverter.exe",
+                    r"C:\Program Files (x86)\ODA\OdaFileConverter.exe",
+                ]
+                for path in common_paths:
+                    if Path(path).exists():
+                        oda_exe = path
+                        break
 
-            json_path = None
-            for candidate in json_candidates:
-                if candidate.exists():
-                    json_path = candidate
-                    break
+            if not oda_exe or not Path(oda_exe).exists():
+                print(f"[WARN] ODA converter not available for DWG: {file_path}")
+                return None
 
-            if json_path:
-                finder.load_results(json_path)
-            else:
-                # Try to convert DWG to DXF using ODA
-                import tempfile
-                import subprocess
-                import shutil
-                import os
+            # Convert DWG to DXF
+            with tempfile.TemporaryDirectory(prefix="dwg_convert_") as tmpdir:
+                input_dir = Path(tmpdir) / "_input"
+                output_dir = Path(tmpdir) / "_output"
+                input_dir.mkdir()
+                output_dir.mkdir()
 
-                # Find ODA converter
-                oda_exe = os.getenv("ODA_FILE_CONVERTER")
-                if not oda_exe:
-                    common_paths = [
-                        r"D:\ODA\ODAFileConverter 26.8.0\ODAFileConverter.exe",
-                        r"C:\Program Files\ODA\OdaFileConverter.exe",
-                        r"C:\Program Files (x86)\ODA\OdaFileConverter.exe",
-                    ]
-                    for path in common_paths:
-                        if Path(path).exists():
-                            oda_exe = path
-                            break
+                # Copy DWG to input dir
+                shutil.copy2(file_path, input_dir / file_path.name)
 
-                if not oda_exe or not Path(oda_exe).exists():
-                    print(f"[WARN] No mtext_results.json found and ODA converter not available for DWG: {file_path}")
+                # Run ODA converter
+                cmd = [
+                    oda_exe,
+                    str(input_dir),
+                    str(output_dir),
+                    "ACAD2018",
+                    "DXF",
+                    "0",
+                    "1",
+                    file_path.name
+                ]
+                subprocess.run(cmd, capture_output=True, text=True)
+
+                # Find output DXF
+                dxf_files = list(output_dir.glob(f"{file_path.stem}*.dxf"))
+                if not dxf_files:
+                    print(f"[WARN] ODA conversion failed for: {file_path}")
                     return None
 
-                # Convert DWG to DXF
-                with tempfile.TemporaryDirectory(prefix="dwg_convert_") as tmpdir:
-                    input_dir = Path(tmpdir) / "_input"
-                    output_dir = Path(tmpdir) / "_output"
-                    input_dir.mkdir()
-                    output_dir.mkdir()
-
-                    # Copy DWG to input dir
-                    shutil.copy2(file_path, input_dir / file_path.name)
-
-                    # Run ODA converter
-                    cmd = [
-                        oda_exe,
-                        str(input_dir),
-                        str(output_dir),
-                        "ACAD2018",
-                        "DXF",
-                        "0",
-                        "1",
-                        file_path.name
-                    ]
-                    subprocess.run(cmd, capture_output=True, text=True)
-
-                    # Find output DXF
-                    dxf_files = list(output_dir.glob(f"{file_path.stem}*.dxf"))
-                    if not dxf_files:
-                        print(f"[WARN] ODA conversion failed for: {file_path}")
-                        return None
-
-                    finder.load_dxf(dxf_files[0])
+                finder.load_dxf(dxf_files[0])
 
         elif ext == '.json' and 'mtext_results' in file_path.name:
             # Direct JSON file
