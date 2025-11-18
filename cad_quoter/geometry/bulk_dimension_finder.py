@@ -257,6 +257,10 @@ def process_file(filepath: str, use_expected: bool = False) -> dict:
         result["unique_values"] = analysis["unique_values"]
         result["bbox_candidates"] = analysis["inferred_bbox"]
 
+        # Capture the top inferred bbox values for later reporting
+        top_3 = [val for val, _ in analysis["inferred_bbox"][:3]]
+        result["top_3_inferred"] = top_3
+
         # Perform our own comparison if expected dimensions provided
         if expected:
             result["expected"] = expected
@@ -264,6 +268,23 @@ def process_file(filepath: str, use_expected: bool = False) -> dict:
             result["comparison"] = comparison
             result["match_rate"] = comparison["match_rate"]
             result["pass"] = comparison["pass"]
+
+            # Quick quality check: compare expected vs inferred top values
+            exp_sorted = sorted(expected, reverse=True)
+            inf_sorted = sorted(top_3, reverse=True)
+
+            matches = 0
+            max_diff_pct = 0.0
+            for i, exp_val in enumerate(exp_sorted):
+                if i < len(inf_sorted):
+                    inf_val = inf_sorted[i]
+                    diff_pct = abs(inf_val - exp_val) / exp_val * 100 if exp_val else 0
+                    max_diff_pct = max(max_diff_pct, diff_pct)
+                    if diff_pct <= 5:
+                        matches += 1
+
+            result["inferred_match_count"] = matches
+            result["max_diff_pct"] = max_diff_pct
 
         result["status"] = "success"
 
@@ -310,7 +331,7 @@ def main():
             # Show top bbox candidates
             if result.get("bbox_candidates"):
                 print("Bounding box candidates:")
-                for val, score in result["bbox_candidates"][:5]:
+                for val, score in result["bbox_candidates"][:3]:
                     print(f"  {val:.4f}\" (score: {score:.2f})")
 
             # Show comparison if available
@@ -353,6 +374,35 @@ def main():
     print(f"Errors/Not found: {error_count}")
 
     if use_expected:
+        # Calculate inferred bbox match statistics
+        perfect_matches = 0
+        partial_matches = 0
+        no_matches = 0
+
+        for r in results:
+            match_count = r.get("inferred_match_count", 0)
+            if match_count == 3:
+                perfect_matches += 1
+            elif match_count > 0:
+                partial_matches += 1
+            elif r.get("status") == "success":
+                no_matches += 1
+
+        print()
+        print("INFERRED BBOX ACCURACY:")
+        print(f"  Perfect (3/3): {perfect_matches}")
+        print(f"  Partial (1-2/3): {partial_matches}")
+        print(f"  None (0/3): {no_matches}")
+
+        max_diffs = [
+            r.get("max_diff_pct")
+            for r in results
+            if r.get("max_diff_pct") is not None
+        ]
+        if max_diffs:
+            avg_max_diff = sum(max_diffs) / len(max_diffs)
+            print(f"  Average max diff: {avg_max_diff:.1f}%")
+
         # Calculate pass/fail statistics
         passed = [r for r in results if r.get("pass") is True]
         failed = [r for r in results if r.get("pass") is False]
