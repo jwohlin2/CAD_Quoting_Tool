@@ -74,11 +74,12 @@ class BackupHoleFeature:
     diameter_mm: Optional[float] = None
     is_thru: bool = False
     depth_in: Optional[float] = None
-    operations: List[str] = field(default_factory=list)  # JIG GRIND, C'BORE, etc.
+    operations: List[str] = field(default_factory=list)  # JIG GRIND, C'BORE, TAP, etc.
     from_face: Optional[str] = None  # FRONT, BACK, or None
     raw_text: str = ""
     cbore_diameter: Optional[str] = None
     cbore_depth_in: Optional[float] = None
+    thread_spec: Optional[str] = None  # Thread specification (e.g., "5/16-18", "#10-32")
 
 
 @dataclass
@@ -106,6 +107,16 @@ EXPECTED_HOLES: Dict[str, List[str]] = {
         r"(2) Ø.2500 THRU\X(JIG GRIND)",
         # 3 holes at Ø7/32 THRU with Ø11/32 C'BORE .100 DEEP FROM FRONT
         r"\A1;(3) ∅7/32 THRU; ∅11/32 C'BORE\PX .100 DEEP FROM FRONT",
+    ],
+    "157": [
+        # TAP operation with thread specification
+        # Pattern: \A1;5/16-18 TAP X 1.00 DEEP FROM BACK
+        r"\A1;5/16-18 TAP X 1.00 DEEP FROM BACK",
+    ],
+    "348": [
+        # TAP operation with thread specification
+        # Pattern: \A1;5/16-18 TAP X 1.00 DEEP FROM BACK
+        r"\A1;5/16-18 TAP X 1.00 DEEP FROM BACK",
     ],
 }
 
@@ -190,6 +201,32 @@ def parse_mtext_hole_description(mtext: str) -> BackupHoleFeature:
     # Extract JIG GRIND
     if re.search(r"\bJIG\s*GRIND\b", text, re.IGNORECASE):
         feature.operations.append("JIG GRIND")
+
+    # Extract thread specification and TAP operation
+    # Patterns: 5/16-18, #10-32, 1/4-20, M6x1.0, etc.
+    thread_match = re.search(
+        r"(#\s*\d+-\d+|\d+\s*/\s*\d+-\d+|\d+(?:\.\d+)?-\d+|M\d+(?:\.\d+)?x\d+(?:\.\d+)?)\s*TAP",
+        text,
+        re.IGNORECASE
+    )
+    if thread_match:
+        feature.thread_spec = thread_match.group(1).replace(" ", "")
+        feature.operations.append("TAP")
+    elif re.search(r"\bTAP\b", text, re.IGNORECASE):
+        # TAP without explicit thread spec - may use diameter
+        feature.operations.append("TAP")
+
+    # Extract depth for TAP operations: "X 1.00 DEEP" or "X .750 DEEP"
+    tap_depth_match = re.search(
+        r"X\s*(\d*\.?\d+)\s*DEEP",
+        text,
+        re.IGNORECASE
+    )
+    if tap_depth_match:
+        try:
+            feature.depth_in = float(tap_depth_match.group(1))
+        except ValueError:
+            pass
 
     # Extract C'BORE
     cbore_match = re.search(
@@ -303,6 +340,26 @@ def convert_to_hole_operations(holes: List[BackupHoleFeature]) -> List[List[str]
             operations.append([letter, main_diam, qty, op_desc])
             continue
 
+        # Check for TAP operation with thread specification
+        if "TAP" in hole.operations:
+            # TAP uses thread spec as reference
+            if hole.thread_spec:
+                tap_ref = hole.thread_spec
+            elif hole.diameter:
+                tap_ref = f"Ø{hole.diameter}"
+            else:
+                tap_ref = "?"
+
+            # Build TAP description
+            tap_desc = "TAP"
+            if hole.depth_in:
+                tap_desc += f" X {hole.depth_in:.2f} DEEP".rstrip("0").rstrip(".")
+            if hole.from_face:
+                tap_desc += f" FROM {hole.from_face}"
+
+            operations.append([letter, tap_ref, qty, tap_desc])
+            continue
+
         # For drill + C'BORE, create separate operations
         if hole.is_thru or hole.diameter:
             # First: Drill operation
@@ -414,17 +471,24 @@ def _is_hole_description(text: str) -> bool:
 
     upper = text.upper()
 
-    # Must have a quantity marker like (2), (3), etc.
+    # Check for quantity marker like (2), (3), etc. - but TAP ops may not have qty
     has_qty = bool(re.search(r"\(\d+\)", text))
-    if not has_qty:
-        return False
 
-    # Must have a diameter indicator (Ø, ∅), placeholder (<>), or resolved decimal (.2500)
+    # Must have a diameter indicator (Ø, ∅), placeholder (<>), resolved decimal, or thread spec
     # After <> resolution, text may be "(2) .2500 THRU" without Ø symbol
     has_diameter = bool(
         re.search(r"[∅Ø]", text) or
         "<>" in text or
         re.search(r"\)\s*\.?\d+\.?\d*\s+THRU", text)  # qty followed by number then THRU
+    )
+
+    # Check for thread specification (e.g., 5/16-18, #10-32, M6x1.0)
+    has_thread_spec = bool(
+        re.search(
+            r"(#\s*\d+-\d+|\d+\s*/\s*\d+-\d+|\d+(?:\.\d+)?-\d+|M\d+(?:\.\d+)?x\d+(?:\.\d+)?)\s*TAP",
+            text,
+            re.IGNORECASE
+        )
     )
 
     # Must have a hole operation keyword
@@ -438,8 +502,16 @@ def _is_hole_description(text: str) -> bool:
     ]
     has_op_keyword = any(kw in upper for kw in hole_op_keywords)
 
-    # Require both diameter/placeholder AND operation keyword
-    return has_diameter and has_op_keyword
+    # For thread spec TAP patterns, qty is optional
+    if has_thread_spec and has_op_keyword:
+        return True
+
+    # For other patterns, require qty and (diameter or thread spec)
+    if not has_qty:
+        return False
+
+    # Require diameter/placeholder/thread_spec AND operation keyword
+    return (has_diameter or has_thread_spec) and has_op_keyword
 
 
 # =============================================================================
@@ -664,6 +736,7 @@ def find_holes_backup(
                 "from_face": h.from_face,
                 "cbore_diameter": h.cbore_diameter,
                 "cbore_depth_in": h.cbore_depth_in,
+                "thread_spec": h.thread_spec,
                 "raw_text": h.raw_text,
             }
             for h in holes
@@ -705,6 +778,10 @@ def print_expected_holes(part_number: str) -> None:
         print(f"    Diameter: {feature.diameter or 'N/A'}")
         print(f"    Through: {feature.is_thru}")
         print(f"    Operations: {', '.join(feature.operations) or 'None'}")
+        if feature.thread_spec:
+            print(f"    Thread spec: {feature.thread_spec}")
+        if feature.depth_in:
+            print(f"    Depth: {feature.depth_in}")
         if feature.cbore_diameter:
             print(f"    C'BORE dia: {feature.cbore_diameter}")
         if feature.cbore_depth_in:
@@ -776,6 +853,10 @@ def main():
                 print(f"    Diameter: {hole['diameter'] or 'N/A'}")
                 print(f"    Through: {hole['is_thru']}")
                 print(f"    Operations: {', '.join(hole['operations']) or 'None'}")
+                if hole.get("thread_spec"):
+                    print(f"    Thread spec: {hole['thread_spec']}")
+                if hole.get("depth_in"):
+                    print(f"    Depth: {hole['depth_in']}")
                 if hole.get("cbore_diameter"):
                     print(f"    C'BORE: {hole['cbore_diameter']}")
                 if hole.get("cbore_depth_in"):
@@ -827,6 +908,10 @@ def main():
                 print(f"    Diameter: {hole['diameter'] or 'N/A'}")
                 print(f"    Through: {hole['is_thru']}")
                 print(f"    Operations: {', '.join(hole['operations']) or 'None'}")
+                if hole.get("thread_spec"):
+                    print(f"    Thread spec: {hole['thread_spec']}")
+                if hole.get("depth_in"):
+                    print(f"    Depth: {hole['depth_in']}")
                 if hole.get("cbore_diameter"):
                     print(f"    C'BORE: {hole['cbore_diameter']}")
                 if hole.get("cbore_depth_in"):
