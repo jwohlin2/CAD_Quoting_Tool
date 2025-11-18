@@ -900,6 +900,9 @@ def classify_punch_family(text_dump: str) -> Tuple[str, str]:
     # Check for specific multi-word terms first
     if "PILOT PIN" in text_upper or "PILOT-PIN" in text_upper:
         family = "pilot_pin"
+    elif "SPRING PIN" in text_upper or "SPRING-PIN" in text_upper:
+        # Spring pins are treated as round punches (same process as a punch)
+        family = "round_punch"
     elif "GUIDE POST" in text_upper:
         family = "guide_post"
     elif "GUIDE BUSHING" in text_upper:

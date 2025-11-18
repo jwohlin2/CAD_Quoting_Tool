@@ -462,6 +462,7 @@ def detect_punch_drawing(cad_file_path: Path, text_dump: str = None) -> bool:
             "DIE PUNCH",
             "PIERCING PUNCH",
             "PILOT PIN",
+            "SPRING PIN",
             "PUNCH TIP",
             "GUIDE POST",
         ]
