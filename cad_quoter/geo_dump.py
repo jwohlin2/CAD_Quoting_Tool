@@ -39,16 +39,18 @@ if str(Path(__file__).resolve().parent.parent) not in sys.path:
     sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 try:
-    from tools.hole_ops import explode_rows_to_operations
+    from cad_quoter.geometry.hole_operations import explode_rows_to_operations
+except ImportError:
+    explode_rows_to_operations = None  # type: ignore
+
+try:
     from tools.stock_dims import infer_stock_dims_from_lines, read_texts_from_csv
 except ImportError:
-    # Fallback if tools module isn't available
-    explode_rows_to_operations = None  # type: ignore
     infer_stock_dims_from_lines = None  # type: ignore
     read_texts_from_csv = None  # type: ignore
 
 try:
-    from tools.backup_hole_finder import (
+    from cad_quoter.geometry.hole_operations import (
         extract_holes_from_text_records,
         convert_to_hole_operations,
     )

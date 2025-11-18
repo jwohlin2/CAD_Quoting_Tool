@@ -15,7 +15,7 @@ from cad_quoter.geo_extractor import collect_all_text
 from cad_quoter.vendors import ezdxf as _ezdxf_vendor
 
 try:  # pragma: no cover - optional helper available during packaging
-    from tools.hole_ops import explode_rows_to_operations
+    from cad_quoter.geometry.hole_operations import explode_rows_to_operations
 except Exception:  # pragma: no cover - optional dependency unavailable
     explode_rows_to_operations = None  # type: ignore[assignment]
 
