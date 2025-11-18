@@ -1383,22 +1383,34 @@ class AppV7:
                         f"t/hole {op.time_per_hole:.2f} min | "
                         f"group {op.qty}x{op.time_per_hole:.2f} = {op.total_time:.2f} min")
 
+            MILLING_DESC_WIDTH = 28
+            MILLING_SEPARATOR_LENGTH = 106
+
             def format_milling_op(op):
-                """Format milling operation with all details"""
-                lines = []
-                lines.append(f"{op.op_description} | W={op.width:.3f}\" | L={op.length:.3f}\"")
+                """Format a milling operation into a compact single line."""
 
-                if op.perimeter > 0:
-                    # Side milling operation
-                    lines.append(f"  perimeter={op.perimeter:.3f}\" | D={op.tool_diameter:.3f}\" | radial_stock={op.radial_stock:.3f}\" | axial_step={op.axial_step:.3f}\"")
-                    lines.append(f"  axial_passes={op.axial_passes} | radial_passes={op.radial_passes} | total_path={op.path_length:.1f}\"")
-                else:
-                    # Face milling operation
-                    lines.append(f"  D={op.tool_diameter:.3f}\" | passes={op.passes} | stepover≈{op.stepover:.3f}\"")
-                    lines.append(f"  path/pass={op.length:.3f}\" | total_path={op.path_length:.1f}\"")
+                desc_raw = (op.op_description or "").strip()
+                desc_short = desc_raw.replace("Square Up", "SQ UP")
+                desc = desc_short[:MILLING_DESC_WIDTH].ljust(MILLING_DESC_WIDTH)
 
-                lines.append(f"  feed={op.feed_rate:.1f} ipm | time={op.time_minutes:.2f} min")
-                return "\n".join(lines)
+                width = op.width if op.width is not None else 0.0
+                length = op.length if op.length is not None else 0.0
+                tool_dia = op.tool_diameter if op.tool_diameter is not None else 0.0
+                path_length = op.path_length if op.path_length is not None else 0.0
+                time_minutes = op.time_minutes if op.time_minutes is not None else 0.0
+
+                w_str = f"{width:.3f}"
+                l_str = f"{length:.3f}"
+                tool_str = f"{tool_dia:.3f}"
+                path_str = f"{path_length:.1f}"
+                time_str = f"{time_minutes:.2f}"
+
+                line = (
+                    f"{desc} | W {w_str} | L {l_str} | "
+                    f"Tool Dia {tool_str} | Path {path_str} | Time (min) {time_str}"
+                )
+
+                return line
 
             def format_grinding_op(op):
                 """Format grinding operation with all details"""
@@ -1466,11 +1478,13 @@ class AppV7:
             # TIME PER OP - MILLING
             if machine_hours.milling_operations:
                 report.append("TIME PER OP - MILLING")
-                report.append("-" * 74)
+                report.append("-" * MILLING_SEPARATOR_LENGTH)
                 for op in machine_hours.milling_operations:
                     report.append(format_milling_op(op))
-                    report.append("")
-                report.append(f"Total Milling Time (Square/Finish): {machine_hours.total_milling_minutes:.2f} minutes")
+                report.append("")
+                report.append(
+                    f"Total Milling Time (Square/Finish): {machine_hours.total_milling_minutes:.2f} minutes"
+                )
                 report.append("")
 
             # TIME PER OP - GRINDING

@@ -39,13 +39,24 @@ if str(Path(__file__).resolve().parent.parent) not in sys.path:
     sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 try:
-    from tools.hole_ops import explode_rows_to_operations
+    from cad_quoter.geometry.hole_operations import explode_rows_to_operations
+except ImportError:
+    explode_rows_to_operations = None  # type: ignore
+
+try:
     from tools.stock_dims import infer_stock_dims_from_lines, read_texts_from_csv
 except ImportError:
-    # Fallback if tools module isn't available
-    explode_rows_to_operations = None  # type: ignore
     infer_stock_dims_from_lines = None  # type: ignore
     read_texts_from_csv = None  # type: ignore
+
+try:
+    from cad_quoter.geometry.hole_operations import (
+        extract_holes_from_text_records,
+        convert_to_hole_operations,
+    )
+except ImportError:
+    extract_holes_from_text_records = None  # type: ignore
+    convert_to_hole_operations = None  # type: ignore
 
 from cad_quoter import geo_extractor
 
@@ -82,13 +93,44 @@ def _diameter_aliases(token: str) -> List[str]:
     return out
 
 
+def _is_hole_table_header(text: str) -> bool:
+    """Check if text is a hole table header marker."""
+    if not text:
+        return False
+    upper = text.upper()
+
+    # Primary pattern: "HOLE TABLE" with flexible spacing
+    if re.search(r"\bHOLE\s+TABLE\b", upper):
+        return True
+
+    # Alternative: "HOLETABLE" as one word
+    if "HOLETABLE" in upper:
+        return True
+
+    # Alternative: Header row with key markers (HOLE + REF + QTY or DESCRIPTION)
+    # This catches cases where there's no "HOLE TABLE" label
+    has_hole = bool(re.search(r"\bHOLE\b", upper))
+    has_ref = bool(re.search(r"\bREF\b", upper))
+    has_qty = bool(re.search(r"\bQTY\b", upper))
+    has_desc = bool(re.search(r"\bDESC(?:RIPTION)?\b", upper))
+
+    # Need HOLE + at least two of (REF, QTY, DESC) to be a header
+    if has_hole and sum([has_ref, has_qty, has_desc]) >= 2:
+        return True
+
+    return False
+
+
 def _find_hole_table_chunks(rows: List[dict]):
     """Return (header_chunks, body_chunks) from text rows when a HOLE TABLE is present."""
+    # Entity types that can contain hole table text
+    text_entity_types = ("PROXYTEXT", "MTEXT", "TEXT", "TABLECELL")
+
     starts = [
         i
         for i, r in enumerate(rows)
-        if r.get("etype") in ("PROXYTEXT", "MTEXT", "TEXT")
-        and "HOLE TABLE" in (r.get("text", "").upper())
+        if r.get("etype") in text_entity_types
+        and _is_hole_table_header(r.get("text", ""))
     ]
     if not starts:
         return [], []
@@ -97,22 +139,40 @@ def _find_hole_table_chunks(rows: List[dict]):
     body_chunks: List[str] = []
     j = i
     saw_desc = False
-    while j < len(rows) and rows[j].get("etype") in ("PROXYTEXT", "MTEXT", "TEXT"):
-        header_chunks.append(rows[j].get("text", ""))
-        if "DESCRIPTION" in (rows[j].get("text", "").upper()):
+    while j < len(rows) and rows[j].get("etype") in text_entity_types:
+        text = rows[j].get("text", "")
+        upper_text = text.upper()
+        if "DESCRIPTION" in upper_text:
+            # Split at DESCRIPTION - everything after goes to body
+            desc_pos = upper_text.find("DESCRIPTION")
+            header_part = text[:desc_pos + len("DESCRIPTION")]
+            body_part = text[desc_pos + len("DESCRIPTION"):].strip()
+            header_chunks.append(header_part)
+            if body_part:
+                body_chunks.append(body_part)
             saw_desc = True
             j += 1
             break
+        header_chunks.append(text)
         j += 1
     if not saw_desc:
         k = j
-        while k < min(j + 5, len(rows)) and rows[k].get("etype") in ("PROXYTEXT", "MTEXT", "TEXT"):
-            header_chunks.append(rows[k].get("text", ""))
-            if "DESCRIPTION" in (rows[k].get("text", "").upper()):
+        while k < min(j + 5, len(rows)) and rows[k].get("etype") in text_entity_types:
+            text = rows[k].get("text", "")
+            upper_text = text.upper()
+            if "DESCRIPTION" in upper_text:
+                # Split at DESCRIPTION - everything after goes to body
+                desc_pos = upper_text.find("DESCRIPTION")
+                header_part = text[:desc_pos + len("DESCRIPTION")]
+                body_part = text[desc_pos + len("DESCRIPTION"):].strip()
+                header_chunks.append(header_part)
+                if body_part:
+                    body_chunks.append(body_part)
                 j = k + 1
                 break
+            header_chunks.append(text)
             k += 1
-    while j < len(rows) and rows[j].get("etype") in ("PROXYTEXT", "MTEXT", "TEXT"):
+    while j < len(rows) and rows[j].get("etype") in text_entity_types:
         body_chunks.append(rows[j].get("text", ""))
         j += 1
     return header_chunks, body_chunks
@@ -274,6 +334,9 @@ def extract_hole_operations_from_file(file_path: str | Path) -> List[dict]:
     This function parses the hole table and breaks it down into atomic
     machining operations (drill, tap, counterbore, etc.) using hole_ops logic.
 
+    If no formal HOLE TABLE is found, it falls back to the backup hole finder
+    which can extract holes from dimension annotations.
+
     Args:
         file_path: Path to DXF or DWG file
 
@@ -305,25 +368,41 @@ def extract_hole_operations_from_file(file_path: str | Path) -> List[dict]:
     # Find and parse hole table
     header_chunks, body_chunks = _find_hole_table_chunks(text_records)
 
-    if not header_chunks:
-        return []
+    if header_chunks:
+        # Use traditional HOLE TABLE parsing
+        text_rows = header_chunks + body_chunks
+        ops_rows = explode_rows_to_operations(text_rows)
 
-    # Explode into operations using hole_ops
-    text_rows = header_chunks + body_chunks
-    ops_rows = explode_rows_to_operations(text_rows)
+        # Convert to list of dicts
+        result = []
+        for row in ops_rows:
+            if len(row) >= 4:
+                result.append({
+                    "HOLE": row[0],
+                    "REF_DIAM": row[1],
+                    "QTY": row[2],
+                    "OPERATION": row[3],
+                })
 
-    # Convert to list of dicts
-    result = []
-    for row in ops_rows:
-        if len(row) >= 4:
-            result.append({
-                "HOLE": row[0],
-                "REF_DIAM": row[1],
-                "QTY": row[2],
-                "OPERATION": row[3],
-            })
+        return result
 
-    return result
+    # Fallback: Use backup hole finder to extract from dimension text
+    if extract_holes_from_text_records and convert_to_hole_operations:
+        holes = extract_holes_from_text_records(text_records)
+        if holes:
+            ops_rows = convert_to_hole_operations(holes)
+            result = []
+            for row in ops_rows:
+                if len(row) >= 4:
+                    result.append({
+                        "HOLE": row[0],
+                        "REF_DIAM": row[1],
+                        "QTY": row[2],
+                        "OPERATION": row[3],
+                    })
+            return result
+
+    return []
 
 
 def extract_all_text_from_file(

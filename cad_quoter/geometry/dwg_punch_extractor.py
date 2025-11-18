@@ -900,6 +900,9 @@ def classify_punch_family(text_dump: str) -> Tuple[str, str]:
     # Check for specific multi-word terms first
     if "PILOT PIN" in text_upper or "PILOT-PIN" in text_upper:
         family = "pilot_pin"
+    elif "SPRING PIN" in text_upper or "SPRING-PIN" in text_upper:
+        # Spring pins are treated as round punches (same process as a punch)
+        family = "round_punch"
     elif "GUIDE POST" in text_upper:
         family = "guide_post"
     elif "GUIDE BUSHING" in text_upper:
@@ -1286,19 +1289,92 @@ def extract_punch_features_from_dxf(
     if "error" in dim_data:
         warnings.append(f"Dimension extraction: {dim_data['error']}")
 
-    # Use the larger of geometry bbox or max dimension
+    # Extract raw values
     geo_length = geo_envelope.get("overall_length_in", 0.0)
     geo_width = geo_envelope.get("overall_width_in", 0.0)
-    dim_length = dim_data.get("max_linear_dim", 0.0)
-    dim_diameter = dim_data.get("max_diameter_dim", 0.0)
 
-    summary.overall_length_in = max(geo_length, dim_length)
+    # Punch-specific dimension selection with sanity checking
+    # Typical punch dimensions: length 0.1-12", OD 0.05-3"
+    MAX_REASONABLE_PUNCH_LENGTH = 12.0  # inches
+    MAX_REASONABLE_PUNCH_OD = 3.0  # inches
+
+    # Get all dimension values and filter to reasonable range before taking max
+    # This filters out dimensions from scaled detail views
+    linear_dims = dim_data.get("linear_dims", [])
+    diameter_dims = dim_data.get("diameter_dims", [])
+
+    # Filter linear dimensions to reasonable punch range
+    reasonable_linear = [d["measurement"] for d in linear_dims if 0 < d["measurement"] <= MAX_REASONABLE_PUNCH_LENGTH]
+    dim_length = max(reasonable_linear) if reasonable_linear else 0.0
+
+    # Filter diameter dimensions to reasonable punch range
+    reasonable_diameters = [d["measurement"] for d in diameter_dims if 0 < d["measurement"] <= MAX_REASONABLE_PUNCH_OD]
+    dim_diameter = max(reasonable_diameters) if reasonable_diameters else 0.0
+
+    # Log if we filtered out unreasonable values
+    all_linear = [d["measurement"] for d in linear_dims]
+    all_diameters = [d["measurement"] for d in diameter_dims]
+    if all_linear and not reasonable_linear:
+        warnings.append(f"All {len(all_linear)} linear dimensions exceed reasonable range ({MAX_REASONABLE_PUNCH_LENGTH}\")")
+    elif len(all_linear) > len(reasonable_linear):
+        filtered_count = len(all_linear) - len(reasonable_linear)
+        warnings.append(f"Filtered {filtered_count} linear dimensions exceeding {MAX_REASONABLE_PUNCH_LENGTH}\"")
+
+    if all_diameters and not reasonable_diameters:
+        warnings.append(f"All {len(all_diameters)} diameter dimensions exceed reasonable range ({MAX_REASONABLE_PUNCH_OD}\")")
+    elif len(all_diameters) > len(reasonable_diameters):
+        filtered_count = len(all_diameters) - len(reasonable_diameters)
+        warnings.append(f"Filtered {filtered_count} diameter dimensions exceeding {MAX_REASONABLE_PUNCH_OD}\"")
+
+    def select_punch_dimension(geo_val: float, dim_val: float, max_reasonable: float, name: str) -> float:
+        """Select best dimension value for punch with sanity checking."""
+        nonlocal warnings
+
+        # If dimension value is in reasonable range, prefer it over geometry
+        # (DIMENSION entities are more accurate than bounding box)
+        if 0 < dim_val <= max_reasonable:
+            if geo_val > max_reasonable and geo_val > dim_val * 2:
+                warnings.append(f"Geometry {name} ({geo_val:.3f}\") exceeds reasonable range; using dimension value ({dim_val:.3f}\")")
+            return dim_val
+
+        # If geometry is in reasonable range, use it
+        if 0 < geo_val <= max_reasonable:
+            if dim_val > max_reasonable:
+                warnings.append(f"Dimension {name} ({dim_val:.3f}\") exceeds reasonable range; using geometry value ({geo_val:.3f}\")")
+            return geo_val
+
+        # Both values exceed reasonable range - likely a multi-view drawing or units issue
+        # Use the smaller value as it's more likely to be the actual part
+        if geo_val > 0 and dim_val > 0:
+            selected = min(geo_val, dim_val)
+            warnings.append(f"Both geometry ({geo_val:.3f}\") and dimension ({dim_val:.3f}\") {name} exceed reasonable range ({max_reasonable}\"); using smaller value ({selected:.3f}\")")
+            return selected
+
+        # One is zero, use the non-zero one
+        if dim_val > 0:
+            if dim_val > max_reasonable:
+                warnings.append(f"Dimension {name} ({dim_val:.3f}\") exceeds reasonable range ({max_reasonable}\")")
+            return dim_val
+        if geo_val > 0:
+            if geo_val > max_reasonable:
+                warnings.append(f"Geometry {name} ({geo_val:.3f}\") exceeds reasonable range ({max_reasonable}\")")
+            return geo_val
+
+        return 0.0
+
+    summary.overall_length_in = select_punch_dimension(
+        geo_length, dim_length, MAX_REASONABLE_PUNCH_LENGTH, "length"
+    )
 
     if summary.shape_type == "round":
-        summary.max_od_or_width_in = max(geo_width, dim_diameter)
+        summary.max_od_or_width_in = select_punch_dimension(
+            geo_width, dim_diameter, MAX_REASONABLE_PUNCH_OD, "OD"
+        )
     else:
-        summary.max_od_or_width_in = geo_width
-        summary.body_width_in = geo_width
+        summary.max_od_or_width_in = select_punch_dimension(
+            geo_width, dim_diameter, MAX_REASONABLE_PUNCH_OD, "width"
+        )
+        summary.body_width_in = summary.max_od_or_width_in
         summary.body_thickness_in = geo_envelope.get("overall_height_in", None)
 
     # Collect distinct ground diameters from DIMENSION entities with clustering

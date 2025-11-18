@@ -913,12 +913,30 @@ def plan_from_cad_file(
     if verbose:
         print(f"[PLANNER] Processing: {file_path.name}")
 
+    # Pre-convert DWG to DXF once to avoid multiple ODA converter invocations
+    # Each extraction function would otherwise convert independently
+    cad_path_for_extraction = file_path
+    if file_path.suffix.lower() == '.dwg':
+        if verbose:
+            print("[PLANNER] Converting DWG to DXF (one-time conversion)...")
+        try:
+            from cad_quoter.geometry import convert_dwg_to_dxf
+            dxf_path = convert_dwg_to_dxf(str(file_path))
+            if dxf_path:
+                cad_path_for_extraction = Path(dxf_path)
+                if verbose:
+                    print(f"[PLANNER] Using cached DXF: {cad_path_for_extraction.name}")
+        except Exception as e:
+            if verbose:
+                print(f"[PLANNER] DWG conversion failed, functions will convert individually: {e}")
+            # Fall back to original path - each function will try its own conversion
+
     # 1. Extract dimensions (L, W, T)
     dims = None
     if use_paddle_ocr:
         if verbose:
             print("[PLANNER] Extracting dimensions with DimensionFinder...")
-        dims = extract_dimensions_from_cad(file_path)
+        dims = extract_dimensions_from_cad(cad_path_for_extraction)
         if dims:
             L, W, T = dims
             if verbose:
@@ -930,15 +948,15 @@ def plan_from_cad_file(
     # 2. Extract hole table and operations
     if verbose:
         print("[PLANNER] Extracting hole table...")
-    hole_table = extract_hole_table_from_cad(file_path)
-    hole_operations = extract_hole_operations_from_cad(file_path)
+    hole_table = extract_hole_table_from_cad(cad_path_for_extraction)
+    hole_operations = extract_hole_operations_from_cad(cad_path_for_extraction)
     if verbose:
         print(f"[PLANNER] Found {len(hole_table)} unique holes -> {len(hole_operations)} operations")
 
     # 3. Extract all text for family detection
     if verbose:
         print("[PLANNER] Extracting text for family detection...")
-    all_text = extract_all_text_from_cad(file_path)
+    all_text = extract_all_text_from_cad(cad_path_for_extraction)
     if verbose:
         print(f"[PLANNER] Extracted {len(all_text)} text records")
 
@@ -970,10 +988,15 @@ def plan_from_cad_file(
 
     # Add source info to plan
     plan["source_file"] = str(file_path)
+    # Store cached DXF path if DWG was converted (avoids redundant ODA conversions)
+    if cad_path_for_extraction != file_path:
+        plan["cached_dxf_path"] = str(cad_path_for_extraction)
     if dims:
         plan["extracted_dims"] = {"L": L, "W": W, "T": T}
     plan["extracted_holes"] = len(hole_table)
     plan["extracted_hole_operations"] = len(hole_operations)
+    # Store actual hole operations data for reuse (avoids redundant ODA conversions)
+    plan["hole_operations_data"] = hole_operations
     # Add text dump for punch detection
     plan["text_dump"] = "\n".join(all_text) if all_text else ""
 
@@ -2109,8 +2132,10 @@ def estimate_hole_table_times(
         # For drilling, assume 2 flutes
         feed_rate = rpm * 2 * feed_per_tooth  # IPM
 
-        # DRILL operations (main hole) - skip if it's a jig grind operation
-        if not is_jig_grind:
+        # DRILL operations (main hole) - skip if it's a jig grind, standalone cbore, or TAP operation
+        # C'BORE entries should not be added to drill_groups (they go in cbore_groups)
+        # TAP entries should not be added to drill_groups (they go in tap_groups)
+        if not is_jig_grind and not is_cbore and not is_tap:
             # Time per hole: depth / feed_rate gives minutes (since feed_rate is IPM)
             time_per_hole = (depth / feed_rate) if feed_rate > 0 else 1.0
             time_per_hole += 0.1  # Add approach/retract time

@@ -26,7 +26,7 @@ from cad_quoter.pricing.vendor_csv import (
     pick_plate_from_mcmaster as _pick_plate_from_mcmaster,
 )
 from cad_quoter.resources import default_catalog_csv as _default_catalog_csv
-from cad_quoter.material_density import (
+from cad_quoter.materials import (
     DEFAULT_MATERIAL_DENSITY_G_CC,
     LB_PER_IN3_PER_GCC,
     MATERIAL_DENSITY_G_CC_BY_KEY,

@@ -424,12 +424,12 @@ def detect_punch_drawing(cad_file_path: Path, text_dump: str = None) -> bool:
     filename = cad_file_path.stem.upper()
 
     # Exclusion patterns - these are NOT punches even if they reference punches
-    exclusion_patterns = ["SHOE", "HOLDER", "BASE", "PLATE", "DIE SET", "BLOCK"]
+    exclusion_patterns = ["SHOE", "HOLDER", "BASE", "PLATE", "DIE SET", "BLOCK", "INSERT"]
     if any(excl in filename for excl in exclusion_patterns):
         return False
 
     # Punch indicators in filename
-    filename_indicators = ["PUNCH", "PILOT", "PIN", "FORM"]
+    filename_indicators = ["PUNCH", "PILOT", "PIN", "FORM", "GUIDE POST"]
     if any(ind in filename for ind in filename_indicators):
         return True
 
@@ -450,6 +450,8 @@ def detect_punch_drawing(cad_file_path: Path, text_dump: str = None) -> bool:
             "DIE PLATE",
             "BACKING PLATE",
             "STRIPPER PLATE",
+            "STRIPPER INSERT",
+            "PUNCH BLOCK",
         ]
         if any(excl in text_upper for excl in exclusion_indicators):
             return False
@@ -460,7 +462,9 @@ def detect_punch_drawing(cad_file_path: Path, text_dump: str = None) -> bool:
             "DIE PUNCH",
             "PIERCING PUNCH",
             "PILOT PIN",
+            "SPRING PIN",
             "PUNCH TIP",
+            "GUIDE POST",
         ]
         # Only trigger on specific punch phrases, not just "PUNCH" alone
         # (since die shoes often reference punches in their title blocks)
@@ -472,7 +476,7 @@ def detect_punch_drawing(cad_file_path: Path, text_dump: str = None) -> bool:
         if "PUNCH" in text_upper:
             # Make sure PUNCH isn't followed by exclusion words
             # e.g., "PUNCH CLEARANCE" or "PUNCH LOCATION" in notes
-            punch_exclusion_suffixes = ["SHOE", "HOLDER", "PLATE", "POCKET", "CLEARANCE", "LOCATION"]
+            punch_exclusion_suffixes = ["SHOE", "HOLDER", "PLATE", "POCKET", "CLEARANCE", "LOCATION", "BLOCK"]
             # Find all occurrences of PUNCH
             import re
             punch_pattern = r'\bPUNCH\b'
@@ -489,7 +493,8 @@ def detect_punch_drawing(cad_file_path: Path, text_dump: str = None) -> bool:
 def extract_punch_quote_data(
     cad_file_path: Path,
     quote_data: 'QuoteData',
-    verbose: bool = False
+    verbose: bool = False,
+    plan: Optional[Dict[str, Any]] = None
 ) -> Dict[str, Any]:
     """
     Extract punch-specific data and estimate times.
@@ -498,6 +503,7 @@ def extract_punch_quote_data(
         cad_file_path: Path to DXF/DWG file
         quote_data: QuoteData object to populate
         verbose: Print progress messages
+        plan: Optional plan dict with cached text_dump and cached_dxf_path
 
     Returns:
         Dict with punch features, plan, and time estimates
@@ -506,19 +512,31 @@ def extract_punch_quote_data(
         return {"error": "Punch extraction modules not available"}
 
     try:
-        # Extract text from DXF
-        from cad_quoter.geo_extractor import open_doc, collect_all_text
+        # Use cached text from plan if available (avoids ODA conversion)
+        if plan and plan.get('text_dump'):
+            text_dump = plan['text_dump']
+            text_lines = text_dump.split('\n')
+            if verbose:
+                print(f"  Using cached text ({len(text_lines)} lines) from plan")
+        else:
+            # Extract text from DXF
+            from cad_quoter.geo_extractor import open_doc, collect_all_text
 
-        doc = open_doc(cad_file_path)
-        text_records = list(collect_all_text(doc))
-        text_lines = [rec["text"] for rec in text_records if rec.get("text")]
-        text_dump = "\n".join(text_lines)
+            doc = open_doc(cad_file_path)
+            text_records = list(collect_all_text(doc))
+            text_lines = [rec["text"] for rec in text_records if rec.get("text")]
+            text_dump = "\n".join(text_lines)
 
-        if verbose:
-            print(f"  Extracted {len(text_lines)} text lines from drawing")
+            if verbose:
+                print(f"  Extracted {len(text_lines)} text lines from drawing")
 
-        # Extract punch features
-        punch_features = extract_punch_features_from_dxf(cad_file_path, text_dump)
+        # Extract punch features - use cached DXF path if available
+        dxf_path_for_punch = cad_file_path
+        if plan and plan.get('cached_dxf_path'):
+            dxf_path_for_punch = Path(plan['cached_dxf_path'])
+            if verbose:
+                print(f"  Using cached DXF for punch extraction: {dxf_path_for_punch.name}")
+        punch_features = extract_punch_features_from_dxf(dxf_path_for_punch, text_dump)
 
         if verbose:
             print(f"  Punch features extracted:")
@@ -697,7 +715,7 @@ def extract_quote_data_from_cad(
                 print("[PUNCH] Detected punch drawing - using punch extraction pipeline")
 
             # Extract punch-specific data
-            punch_data = extract_punch_quote_data(cad_file_path, quote_data, verbose)
+            punch_data = extract_punch_quote_data(cad_file_path, quote_data, verbose, plan)
 
             if "error" not in punch_data:
                 # Use punch features for part dimensions
@@ -716,20 +734,83 @@ def extract_quote_data_from_cad(
                     if verbose:
                         print("  [PUNCH] Punch dimensions are zero, falling back to DimensionFinder...")
 
-                    from cad_quoter.planning.process_planner import extract_dimensions_from_cad
-                    dims = extract_dimensions_from_cad(cad_file_path)
-                    if dims:
-                        L, W, T = dims
-                        quote_data.part_dimensions = PartDimensions(
-                            length=L,
-                            width=W,
-                            thickness=T,
-                        )
-                        if verbose:
-                            print(f"  [PUNCH] DimensionFinder found: {L:.3f} x {W:.3f} x {T:.3f}")
+                    # Use cached dimensions from plan if available (avoids ODA conversion)
+                    if 'extracted_dims' in plan and plan['extracted_dims']:
+                        dims_data = plan['extracted_dims']
+                        L = dims_data.get('L', 0.0)
+                        W = dims_data.get('W', 0.0)
+                        T = dims_data.get('T', 0.0)
+                        if L > 0 and W > 0:
+                            quote_data.part_dimensions = PartDimensions(
+                                length=L,
+                                width=W,
+                                thickness=T,
+                            )
+                            if verbose:
+                                print(f"  [PUNCH] Using cached dimensions: {L:.3f} x {W:.3f} x {T:.3f}")
+                        else:
+                            if verbose:
+                                print("  [PUNCH] Cached dimensions are zero, DimensionFinder also failed")
                     else:
-                        if verbose:
-                            print("  [PUNCH] DimensionFinder also failed to extract dimensions")
+                        # No cached dims, fall back to extraction (will trigger ODA conversion)
+                        from cad_quoter.planning.process_planner import extract_dimensions_from_cad
+                        dims = extract_dimensions_from_cad(cad_file_path)
+                        if dims:
+                            L, W, T = dims
+                            quote_data.part_dimensions = PartDimensions(
+                                length=L,
+                                width=W,
+                                thickness=T,
+                            )
+                            if verbose:
+                                print(f"  [PUNCH] DimensionFinder found: {L:.3f} x {W:.3f} x {T:.3f}")
+                        else:
+                            if verbose:
+                                print("  [PUNCH] DimensionFinder also failed to extract dimensions")
+
+                # Apply dimension override for punch parts
+                if dimension_override:
+                    dim1, dim2, dim3 = dimension_override
+                    if verbose:
+                        print(f"  [PUNCH] Dimension override input: {dim1} x {dim2} x {dim3}")
+
+                    # For punch parts, auto-reorder dimensions:
+                    # Users often enter dimensions as smallest×middle×largest (e.g., .148x.445x2)
+                    # but punch features need: length=OAL (largest), width=OD, thickness
+                    # Sort to get: thickness (smallest), width (middle), length (largest)
+                    sorted_dims = sorted([dim1, dim2, dim3])
+                    thickness = sorted_dims[0]  # smallest
+                    width = sorted_dims[1]      # middle
+                    length = sorted_dims[2]     # largest (OAL)
+
+                    if verbose:
+                        print(f"  [PUNCH] Reordered to: length={length}, width={width}, thickness={thickness}")
+
+                    quote_data.part_dimensions = PartDimensions(
+                        length=length,
+                        width=width,
+                        thickness=thickness,
+                    )
+
+                    # Also update punch_features dict so punch plan uses correct values
+                    features["overall_length_in"] = length
+                    features["max_od_or_width_in"] = width
+                    if width != thickness:
+                        # Rectangular punch - set body dimensions
+                        features["body_width_in"] = width
+                        features["body_thickness_in"] = thickness
+
+                    # Regenerate punch plan with new dimensions
+                    from dataclasses import asdict
+                    from cad_quoter.planning.punch_planner import create_punch_plan
+
+                    updated_features_dict = features  # Already a dict
+                    punch_plan = create_punch_plan(updated_features_dict)
+                    punch_data["punch_plan"] = punch_plan
+                    punch_data["punch_features"] = features
+
+                    if verbose:
+                        print(f"  [PUNCH] Plan regenerated with dimension overrides")
 
                 # Set material from punch features
                 punch_material = features.get("material_callout") or DEFAULT_MATERIAL
@@ -852,7 +933,11 @@ def extract_quote_data_from_cad(
             material = material_override
             detected_from_cad = False
         else:
-            material = detect_material_in_cad(cad_file_path)
+            # Use cached text from plan if available (avoids ODA conversion)
+            cached_text = None
+            if 'text_dump' in plan and plan['text_dump']:
+                cached_text = plan['text_dump'].split('\n')
+            material = detect_material_in_cad(cad_file_path, text_list=cached_text)
             detected_from_cad = True
             if material == "GENERIC":
                 material = DEFAULT_MATERIAL
@@ -914,12 +999,20 @@ def extract_quote_data_from_cad(
     if catalog_csv_path is None:
         catalog_csv_path = str(default_catalog_csv())
 
+    # Calculate desired stock dimensions (with machining allowances)
+    # These are the actual dimensions needed for the starting stock
+    desired_L = part_info.length + 0.50   # +0.50" face milling allowance
+    desired_W = part_info.width + 0.50    # +0.50" face milling allowance
+    desired_T = part_info.thickness + 0.25  # +0.25" thickness allowance
+
     # Calculate scrap info
-    # Always pass dimensions to avoid redundant OCR extraction
-    # Dimensions are already extracted from the process plan above (line 429)
+    # Pass desired dimensions explicitly to ensure catalog lookup uses correct values
     scrap_calc = calculate_total_scrap(
         cad_file_path=cad_file_path,
         material=material,
+        desired_length=desired_L,
+        desired_width=desired_W,
+        desired_thickness=desired_T,
         part_length=part_info.length,
         part_width=part_info.width,
         part_thickness=part_info.thickness,
@@ -945,9 +1038,6 @@ def extract_quote_data_from_cad(
     # Note: McMaster stock dimensions are already calculated in scrap_calc from calculate_total_scrap()
     # We just need to get the part number for pricing lookup
     catalog_rows = load_mcmaster_catalog_rows(catalog_csv_path)
-    desired_L = part_info.length + 0.50
-    desired_W = part_info.width + 0.50
-    desired_T = part_info.thickness + 0.25
 
     mcmaster_result = pick_mcmaster_plate_sku(
         need_L_in=desired_L,
@@ -1123,7 +1213,13 @@ def extract_quote_data_from_cad(
         if verbose:
             print("[4/5] Calculating machine hours...")
 
-        hole_table = extract_hole_operations_from_cad(cad_file_path)
+        # Use cached hole operations from plan if available (avoids redundant ODA conversion)
+        if 'hole_operations_data' in plan and plan['hole_operations_data']:
+            hole_table = plan['hole_operations_data']
+            if verbose:
+                print("  Using cached hole operations from plan")
+        else:
+            hole_table = extract_hole_operations_from_cad(cad_file_path)
 
         # Calculate total hole count (sum QTY field from each hole entry)
         holes_total = sum(int(hole.get('QTY', 1)) for hole in hole_table) if hole_table else 0

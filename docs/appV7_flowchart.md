@@ -75,17 +75,15 @@ flowchart TB
     n8 --> n9 & n4
 
     %% Machine Cost
-    n9["Sum Machine Cost<br/><small>process_cost_renderer.py</small>"]
+    n9["Sum Machine Cost<br/><small>rate_buckets.py</small>"]
 
     %% Labor Path
-    L --> P
-    P["Task Hours<br/><small>planner_render.py</small>"]
-    P --> n7
+    L --> n7
     n7["Hours Table<br/><small>Master_Variables.csv</small>"]
     n7 --> n10
 
     %% Labor Cost
-    n10["Sum Labor Cost<br/><small>process_cost_renderer.py</small>"]
+    n10["Sum Labor Cost<br/><small>rate_buckets.py</small>"]
 
     %% Material Cost Aggregation
     n12 --> n13
@@ -129,7 +127,7 @@ flowchart TB
     class B,C,D,E1,H1 extraction
     class E,F,G,H,I,J,K,L processing
     class n1,n2,n3,n5,n7,n8,n15,R1 data
-    class n4,n6,P,n9,n10,n12,n13,n11,OV,QTY,MRG cost
+    class n4,n6,n9,n10,n12,n13,n11,OV,QTY,MRG cost
     class n18,OUT output
 ```
 
@@ -171,8 +169,6 @@ flowchart TB
 | Rate Buckets | `cad_quoter/pricing/rate_buckets.py` | Machine/labor rates |
 | Rates | `cad_quoter/pricing/rates.py` | Rate definitions |
 | Speeds & Feeds | `cad_quoter/pricing/speeds_feeds_selector.py` | Machining parameters |
-| Process Cost Renderer | `cad_quoter/pricing/process_cost_renderer.py` | Converts hours to costs |
-| Planner Render | `cad_quoter/pricing/planner_render.py` | Hours table rendering |
 | Cost Summary | `cad_quoter/pricing/QuoteDataHelper.py` | `CostSummary` class |
 
 ### Overrides & Output

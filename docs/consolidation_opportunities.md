@@ -1,11 +1,24 @@
 # Consolidation opportunities
 
-This repository still carries several legacy entry points and compatibility layers that duplicate newer, package‑scoped helpers. Consolidating these hotspots would simplify the import graph and reduce the risk of behaviour drift between the GUI (`AppV7.py`) and the `cad_quoter` package.
+> **Status: ALL CONSOLIDATIONS COMPLETE**
+
+This document tracks legacy entry points and compatibility layers that have been consolidated into the modern `cad_quoter` package structure.
 
 ## Completed cleanups
 
-- Removed the redundant `dxf_text_extract.py` shim; callers should rely on `cad_quoter.geometry.dxf_text.extract_text_lines_from_dxf` exposed by the geometry package.
-- Deleted the unused `time_models.py` module and updated migration docs to point to the actively maintained estimator in `cad_quoter.pricing.time_estimator`.
+All consolidation work has been completed:
+
+- [x] Removed the redundant `dxf_text_extract.py` shim; callers now use `cad_quoter.geometry.dxf_text.extract_text_lines_from_dxf`
+- [x] Deleted the unused `time_models.py` module; functionality in `cad_quoter.pricing.time_estimator`
+- [x] Removed `planner_pricing.py` shim; callers import `cad_quoter.pricing.planner` directly
+- [x] Consolidated drilling estimators into `cad_quoter.estimators` and `cad_quoter.pricing.time_estimator`
+- [x] Removed entire `appkit/` directory and migrated all functionality to `cad_quoter/`
+- [x] Removed `appkit/env_utils.py` (retired environment toggles)
+- [x] Migrated `appkit/llm_adapter.py` to `cad_quoter/llm/__init__.py`
+- [x] Migrated `appkit/llm_converters.py` to `cad_quoter/llm/converters.py`
+- [x] Migrated `appkit/merge_utils.py` to `cad_quoter/app/merge_utils.py`
+- [x] Migrated `appkit/guardrails.py` to `cad_quoter/app/guardrails.py`
+- [x] Removed `appkit/ui/*` subtree (Tk UI removed from repository)
 
 ## Process-cost bucketisation
 
@@ -13,9 +26,13 @@ The standalone bucketiser has been folded into the pricing package so that both 
 
 ## Planner pricing duplication
 
-Planner cost conversion lives alongside the rate metadata in `cad_quoter.pricing.planner`. A thin compatibility shim `planner_pricing.py` re‑exports `price_with_planner`, allowing existing imports to continue working while the heavy lifting happens inside the package. The migration guide documents the new import path.
+Planner cost conversion lives in `cad_quoter.pricing.planner`. The thin compatibility shim `planner_pricing.py` has been removed; callers now import directly from `cad_quoter.pricing.planner`.
 
 ## Drilling estimator location
 
 All drilling estimator functionality has been migrated into `cad_quoter.estimators` and `cad_quoter.pricing.time_estimator`, decoupling estimators from the GUI and making them easier to test and reuse.
+
+## appkit package removal
+
+The entire `appkit/` package has been removed. See `docs/appkit_inventory.md` for the complete migration map showing where each module's functionality now resides in the `cad_quoter/` package.
 
