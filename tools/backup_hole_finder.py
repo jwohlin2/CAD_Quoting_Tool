@@ -98,10 +98,13 @@ class HoleValidationResult:
 # =============================================================================
 
 # Expected holes for known parts
-# Format: part_number -> list of (raw_mtext_description, parsed_features)
+# Note: <> placeholder should be replaced with actual dimension value when parsed from DWG
 EXPECTED_HOLES: Dict[str, List[str]] = {
     "108": [
-        r"(2) <> THRU\X(JIG GRIND)",
+        # 2 holes at Ø.2500 THRU with JIG GRIND
+        # Raw MTEXT: (2) <> THRU\X(JIG GRIND) - but <> resolved to .2500 from dimension
+        r"(2) Ø.2500 THRU\X(JIG GRIND)",
+        # 3 holes at Ø7/32 THRU with Ø11/32 C'BORE .100 DEEP FROM FRONT
         r"\A1;(3) ∅7/32 THRU; ∅11/32 C'BORE\PX .100 DEEP FROM FRONT",
     ],
 }
@@ -266,6 +269,8 @@ def convert_to_hole_operations(holes: List[BackupHoleFeature]) -> List[List[str]
     This matches the format expected by explode_rows_to_operations output:
     [HOLE_LETTER, REF_DIAM, QTY, OPERATION]
 
+    Each hole feature may produce multiple operations (e.g., drill + C'BORE).
+
     Args:
         holes: List of BackupHoleFeature objects
 
@@ -278,38 +283,40 @@ def convert_to_hole_operations(holes: List[BackupHoleFeature]) -> List[List[str]
     for hole in holes:
         letter = chr(hole_letter)
         hole_letter += 1
-
-        # Format diameter
-        if hole.diameter and hole.diameter != "<>":
-            ref_diam = f"Ø{hole.diameter}"
-        elif hole.diameter_mm:
-            inches = hole.diameter_mm / INCH_TO_MM
-            ref_diam = f"Ø{inches:.4f}".rstrip("0").rstrip(".")
-        else:
-            ref_diam = "Ø?"
-
         qty = str(hole.qty)
 
-        # Build operation description
-        op_parts = []
+        # Format main hole diameter
+        if hole.diameter and hole.diameter != "<>":
+            main_diam = f"Ø{hole.diameter}"
+        elif hole.diameter_mm:
+            inches = hole.diameter_mm / INCH_TO_MM
+            main_diam = f"Ø{inches:.4f}".rstrip("0").rstrip(".")
+        else:
+            main_diam = "Ø?"
 
-        if hole.is_thru:
-            op_parts.append("THRU")
+        # Check for JIG GRIND operation (standalone)
+        if "JIG GRIND" in hole.operations:
+            # JIG GRIND is the main operation
+            op_desc = "THRU (JIG GRIND)" if hole.is_thru else "(JIG GRIND)"
+            operations.append([letter, main_diam, qty, op_desc])
+            continue
 
-        for op in hole.operations:
-            if op == "JIG GRIND":
-                op_parts.append("(JIG GRIND)")
-            elif op == "C'BORE" and hole.cbore_diameter:
-                cbore_desc = f"Ø{hole.cbore_diameter} C'BORE"
-                if hole.cbore_depth_in:
-                    cbore_desc += f" X {hole.cbore_depth_in} DEEP"
-                if hole.from_face:
-                    cbore_desc += f" FROM {hole.from_face}"
-                op_parts.append(cbore_desc)
+        # For drill + C'BORE, create separate operations
+        if hole.is_thru or hole.diameter:
+            # First: Drill operation
+            drill_desc = "THRU" if hole.is_thru else "DRILL"
+            operations.append([letter, main_diam, qty, drill_desc])
 
-        operation = " ".join(op_parts) if op_parts else hole.raw_text
-
-        operations.append([letter, ref_diam, qty, operation])
+        # Second: C'BORE operation (if present)
+        if "C'BORE" in hole.operations and hole.cbore_diameter:
+            # Use C'BORE diameter for this operation
+            cbore_diam = f"Ø{hole.cbore_diameter}"
+            cbore_desc = "C'BORE"
+            if hole.cbore_depth_in:
+                cbore_desc += f" X {hole.cbore_depth_in} DEEP"
+            if hole.from_face:
+                cbore_desc += f" FROM {hole.from_face}"
+            operations.append([letter, cbore_diam, qty, cbore_desc])
 
     return operations
 
