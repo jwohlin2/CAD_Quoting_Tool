@@ -1384,21 +1384,20 @@ class AppV7:
                         f"group {op.qty}x{op.time_per_hole:.2f} = {op.total_time:.2f} min")
 
             def format_milling_op(op):
-                """Format milling operation with all details"""
-                lines = []
-                lines.append(f"{op.op_description} | W={op.width:.3f}\" | L={op.length:.3f}\"")
+                """Format a milling operation as a single table row."""
 
-                if op.perimeter > 0:
-                    # Side milling operation
-                    lines.append(f"  perimeter={op.perimeter:.3f}\" | D={op.tool_diameter:.3f}\" | radial_stock={op.radial_stock:.3f}\" | axial_step={op.axial_step:.3f}\"")
-                    lines.append(f"  axial_passes={op.axial_passes} | radial_passes={op.radial_passes} | total_path={op.path_length:.1f}\"")
-                else:
-                    # Face milling operation
-                    lines.append(f"  D={op.tool_diameter:.3f}\" | passes={op.passes} | stepover≈{op.stepover:.3f}\"")
-                    lines.append(f"  path/pass={op.length:.3f}\" | total_path={op.path_length:.1f}\"")
+                feed = op.feed_rate if op.feed_rate and op.feed_rate > 0 else None
+                feed_display = f"{feed:>9.1f}" if feed is not None else f"{'--':>9}"
 
-                lines.append(f"  feed={op.feed_rate:.1f} ipm | time={op.time_minutes:.2f} min")
-                return "\n".join(lines)
+                return (
+                    f"{op.op_description:<26}  "
+                    f"{op.width:>7.3f}  "
+                    f"{op.length:>7.3f}  "
+                    f"{op.tool_diameter:>12.3f}  "
+                    f"{op.path_length:>9.1f}  "
+                    f"{feed_display}  "
+                    f"{op.time_minutes:>9.2f}"
+                )
 
             def format_grinding_op(op):
                 """Format grinding operation with all details"""
@@ -1467,10 +1466,16 @@ class AppV7:
             if machine_hours.milling_operations:
                 report.append("TIME PER OP - MILLING")
                 report.append("-" * 74)
+                report.append(
+                    "Op Description              W (in)   L (in)   Tool Dia (in)  Path (in)  Feed (ipm)  Time (min)"
+                )
+                report.append("-" * 90)
                 for op in machine_hours.milling_operations:
                     report.append(format_milling_op(op))
-                    report.append("")
-                report.append(f"Total Milling Time (Square/Finish): {machine_hours.total_milling_minutes:.2f} minutes")
+                report.append("-" * 90)
+                report.append(
+                    f"Total Milling Time (Square/Finish): {machine_hours.total_milling_minutes:.2f} minutes"
+                )
                 report.append("")
 
             # TIME PER OP - GRINDING
