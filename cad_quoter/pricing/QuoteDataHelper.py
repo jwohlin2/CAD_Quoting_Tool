@@ -405,11 +405,13 @@ class QuoteData:
 
 def detect_punch_drawing(cad_file_path: Path, text_dump: str = None) -> bool:
     """
-    Detect if a CAD file is a punch drawing.
+    Detect if a CAD file is a punch drawing (individual punch component).
 
     Detection is based on:
     1. Filename containing 'punch', 'pilot', 'pin', etc.
     2. Text content containing PUNCH, PILOT PIN, etc.
+
+    Excludes die shoes, holders, and other tooling that references punches.
 
     Args:
         cad_file_path: Path to CAD file
@@ -420,6 +422,13 @@ def detect_punch_drawing(cad_file_path: Path, text_dump: str = None) -> bool:
     """
     # Check filename
     filename = cad_file_path.stem.upper()
+
+    # Exclusion patterns - these are NOT punches even if they reference punches
+    exclusion_patterns = ["SHOE", "HOLDER", "BASE", "PLATE", "DIE SET", "BLOCK"]
+    if any(excl in filename for excl in exclusion_patterns):
+        return False
+
+    # Punch indicators in filename
     filename_indicators = ["PUNCH", "PILOT", "PIN", "FORM"]
     if any(ind in filename for ind in filename_indicators):
         return True
@@ -427,13 +436,34 @@ def detect_punch_drawing(cad_file_path: Path, text_dump: str = None) -> bool:
     # Check text content if provided
     if text_dump:
         text_upper = text_dump.upper()
+
+        # Check for exclusions first - die shoes, holders, etc.
+        # These parts reference punches but are not themselves punches
+        exclusion_indicators = [
+            "DIE SHOE",
+            "PUNCH SHOE",
+            "PUNCH HOLDER",
+            "DIE HOLDER",
+            "DIE SET",
+            "DIE BASE",
+            "PUNCH PLATE",
+            "DIE PLATE",
+            "BACKING PLATE",
+            "STRIPPER PLATE",
+        ]
+        if any(excl in text_upper for excl in exclusion_indicators):
+            return False
+
+        # Punch indicators in text
         text_indicators = [
-            "PUNCH",
-            "PILOT PIN",
             "FORM PUNCH",
             "DIE PUNCH",
             "PIERCING PUNCH",
+            "PILOT PIN",
+            "PUNCH TIP",
         ]
+        # Only trigger on specific punch phrases, not just "PUNCH" alone
+        # (since die shoes often reference punches in their title blocks)
         if any(ind in text_upper for ind in text_indicators):
             return True
 
