@@ -563,6 +563,7 @@ def extract_quote_data_from_cad(
     mcmaster_price_override: Optional[float] = None,
     scrap_value_override: Optional[float] = None,
     quantity: int = 1,
+    family_override: Optional[str] = None,
     verbose: bool = False
 ) -> QuoteData:
     """
@@ -582,6 +583,7 @@ def extract_quote_data_from_cad(
         mcmaster_price_override: Optional manual stock price - skips McMaster API lookup
         scrap_value_override: Optional manual scrap value - skips automatic scrap value calculation
         quantity: Number of parts to quote (affects setup cost amortization and material pricing)
+        family_override: Optional part family override (e.g., "Punches" to force punch pipeline)
         verbose: Print extraction progress
 
     Returns:
@@ -661,12 +663,18 @@ def extract_quote_data_from_cad(
     punch_data = None
 
     if PUNCH_EXTRACTION_AVAILABLE:
-        # First check by filename
-        is_punch = detect_punch_drawing(cad_file_path)
+        # First check for family override - this takes priority
+        if family_override and family_override.lower() in ("punches", "punch"):
+            is_punch = True
+            if verbose:
+                print(f"[PUNCH] Using family override: {family_override}")
+        else:
+            # Auto-detect: First check by filename
+            is_punch = detect_punch_drawing(cad_file_path)
 
-        # If not detected by filename, check text content
-        if not is_punch and plan.get('text_dump'):
-            is_punch = detect_punch_drawing(cad_file_path, plan.get('text_dump'))
+            # If not detected by filename, check text content
+            if not is_punch and plan.get('text_dump'):
+                is_punch = detect_punch_drawing(cad_file_path, plan.get('text_dump'))
 
         if is_punch:
             if verbose:
