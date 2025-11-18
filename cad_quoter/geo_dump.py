@@ -91,13 +91,44 @@ def _diameter_aliases(token: str) -> List[str]:
     return out
 
 
+def _is_hole_table_header(text: str) -> bool:
+    """Check if text is a hole table header marker."""
+    if not text:
+        return False
+    upper = text.upper()
+
+    # Primary pattern: "HOLE TABLE" with flexible spacing
+    if re.search(r"\bHOLE\s+TABLE\b", upper):
+        return True
+
+    # Alternative: "HOLETABLE" as one word
+    if "HOLETABLE" in upper:
+        return True
+
+    # Alternative: Header row with key markers (HOLE + REF + QTY or DESCRIPTION)
+    # This catches cases where there's no "HOLE TABLE" label
+    has_hole = bool(re.search(r"\bHOLE\b", upper))
+    has_ref = bool(re.search(r"\bREF\b", upper))
+    has_qty = bool(re.search(r"\bQTY\b", upper))
+    has_desc = bool(re.search(r"\bDESC(?:RIPTION)?\b", upper))
+
+    # Need HOLE + at least two of (REF, QTY, DESC) to be a header
+    if has_hole and sum([has_ref, has_qty, has_desc]) >= 2:
+        return True
+
+    return False
+
+
 def _find_hole_table_chunks(rows: List[dict]):
     """Return (header_chunks, body_chunks) from text rows when a HOLE TABLE is present."""
+    # Entity types that can contain hole table text
+    text_entity_types = ("PROXYTEXT", "MTEXT", "TEXT", "TABLECELL")
+
     starts = [
         i
         for i, r in enumerate(rows)
-        if r.get("etype") in ("PROXYTEXT", "MTEXT", "TEXT")
-        and "HOLE TABLE" in (r.get("text", "").upper())
+        if r.get("etype") in text_entity_types
+        and _is_hole_table_header(r.get("text", ""))
     ]
     if not starts:
         return [], []
@@ -106,7 +137,7 @@ def _find_hole_table_chunks(rows: List[dict]):
     body_chunks: List[str] = []
     j = i
     saw_desc = False
-    while j < len(rows) and rows[j].get("etype") in ("PROXYTEXT", "MTEXT", "TEXT"):
+    while j < len(rows) and rows[j].get("etype") in text_entity_types:
         header_chunks.append(rows[j].get("text", ""))
         if "DESCRIPTION" in (rows[j].get("text", "").upper()):
             saw_desc = True
@@ -115,13 +146,13 @@ def _find_hole_table_chunks(rows: List[dict]):
         j += 1
     if not saw_desc:
         k = j
-        while k < min(j + 5, len(rows)) and rows[k].get("etype") in ("PROXYTEXT", "MTEXT", "TEXT"):
+        while k < min(j + 5, len(rows)) and rows[k].get("etype") in text_entity_types:
             header_chunks.append(rows[k].get("text", ""))
             if "DESCRIPTION" in (rows[k].get("text", "").upper()):
                 j = k + 1
                 break
             k += 1
-    while j < len(rows) and rows[j].get("etype") in ("PROXYTEXT", "MTEXT", "TEXT"):
+    while j < len(rows) and rows[j].get("etype") in text_entity_types:
         body_chunks.append(rows[j].get("text", ""))
         j += 1
     return header_chunks, body_chunks
