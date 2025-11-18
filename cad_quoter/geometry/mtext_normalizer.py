@@ -370,10 +370,25 @@ def resolve_dimension_with_info(dim, unit_factor: float) -> Dict[str, Any]:
         "DIA" in raw_text.upper()
     )
 
+    # Get ordinate direction for ordinate dimensions (dimtype 6)
+    # In DXF, ordinate_type flag: 0 = X-type, 1 = Y-type
+    ordinate_direction = None
+    if dimtype == 6:
+        try:
+            # Check flag in dimension type value (bit 6 = Y-type if set)
+            # dimtype value for ordinate is 6, with flag 64 (0x40) for Y-type
+            full_dimtype = dim.dxf.dimtype if hasattr(dim.dxf, 'dimtype') else 0
+            if full_dimtype & 64:  # Bit 6 set = Y-type ordinate
+                ordinate_direction = "Y"
+            else:
+                ordinate_direction = "X"
+        except:
+            pass
+
     # Resolve text
     resolved = resolved_dimension_text(dim, unit_factor)
 
-    return {
+    result = {
         "resolved_text": resolved,
         "raw_text": raw_text,
         "measurement": meas,
@@ -381,6 +396,11 @@ def resolve_dimension_with_info(dim, unit_factor: float) -> Dict[str, Any]:
         "dimtype": dimtype,
         "is_diameter": is_diameter,
     }
+
+    if ordinate_direction:
+        result["ordinate_direction"] = ordinate_direction
+
+    return result
 
 
 # ============================================================================

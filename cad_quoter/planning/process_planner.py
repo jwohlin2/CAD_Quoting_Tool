@@ -748,11 +748,13 @@ def extract_dimensions_from_cad(file_path: str | Path) -> Optional[Tuple[float, 
 
         # Strategy for bbox extraction:
         # - Linear dimensions (dimtype 0/1) are almost always THICKNESS
-        # - Ordinate dimensions (dimtype 6) give L and W from max extents
+        # - Ordinate dimensions (dimtype 6) give L and W from max extents in each direction
 
         # Separate dimensions by type
         linear_dims = []
-        ordinate_dims = []
+        ordinate_x = []  # X-direction ordinates
+        ordinate_y = []  # Y-direction ordinates
+        ordinate_unknown = []  # Direction unknown
 
         for dim in finder.dimensions:
             dimtype = dim.get("dimtype", 0)
@@ -765,22 +767,42 @@ def extract_dimensions_from_cad(file_path: str | Path) -> Optional[Tuple[float, 
             if dimtype in (0, 1):  # Linear or Aligned
                 linear_dims.append(val)
             elif dimtype == 6:  # Ordinate
-                ordinate_dims.append(val)
+                direction = dim.get("ordinate_direction")
+                if direction == "X":
+                    ordinate_x.append(val)
+                elif direction == "Y":
+                    ordinate_y.append(val)
+                else:
+                    ordinate_unknown.append(val)
 
         # Get thickness from largest linear dimension
         T = max(linear_dims) if linear_dims else None
 
-        # Get L and W from two largest unique ordinates
-        # (representing max extent in each direction)
-        unique_ordinates = sorted(set(ordinate_dims), reverse=True)
+        # Get L and W from max ordinates in each direction
+        L = None
+        W = None
 
-        if len(unique_ordinates) >= 2 and T:
-            L = unique_ordinates[0]
-            W = unique_ordinates[1]
-        elif len(unique_ordinates) >= 1 and T:
-            # Only one ordinate direction - use it for both L and W
-            L = unique_ordinates[0]
-            W = unique_ordinates[0]
+        if ordinate_x and ordinate_y:
+            # We have direction information - use max in each direction
+            L = max(ordinate_x)
+            W = max(ordinate_y)
+            # Ensure L >= W
+            if W > L:
+                L, W = W, L
+        elif ordinate_unknown:
+            # No direction info - use two largest unique ordinates
+            unique_ordinates = sorted(set(ordinate_unknown), reverse=True)
+            if len(unique_ordinates) >= 2:
+                L = unique_ordinates[0]
+                W = unique_ordinates[1]
+            elif len(unique_ordinates) >= 1:
+                L = unique_ordinates[0]
+                W = unique_ordinates[0]
+
+        if L and W and T:
+            # Sort as L >= W >= T
+            dims = sorted([L, W, T], reverse=True)
+            return (dims[0], dims[1], dims[2])
         else:
             # Fallback: use top 3 scored dimensions
             seen = set()
@@ -798,10 +820,6 @@ def extract_dimensions_from_cad(file_path: str | Path) -> Optional[Tuple[float, 
 
             dims = sorted(top_3, reverse=True)
             return (dims[0], dims[1], dims[2])
-
-        # Sort as L >= W >= T
-        dims = sorted([L, W, T], reverse=True)
-        return (dims[0], dims[1], dims[2])
 
     except Exception as e:
         print(f"[WARN] Dimension extraction failed: {e}")
