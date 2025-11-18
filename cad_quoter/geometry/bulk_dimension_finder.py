@@ -41,7 +41,7 @@ DWG_FILES = [
     r"D:\CAD_Quoting_Tool\Cad Files\T1769-104_redacted.dwg",
     r"D:\CAD_Quoting_Tool\Cad Files\316A_redacted.dwg",
     r"D:\CAD_Quoting_Tool\Cad Files\305_redacted.dwg",
-    r"D:\CAD_Quoting_Tool\Cad Files\301 _redacted.dwg",
+    r"D:\CAD_Quoting_Tool\Cad Files\301_redacted.dwg",
 ]
 
 # Expected dimensions for validation (optional)
@@ -119,6 +119,86 @@ def get_expected_dims(filepath: str) -> tuple | None:
     return None
 
 
+def compare_dimensions(found_candidates: list, expected: tuple, tolerance: float = 0.05) -> dict:
+    """
+    Compare found dimension candidates against expected dimensions.
+
+    Args:
+        found_candidates: List of (value, score) tuples from dimension finder
+        expected: Tuple of expected (L, W, H) dimensions
+        tolerance: Relative tolerance for matching (default 5%)
+
+    Returns:
+        dict with comparison results
+    """
+    found_values = [val for val, _ in found_candidates] if found_candidates else []
+
+    results = {
+        "expected": expected,
+        "found_values": found_values[:10],  # Top 10 candidates
+        "matches": [],
+        "missing": [],
+        "pass": False,
+        "match_count": 0,
+        "total_expected": len(expected),
+    }
+
+    matched_indices = set()
+
+    for exp_dim in expected:
+        best_match = None
+        best_diff = float('inf')
+        best_idx = None
+
+        for idx, found_val in enumerate(found_values):
+            if idx in matched_indices:
+                continue
+
+            # Calculate relative difference
+            if exp_dim == 0:
+                diff = abs(found_val)
+            else:
+                diff = abs(found_val - exp_dim) / exp_dim
+
+            if diff < best_diff:
+                best_diff = diff
+                best_match = found_val
+                best_idx = idx
+
+        if best_match is not None and best_diff <= tolerance:
+            results["matches"].append({
+                "expected": exp_dim,
+                "found": best_match,
+                "diff_pct": best_diff * 100,
+                "status": "PASS"
+            })
+            results["match_count"] += 1
+            if best_idx is not None:
+                matched_indices.add(best_idx)
+        else:
+            # Check if we found something close but outside tolerance
+            if best_match is not None:
+                results["missing"].append({
+                    "expected": exp_dim,
+                    "closest": best_match,
+                    "diff_pct": best_diff * 100,
+                    "status": "FAIL"
+                })
+            else:
+                results["missing"].append({
+                    "expected": exp_dim,
+                    "closest": None,
+                    "diff_pct": None,
+                    "status": "FAIL"
+                })
+
+    # Overall pass if all expected dimensions were found
+    results["pass"] = results["match_count"] == results["total_expected"]
+    results["match_rate"] = results["match_count"] / results["total_expected"] if results["total_expected"] > 0 else 0
+
+    return results
+
+
 def process_file(filepath: str, use_expected: bool = False) -> dict:
     """
     Process a single DWG file.
@@ -177,9 +257,13 @@ def process_file(filepath: str, use_expected: bool = False) -> dict:
         result["unique_values"] = analysis["unique_values"]
         result["bbox_candidates"] = analysis["inferred_bbox"]
 
-        if expected and "comparison" in analysis:
-            result["comparison"] = analysis["comparison"]
-            result["match_rate"] = analysis["comparison"]["match_rate"]
+        # Perform our own comparison if expected dimensions provided
+        if expected:
+            result["expected"] = expected
+            comparison = compare_dimensions(analysis["inferred_bbox"], expected)
+            result["comparison"] = comparison
+            result["match_rate"] = comparison["match_rate"]
+            result["pass"] = comparison["pass"]
 
         result["status"] = "success"
 
@@ -226,21 +310,26 @@ def main():
             # Show top bbox candidates
             if result.get("bbox_candidates"):
                 print("Bounding box candidates:")
-                for val, score in result["bbox_candidates"][:3]:
+                for val, score in result["bbox_candidates"][:5]:
                     print(f"  {val:.4f}\" (score: {score:.2f})")
 
             # Show comparison if available
             if result.get("comparison"):
                 comp = result["comparison"]
-                print(f"Expected: {result.get('expected')}")
-                print(f"Match rate: {comp['match_rate']*100:.0f}%")
+                pass_fail = "PASS" if result.get("pass") else "FAIL"
+                print(f"\nComparison Result: [{pass_fail}]")
+                print(f"Expected dimensions: {result.get('expected')}")
+                print(f"Match rate: {comp['match_rate']*100:.0f}% ({comp['match_count']}/{comp['total_expected']})")
 
+                print("\nDimension matching:")
                 for m in comp.get("matches", []):
-                    note = f" ({m.get('note', '')})" if m.get('note') else ""
-                    print(f"  {m['expected']} -> {m['found']:.4f}{note}")
+                    print(f"  [PASS] {m['expected']:.4f} -> {m['found']:.4f} (diff: {m['diff_pct']:.1f}%)")
 
                 for m in comp.get("missing", []):
-                    print(f"  {m} -> MISSING")
+                    if m.get("closest") is not None:
+                        print(f"  [FAIL] {m['expected']:.4f} -> closest: {m['closest']:.4f} (diff: {m['diff_pct']:.1f}%)")
+                    else:
+                        print(f"  [FAIL] {m['expected']:.4f} -> NOT FOUND")
 
         elif result["status"] == "file_not_found":
             error_count += 1
@@ -264,11 +353,70 @@ def main():
     print(f"Errors/Not found: {error_count}")
 
     if use_expected:
+        # Calculate pass/fail statistics
+        passed = [r for r in results if r.get("pass") is True]
+        failed = [r for r in results if r.get("pass") is False]
+
+        print(f"\nComparison Results:")
+        print(f"  Passed: {len(passed)}")
+        print(f"  Failed: {len(failed)}")
+
         # Calculate overall match rate
         match_rates = [r.get("match_rate", 0) for r in results if r.get("match_rate") is not None]
         if match_rates:
             avg_match = sum(match_rates) / len(match_rates)
-            print(f"Average match rate: {avg_match*100:.1f}%")
+            print(f"  Average match rate: {avg_match*100:.1f}%")
+
+        # Results table
+        print("\n" + "=" * 80)
+        print("RESULTS TABLE")
+        print("=" * 80)
+        print(f"{'File':<28} {'Status':<8} {'Rate':<8} {'Max Diff':<10} {'Expected'}")
+        print("-" * 80)
+
+        for r in results:
+            filename = r['filename'][:26] if len(r['filename']) > 26 else r['filename']
+            if r.get("pass") is not None:
+                status = "PASS" if r["pass"] else "FAIL"
+                rate = f"{r.get('match_rate', 0)*100:.0f}%"
+                expected = r.get("expected", "N/A")
+                if expected != "N/A":
+                    expected = f"{expected[0]}x{expected[1]}x{expected[2]}"
+
+                # Calculate max diff from matches and missing
+                comp = r.get("comparison", {})
+                all_diffs = []
+                for m in comp.get("matches", []):
+                    all_diffs.append(m["diff_pct"])
+                for m in comp.get("missing", []):
+                    if m.get("diff_pct") is not None:
+                        all_diffs.append(m["diff_pct"])
+
+                if all_diffs:
+                    max_diff = f"{max(all_diffs):.1f}%"
+                else:
+                    max_diff = "N/A"
+            else:
+                status = "ERROR"
+                rate = "N/A"
+                expected = "N/A"
+                max_diff = "N/A"
+
+            print(f"{filename:<28} {status:<8} {rate:<8} {max_diff:<10} {expected}")
+
+        # Show failed files details
+        if failed:
+            print("\n" + "=" * 70)
+            print("FAILED FILES DETAILS")
+            print("=" * 70)
+            for r in failed:
+                print(f"\n{r['filename']}:")
+                comp = r.get("comparison", {})
+                for m in comp.get("missing", []):
+                    if m.get("closest") is not None:
+                        print(f"  Missing: {m['expected']:.4f} (closest found: {m['closest']:.4f}, diff: {m['diff_pct']:.1f}%)")
+                    else:
+                        print(f"  Missing: {m['expected']:.4f} (not found)")
 
     return results
 
