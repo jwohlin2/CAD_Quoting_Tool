@@ -19,10 +19,6 @@ from cad_quoter.utils.machining import (
 
 
 __all__ = [
-    "norm_line",
-    "build_ops_rows_from_lines_fallback",
-    "collect_chart_lines_context",
-    "coalesce_rows",
     "RE_QTY_LEAD",
     "RE_FROM_SIDE",
     "RE_DEPTH",
@@ -383,31 +379,6 @@ def _collect_chart_lines_context(*containers: Mapping[str, object] | Sequence[st
     return merged
 
 
-# -- Public wrappers ---------------------------------------------------------
-
-def norm_line(value: str) -> str:
-    """Public wrapper around :func:`_norm_line`."""
-
-    return _norm_line(value)
-
-
-def build_ops_rows_from_lines_fallback(lines: Iterable[str]) -> list[dict]:
-    """Return conservative ops rows based on raw chart text."""
-
-    seq = list(lines) if not isinstance(lines, list) else lines
-    return _build_ops_rows_from_lines_fallback(seq)
-
-
-def collect_chart_lines_context(*containers: Mapping[str, object] | None) -> list[str]:
-    """Public wrapper around :func:`_collect_chart_lines_context`."""
-
-    return _collect_chart_lines_context(*containers)
-
-
-def coalesce_rows(rows: Sequence[Mapping[str, object]] | Sequence[dict]) -> list[dict]:
-    """Public wrapper around :func:`_coalesce_rows`."""
-
-    return _coalesce_rows(rows)
 
 
 # -- Export commonly used regex patterns ------------------------------------
