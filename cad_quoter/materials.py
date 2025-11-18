@@ -9,7 +9,7 @@ import re
 from fractions import Fraction
 from typing import Dict, Set
 
-from cad_quoter.resources.loading import load_json
+from cad_quoter.resources import load_json
 
 # Import MaterialMapper for centralized material handling
 try:

@@ -1,9 +1,17 @@
 """Estimator modules exposed for backwards-compatible imports."""
 
-from . import base, drilling, drilling_legacy
+from . import drilling_legacy
+from .drilling_legacy import (
+    EstimatorInput,
+    SpeedsFeedsUnavailableError,
+    estimate,
+    legacy_estimate_drilling_hours,
+)
 
 __all__ = [
-    "base",
-    "drilling",
     "drilling_legacy",
+    "estimate",
+    "EstimatorInput",
+    "legacy_estimate_drilling_hours",
+    "SpeedsFeedsUnavailableError",
 ]
