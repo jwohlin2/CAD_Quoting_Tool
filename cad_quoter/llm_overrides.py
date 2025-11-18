@@ -30,7 +30,7 @@ from cad_quoter.pass_labels import (
     _HARDWARE_LABEL_ALIASES,
     _canonical_pass_label,
 )
-from cad_quoter.material_density import density_for_material as _lookup_density
+from cad_quoter.materials import density_for_material as _lookup_density
 from cad_quoter.utils import jdump
 from cad_quoter.utils.render_utils import fmt_hours
 

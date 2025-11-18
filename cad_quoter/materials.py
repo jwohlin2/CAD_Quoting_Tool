@@ -1,9 +1,13 @@
-"""Shared material density lookups and normalization helpers."""
+"""Shared material data: densities, lookups, and domain primitives.
+
+This module consolidates all material-related data and helper functions,
+combining density lookups with material selection primitives.
+"""
 from __future__ import annotations
 
 import re
 from fractions import Fraction
-from typing import Dict
+from typing import Dict, Set
 
 from cad_quoter.resources.loading import load_json
 
@@ -14,6 +18,10 @@ try:
 except ImportError:
     _HAS_MATERIAL_MAPPER = False
 
+
+# -----------------------------------------------------------------------------
+# Density conversion constants
+# -----------------------------------------------------------------------------
 
 LB_PER_IN3_PER_GCC = float(
     # 1 in = 2.54 cm (exact) and 1 lb = 453.59237 g (exact).
@@ -37,7 +45,15 @@ def normalize_material_key(value: object) -> str:
     return re.sub(r"\s+", " ", cleaned).strip()
 
 
+# -----------------------------------------------------------------------------
+# Load material data from JSON resource
+# -----------------------------------------------------------------------------
+
 _MATERIAL_DATA = load_json("materials.json")
+
+# -----------------------------------------------------------------------------
+# Density lookup tables
+# -----------------------------------------------------------------------------
 
 _DENSITY_BY_DISPLAY_RAW = _MATERIAL_DATA.get("density_g_cc_by_display", {})
 
@@ -130,7 +146,7 @@ for alias, density in _ADDITIONAL_DENSITY_ALIASES.items():
     MATERIAL_DENSITY_G_CC_BY_KEYWORD.setdefault(key, float(density))
 
 
-DEFAULT_MATERIAL_DENSITY_G_CC = 2.7  # Aluminum density in g/cm³ (fixed from incorrect 7.85 steel fallback)
+DEFAULT_MATERIAL_DENSITY_G_CC = 2.7  # Aluminum density in g/cm³
 
 
 def density_for_material(material: object | None, default: float | None = None) -> float:
@@ -178,7 +194,112 @@ def density_for_material(material: object | None, default: float | None = None) 
     return DEFAULT_MATERIAL_DENSITY_G_CC
 
 
+# -----------------------------------------------------------------------------
+# Material dropdown options and display mappings
+# -----------------------------------------------------------------------------
+
+_raw_dropdowns = _MATERIAL_DATA.get("dropdown_options", [])
+MATERIAL_DROPDOWN_OPTIONS = [
+    str(option).strip()
+    for option in _raw_dropdowns
+    if str(option or "").strip()
+]
+
+default_display_raw = _MATERIAL_DATA.get("default_display")
+if default_display_raw:
+    DEFAULT_MATERIAL_DISPLAY = str(default_display_raw).strip()
+elif MATERIAL_DROPDOWN_OPTIONS:
+    DEFAULT_MATERIAL_DISPLAY = MATERIAL_DROPDOWN_OPTIONS[0]
+else:
+    DEFAULT_MATERIAL_DISPLAY = "Aluminum MIC6"
+DEFAULT_MATERIAL_KEY = normalize_material_key(DEFAULT_MATERIAL_DISPLAY)
+
+_MATERIAL_ADDITIONAL_KEYWORDS: Dict[str, Set[str]] = {}
+for display, keywords in _MATERIAL_DATA.get("additional_keywords", {}).items():
+    if not isinstance(keywords, (list, tuple, set)):
+        continue
+    extras = {str(term).strip() for term in keywords if str(term or "").strip()}
+    if extras:
+        _MATERIAL_ADDITIONAL_KEYWORDS[str(display)] = extras
+
+MATERIAL_KEYWORDS: Dict[str, Set[str]] = {}
+for display in MATERIAL_DROPDOWN_OPTIONS:
+    key = normalize_material_key(display)
+    if not key:
+        continue
+    extras = {normalize_material_key(term) for term in _MATERIAL_ADDITIONAL_KEYWORDS.get(display, set())}
+    extras.discard("")
+    MATERIAL_KEYWORDS[key] = {key} | extras
+
+MATERIAL_DISPLAY_BY_KEY: Dict[str, str] = {}
+for display in MATERIAL_DROPDOWN_OPTIONS:
+    key = normalize_material_key(display)
+    if key:
+        MATERIAL_DISPLAY_BY_KEY[key] = display
+
+_MATERIAL_DISPLAY_OVERRIDES = {
+    "aluminum": "Aluminum MIC6",
+    "tool_steel_a2": "Tool Steel A2",
+    "ss_303": "303 Stainless Steel",
+    "mild_steel": "Mild Steel / Low-Carbon Steel",
+}
+
+for lookup, display in _MATERIAL_DISPLAY_OVERRIDES.items():
+    key = normalize_material_key(lookup)
+    if not key:
+        continue
+    target = MATERIAL_DISPLAY_BY_KEY.get(normalize_material_key(display), display)
+    MATERIAL_DISPLAY_BY_KEY[key] = target
+
+MATERIAL_OTHER_KEY = normalize_material_key(MATERIAL_DROPDOWN_OPTIONS[-1]) if MATERIAL_DROPDOWN_OPTIONS else ""
+
+_MATERIAL_DENSITY_G_CC_BY_DISPLAY: Dict[str, float | None] = {}
+for display, density in _MATERIAL_DATA.get("density_g_cc_by_display", {}).items():
+    if density is None:
+        _MATERIAL_DENSITY_G_CC_BY_DISPLAY[str(display)] = None
+        continue
+    try:
+        _MATERIAL_DENSITY_G_CC_BY_DISPLAY[str(display)] = float(density)
+    except Exception:
+        continue
+
+MATERIAL_MAP: Dict[str, Dict[str, float | str]] = {}
+for key, meta in _MATERIAL_DATA.get("material_map", {}).items():
+    if not isinstance(meta, dict):
+        continue
+    cleaned: Dict[str, float | str] = {}
+    for meta_key, meta_value in meta.items():
+        if isinstance(meta_value, (int, float)):
+            cleaned[str(meta_key)] = float(meta_value)
+        elif meta_value is None:
+            continue
+        else:
+            cleaned[str(meta_key)] = str(meta_value)
+    MATERIAL_MAP[str(key)] = cleaned
+
+
+# -----------------------------------------------------------------------------
+# Utility functions
+# -----------------------------------------------------------------------------
+
+def canonical_material_key(value: str | None, default: str = DEFAULT_MATERIAL_KEY) -> str:
+    """Return a canonical key for the given display label or fallback."""
+
+    if not value:
+        return default
+    key = normalize_material_key(value)
+    return key or default
+
+
+def is_material_match(display: str, keyword: str) -> bool:
+    """Return ``True`` if the keyword matches the display entry."""
+
+    canon = normalize_material_key(display)
+    return keyword in MATERIAL_KEYWORDS.get(canon, set())
+
+
 __all__ = [
+    # Density constants and functions
     "LB_PER_IN3_PER_GCC",
     "DEFAULT_MATERIAL_DENSITY_G_CC",
     "MATERIAL_DENSITY_G_CC_BY_DISPLAY",
@@ -187,4 +308,14 @@ __all__ = [
     "density_for_material",
     "density_g_cc_to_lb_in3",
     "normalize_material_key",
+    # Material selection primitives
+    "DEFAULT_MATERIAL_DISPLAY",
+    "DEFAULT_MATERIAL_KEY",
+    "MATERIAL_DISPLAY_BY_KEY",
+    "MATERIAL_DROPDOWN_OPTIONS",
+    "MATERIAL_KEYWORDS",
+    "MATERIAL_MAP",
+    "MATERIAL_OTHER_KEY",
+    "canonical_material_key",
+    "is_material_match",
 ]
