@@ -1383,6 +1383,13 @@ class AppV7:
                         f"t/hole {op.time_per_hole:.2f} min | "
                         f"group {op.qty}x{op.time_per_hole:.2f} = {op.total_time:.2f} min")
 
+            MILLING_DESC_WIDTH = 30
+            MILLING_ROW_TEMPLATE = (
+                "{desc:<30} | W (in) {w:>7.3f} | L (in) {l:>7.3f} | "
+                "Tool Dia (in) {tool:>7.3f} |  Path (in) {path:>7.1f} | "
+                "Feed (ipm) {feed:>6} | Time (min) {time:>7.2f}"
+            )
+
             def format_milling_op(op):
                 """Format a milling operation as a single table row."""
 
