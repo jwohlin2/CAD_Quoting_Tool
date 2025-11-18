@@ -138,19 +138,37 @@ def _find_hole_table_chunks(rows: List[dict]):
     j = i
     saw_desc = False
     while j < len(rows) and rows[j].get("etype") in text_entity_types:
-        header_chunks.append(rows[j].get("text", ""))
-        if "DESCRIPTION" in (rows[j].get("text", "").upper()):
+        text = rows[j].get("text", "")
+        upper_text = text.upper()
+        if "DESCRIPTION" in upper_text:
+            # Split at DESCRIPTION - everything after goes to body
+            desc_pos = upper_text.find("DESCRIPTION")
+            header_part = text[:desc_pos + len("DESCRIPTION")]
+            body_part = text[desc_pos + len("DESCRIPTION"):].strip()
+            header_chunks.append(header_part)
+            if body_part:
+                body_chunks.append(body_part)
             saw_desc = True
             j += 1
             break
+        header_chunks.append(text)
         j += 1
     if not saw_desc:
         k = j
         while k < min(j + 5, len(rows)) and rows[k].get("etype") in text_entity_types:
-            header_chunks.append(rows[k].get("text", ""))
-            if "DESCRIPTION" in (rows[k].get("text", "").upper()):
+            text = rows[k].get("text", "")
+            upper_text = text.upper()
+            if "DESCRIPTION" in upper_text:
+                # Split at DESCRIPTION - everything after goes to body
+                desc_pos = upper_text.find("DESCRIPTION")
+                header_part = text[:desc_pos + len("DESCRIPTION")]
+                body_part = text[desc_pos + len("DESCRIPTION"):].strip()
+                header_chunks.append(header_part)
+                if body_part:
+                    body_chunks.append(body_part)
                 j = k + 1
                 break
+            header_chunks.append(text)
             k += 1
     while j < len(rows) and rows[j].get("etype") in text_entity_types:
         body_chunks.append(rows[j].get("text", ""))
