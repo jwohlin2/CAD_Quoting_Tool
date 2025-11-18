@@ -156,12 +156,14 @@ def usdlb_to_usdkg(usd_per_lb: float) -> float:
     return usd_per_lb * LB_PER_KG
 
 
-def _cache_path() -> str:
-    return os.path.join(tempfile.gettempdir(), "scrapmetalbuyers_cache.json")
+def _cache_path(method: str = "urllib") -> str:
+    """Return method-specific cache path to avoid urllib/selenium cache conflicts."""
+    suffix = f"_{method}" if method != "urllib" else ""
+    return os.path.join(tempfile.gettempdir(), f"scrapmetalbuyers{suffix}_cache.json")
 
 
-def _read_temp_cache() -> Optional[Dict[str, Any]]:
-    p = _cache_path()
+def _read_temp_cache(method: str = "urllib") -> Optional[Dict[str, Any]]:
+    p = _cache_path(method)
     try:
         if not os.path.isfile(p):
             return None
@@ -174,8 +176,8 @@ def _read_temp_cache() -> Optional[Dict[str, Any]]:
         return None
 
 
-def _write_temp_cache(data: Dict[str, Any]) -> None:
-    p = _cache_path()
+def _write_temp_cache(data: Dict[str, Any], method: str = "urllib") -> None:
+    p = _cache_path(method)
     try:
         with open(p, "w", encoding="utf-8") as f:
             json.dump({"_ts": time.time(), "data": data}, f)
@@ -434,9 +436,9 @@ def scrape_scrapmetalbuyers_prices(
     if mc and now - mc[0] < CACHE_TTL_S and not force:
         return mc[1]
 
-    # temp-file cache
+    # temp-file cache (method-specific to avoid urllib/selenium conflicts)
     if not force:
-        tc = _read_temp_cache()
+        tc = _read_temp_cache(method)
         if tc:
             _MEM_CACHE[cache_key] = (now, tc)
             return tc
@@ -458,7 +460,7 @@ def scrape_scrapmetalbuyers_prices(
 
     # cache
     _MEM_CACHE[cache_key] = (now, data)
-    _write_temp_cache(data)
+    _write_temp_cache(data, method)
     return data
 
 
