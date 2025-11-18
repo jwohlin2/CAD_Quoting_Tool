@@ -1389,8 +1389,8 @@ class AppV7:
             def format_milling_op(op):
                 """Format a milling operation into a compact single line."""
 
-                raw_desc = (op.op_description or "").strip()
-                desc_short = raw_desc.replace("Square Up", "SQ UP")
+                desc_raw = (op.op_description or "").strip()
+                desc_short = desc_raw.replace("Square Up", "SQ UP")
                 desc = desc_short[:MILLING_DESC_WIDTH].ljust(MILLING_DESC_WIDTH)
 
                 width = op.width if op.width is not None else 0.0
@@ -1405,10 +1405,12 @@ class AppV7:
                 path_str = f"{path_length:.1f}"
                 time_str = f"{time_minutes:.2f}"
 
-                return (
-                    f"{desc}  | W {w_str} | L {l_str} | "
-                    f"Tool Dia {tool_str} | Path {path_str} | {path_str:>6} | Time (min) {time_str}"
+                line = (
+                    f"{desc} | W {w_str} | L {l_str} | "
+                    f"Tool Dia {tool_str} | Path {path_str} | Time (min) {time_str}"
                 )
+
+                return line
 
             def format_grinding_op(op):
                 """Format grinding operation with all details"""
