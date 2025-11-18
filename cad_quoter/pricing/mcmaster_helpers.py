@@ -187,10 +187,22 @@ def _pick_mcmaster_plate_sku_impl(
         over_L = min(overL1, overL2)
         over_W = min(overW1, overW2)
 
+        # Determine which orientation to use and store dimensions accordingly
+        # If ok1, use original orientation (length covers need_L, width covers need_W)
+        # If ok2, use rotated orientation (width covers need_L, length covers need_W)
+        # Prefer ok1 if both work (less material waste in original orientation)
+        if ok1:
+            stock_L = float(length)
+            stock_W = float(width)
+        else:  # ok2
+            # Swap dimensions to reflect the rotated orientation
+            stock_L = float(width)
+            stock_W = float(length)
+
         candidates.append(
             {
-                "len_in": float(length),
-                "wid_in": float(width),
+                "len_in": stock_L,
+                "wid_in": stock_W,
                 "thk_in": float(thickness),
                 "mcmaster_part": part_no,
                 "area": float(area),
