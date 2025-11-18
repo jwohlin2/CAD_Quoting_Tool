@@ -467,6 +467,22 @@ def detect_punch_drawing(cad_file_path: Path, text_dump: str = None) -> bool:
         if any(ind in text_upper for ind in text_indicators):
             return True
 
+        # Check for standalone "PUNCH" - but only if no exclusion words are nearby
+        # This catches drawings titled just "PUNCH" without SHOE/HOLDER/etc.
+        if "PUNCH" in text_upper:
+            # Make sure PUNCH isn't followed by exclusion words
+            # e.g., "PUNCH CLEARANCE" or "PUNCH LOCATION" in notes
+            punch_exclusion_suffixes = ["SHOE", "HOLDER", "PLATE", "POCKET", "CLEARANCE", "LOCATION"]
+            # Find all occurrences of PUNCH
+            import re
+            punch_pattern = r'\bPUNCH\b'
+            for match in re.finditer(punch_pattern, text_upper):
+                # Get text after this PUNCH occurrence
+                after_punch = text_upper[match.end():match.end()+15]  # Check next 15 chars
+                # If PUNCH is not followed by an exclusion suffix, it's likely a punch drawing
+                if not any(suffix in after_punch for suffix in punch_exclusion_suffixes):
+                    return True
+
     return False
 
 
