@@ -4,10 +4,16 @@ from __future__ import annotations
 
 import argparse
 import csv
+import sys
 from pathlib import Path
 from typing import Iterable, List
 
-from .hole_ops import explode_rows_to_operations
+# Add parent directory to path for cad_quoter imports
+_root = Path(__file__).resolve().parent.parent
+if str(_root) not in sys.path:
+    sys.path.insert(0, str(_root))
+
+from cad_quoter.geometry.hole_operations import explode_rows_to_operations
 
 
 OPS_FIELDNAMES = ("HOLE", "REF_DIAM", "QTY", "DESCRIPTION/DEPTH")
