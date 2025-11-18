@@ -1475,25 +1475,97 @@ class AppV7:
                 report.append(f"\nTotal Center Drill Time: {machine_hours.total_cdrill_minutes:.2f} minutes")
                 report.append("")
 
-            # TIME PER OP - MILLING
-            if machine_hours.milling_operations:
-                report.append("TIME PER OP - MILLING")
+            # SQUARE-UP BLOCK - Enhanced rendering for square-up operations
+            from cad_quoter.planning.process_planner import render_square_up_block
+            # Convert dataclass objects to dicts for render_square_up_block
+            milling_ops_dicts = []
+            for op in (machine_hours.milling_operations or []):
+                milling_ops_dicts.append({
+                    'op_name': op.op_name,
+                    'op_description': op.op_description,
+                    'length': op.length,
+                    'width': op.width,
+                    'perimeter': op.perimeter,
+                    'tool_diameter': op.tool_diameter,
+                    'passes': op.passes,
+                    'stepover': op.stepover,
+                    'radial_stock': op.radial_stock,
+                    'axial_step': op.axial_step,
+                    'axial_passes': op.axial_passes,
+                    'radial_passes': op.radial_passes,
+                    'path_length': op.path_length,
+                    'feed_rate': op.feed_rate,
+                    'time_minutes': op.time_minutes,
+                    '_used_override': op._used_override,
+                    'override_time_minutes': op.override_time_minutes,
+                })
+
+            grinding_ops_dicts = []
+            for op in (machine_hours.grinding_operations or []):
+                grinding_ops_dicts.append({
+                    'op_name': op.op_name,
+                    'op_description': op.op_description,
+                    'length': op.length,
+                    'width': op.width,
+                    'area': op.area,
+                    'stock_removed_total': op.stock_removed_total,
+                    'faces': op.faces,
+                    'volume_removed': op.volume_removed,
+                    'min_per_cuin': op.min_per_cuin,
+                    'material_factor': op.material_factor,
+                    'grind_material_factor': op.grind_material_factor,
+                    'time_minutes': op.time_minutes,
+                    '_used_override': op._used_override,
+                })
+
+            # Render the square-up block
+            square_up_lines = render_square_up_block(
+                plan=quote_data.raw_plan or {},
+                milling_ops=milling_ops_dicts,
+                grinding_ops=grinding_ops_dicts,
+                setup_time_min=0.0,
+                flip_time_min=0.0
+            )
+
+            if square_up_lines:
+                report.append("")
+                for line in square_up_lines:
+                    report.append(line)
+                report.append("")
+
+            # TIME PER OP - MILLING (additional milling ops not in square-up block)
+            non_square_up_milling = [
+                op for op in (machine_hours.milling_operations or [])
+                if op.op_name not in ('square_up_rough_sides', 'square_up_rough_faces')
+            ]
+            if non_square_up_milling:
+                report.append("TIME PER OP - MILLING (Other)")
                 report.append("-" * MILLING_SEPARATOR_LENGTH)
-                for op in machine_hours.milling_operations:
+                for op in non_square_up_milling:
                     report.append(format_milling_op(op))
                 report.append("")
+
+            # Show total milling time
+            if machine_hours.milling_operations:
                 report.append(
                     f"Total Milling Time (Square/Finish): {machine_hours.total_milling_minutes:.2f} minutes"
                 )
                 report.append("")
 
-            # TIME PER OP - GRINDING
-            if machine_hours.grinding_operations:
-                report.append("TIME PER OP - GRINDING")
+            # TIME PER OP - GRINDING (non-square-up grinding)
+            non_square_up_grinding = [
+                op for op in (machine_hours.grinding_operations or [])
+                if op.op_name != 'wet_grind_square_all'
+            ]
+            if non_square_up_grinding:
+                report.append("TIME PER OP - GRINDING (Other)")
                 report.append("-" * 74)
-                for op in machine_hours.grinding_operations:
+                for op in non_square_up_grinding:
                     report.append(format_grinding_op(op))
                     report.append("")
+
+            # Show total grinding time
+            if machine_hours.grinding_operations:
                 report.append(f"Total Wet Grind Time: {machine_hours.total_grinding_minutes:.2f} minutes")
                 report.append("")
 

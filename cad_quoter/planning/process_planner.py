@@ -1877,12 +1877,14 @@ def estimate_machine_hours_from_plan(
         # Squaring operations (wet grind)
         elif op_type == 'wet_grind_square_all':
             # Wet grind squaring: time based on volume and material factor
+            from cad_quoter.pricing.time_estimator import estimate_wet_grind_minutes
             stock_removed = op.get('stock_removed_total', 0.050)
             faces = op.get('faces', 2)
+            grind_time, material_factor = estimate_wet_grind_minutes(
+                L, W, stock_removed, material, material_group='', faces=faces
+            )
             volume_cuin = L * W * stock_removed
             min_per_cuin = 3.0
-            material_factor = get_grind_factor(material)
-            grind_time = volume_cuin * min_per_cuin * material_factor
             time_breakdown['grinding'] += grind_time
 
             # Create detailed operation object
@@ -1897,7 +1899,9 @@ def estimate_machine_hours_from_plan(
                 'volume_removed': volume_cuin,
                 'min_per_cuin': min_per_cuin,
                 'material_factor': material_factor,
-                'time_minutes': grind_time
+                'grind_material_factor': material_factor,  # For renderer display
+                'time_minutes': grind_time,
+                '_used_override': False  # Wet grind doesn't use overrides
             })
 
         # Squaring operations (mill - rough faces)
@@ -1910,7 +1914,8 @@ def estimate_machine_hours_from_plan(
 
             # Check if time is overridden
             override_time = op.get('override_time_minutes')
-            if override_time is not None:
+            used_override = override_time is not None
+            if used_override:
                 minutes = override_time
                 ipm = 0  # Not calculated when overridden
             else:
@@ -1945,7 +1950,9 @@ def estimate_machine_hours_from_plan(
                 'radial_passes': None,
                 'path_length': path_in,
                 'feed_rate': ipm,
-                'time_minutes': minutes
+                'time_minutes': minutes,
+                '_used_override': used_override,
+                'override_time_minutes': override_time
             })
 
         # Squaring operations (mill - rough sides)
@@ -1967,7 +1974,8 @@ def estimate_machine_hours_from_plan(
 
             # Check if time is overridden
             override_time = op.get('override_time_minutes')
-            if override_time is not None:
+            used_override = override_time is not None
+            if used_override:
                 minutes = override_time
                 ipm = 0  # Not calculated when overridden
             else:
@@ -2002,7 +2010,9 @@ def estimate_machine_hours_from_plan(
                 'radial_passes': radial_passes,
                 'path_length': path_in,
                 'feed_rate': ipm,
-                'time_minutes': minutes
+                'time_minutes': minutes,
+                '_used_override': used_override,
+                'override_time_minutes': override_time
             })
 
         # Grinding operations (general handler - punch-specific handlers are earlier)
@@ -2037,6 +2047,130 @@ def estimate_machine_hours_from_plan(
         'milling_operations': milling_operations_detailed,
         'grinding_operations': grinding_operations_detailed,
     }
+
+
+def render_square_up_block(
+    plan: Dict[str, Any],
+    milling_ops: List[Dict[str, Any]],
+    grinding_ops: List[Dict[str, Any]],
+    setup_time_min: float = 0.0,
+    flip_time_min: float = 0.0
+) -> List[str]:
+    """Render a detailed square-up block with compact, transparent output.
+
+    Produces ≤106 char lines showing the squaring/finishing strategy.
+
+    Args:
+        plan: Process plan dict with 'ops' list
+        milling_ops: Detailed milling operations from estimate_machine_hours_from_plan
+        grinding_ops: Detailed grinding operations from estimate_machine_hours_from_plan
+        setup_time_min: Setup overhead in minutes
+        flip_time_min: Flip/deburr time in minutes
+
+    Returns:
+        List of formatted strings for display
+    """
+    lines = []
+    total_time = 0.0
+
+    # Find square-up operations
+    side_op = None
+    face_op = None
+    grind_op = None
+
+    for op in milling_ops:
+        if op.get('op_name') == 'square_up_rough_sides':
+            side_op = op
+        elif op.get('op_name') == 'square_up_rough_faces':
+            face_op = op
+
+    for op in grinding_ops:
+        if op.get('op_name') == 'wet_grind_square_all':
+            grind_op = op
+
+    # Determine method
+    is_mill_route = side_op is not None or face_op is not None
+    is_grind_route = grind_op is not None
+
+    if not is_mill_route and not is_grind_route:
+        return []  # No square-up operations
+
+    # Header line
+    if is_mill_route:
+        D = side_op.get('tool_diameter', 0) if side_op else (face_op.get('tool_diameter', 0) if face_op else 0)
+        header = f"SQUARE-UP — METHOD: Mill | ToolØ W/3 = {D:.3f} | Stock Sides 0.250 | Top/Bottom 0.025"
+    else:
+        header = "SQUARE-UP — METHOD: Wet Grind | Stock Top/Bottom 0.025 per face"
+
+    lines.append(header[:106])
+    lines.append("-" * min(106, len(header)))
+
+    # Mill route details
+    if is_mill_route:
+        # Rules note
+        lines.append("3-pass face strategy | Setup + Flip overhead included")
+
+        # Side mill line
+        if side_op:
+            perim = side_op.get('perimeter', 0)
+            ax_passes = side_op.get('axial_passes', 1)
+            rad_passes = side_op.get('radial_passes', 1)
+            tool_d = side_op.get('tool_diameter', 0)
+            ipm = side_op.get('feed_rate', 0)
+            path = side_op.get('path_length', 0)
+            time_min = side_op.get('time_minutes', 0)
+            used_ovr = side_op.get('_used_override', False)
+
+            ovr_badge = " (ovr)" if used_ovr else ""
+            # Split into 2 lines if needed for ≤106 chars
+            line1 = f"  Side Mill: Perim {perim:.1f}\" | Ax {ax_passes}× Rad {rad_passes}× | ToolØ {tool_d:.3f}"
+            line2 = f"            IPM {ipm:.1f} | Path {path:.1f}\" | Time {time_min:.2f} min{ovr_badge}"
+
+            lines.append(line1[:106])
+            lines.append(line2[:106])
+            total_time += time_min
+
+        # Face mill line
+        if face_op:
+            L = face_op.get('length', 0)
+            passes = face_op.get('passes', 3)
+            tool_d = face_op.get('tool_diameter', 0)
+            stepover = face_op.get('stepover', 0)
+            ipm = face_op.get('feed_rate', 0)
+            path = face_op.get('path_length', 0)
+            time_min = face_op.get('time_minutes', 0)
+            used_ovr = face_op.get('_used_override', False)
+
+            ovr_badge = " (ovr)" if used_ovr else ""
+            # Passes = 3×L description
+            line1 = f"  Face Mill: Passes {passes}×L = {passes * L:.1f}\" | ToolØ {tool_d:.3f} | Step {stepover:.3f}"
+            line2 = f"            IPM {ipm:.1f} | Path {path:.1f}\" | Time {time_min:.2f} min{ovr_badge}"
+
+            lines.append(line1[:106])
+            lines.append(line2[:106])
+            total_time += time_min
+
+    # Grind route details
+    if is_grind_route:
+        L = grind_op.get('length', 0)
+        W = grind_op.get('width', 0)
+        stock = grind_op.get('stock_removed_total', 0.050)
+        vol = grind_op.get('volume_removed', 0)
+        factor = grind_op.get('grind_material_factor', 1.0)
+        time_min = grind_op.get('time_minutes', 0)
+
+        line1 = f"  Wet Grind: Volume {L:.3f} × {W:.3f} × {stock:.3f} = {vol:.4f} cu in"
+        line2 = f"            Rate 3.0 min/in³ | Factor {factor:.2f} | Time {time_min:.2f} min"
+
+        lines.append(line1[:106])
+        lines.append(line2[:106])
+        total_time += time_min
+
+    # Total line
+    lines.append("")
+    lines.append(f"TOTAL Square/Finish Time: {total_time:.2f} minutes")
+
+    return lines
 
 
 def estimate_hole_table_times(
