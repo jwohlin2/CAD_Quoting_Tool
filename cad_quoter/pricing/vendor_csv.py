@@ -12,6 +12,7 @@ from __future__ import annotations
 import csv
 import math
 import os
+from abc import ABC, abstractmethod
 from typing import Any, Dict, Iterable, Mapping, Sequence
 
 from cad_quoter.pricing.mcmaster_helpers import (
@@ -22,7 +23,16 @@ from cad_quoter.pricing.mcmaster_helpers import (
 from cad_quoter.vendors.mcmaster_stock import norm_material
 from cad_quoter.utils.numeric import coerce_float
 
-from .base import PriceProvider
+
+class PriceProvider(ABC):
+    """Abstract base class for price providers."""
+    name: str = ""
+    quote_basis: str | None = None
+
+    @abstractmethod
+    def get(self, symbol: str) -> tuple[float, str]:
+        """Return (price, source) for the given symbol."""
+        ...
 
 
 _SCRAP_FRACTION = 0.05
