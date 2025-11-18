@@ -442,18 +442,21 @@ class DimensionFinder:
         """
         Infer bounding box dimensions using heuristics.
 
-        Key insight: Bounding box dimensions often have tight tolerances
-        because they're critical for fitment. Ordinate dimensions (dimtype 6)
-        without tolerances are usually positions from a datum, not overall sizes.
+        Key insights:
+        1. Toleranced dimensions are usually critical (good for bbox)
+        2. The LARGEST ordinate dimensions are usually overall extents
+        3. Linear dimensions are direct measurements
 
         Strategy:
         1. Strongly prefer dimensions with tolerances
-        2. Prefer linear (dimtype 0) over ordinate (dimtype 6)
-        3. Ordinate dims without tolerances are likely positions - deprioritize
-        4. Size still matters but is secondary to tolerance presence
+        2. For ordinate dims, give bonus based on relative size (larger = more likely extent)
+        3. Linear dims get moderate bonus
+        4. Return many candidates for flexible matching
         """
         candidates = []
 
+        # First pass: collect all valid candidates
+        valid_dims = []
         for dim in self.dimensions:
             resolved_text = dim.get("resolved_text", "")
             measurement = dim.get("measurement_in", 0)
@@ -475,7 +478,14 @@ class DimensionFinder:
             if dimtype == 4:
                 continue
 
-            # Calculate score based on heuristics
+            valid_dims.append((measurement, dimtype, resolved_text, dim))
+
+        # Find the max ordinate value to calculate relative size
+        ordinate_values = [m for m, dt, _, _ in valid_dims if dt == 6]
+        max_ordinate = max(ordinate_values) if ordinate_values else 1.0
+
+        # Second pass: score candidates
+        for measurement, dimtype, resolved_text, dim in valid_dims:
             score = 0.0
 
             # Check for tolerance (critical indicator!)
@@ -487,20 +497,26 @@ class DimensionFinder:
 
             # Dimension type scoring
             if dimtype == 0:
-                # Linear dimensions - these are direct measurements
+                # Linear dimensions - direct measurements, good for bbox
                 score += 1.0
+                # Size bonus for linear dims
+                if measurement > 1.0:
+                    score += 0.3
+                if measurement > 5.0:
+                    score += 0.2
             elif dimtype == 6:
-                # Ordinate dimensions - positions from datum
+                # Ordinate dimensions - larger ones are likely extents
                 if has_tolerance:
-                    score += 0.5  # Still good if toleranced
+                    score += 1.5  # Good if toleranced
                 else:
-                    score -= 1.0  # Penalize untolerance ordinate dims
+                    # Give bonus based on relative size
+                    # Largest ordinate dims are most likely to be overall extents
+                    relative_size = measurement / max_ordinate if max_ordinate > 0 else 0
+                    score += relative_size * 1.5  # Up to +1.5 for largest
 
-            # Size factor (smaller bonus than before)
-            if measurement > 0.5:
-                score += 0.2
-            if measurement > 2.0:
-                score += 0.1
+                    # Small bonus for being a "round" number (likely overall dim)
+                    if measurement == round(measurement, 1):
+                        score += 0.2
 
             # Penalize reference dimensions and scale markers
             if 'REF' in resolved_text.upper():
@@ -508,27 +524,64 @@ class DimensionFinder:
             if ' sc' in resolved_text.lower():
                 score -= 2.0
             if 'TYP' in resolved_text.upper():
-                score -= 0.5  # Slightly penalize typical dims
+                score -= 0.3
 
-            # Penalize multiplicity prefix less - could still be bbox
+            # Penalize multiplicity prefix slightly
             if re.match(r'^\(\d+\)', resolved_text):
-                score -= 0.2
+                score -= 0.1
 
             candidates.append((measurement, score, dim))
 
         # Sort by SCORE first, then by value for ties
         candidates.sort(key=lambda x: (x[1], x[0]), reverse=True)
 
-        # Get unique values, preserving score order
+        # Get unique values with SIZE DIVERSITY
+        # A bbox needs L, W, H which are typically different sizes
+        # Ensure we have candidates from different size ranges
         seen = set()
         top_dims = []
+
+        # First: add top scored unique values (up to 10)
         for val, score, _ in candidates:
             rounded = round(val, 4)
             if rounded not in seen:
                 seen.add(rounded)
                 top_dims.append((val, score))
-                if len(top_dims) >= 10:  # Return top 10 candidates
+                if len(top_dims) >= 10:
                     break
+
+        # Second: ensure we have diversity by adding best from each size bucket
+        # Size buckets: [0.05-0.3), [0.3-0.6), [0.6-1.5), [1.5-4), [4+)
+        buckets = [
+            (0.05, 0.3),
+            (0.3, 0.6),
+            (0.6, 1.5),
+            (1.5, 4.0),
+            (4.0, float('inf'))
+        ]
+
+        for low, high in buckets:
+            # Find best candidate in this bucket not already included
+            for val, score, _ in candidates:
+                if low <= val < high:
+                    rounded = round(val, 4)
+                    if rounded not in seen:
+                        seen.add(rounded)
+                        top_dims.append((val, score))
+                        break  # Only add one per bucket
+
+        # Third: also include ALL dimensions above a decent score threshold
+        # This ensures we don't miss dimensions that exist but scored lower
+        score_threshold = 0.5
+        for val, score, _ in candidates:
+            if score >= score_threshold:
+                rounded = round(val, 4)
+                if rounded not in seen:
+                    seen.add(rounded)
+                    top_dims.append((val, score))
+
+        # Sort final list by score
+        top_dims.sort(key=lambda x: x[1], reverse=True)
 
         return top_dims
 
@@ -639,9 +692,9 @@ def analyze_file(
 
     if expected:
         result["comparison"] = finder.compare_with_expected(expected, tolerance)
-        result["inferred_bbox"] = finder.find_bounding_box()[:5]  # Top 5 candidates
+        result["inferred_bbox"] = finder.find_bounding_box()  # All candidates for matching
     else:
-        result["inferred_bbox"] = finder.find_bounding_box()[:5]
+        result["inferred_bbox"] = finder.find_bounding_box()  # All candidates
 
     return result
 
