@@ -718,7 +718,7 @@ def lookup_rate(
 
 
 # ---------------------------------------------------------------------------
-# Planner bucketisation helpers (mirrored by ``cad_quoter.pricing.planner_render``)
+# Planner bucketisation helpers
 # ---------------------------------------------------------------------------
 
 
