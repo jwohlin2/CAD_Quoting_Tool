@@ -1154,8 +1154,10 @@ def calculate_scrap_value(
         material_lower = material.lower()
         if any(kw in material_lower for kw in ["carbide", "tungsten carbide", "tungsten", "vm-15", "vm15"]):
             material_family = "carbide"
-        elif any(kw in material_lower for kw in ["high speed steel", "hss", "tool steel a2"]) or material_lower == "a2":
+        elif any(kw in material_lower for kw in ["high speed steel", "hss"]):
             material_family = "high_speed_steel"
+        elif any(kw in material_lower for kw in ["tool steel", "a2 tool steel"]) or material_lower == "a2":
+            material_family = "steel"
         elif any(kw in material_lower for kw in ["aluminum", "aluminium", "6061", "7075", "2024", "5083", "mic6", "hokotol"]):
             material_family = "aluminum"
         elif any(kw in material_lower for kw in ["stainless", "303", "304", "316", "17-4", "17 4", "52100"]):
