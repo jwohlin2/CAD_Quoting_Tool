@@ -767,6 +767,50 @@ def extract_quote_data_from_cad(
                             if verbose:
                                 print("  [PUNCH] DimensionFinder also failed to extract dimensions")
 
+                # Apply dimension override for punch parts
+                if dimension_override:
+                    dim1, dim2, dim3 = dimension_override
+                    if verbose:
+                        print(f"  [PUNCH] Dimension override input: {dim1} x {dim2} x {dim3}")
+
+                    # For punch parts, auto-reorder dimensions:
+                    # Users often enter dimensions as smallest×middle×largest (e.g., .148x.445x2)
+                    # but punch features need: length=OAL (largest), width=OD, thickness
+                    # Sort to get: thickness (smallest), width (middle), length (largest)
+                    sorted_dims = sorted([dim1, dim2, dim3])
+                    thickness = sorted_dims[0]  # smallest
+                    width = sorted_dims[1]      # middle
+                    length = sorted_dims[2]     # largest (OAL)
+
+                    if verbose:
+                        print(f"  [PUNCH] Reordered to: length={length}, width={width}, thickness={thickness}")
+
+                    quote_data.part_dimensions = PartDimensions(
+                        length=length,
+                        width=width,
+                        thickness=thickness,
+                    )
+
+                    # Also update punch_features dict so punch plan uses correct values
+                    features["overall_length_in"] = length
+                    features["max_od_or_width_in"] = width
+                    if width != thickness:
+                        # Rectangular punch - set body dimensions
+                        features["body_width_in"] = width
+                        features["body_thickness_in"] = thickness
+
+                    # Regenerate punch plan with new dimensions
+                    from dataclasses import asdict
+                    from cad_quoter.planning.punch_planner import create_punch_plan
+
+                    updated_features_dict = features  # Already a dict
+                    punch_plan = create_punch_plan(updated_features_dict)
+                    punch_data["punch_plan"] = punch_plan
+                    punch_data["punch_features"] = features
+
+                    if verbose:
+                        print(f"  [PUNCH] Plan regenerated with dimension overrides")
+
                 # Set material from punch features
                 punch_material = features.get("material_callout") or DEFAULT_MATERIAL
                 density = get_material_density(punch_material)
