@@ -442,11 +442,14 @@ class DimensionFinder:
         """
         Infer bounding box dimensions using heuristics.
 
-        Heuristics used:
-        1. Look for dimensions without multiplicity prefixes (2), (3), etc.
-        2. Prefer larger dimensions (bounding box tends to be overall size)
-        3. Look for dimensions with tight tolerances
-        4. Exclude angles (dimtype 2) and radii (dimtype 4)
+        Key insight: Bounding box dimensions are the 3 LARGEST distinct
+        linear dimensions in the drawing. They represent the overall envelope.
+
+        Strategy:
+        1. Filter out angles (dimtype 2)
+        2. Filter out radii/chamfers (dimtype 4, very small values)
+        3. Sort by value descending
+        4. Return top 3 unique values as bbox candidates
         """
         candidates = []
 
@@ -455,56 +458,65 @@ class DimensionFinder:
             measurement = dim.get("measurement_in", 0)
             dimtype = dim.get("dimtype", 0)
 
-            # Skip angles and very small values
-            if dimtype == 2 or measurement < 0.01:
+            # Skip angles (dimtype 2)
+            if dimtype == 2:
+                continue
+
+            # Skip very small values (chamfers, fillets, radii)
+            if measurement < 0.05:
                 continue
 
             # Skip diameter dimensions (usually holes, not bounding box)
             if dim.get("is_diameter", False):
                 continue
 
-            # Calculate score based on heuristics
-            score = 0.5
+            # Skip radii (dimtype 4) unless they're large
+            if dimtype == 4 and measurement < 0.5:
+                continue
 
-            # Prefer dimensions without multiplicity prefix
+            # Calculate confidence based on size and other factors
+            confidence = 0.5
+
+            # Primary factor: SIZE - larger is better for bounding box
+            # Normalize to 0-1 range based on typical part sizes (0-20")
+            size_score = min(measurement / 20.0, 1.0) * 0.4
+            confidence += size_score
+
+            # Secondary: Prefer dimensions without multiplicity prefix
             if not re.match(r'^\(\d+\)', resolved_text):
-                score += 0.2
-
-            # Prefer larger dimensions
-            if measurement > 1.0:
-                score += 0.1
-            if measurement > 5.0:
-                score += 0.1
-
-            # Prefer dimensions with tight tolerances (indicates precision)
-            if '+' in resolved_text or '±' in resolved_text:
-                score += 0.1
-
-            # Prefer ordinate dimensions (dimtype 6) - often used for bounding box
-            if dimtype == 6:
-                score += 0.1
+                confidence += 0.05
 
             # Penalize reference dimensions
             if 'REF' in resolved_text.upper() or 'sc' in resolved_text:
-                score -= 0.3
+                confidence -= 0.2
 
-            candidates.append((measurement, score, dim))
+            candidates.append((measurement, confidence, dim))
 
-        # Sort by score and get top candidates
-        candidates.sort(key=lambda x: x[1], reverse=True)
+        # Sort by VALUE (largest first), not by score
+        candidates.sort(key=lambda x: x[0], reverse=True)
 
-        # Get unique values
+        # Get unique values, preserving size order
         seen = set()
         top_dims = []
-        for val, score, _ in candidates:
+        for val, conf, _ in candidates:
             rounded = round(val, 4)
             if rounded not in seen:
                 seen.add(rounded)
-                top_dims.append((val, score))
+                top_dims.append((val, conf))
                 if len(top_dims) >= 10:  # Return top 10 candidates
                     break
 
         return top_dims
+
+    def get_top_3_dimensions(self) -> List[float]:
+        """
+        Get the 3 largest dimensions as likely bounding box.
+
+        Returns:
+            List of 3 largest unique dimension values, sorted descending
+        """
+        bbox_candidates = self._infer_bounding_box()
+        return [val for val, _ in bbox_candidates[:3]]
 
     def compare_with_expected(
         self,

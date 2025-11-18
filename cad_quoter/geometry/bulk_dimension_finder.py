@@ -177,9 +177,32 @@ def process_file(filepath: str, use_expected: bool = False) -> dict:
         result["unique_values"] = analysis["unique_values"]
         result["bbox_candidates"] = analysis["inferred_bbox"]
 
+        # Get top 3 inferred dimensions
+        top_3 = [val for val, _ in analysis["inferred_bbox"][:3]]
+        result["top_3_inferred"] = top_3
+
         if expected and "comparison" in analysis:
             result["comparison"] = analysis["comparison"]
             result["match_rate"] = analysis["comparison"]["match_rate"]
+
+            # Calculate how well top 3 inferred match expected
+            # Sort both for comparison
+            exp_sorted = sorted(expected, reverse=True)
+            inf_sorted = sorted(top_3, reverse=True) if len(top_3) >= 3 else top_3
+
+            matches = 0
+            max_diff_pct = 0
+            for i, exp_val in enumerate(exp_sorted):
+                if i < len(inf_sorted):
+                    inf_val = inf_sorted[i]
+                    diff_pct = abs(inf_val - exp_val) / exp_val * 100 if exp_val else 0
+                    max_diff_pct = max(max_diff_pct, diff_pct)
+                    # Consider a match if within 5%
+                    if diff_pct <= 5:
+                        matches += 1
+
+            result["inferred_match_count"] = matches
+            result["max_diff_pct"] = max_diff_pct
 
         result["status"] = "success"
 
@@ -219,28 +242,39 @@ def main():
 
         if result["status"] == "success":
             success_count += 1
-            print(f"Source: {result.get('source', 'N/A')}")
-            print(f"Total dimensions: {result.get('total_dimensions', 0)}")
-            print(f"Unique values: {len(result.get('unique_values', []))}")
 
-            # Show top bbox candidates
-            if result.get("bbox_candidates"):
-                print("Bounding box candidates:")
-                for val, score in result["bbox_candidates"][:3]:
-                    print(f"  {val:.4f}\" (score: {score:.2f})")
+            # Show inferred vs expected comparison
+            if result.get("expected") and result.get("top_3_inferred"):
+                exp = result["expected"]
+                inf = result["top_3_inferred"]
 
-            # Show comparison if available
-            if result.get("comparison"):
-                comp = result["comparison"]
-                print(f"Expected: {result.get('expected')}")
-                print(f"Match rate: {comp['match_rate']*100:.0f}%")
+                # Sort both for comparison
+                exp_sorted = sorted(exp, reverse=True)
+                inf_sorted = sorted(inf, reverse=True)
 
-                for m in comp.get("matches", []):
-                    note = f" ({m.get('note', '')})" if m.get('note') else ""
-                    print(f"  {m['expected']} -> {m['found']:.4f}{note}")
+                print(f"Expected (sorted): {exp_sorted[0]:.4f} x {exp_sorted[1]:.4f} x {exp_sorted[2]:.4f}")
+                if len(inf_sorted) >= 3:
+                    print(f"Inferred (top 3):  {inf_sorted[0]:.4f} x {inf_sorted[1]:.4f} x {inf_sorted[2]:.4f}")
+                else:
+                    print(f"Inferred (top 3):  {inf_sorted}")
 
-                for m in comp.get("missing", []):
-                    print(f"  {m} -> MISSING")
+                # Show match quality
+                match_count = result.get("inferred_match_count", 0)
+                max_diff = result.get("max_diff_pct", 0)
+                print(f"Matches: {match_count}/3 (max diff: {max_diff:.1f}%)")
+
+                # Detailed comparison
+                for i in range(3):
+                    if i < len(inf_sorted):
+                        diff_pct = abs(inf_sorted[i] - exp_sorted[i]) / exp_sorted[i] * 100 if exp_sorted[i] else 0
+                        status = "OK" if diff_pct <= 5 else "MISS"
+                        print(f"  [{status}] {exp_sorted[i]:.4f} -> {inf_sorted[i]:.4f} ({diff_pct:+.1f}%)")
+            else:
+                # Just show inferred if no expected
+                if result.get("bbox_candidates"):
+                    print("Top 3 inferred dimensions:")
+                    for val, score in result["bbox_candidates"][:3]:
+                        print(f"  {val:.4f}\"")
 
         elif result["status"] == "file_not_found":
             error_count += 1
@@ -264,11 +298,31 @@ def main():
     print(f"Errors/Not found: {error_count}")
 
     if use_expected:
-        # Calculate overall match rate
-        match_rates = [r.get("match_rate", 0) for r in results if r.get("match_rate") is not None]
-        if match_rates:
-            avg_match = sum(match_rates) / len(match_rates)
-            print(f"Average match rate: {avg_match*100:.1f}%")
+        # Calculate inferred bbox match statistics
+        perfect_matches = 0
+        partial_matches = 0
+        no_matches = 0
+
+        for r in results:
+            match_count = r.get("inferred_match_count", 0)
+            if match_count == 3:
+                perfect_matches += 1
+            elif match_count > 0:
+                partial_matches += 1
+            elif r.get("status") == "success":
+                no_matches += 1
+
+        print()
+        print("INFERRED BBOX ACCURACY:")
+        print(f"  Perfect (3/3): {perfect_matches}")
+        print(f"  Partial (1-2/3): {partial_matches}")
+        print(f"  None (0/3): {no_matches}")
+
+        # Calculate average max diff
+        max_diffs = [r.get("max_diff_pct", 0) for r in results if r.get("max_diff_pct") is not None]
+        if max_diffs:
+            avg_max_diff = sum(max_diffs) / len(max_diffs)
+            print(f"  Average max diff: {avg_max_diff:.1f}%")
 
     return results
 
