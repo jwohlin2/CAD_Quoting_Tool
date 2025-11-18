@@ -746,26 +746,61 @@ def extract_dimensions_from_cad(file_path: str | Path) -> Optional[Tuple[float, 
             print(f"[WARN] Not enough dimension candidates found: {len(bbox_candidates)}")
             return None
 
-        # Get top 3 scored dimensions, sorted by size as L >= W >= T
-        # Note: Without expected values, this is a best-effort guess based on
-        # dimension scoring (toleranced dims score higher, larger ordinates score higher)
+        # Strategy for bbox extraction:
+        # - Linear dimensions (dimtype 0/1) are almost always THICKNESS
+        # - Ordinate dimensions (dimtype 6) give L and W from max extents
 
-        # Get top 3 unique values by score
-        seen = set()
-        top_3 = []
-        for val, score in bbox_candidates:
-            rounded = round(val, 4)
-            if rounded not in seen:
-                seen.add(rounded)
-                top_3.append(val)
-                if len(top_3) >= 3:
-                    break
+        # Separate dimensions by type
+        linear_dims = []
+        ordinate_dims = []
 
-        if len(top_3) < 3:
-            return None
+        for dim in finder.dimensions:
+            dimtype = dim.get("dimtype", 0)
+            val = dim.get("measurement_in", 0)
+            if val < 0.05:
+                continue
+            if dim.get("is_diameter", False):
+                continue
+
+            if dimtype in (0, 1):  # Linear or Aligned
+                linear_dims.append(val)
+            elif dimtype == 6:  # Ordinate
+                ordinate_dims.append(val)
+
+        # Get thickness from largest linear dimension
+        T = max(linear_dims) if linear_dims else None
+
+        # Get L and W from two largest unique ordinates
+        # (representing max extent in each direction)
+        unique_ordinates = sorted(set(ordinate_dims), reverse=True)
+
+        if len(unique_ordinates) >= 2 and T:
+            L = unique_ordinates[0]
+            W = unique_ordinates[1]
+        elif len(unique_ordinates) >= 1 and T:
+            # Only one ordinate direction - use it for both L and W
+            L = unique_ordinates[0]
+            W = unique_ordinates[0]
+        else:
+            # Fallback: use top 3 scored dimensions
+            seen = set()
+            top_3 = []
+            for val, score in bbox_candidates:
+                rounded = round(val, 4)
+                if rounded not in seen:
+                    seen.add(rounded)
+                    top_3.append(val)
+                    if len(top_3) >= 3:
+                        break
+
+            if len(top_3) < 3:
+                return None
+
+            dims = sorted(top_3, reverse=True)
+            return (dims[0], dims[1], dims[2])
 
         # Sort as L >= W >= T
-        dims = sorted(top_3, reverse=True)
+        dims = sorted([L, W, T], reverse=True)
         return (dims[0], dims[1], dims[2])
 
     except Exception as e:
