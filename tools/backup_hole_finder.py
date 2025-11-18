@@ -156,11 +156,13 @@ def parse_mtext_hole_description(mtext: str) -> BackupHoleFeature:
         feature.is_thru = True
 
     # Extract main diameter
-    # Patterns: ∅7/32, Ø.375, <> (placeholder)
+    # Patterns: ∅7/32, Ø.375, <> (placeholder), or plain decimal after qty
     dia_patterns = [
         r"[∅Ø]\s*(\d+\s*/\s*\d+)",  # Fraction: ∅7/32
         r"[∅Ø]\s*(\.\d+)",          # Decimal: Ø.375
         r"[∅Ø]\s*(\d+\.\d+)",       # Decimal with leading: Ø0.375
+        r"\)\s*(\.\d+)\s+THRU",     # Plain decimal after qty: (2) .2500 THRU
+        r"\)\s*(\d+\.\d+)\s+THRU",  # Plain decimal with leading: (2) 0.2500 THRU
     ]
 
     for pattern in dia_patterns:
@@ -417,8 +419,13 @@ def _is_hole_description(text: str) -> bool:
     if not has_qty:
         return False
 
-    # Must have a diameter indicator (Ø, ∅) or placeholder (<>)
-    has_diameter = bool(re.search(r"[∅Ø]", text) or "<>" in text)
+    # Must have a diameter indicator (Ø, ∅), placeholder (<>), or resolved decimal (.2500)
+    # After <> resolution, text may be "(2) .2500 THRU" without Ø symbol
+    has_diameter = bool(
+        re.search(r"[∅Ø]", text) or
+        "<>" in text or
+        re.search(r"\)\s*\.?\d+\.?\d*\s+THRU", text)  # qty followed by number then THRU
+    )
 
     # Must have a hole operation keyword
     hole_op_keywords = [
