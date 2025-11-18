@@ -1383,19 +1383,15 @@ class AppV7:
                         f"t/hole {op.time_per_hole:.2f} min | "
                         f"group {op.qty}x{op.time_per_hole:.2f} = {op.total_time:.2f} min")
 
-            MILLING_DESC_WIDTH = 30
+            MILLING_DESC_WIDTH = 28
+            MILLING_SEPARATOR_LENGTH = 106
 
             def format_milling_op(op):
-                """Format a milling operation using single-line label chunks."""
+                """Format a milling operation into a compact single line."""
 
                 raw_desc = (op.op_description or "").strip()
-                if len(raw_desc) > MILLING_DESC_WIDTH:
-                    desc = raw_desc[:MILLING_DESC_WIDTH]
-                else:
-                    desc = raw_desc.ljust(MILLING_DESC_WIDTH)
-
-                feed_value = getattr(op, "feed_rate", None)
-                feed_str = f"{feed_value:.1f}" if feed_value and feed_value > 0 else "--"
+                desc_short = raw_desc.replace("Square Up", "SQ UP")
+                desc = desc_short[:MILLING_DESC_WIDTH].ljust(MILLING_DESC_WIDTH)
 
                 width = op.width if op.width is not None else 0.0
                 length = op.length if op.length is not None else 0.0
@@ -1410,9 +1406,8 @@ class AppV7:
                 time_str = f"{time_minutes:.2f}"
 
                 return (
-                    f"{desc} | W (in) {w_str} | L (in) {l_str} | "
-                    f"Tool Dia (in) {tool_str} | Path (in) {path_str} | {path_str} | "
-                    f"Feed (ipm) {feed_str} | Time (min) {time_str}"
+                    f"{desc}  | W {w_str} | L {l_str} | "
+                    f"Tool Dia {tool_str} | Path {path_str} | {path_str:>6} | Time (min) {time_str}"
                 )
 
             def format_grinding_op(op):
@@ -1480,15 +1475,8 @@ class AppV7:
 
             # TIME PER OP - MILLING
             if machine_hours.milling_operations:
-                sample_line = (
-                    f"{'':<{MILLING_DESC_WIDTH}} | W (in) 000.000 | L (in) 000.000 | "
-                    f"Tool Dia (in) 000.000 | Path (in) 000.0 | 000.0 | "
-                    f"Feed (ipm) --- | Time (min) 000.00"
-                )
-                separator = "-" * len(sample_line)
-
                 report.append("TIME PER OP - MILLING")
-                report.append(separator)
+                report.append("-" * MILLING_SEPARATOR_LENGTH)
                 for op in machine_hours.milling_operations:
                     report.append(format_milling_op(op))
                 report.append("")
