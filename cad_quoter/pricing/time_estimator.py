@@ -35,6 +35,7 @@ __all__ = [
     "estimate_wire_edm_minutes",
     "estimate_face_grind_minutes",
     "estimate_od_grind_minutes",
+    "estimate_wet_grind_minutes",
     "MIN_PER_CUIN_GRIND",
     # Punch time estimation
     "PunchMachineHours",
@@ -588,13 +589,13 @@ def estimate_wire_edm_minutes(
 def _grind_factor(material: str, material_group: str) -> float:
     """Get material-specific grinding factor with fallback chain.
 
-    Searches for grind_factor, grind_material_factor, or material_factor.
+    Searches for grinding_time_factor, grind_factor, grind_material_factor, or material_factor.
     Returns 1.0 if not found.
     """
     # Try Grinding operation first, then Generic
     for op_hint in ("Grinding", "Generic"):
         row = _csv_row(material, material_group, operation_hint=op_hint)
-        for k in ("grind_factor", "grind_material_factor", "material_factor"):
+        for k in ("grinding_time_factor", "grind_factor", "grind_material_factor", "material_factor"):
             val = row.get(k)
             if val not in (None, ""):
                 try:
@@ -633,6 +634,35 @@ def estimate_face_grind_minutes(
     volume_cuin = (length_in * width_in * stock_removed_total_in) * max(1, faces // 2)
     factor = _grind_factor(material, material_group)
     return max(0.0, volume_cuin * MIN_PER_CUIN_GRIND * factor)
+
+
+def estimate_wet_grind_minutes(
+    length_in: float,
+    width_in: float,
+    stock_removed_total: float = 0.050,
+    material: str = "GENERIC",
+    material_group: str = "",
+    faces: int = 2,
+) -> tuple[float, float]:
+    """Estimate wet grind time using the agreed formula.
+
+    Formula: minutes = (L * W * stock_removed_total) * 3.0 * grind_factor(material)
+
+    Args:
+        length_in: Part length in inches
+        width_in: Part width in inches
+        stock_removed_total: Total stock to remove (default 0.050 = 0.025 per face × 2)
+        material: Material name
+        material_group: Material group (ISO group or similar)
+        faces: Number of faces (default 2 for top+bottom)
+
+    Returns:
+        Tuple of (minutes, grind_material_factor) so renderer can display the factor
+    """
+    volume_cuin = length_in * width_in * stock_removed_total
+    factor = _grind_factor(material, material_group)
+    minutes = max(0.0, volume_cuin * MIN_PER_CUIN_GRIND * factor)
+    return minutes, factor
 
 
 def estimate_od_grind_minutes(

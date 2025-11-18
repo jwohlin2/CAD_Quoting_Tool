@@ -155,6 +155,10 @@ class MillingOperation:
     # Time
     time_minutes: float = 0.0
 
+    # Override tracking
+    _used_override: bool = False
+    override_time_minutes: Optional[float] = None
+
 
 @dataclass
 class GrindingOperation:
@@ -175,7 +179,11 @@ class GrindingOperation:
     # Time calculation
     min_per_cuin: float = 3.0
     material_factor: float = 1.0
+    grind_material_factor: float = 1.0  # Alias for renderer display
     time_minutes: float = 0.0
+
+    # Override tracking
+    _used_override: bool = False
 
 
 @dataclass
