@@ -26,7 +26,7 @@ now resides.
 | `appkit/planner_helpers.py` | _(removed)_ | Retired |
 | `appkit/ui/editor_controls.py` | _(removed)_ | Removed with Tk UI |
 | `appkit/ui/llm_panel.py` | _(removed)_ | Removed with Tk UI |
-| `appkit/ui/planner_render.py` | `cad_quoter/pricing/planner_render.py` | Migrated |
+| `appkit/ui/planner_render.py` | _(removed)_ | Retired |
 | `appkit/ui/services.py` | _(removed)_ | Removed with Tk UI |
 | `appkit/ui/session_io.py` | _(removed)_ | Removed with Tk UI |
 | `appkit/ui/suggestions.py` | `cad_quoter/app/suggestions.py` | Migrated |
