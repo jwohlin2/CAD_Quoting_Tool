@@ -442,14 +442,15 @@ class DimensionFinder:
         """
         Infer bounding box dimensions using heuristics.
 
-        Key insight: Bounding box dimensions are the 3 LARGEST distinct
-        linear dimensions in the drawing. They represent the overall envelope.
+        Key insight: Bounding box dimensions often have tight tolerances
+        because they're critical for fitment. Ordinate dimensions (dimtype 6)
+        without tolerances are usually positions from a datum, not overall sizes.
 
         Strategy:
-        1. Filter out angles (dimtype 2)
-        2. Filter out radii/chamfers (dimtype 4, very small values)
-        3. Sort by value descending
-        4. Return top 3 unique values as bbox candidates
+        1. Strongly prefer dimensions with tolerances
+        2. Prefer linear (dimtype 0) over ordinate (dimtype 6)
+        3. Ordinate dims without tolerances are likely positions - deprioritize
+        4. Size still matters but is secondary to tolerance presence
         """
         candidates = []
 
@@ -462,7 +463,7 @@ class DimensionFinder:
             if dimtype == 2:
                 continue
 
-            # Skip very small values (chamfers, fillets, radii)
+            # Skip very small values (chamfers, fillets)
             if measurement < 0.05:
                 continue
 
@@ -470,39 +471,62 @@ class DimensionFinder:
             if dim.get("is_diameter", False):
                 continue
 
-            # Skip radii (dimtype 4) unless they're large
-            if dimtype == 4 and measurement < 0.5:
+            # Skip radii (dimtype 4)
+            if dimtype == 4:
                 continue
 
-            # Calculate confidence based on size and other factors
-            confidence = 0.5
+            # Calculate score based on heuristics
+            score = 0.0
 
-            # Primary factor: SIZE - larger is better for bounding box
-            # Normalize to 0-1 range based on typical part sizes (0-20")
-            size_score = min(measurement / 20.0, 1.0) * 0.4
-            confidence += size_score
+            # Check for tolerance (critical indicator!)
+            has_tolerance = ('+' in resolved_text or '±' in resolved_text or
+                           '-.00' in resolved_text or '+.00' in resolved_text)
 
-            # Secondary: Prefer dimensions without multiplicity prefix
-            if not re.match(r'^\(\d+\)', resolved_text):
-                confidence += 0.05
+            if has_tolerance:
+                score += 3.0  # Strong bonus for toleranced dimensions
 
-            # Penalize reference dimensions
-            if 'REF' in resolved_text.upper() or 'sc' in resolved_text:
-                confidence -= 0.2
+            # Dimension type scoring
+            if dimtype == 0:
+                # Linear dimensions - these are direct measurements
+                score += 1.0
+            elif dimtype == 6:
+                # Ordinate dimensions - positions from datum
+                if has_tolerance:
+                    score += 0.5  # Still good if toleranced
+                else:
+                    score -= 1.0  # Penalize untolerance ordinate dims
 
-            candidates.append((measurement, confidence, dim))
+            # Size factor (smaller bonus than before)
+            if measurement > 0.5:
+                score += 0.2
+            if measurement > 2.0:
+                score += 0.1
 
-        # Sort by VALUE (largest first), not by score
-        candidates.sort(key=lambda x: x[0], reverse=True)
+            # Penalize reference dimensions and scale markers
+            if 'REF' in resolved_text.upper():
+                score -= 2.0
+            if ' sc' in resolved_text.lower():
+                score -= 2.0
+            if 'TYP' in resolved_text.upper():
+                score -= 0.5  # Slightly penalize typical dims
 
-        # Get unique values, preserving size order
+            # Penalize multiplicity prefix less - could still be bbox
+            if re.match(r'^\(\d+\)', resolved_text):
+                score -= 0.2
+
+            candidates.append((measurement, score, dim))
+
+        # Sort by SCORE first, then by value for ties
+        candidates.sort(key=lambda x: (x[1], x[0]), reverse=True)
+
+        # Get unique values, preserving score order
         seen = set()
         top_dims = []
-        for val, conf, _ in candidates:
+        for val, score, _ in candidates:
             rounded = round(val, 4)
             if rounded not in seen:
                 seen.add(rounded)
-                top_dims.append((val, conf))
+                top_dims.append((val, score))
                 if len(top_dims) >= 10:  # Return top 10 candidates
                     break
 
