@@ -625,47 +625,136 @@ def plan_with_text(fallback_family: str, params: Dict[str, Any], all_text: str |
 
 
 # ---------------------------------------------------------------------------
-# CAD File Integration (geo_dump + PaddleOCR)
+# CAD File Integration (geo_dump + DimensionFinder)
 # ---------------------------------------------------------------------------
 
 def extract_dimensions_from_cad(file_path: str | Path) -> Optional[Tuple[float, float, float]]:
-    """Extract L, W, T dimensions from CAD file using PaddleOCR.
+    """Extract L, W, T dimensions from CAD file using DimensionFinder.
+
+    Uses the DimensionFinder to analyze DIMENSION entities in DXF files
+    and infer bounding box dimensions. For DWG files, looks for pre-extracted
+    mtext_results.json or converts to DXF first.
 
     Returns (length, width, thickness) in inches, or None if extraction fails.
     """
     try:
-        import sys
         from pathlib import Path
-
-        # Add tools directory to path if needed
-        tools_dir = Path(__file__).resolve().parent.parent.parent / "tools"
-        if str(tools_dir) not in sys.path:
-            sys.path.insert(0, str(tools_dir))
-
-        from paddle_dims_extractor import PaddleOCRDimensionExtractor, DrawingRenderer
-        from PIL import Image
-        import tempfile
+        from cad_quoter.geometry.dimension_finder import DimensionFinder
 
         file_path = Path(file_path)
+        finder = DimensionFinder()
 
-        # Render CAD to PNG
-        with tempfile.TemporaryDirectory(prefix="cad_dims_") as tmpdir:
-            png_path = Path(tmpdir) / f"{file_path.stem}_render.png"
-            renderer = DrawingRenderer(verbose=False)
-            renderer.render(str(file_path), str(png_path))
+        # Handle different file types
+        ext = file_path.suffix.lower()
 
-            # Extract dimensions with OCR
-            extractor = PaddleOCRDimensionExtractor(verbose=False)
-            with Image.open(png_path) as img:
-                img = img.convert("RGB")
-                dims = extractor.extract(img)
+        if ext == '.dxf':
+            # Load directly from DXF
+            finder.load_dxf(file_path)
 
-            if dims:
-                return (dims.length, dims.width, dims.thickness)
+        elif ext == '.dwg':
+            # For DWG files, look for pre-extracted mtext_results.json
+            json_path = file_path.with_suffix('.mtext_results.json')
+            if not json_path.exists():
+                # Try in Cad Files directory
+                cad_files_dir = Path(__file__).resolve().parent.parent.parent / "Cad Files"
+                json_path = cad_files_dir / f"{file_path.stem}.mtext_results.json"
+
+            if json_path.exists():
+                finder.load_results(json_path)
+            else:
+                # Try to convert DWG to DXF using ODA
+                import tempfile
+                import subprocess
+                import shutil
+                import os
+
+                # Find ODA converter
+                oda_exe = os.getenv("ODA_FILE_CONVERTER")
+                if not oda_exe:
+                    common_paths = [
+                        r"D:\ODA\ODAFileConverter 26.8.0\ODAFileConverter.exe",
+                        r"C:\Program Files\ODA\OdaFileConverter.exe",
+                        r"C:\Program Files (x86)\ODA\OdaFileConverter.exe",
+                    ]
+                    for path in common_paths:
+                        if Path(path).exists():
+                            oda_exe = path
+                            break
+
+                if not oda_exe or not Path(oda_exe).exists():
+                    print(f"[WARN] No mtext_results.json found and ODA converter not available for DWG: {file_path}")
+                    return None
+
+                # Convert DWG to DXF
+                with tempfile.TemporaryDirectory(prefix="dwg_convert_") as tmpdir:
+                    input_dir = Path(tmpdir) / "_input"
+                    output_dir = Path(tmpdir) / "_output"
+                    input_dir.mkdir()
+                    output_dir.mkdir()
+
+                    # Copy DWG to input dir
+                    shutil.copy2(file_path, input_dir / file_path.name)
+
+                    # Run ODA converter
+                    cmd = [
+                        oda_exe,
+                        str(input_dir),
+                        str(output_dir),
+                        "ACAD2018",
+                        "DXF",
+                        "0",
+                        "1",
+                        file_path.name
+                    ]
+                    subprocess.run(cmd, capture_output=True, text=True)
+
+                    # Find output DXF
+                    dxf_files = list(output_dir.glob(f"{file_path.stem}*.dxf"))
+                    if not dxf_files:
+                        print(f"[WARN] ODA conversion failed for: {file_path}")
+                        return None
+
+                    finder.load_dxf(dxf_files[0])
+
+        elif ext == '.json' and 'mtext_results' in file_path.name:
+            # Direct JSON file
+            finder.load_results(file_path)
+
+        else:
+            print(f"[WARN] Unsupported file type: {ext}")
             return None
 
+        # Get inferred bounding box dimensions
+        bbox_candidates = finder.find_bounding_box()
+
+        if len(bbox_candidates) < 3:
+            print(f"[WARN] Not enough dimension candidates found: {len(bbox_candidates)}")
+            return None
+
+        # Get top 3 scored dimensions, sorted by size as L >= W >= T
+        # Note: Without expected values, this is a best-effort guess based on
+        # dimension scoring (toleranced dims score higher, larger ordinates score higher)
+
+        # Get top 3 unique values by score
+        seen = set()
+        top_3 = []
+        for val, score in bbox_candidates:
+            rounded = round(val, 4)
+            if rounded not in seen:
+                seen.add(rounded)
+                top_3.append(val)
+                if len(top_3) >= 3:
+                    break
+
+        if len(top_3) < 3:
+            return None
+
+        # Sort as L >= W >= T
+        dims = sorted(top_3, reverse=True)
+        return (dims[0], dims[1], dims[2])
+
     except Exception as e:
-        print(f"[WARN] PaddleOCR dimension extraction failed: {e}")
+        print(f"[WARN] Dimension extraction failed: {e}")
         return None
 
 
@@ -751,7 +840,7 @@ def plan_from_cad_file(
     """High-level API: Generate process plan directly from a CAD file.
 
     This function:
-    1. Extracts dimensions (L, W, T) using PaddleOCR (if use_paddle_ocr=True)
+    1. Extracts dimensions (L, W, T) using DimensionFinder (if use_paddle_ocr=True)
     2. Extracts hole table using geo_dump
     3. Extracts all text for family detection
     4. Converts hole table to hole_sets format
@@ -761,7 +850,8 @@ def plan_from_cad_file(
     Args:
         file_path: Path to DXF or DWG file
         fallback_family: Family to use if auto-detection fails (default: "Plates")
-        use_paddle_ocr: Whether to use PaddleOCR for dimensions (default: True)
+        use_paddle_ocr: Whether to extract dimensions (default: True)
+            Note: Now uses DimensionFinder instead of PaddleOCR for better accuracy
         verbose: Print extraction progress (default: False)
 
     Returns:
@@ -784,7 +874,7 @@ def plan_from_cad_file(
     dims = None
     if use_paddle_ocr:
         if verbose:
-            print("[PLANNER] Extracting dimensions with PaddleOCR...")
+            print("[PLANNER] Extracting dimensions with DimensionFinder...")
         dims = extract_dimensions_from_cad(file_path)
         if dims:
             L, W, T = dims
@@ -792,7 +882,7 @@ def plan_from_cad_file(
                 print(f"[PLANNER] Dimensions: L={L:.3f}\", W={W:.3f}\", T={T:.3f}\"")
         else:
             if verbose:
-                print("[PLANNER] Could not extract dimensions with PaddleOCR")
+                print("[PLANNER] Could not extract dimensions")
 
     # 2. Extract hole table and operations
     if verbose:

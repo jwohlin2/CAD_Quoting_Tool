@@ -79,20 +79,21 @@ def extract_part_info_from_cad(
     verbose: bool = False
 ) -> PartInfo:
     """
-    Extract part size and material directly from CAD file using PaddleOCR.
+    Extract part size and material directly from CAD file using DimensionFinder.
 
-    This function uses PaddleOCR to extract L×W×T dimensions from the CAD file,
+    This function uses DimensionFinder to extract L×W×T dimensions from the CAD file,
     which provides accurate detection of dimension text annotations.
 
     Args:
         cad_file_path: Path to CAD file (DXF/DWG)
         material: Material name (if None and auto_detect_material=True, will auto-detect)
-        use_paddle_ocr: Use PaddleOCR for dimension extraction (default: True)
+        use_paddle_ocr: Extract dimensions (default: True)
+            Note: Now uses DimensionFinder instead of PaddleOCR for better accuracy
         auto_detect_material: Auto-detect material from CAD text if not specified (default: True)
         verbose: Print extraction details
 
     Returns:
-        PartInfo with dimensions (extracted via PaddleOCR) and material
+        PartInfo with dimensions (extracted via DimensionFinder) and material
 
     Example:
         >>> # Auto-detect material from CAD file
@@ -118,14 +119,14 @@ def extract_part_info_from_cad(
                 print(f"Using default material instead: {DEFAULT_MATERIAL}")
             material = DEFAULT_MATERIAL
 
-    # Generate plan from CAD file - uses PaddleOCR by default for dimension extraction
+    # Generate plan from CAD file - uses DimensionFinder by default for dimension extraction
     plan = plan_from_cad_file(
         cad_file_path,
         use_paddle_ocr=use_paddle_ocr,
         verbose=verbose
     )
 
-    # Extract part info from plan (dimensions come from PaddleOCR)
+    # Extract part info from plan (dimensions come from DimensionFinder)
     return extract_part_info_from_plan(plan, material)
 
 
@@ -152,10 +153,13 @@ def get_part_dimensions(plan: Dict[str, Any]) -> Tuple[float, float, float]:
 
 def extract_dimensions_with_paddle_ocr(cad_file_path: str | Path) -> Dict[str, float]:
     """
-    Extract L×W×T dimensions directly from CAD file using PaddleOCR.
+    Extract L×W×T dimensions directly from CAD file using DimensionFinder.
 
-    This is a direct wrapper around extract_dimensions_from_cad() that explicitly
-    uses PaddleOCR to detect dimension annotations in the CAD file.
+    This is a direct wrapper around extract_dimensions_from_cad() that
+    uses DimensionFinder to detect dimension annotations in the CAD file.
+
+    Note: Function name retained for backward compatibility, but now uses
+    DimensionFinder instead of PaddleOCR for better accuracy.
 
     Args:
         cad_file_path: Path to CAD file (DXF/DWG)
@@ -169,7 +173,7 @@ def extract_dimensions_with_paddle_ocr(cad_file_path: str | Path) -> Dict[str, f
     """
     from cad_quoter.planning import extract_dimensions_from_cad
 
-    # Use PaddleOCR to extract L×W×T from CAD file (returns tuple or None)
+    # Use DimensionFinder to extract L×W×T from CAD file (returns tuple or None)
     dims_tuple = extract_dimensions_from_cad(cad_file_path)
 
     # Convert tuple to dict
