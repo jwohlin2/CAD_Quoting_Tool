@@ -1,6 +1,6 @@
 """Domain models for the CAD quoting tool."""
 
-from .materials import (
+from cad_quoter.materials import (
     DEFAULT_MATERIAL_DISPLAY,
     DEFAULT_MATERIAL_KEY,
     MATERIAL_DENSITY_G_CC_BY_KEY,

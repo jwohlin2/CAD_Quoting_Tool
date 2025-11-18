@@ -7,7 +7,7 @@ from collections.abc import Mapping, Sequence
 from typing import Any, Iterable
 
 from cad_quoter.domain_models import coerce_float_or_none as _coerce_float_or_none
-from cad_quoter.material_density import (
+from cad_quoter.materials import (
     MATERIAL_DENSITY_G_CC_BY_KEY,
     MATERIAL_DENSITY_G_CC_BY_KEYWORD,
     normalize_material_key as _normalize_lookup_key,
