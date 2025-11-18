@@ -1383,20 +1383,35 @@ class AppV7:
                         f"t/hole {op.time_per_hole:.2f} min | "
                         f"group {op.qty}x{op.time_per_hole:.2f} = {op.total_time:.2f} min")
 
+            MILLING_DESC_WIDTH = 30
+            MILLING_ROW_TEMPLATE = (
+                "{desc:<30} | W (in) {w:>7.3f} | L (in) {l:>7.3f} | "
+                "Tool Dia (in) {tool:>7.3f} |  Path (in) {path:>7.1f} | "
+                "Feed (ipm) {feed:>6} | Time (min) {time:>7.2f}"
+            )
+
             def format_milling_op(op):
-                """Format a milling operation as a single table row."""
+                """Format a milling operation as a single descriptive line."""
 
-                feed = op.feed_rate if op.feed_rate and op.feed_rate > 0 else None
-                feed_display = f"{feed:>9.1f}" if feed is not None else f"{'--':>9}"
+                desc = (op.op_description or "")[:MILLING_DESC_WIDTH]
 
-                return (
-                    f"{op.op_description:<26}  "
-                    f"{op.width:>7.3f}  "
-                    f"{op.length:>7.3f}  "
-                    f"{op.tool_diameter:>12.3f}  "
-                    f"{op.path_length:>9.1f}  "
-                    f"{feed_display}  "
-                    f"{op.time_minutes:>9.2f}"
+                feed_value = getattr(op, "feed_rate", None)
+                feed_str = f"{feed_value:.1f}" if feed_value and feed_value > 0 else "--"
+
+                width = op.width if op.width is not None else 0.0
+                length = op.length if op.length is not None else 0.0
+                tool_dia = op.tool_diameter if op.tool_diameter is not None else 0.0
+                path_length = op.path_length if op.path_length is not None else 0.0
+                time_minutes = op.time_minutes if op.time_minutes is not None else 0.0
+
+                return MILLING_ROW_TEMPLATE.format(
+                    desc=desc,
+                    w=width,
+                    l=length,
+                    tool=tool_dia,
+                    path=path_length,
+                    feed=feed_str,
+                    time=time_minutes,
                 )
 
             def format_grinding_op(op):
@@ -1464,15 +1479,22 @@ class AppV7:
 
             # TIME PER OP - MILLING
             if machine_hours.milling_operations:
-                report.append("TIME PER OP - MILLING")
-                report.append("-" * 74)
-                report.append(
-                    "Op Description              W (in)   L (in)   Tool Dia (in)  Path (in)  Feed (ipm)  Time (min)"
+                sample_row = MILLING_ROW_TEMPLATE.format(
+                    desc="".ljust(MILLING_DESC_WIDTH),
+                    w=0.0,
+                    l=0.0,
+                    tool=0.0,
+                    path=0.0,
+                    feed="--",
+                    time=0.0,
                 )
-                report.append("-" * 90)
+                separator = "-" * len(sample_row)
+
+                report.append("TIME PER OP - MILLING")
+                report.append(separator)
                 for op in machine_hours.milling_operations:
                     report.append(format_milling_op(op))
-                report.append("-" * 90)
+                report.append("")
                 report.append(
                     f"Total Milling Time (Square/Finish): {machine_hours.total_milling_minutes:.2f} minutes"
                 )
