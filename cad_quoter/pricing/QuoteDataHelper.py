@@ -424,12 +424,12 @@ def detect_punch_drawing(cad_file_path: Path, text_dump: str = None) -> bool:
     filename = cad_file_path.stem.upper()
 
     # Exclusion patterns - these are NOT punches even if they reference punches
-    exclusion_patterns = ["SHOE", "HOLDER", "BASE", "PLATE", "DIE SET", "BLOCK"]
+    exclusion_patterns = ["SHOE", "HOLDER", "BASE", "PLATE", "DIE SET", "BLOCK", "INSERT"]
     if any(excl in filename for excl in exclusion_patterns):
         return False
 
     # Punch indicators in filename
-    filename_indicators = ["PUNCH", "PILOT", "PIN", "FORM"]
+    filename_indicators = ["PUNCH", "PILOT", "PIN", "FORM", "GUIDE POST"]
     if any(ind in filename for ind in filename_indicators):
         return True
 
@@ -450,6 +450,8 @@ def detect_punch_drawing(cad_file_path: Path, text_dump: str = None) -> bool:
             "DIE PLATE",
             "BACKING PLATE",
             "STRIPPER PLATE",
+            "STRIPPER INSERT",
+            "PUNCH BLOCK",
         ]
         if any(excl in text_upper for excl in exclusion_indicators):
             return False
@@ -461,6 +463,7 @@ def detect_punch_drawing(cad_file_path: Path, text_dump: str = None) -> bool:
             "PIERCING PUNCH",
             "PILOT PIN",
             "PUNCH TIP",
+            "GUIDE POST",
         ]
         # Only trigger on specific punch phrases, not just "PUNCH" alone
         # (since die shoes often reference punches in their title blocks)
@@ -472,7 +475,7 @@ def detect_punch_drawing(cad_file_path: Path, text_dump: str = None) -> bool:
         if "PUNCH" in text_upper:
             # Make sure PUNCH isn't followed by exclusion words
             # e.g., "PUNCH CLEARANCE" or "PUNCH LOCATION" in notes
-            punch_exclusion_suffixes = ["SHOE", "HOLDER", "PLATE", "POCKET", "CLEARANCE", "LOCATION"]
+            punch_exclusion_suffixes = ["SHOE", "HOLDER", "PLATE", "POCKET", "CLEARANCE", "LOCATION", "BLOCK"]
             # Find all occurrences of PUNCH
             import re
             punch_pattern = r'\bPUNCH\b'
