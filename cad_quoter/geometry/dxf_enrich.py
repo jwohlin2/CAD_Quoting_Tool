@@ -589,6 +589,13 @@ def _classify_operation(desc: str) -> str:
         return "tap"
     if "REAM" in upper or "DRILL" in upper:
         return "drill"
+    # Detect slot/obround features
+    if "SLOT" in upper or "OBROUND" in upper or "ELONGATED" in upper:
+        return "slot"
+    # Detect slot patterns like "R.094" with length indicators
+    import re
+    if re.search(r'\bR[\.\d]+\s*(?:X\s*[\d\.]+|OVER\s*R)', upper):
+        return "slot"
     return "other"
 
 

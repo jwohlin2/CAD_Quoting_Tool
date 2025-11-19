@@ -1326,8 +1326,22 @@ def extract_quote_data_from_cad(
         # Calculate hole counts
         # hole_entries = count of unique hole groups (A, B, C, etc.)
         # holes_total = sum of QTY field from each hole entry (total individual holes)
-        hole_entries = len(hole_table) if hole_table else 0
-        holes_total = sum(int(hole.get('QTY', 1)) for hole in hole_table) if hole_table else 0
+        # Note: hole_table may contain multiple operations per hole group (e.g., drill + tap + cbore)
+        # so we count unique hole letters rather than operation count
+        if hole_table:
+            unique_holes = set(hole.get('HOLE', '') for hole in hole_table)
+            hole_entries = len(unique_holes)
+            # For holes_total, sum QTY only once per unique hole group
+            # Group by hole letter and take first QTY value
+            qty_by_hole = {}
+            for hole in hole_table:
+                hole_letter = hole.get('HOLE', '')
+                if hole_letter not in qty_by_hole:
+                    qty_by_hole[hole_letter] = int(hole.get('QTY', 1))
+            holes_total = sum(qty_by_hole.values())
+        else:
+            hole_entries = 0
+            holes_total = 0
 
         # Initialize time accumulators
         total_drill_min = 0.0
@@ -1443,8 +1457,11 @@ def extract_quote_data_from_cad(
             total_jig_grind_min = times.get('total_jig_grind_minutes', 0.0)
             # EDM time from "FOR WIRE EDM" holes (starter holes for wire EDM operations)
             hole_table_edm_min = times.get('total_edm_minutes', 0.0)
+            # Slot milling time (obround features)
+            slot_milling_min = times.get('total_slot_minutes', 0.0)
         else:
             hole_table_edm_min = 0.0
+            slot_milling_min = 0.0
 
         # Calculate times for plan operations (squaring, face milling, EDM, etc.)
         # Pass both final part thickness and McMaster stock thickness for proper removal calculations
@@ -1478,12 +1495,14 @@ def extract_quote_data_from_cad(
         total_other_min += milling_overhead_min + grinding_overhead_min
 
         # Use detailed ops totals for display (ensures Total Milling Time matches ops sum)
-        total_milling_min = total_milling_ops_min
+        # Add slot milling time from hole table to milling totals
+        total_milling_min = total_milling_ops_min + slot_milling_min
         total_grinding_min = total_grinding_ops_min
 
-        # Sanity check: totals should match
-        assert abs(total_milling_min - total_milling_ops_min) < 0.01, \
-            f"Milling time mismatch: {total_milling_min:.2f} vs ops sum {total_milling_ops_min:.2f}"
+        # Sanity check: totals should match (total_milling_min includes slot time + plan ops)
+        expected_milling = total_milling_ops_min + slot_milling_min
+        assert abs(total_milling_min - expected_milling) < 0.01, \
+            f"Milling time mismatch: {total_milling_min:.2f} vs expected {expected_milling:.2f}"
 
         # Convert detailed operations to dataclass objects
         milling_ops = [
