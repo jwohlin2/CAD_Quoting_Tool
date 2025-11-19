@@ -1499,6 +1499,13 @@ class AppV7:
                         f"t/hole {op.time_per_hole:.2f} min | "
                         f"group {op.qty}x{op.time_per_hole:.2f} = {op.total_time:.2f} min")
 
+            def format_edm_group(op):
+                """Format EDM (wire EDM profile) operation."""
+                return (f"Hole {op.hole_id} | Starter Ø{op.diameter:.4f}\" x {op.qty} | "
+                        f"thickness {op.depth:.3f}\" | "
+                        f"t/window {op.time_per_hole:.2f} min | "
+                        f"total {op.qty}x{op.time_per_hole:.2f} = {op.total_time:.2f} min")
+
             MILLING_DESC_WIDTH = 28
             MILLING_SEPARATOR_LENGTH = 106
 
@@ -1543,6 +1550,7 @@ class AppV7:
             report.append("=" * 74)
             report.append(f"Material: {quote_data.material_info.material_name}")
             report.append(f"Thickness: {quote_data.part_dimensions.thickness:.3f}\"")
+            report.append(f"Hole entries: {machine_hours.hole_entries}")
             report.append(f"Total holes: {machine_hours.holes_total}")
             report.append("")
 
@@ -1589,6 +1597,15 @@ class AppV7:
                 for op in machine_hours.cdrill_operations:
                     report.append(format_cdrill_group(op))
                 report.append(f"\nTotal Center Drill Time: {machine_hours.total_cdrill_minutes:.2f} minutes")
+                report.append("")
+
+            # WIRE EDM PROFILE - Time to cut profiles from starter holes
+            if machine_hours.edm_operations:
+                report.append("WIRE EDM PROFILE")
+                report.append("-" * 74)
+                for op in machine_hours.edm_operations:
+                    report.append(format_edm_group(op))
+                report.append(f"\nTotal Wire EDM Time: {machine_hours.total_edm_minutes:.2f} minutes")
                 report.append("")
 
             # SQUARE-UP BLOCK - Enhanced rendering for square-up operations
