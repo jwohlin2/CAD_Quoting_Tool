@@ -3459,8 +3459,17 @@ def estimate_hole_table_times(
                     else:
                         tap_major_dia = 0.060 + (screw_num * 0.013)
                 else:
-                    tap_major_dia = ref_dia
-                    tpi = 20  # Default TPI
+                    # Fallback: use ref_dia as estimated major diameter
+                    # and apply validation to get a reasonable TPI
+                    corrected_major, corrected_tpi, was_corrected = validate_and_correct_thread(
+                        str(ref_dia), 20  # Start with 20 TPI as default guess
+                    )
+                    if corrected_major in THREAD_MAJOR_DIAMETERS:
+                        tap_major_dia = THREAD_MAJOR_DIAMETERS[corrected_major]
+                        tpi = corrected_tpi
+                    else:
+                        tap_major_dia = ref_dia
+                        tpi = 20  # Default TPI if validation fails
 
             # Calculate tap drill diameter: major_dia - (1/TPI)
             # This gives approximately 75% thread engagement
@@ -3477,6 +3486,15 @@ def estimate_hole_table_times(
                     tap_drill_depth = float(tap_depth_match.group(1)) + 0.1  # Drill slightly deeper than tap
                 else:
                     tap_drill_depth = 0.6  # Default
+
+            # Sanity check: tap drill depth cannot exceed material thickness
+            if thickness > 0 and tap_drill_depth > thickness + 0.1:
+                import logging
+                logging.warning(
+                    f"Tap drill depth {tap_drill_depth:.3f}\" exceeds thickness {thickness:.3f}\" for hole {hole_id}, "
+                    f"clamping to thickness"
+                )
+                tap_drill_depth = thickness
 
             # Calculate drill time using tap drill diameter
             tap_drill_rpm = (sfm * 12) / (3.14159 * tap_drill_dia) if tap_drill_dia > 0 else 1000
@@ -3606,8 +3624,20 @@ def estimate_hole_table_times(
                     else:
                         tap_dia = 0.060 + (screw_num * 0.013)
                 else:
-                    tap_dia = ref_dia * 0.8  # Estimate tap drill size
-                    tpi = int(20 / tap_dia) if tap_dia > 0 else 20
+                    # Fallback: use ref_dia as estimated major diameter
+                    # and apply validation to get a reasonable TPI
+                    tap_dia = ref_dia
+
+                    # Try to match ref_dia to a standard thread size
+                    # and get the coarse TPI for that size
+                    corrected_major, corrected_tpi, was_corrected = validate_and_correct_thread(
+                        str(ref_dia), 20  # Start with 20 TPI as default guess
+                    )
+                    if corrected_major in THREAD_MAJOR_DIAMETERS:
+                        tap_dia = THREAD_MAJOR_DIAMETERS[corrected_major]
+                        tpi = corrected_tpi
+                    else:
+                        tpi = 20  # Default TPI if validation fails
 
             # Extract TAP depth - look for "TAP X {number} DEEP" or "X {number} DEEP"
             tap_depth_match = re.search(r'[TAP\s+]*X\s+(\d*\.\d+|\d+)\s+DEEP', combined_text)
@@ -3617,6 +3647,15 @@ def estimate_hole_table_times(
                 tap_depth = thickness if thickness > 0 else 2.0
             else:
                 tap_depth = 0.5  # Default
+
+            # Sanity check: tap depth cannot exceed material thickness
+            if thickness > 0 and tap_depth > thickness + 0.1:
+                import logging
+                logging.warning(
+                    f"Tap depth {tap_depth:.3f}\" exceeds thickness {thickness:.3f}\" for hole {hole_id}, "
+                    f"clamping to thickness"
+                )
+                tap_depth = thickness
 
             is_rigid = 'RIGID' in combined_text
 
