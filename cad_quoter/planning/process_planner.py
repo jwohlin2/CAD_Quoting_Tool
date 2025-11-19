@@ -3875,16 +3875,57 @@ def estimate_hole_table_times(
                 spark_out_min
             )
 
-            # Apply material grinding factor (aluminum < 1.0, tool steel = 1.0, etc.)
-            sf_grind = get_speeds_feeds(material, "Endmill_Profile")
+            # Apply material grinding factor (aluminum < 1.0, tool steel = 1.0, carbide = 2.5, etc.)
+            # Try Grinding operation first, then Endmill_Profile for backward compatibility
+            sf_grind = get_speeds_feeds(material, "Grinding")
+            if not sf_grind:
+                sf_grind = get_speeds_feeds(material, "Endmill_Profile")
+
             grinding_time_factor = 1.0
             if sf_grind:
                 grinding_time_factor = sf_grind.get('grinding_time_factor', 1.0)
 
-            time_per_hole = time_per_hole_base * grinding_time_factor
+            # Apply small-diameter factor: if dia < 0.080", multiply by 1.2-1.4
+            small_dia_factor = 1.0
+            if ref_dia < 0.080:
+                # Use 1.3 as the middle of the range (1.2-1.4)
+                # Scale based on how small: at 0.060" use 1.2, at 0.040" or less use 1.4
+                if ref_dia <= 0.040:
+                    small_dia_factor = 1.4
+                elif ref_dia <= 0.060:
+                    # Linear interpolation between 0.040 (1.4) and 0.060 (1.2)
+                    small_dia_factor = 1.4 - (ref_dia - 0.040) / (0.060 - 0.040) * (1.4 - 1.2)
+                else:
+                    # Linear interpolation between 0.060 (1.2) and 0.080 (1.0)
+                    small_dia_factor = 1.2 - (ref_dia - 0.060) / (0.080 - 0.060) * (1.2 - 1.0)
+
+            # Calculate time per hole with material and diameter factors
+            time_per_hole = time_per_hole_base * grinding_time_factor * small_dia_factor
+
+            # Detect die sections/inserts from description
+            desc_upper = entry.get('DESCRIPTION', '').upper()
+            is_die_section = any(kw in desc_upper for kw in [
+                'DIE SECTION', 'DIE INSERT', 'FORM DIE', 'CARBIDE INSERT',
+                'DIE CHASER', 'INSERT', 'SECTION'
+            ])
+
+            # Enforce minimum grinding time for die sections/inserts (20.0 minutes)
+            time_before_min = time_per_hole
+            if is_die_section and time_per_hole < 20.0:
+                time_per_hole = 20.0
+
             # Round times to 2 decimals for display consistency
             time_per_hole = round(time_per_hole, 2)
             total_time = round(time_per_hole * qty, 2)
+
+            # Log jig-grind calculation details
+            import logging
+            logging.debug(
+                f"Jig grind {hole_id}: dia={ref_dia:.4f}\", depth={depth:.3f}\", "
+                f"t_base={time_per_hole_base:.2f}min, material_factor={grinding_time_factor:.2f}, "
+                f"small_dia_factor={small_dia_factor:.2f}, t_hole={time_per_hole:.2f}min"
+                + (f", die_section_min_applied (was {time_before_min:.2f}min)" if is_die_section and time_before_min < 20.0 else "")
+            )
 
             jig_grind_groups.append({
                 'hole_id': hole_id,
@@ -3894,7 +3935,17 @@ def estimate_hole_table_times(
                 'time_per_hole': time_per_hole,
                 'total_time': total_time,
                 'description': entry.get('DESCRIPTION', ''),
-                'grinding_time_factor': grinding_time_factor
+                'grinding_time_factor': grinding_time_factor,
+                # JIG GRIND TIME MODEL TRANSPARENCY FIELDS
+                'jig_grind_dia': ref_dia,
+                'jig_grind_depth': depth,
+                't_hole': time_per_hole,
+                'material_factor': grinding_time_factor,
+                'small_dia_factor': small_dia_factor,
+                'is_die_section': is_die_section,
+                'grind_area_sq_in': grind_area,
+                't_base': round(time_per_hole_base, 2),
+                'spark_out_min': spark_out_min,
             })
 
         # TAP operations
