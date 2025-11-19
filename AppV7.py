@@ -1358,8 +1358,58 @@ class AppV7:
                 self.machine_cost_total = machine_hours.machine_cost
                 return "\n".join(report)
 
+            # Check if this is a die section (form-only, no drilled holes expected)
+            is_die_section = (quote_data.raw_plan and
+                              quote_data.raw_plan.get("meta", {}).get("family") == "Sections_blocks")
+            is_carbide_die_section = (quote_data.raw_plan and
+                                       quote_data.raw_plan.get("meta", {}).get("is_carbide_die_section", False))
+
             if not machine_hours.drill_operations and not machine_hours.tap_operations:
-                return "No hole operations found in CAD file."
+                # For die sections, provide appropriate messaging instead of implying "no machining"
+                if is_die_section or is_carbide_die_section:
+                    # Get machine rate for display
+                    machine_rate = getattr(self, '_temp_machine_rate', self.MACHINE_RATE)
+                    machine_rate_label = f"@ ${machine_rate:.2f}/hr"
+                    if machine_rate != self.MACHINE_RATE:
+                        machine_rate_label += " (OVERRIDDEN)"
+
+                    # Generate die section machine hours report
+                    report = []
+                    report.append("MACHINE HOURS ESTIMATION - DIE SECTION / FORM BLOCK")
+                    report.append("=" * 74)
+                    report.append(f"Material: {quote_data.material_info.material_name}")
+                    if quote_data.raw_plan:
+                        meta = quote_data.raw_plan.get("meta", {})
+                        report.append(f"Part type: {meta.get('sub_type', 'die_section')}")
+                        if meta.get("is_carbide_die_section"):
+                            report.append("Classification: Carbide Form Die Section")
+                        report.append(f"Complexity: {meta.get('complexity_level', 'medium').title()}")
+                    report.append("")
+
+                    report.append("NOTE: This is a form die section (no drilled/tapped holes)")
+                    report.append("Machining operations: grinding, wire EDM, form cutting")
+                    report.append("")
+
+                    report.append("MACHINE TIME BREAKDOWN")
+                    report.append("-" * 74)
+                    report.append(f"  Grinding (square-up/finish):     {machine_hours.total_grinding_minutes:>10.2f} minutes")
+                    report.append(f"  EDM (form cutting):              {machine_hours.total_edm_minutes:>10.2f} minutes")
+                    report.append(f"  Other (chamfer/polish):          {machine_hours.total_other_minutes:>10.2f} minutes")
+                    report.append(f"  Inspection:                      {machine_hours.total_cmm_minutes:>10.2f} minutes")
+                    report.append("-" * 74)
+                    report.append(f"  TOTAL MACHINE TIME:              {machine_hours.total_minutes:>10.2f} minutes")
+                    report.append(f"                                   {machine_hours.total_hours:>10.2f} hours")
+                    report.append("")
+                    report.append("=" * 74)
+                    report.append(f"TOTAL MACHINE COST: ${machine_hours.machine_cost:.2f} {machine_rate_label}")
+                    report.append("=" * 74)
+                    report.append("")
+
+                    self.machine_cost_total = machine_hours.machine_cost
+                    return "\n".join(report)
+                else:
+                    # Standard message for other parts without holes
+                    return "No hole operations found in CAD file. (Note: If this is a form die section, verify family classification)"
 
             # Format helper functions
             def format_drill_group(op):

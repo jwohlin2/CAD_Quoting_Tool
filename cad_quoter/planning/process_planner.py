@@ -111,6 +111,9 @@ def normalize_plan(plan: Plan | Dict[str, Any]) -> Dict[str, Any]:
             "warnings": list(plan.get("warnings", [])),
             "directs": dict(plan.get("directs", {})),
         }
+        # Preserve meta key for die sections and other families with metadata
+        if "meta" in plan:
+            d["meta"] = dict(plan["meta"])
     derive_directs(d)
     return d
 
@@ -357,9 +360,749 @@ def planner_bushing(params: Dict[str, Any]) -> Plan:
     return _stub_plan("bushing_id_critical", "Wire/drill open ID, jig grind to tol, lap for low Ra.")
 
 
-def planner_sections_blocks(params: Dict[str, Any]) -> Plan:
-    """Consolidated planner for Sections_blocks (cam_or_hemmer + flat_die_chaser)."""
-    return _stub_plan("Sections_blocks", "WEDM/mill slots/profiles → HT → profile grind → lap wear faces.")
+def planner_sections_blocks(params: Dict[str, Any]) -> Dict[str, Any]:
+    """Consolidated planner for Sections_blocks (cam_or_hemmer + flat_die_chaser + die_section).
+
+    Handles carbide die sections with proper operation stacks including:
+    - Stock procurement from oversize blank
+    - Square up / rough grind all faces
+    - Finish grind thickness and working faces
+    - Form cutting (wire EDM and/or grinding)
+    - Chamfers and reliefs
+
+    Ensures proper time estimation with carbide material factors.
+
+    Returns a dict (not Plan) to preserve the meta key with timing/cost data.
+    """
+    try:
+        plan_dict = create_die_section_plan(params)
+        # Return as dict to preserve meta key
+        return plan_dict
+    except Exception as e:
+        p = _stub_plan("Sections_blocks", "WEDM/mill slots/profiles → HT → profile grind → lap wear faces.")
+        p.warnings.append(f"Die section planner failed: {str(e)}")
+        # Convert Plan to dict and add error info to meta
+        return {
+            "ops": p.ops,
+            "fixturing": p.fixturing,
+            "qa": p.qa,
+            "warnings": p.warnings,
+            "directs": dict(p.directs),
+            "meta": {"error": str(e)},
+        }
+
+
+# ---------------------------------------------------------------------------
+# Die Section / Carbide Block Planner
+# ---------------------------------------------------------------------------
+
+@dataclass
+class DieSectionParams:
+    """Parameters for die section planning."""
+    # Basic geometry
+    length_in: float = 0.0
+    width_in: float = 0.0
+    thickness_in: float = 0.0
+
+    # Material
+    material: str = "A2"
+    material_group: str = ""
+
+    # Form characteristics
+    has_internal_form: bool = False
+    has_edge_form: bool = False
+    form_perimeter_in: float = 0.0
+    form_depth_in: float = 0.0
+    form_complexity: int = 1  # 1=simple, 2=moderate, 3=complex
+
+    # Tolerances
+    tight_tolerances: List[Dict[str, Any]] = field(default_factory=list)
+    min_tolerance_in: float = 0.001  # Tightest tolerance on part
+    has_over_r_callout: bool = False  # "OVER R" dimension callouts
+
+    # Features
+    num_chamfers: int = 0
+    num_reliefs: int = 0
+    num_working_faces: int = 2
+    has_land_height: bool = False
+
+    # Hole info (usually none for form die sections)
+    hole_count: int = 0
+    hole_sets: List[Dict[str, Any]] = field(default_factory=list)
+
+    # Processing hints
+    requires_wire_edm: bool = True
+    requires_form_grind: bool = False
+    requires_polish: bool = False
+
+    # Family sub-type
+    sub_type: str = "die_section"  # die_section, cam, hemmer, sensor_block
+
+    def __post_init__(self):
+        if self.tight_tolerances is None:
+            self.tight_tolerances = []
+        if self.hole_sets is None:
+            self.hole_sets = []
+
+
+def _extract_die_section_params(params: Dict[str, Any]) -> DieSectionParams:
+    """Extract and normalize die section parameters from input dict."""
+    # Get dimensions
+    L, W, T = 0.0, 0.0, 0.0
+    if "plate_LxW" in params:
+        L, W = params["plate_LxW"]
+    else:
+        L = float(params.get("L") or params.get("length") or params.get("length_in") or 0.0)
+        W = float(params.get("W") or params.get("width") or params.get("width_in") or 0.0)
+    T = float(params.get("T") or params.get("thickness") or params.get("thickness_in") or 0.0)
+
+    # Material detection
+    material = params.get("material", "A2")
+    material_group = params.get("material_group", "")
+
+    # Form detection
+    has_internal = bool(params.get("has_internal_form", False))
+    has_edge = bool(params.get("has_edge_form", False))
+
+    # If no explicit form flags, infer from part type keywords
+    sub_type = params.get("sub_type", "die_section")
+    part_name = str(params.get("part_name", "")).lower()
+    if not has_internal and not has_edge:
+        if any(kw in part_name for kw in ["die section", "form die", "carbide insert"]):
+            has_internal = True
+        elif any(kw in part_name for kw in ["cam", "hemmer", "sensor"]):
+            has_edge = True
+
+    # Tolerance extraction
+    tight_tols = params.get("tight_tolerances", [])
+    min_tol = float(params.get("min_tolerance_in", 0.001))
+    has_over_r = bool(params.get("has_over_r_callout", False))
+
+    # Check for tight tolerances from dimensions
+    if not tight_tols and "dimensions" in params:
+        for dim in params.get("dimensions", []):
+            tol = dim.get("tolerance", 0.001)
+            if tol <= 0.0005:
+                tight_tols.append(dim)
+                min_tol = min(min_tol, tol)
+
+    return DieSectionParams(
+        length_in=float(L),
+        width_in=float(W),
+        thickness_in=float(T),
+        material=material,
+        material_group=material_group,
+        has_internal_form=has_internal,
+        has_edge_form=has_edge,
+        form_perimeter_in=float(params.get("form_perimeter_in", 0.0)),
+        form_depth_in=float(params.get("form_depth_in", T * 0.5 if T > 0 else 0.25)),
+        form_complexity=int(params.get("form_complexity", 2)),
+        tight_tolerances=tight_tols,
+        min_tolerance_in=min_tol,
+        has_over_r_callout=has_over_r,
+        num_chamfers=int(params.get("num_chamfers", 4)),
+        num_reliefs=int(params.get("num_reliefs", 0)),
+        num_working_faces=int(params.get("num_working_faces", 2)),
+        has_land_height=bool(params.get("has_land_height", False)),
+        hole_count=int(params.get("hole_count", 0)),
+        hole_sets=params.get("hole_sets", []),
+        requires_wire_edm=bool(params.get("requires_wire_edm", True)),
+        requires_form_grind=bool(params.get("requires_form_grind", False)),
+        requires_polish=bool(params.get("requires_polish", False)),
+        sub_type=sub_type,
+    )
+
+
+def _is_carbide_die_section(params: DieSectionParams) -> bool:
+    """Determine if this is a carbide die section (not a plain block).
+
+    A carbide die section is characterized by:
+    - Material is carbide
+    - Small block geometry (typically < 4" in any dimension)
+    - Has internal or edge form
+    - No drilled holes (form-only)
+    """
+    is_carbide = _is_carbide(params.material, params.material_group)
+    is_small = max(params.length_in, params.width_in, params.thickness_in) < 4.0
+    has_form = params.has_internal_form or params.has_edge_form
+    no_holes = params.hole_count == 0
+
+    return is_carbide and is_small and has_form and no_holes
+
+
+def _calculate_die_section_complexity(params: DieSectionParams) -> Dict[str, Any]:
+    """Calculate complexity score for a die section.
+
+    Returns complexity metrics used to scale:
+    - Programming time
+    - Machining time
+    - Inspection time
+    - Finishing time
+    """
+    score = 0
+    factors = []
+
+    # Form complexity base
+    score += params.form_complexity * 2
+    factors.append(f"Form complexity: {params.form_complexity}")
+
+    # Tight tolerances
+    num_tight = len(params.tight_tolerances)
+    if params.min_tolerance_in <= 0.0002:
+        score += 3
+        factors.append(f"Very tight tolerance: ±{params.min_tolerance_in:.4f}\"")
+    elif params.min_tolerance_in <= 0.0005:
+        score += 2
+        factors.append(f"Tight tolerance: ±{params.min_tolerance_in:.4f}\"")
+
+    if num_tight > 3:
+        score += num_tight - 3
+        factors.append(f"Multiple tight tolerances: {num_tight}")
+
+    # Special callouts
+    if params.has_over_r_callout:
+        score += 2
+        factors.append("'OVER R' dimension callout")
+
+    if params.has_land_height:
+        score += 1
+        factors.append("Land height specification")
+
+    # Feature counts
+    if params.num_chamfers > 4:
+        score += 1
+        factors.append(f"Multiple chamfers: {params.num_chamfers}")
+
+    if params.num_reliefs > 0:
+        score += params.num_reliefs
+        factors.append(f"Reliefs: {params.num_reliefs}")
+
+    # Wire EDM + form grind combo
+    if params.requires_wire_edm and params.requires_form_grind:
+        score += 2
+        factors.append("Wire EDM + form grind combination")
+
+    # Polish requirement
+    if params.requires_polish:
+        score += 2
+        factors.append("Polish/lap finish required")
+
+    # Carbide material factor
+    if _is_carbide(params.material, params.material_group):
+        score += 3
+        factors.append("Carbide material (slower machining)")
+
+    return {
+        "score": score,
+        "level": "high" if score >= 10 else "medium" if score >= 5 else "low",
+        "factors": factors,
+    }
+
+
+def create_die_section_plan(params: Dict[str, Any]) -> Dict[str, Any]:
+    """Create a detailed manufacturing plan for a die section or similar block.
+
+    Generates proper operation stack for carbide form die sections:
+    1. Stock from oversize blank
+    2. Square up / rough grind all faces
+    3. Finish grind thickness and working faces
+    4. Form cutting (wire EDM and/or form grinding)
+    5. Chamfers and reliefs
+    6. Polish/finishing
+
+    Ensures:
+    - Programming time is never 0
+    - Machining time has minimum floors for carbide
+    - Inspection scales with complexity
+    - Machine costs are populated
+    """
+    p = _extract_die_section_params(params)
+    is_carbide = _is_carbide(p.material, p.material_group)
+    is_die_section = _is_carbide_die_section(p)
+    complexity = _calculate_die_section_complexity(p)
+
+    plan = {
+        "ops": [],
+        "fixturing": [],
+        "qa": [],
+        "warnings": [],
+        "directs": {
+            "hardware": False,
+            "outsourced": not is_carbide,  # Carbide skips HT
+            "utilities": False,
+            "consumables_flat": False,
+            "packaging_flat": True,
+        },
+        "meta": {
+            "family": "Sections_blocks",
+            "sub_type": p.sub_type,
+            "is_carbide_die_section": is_die_section,
+            "complexity": complexity,
+        }
+    }
+
+    # 1. Stock procurement
+    _add_die_section_stock_ops(plan, p)
+
+    # 2. Square up / rough grinding
+    _add_die_section_squaring_ops(plan, p, is_carbide)
+
+    # 3. Finish grinding
+    _add_die_section_finish_grind_ops(plan, p, is_carbide)
+
+    # 4. Form operations (Wire EDM and/or form grinding)
+    _add_die_section_form_ops(plan, p, is_carbide)
+
+    # 5. Heat treatment (if not carbide)
+    if not is_carbide:
+        _add_die_section_heat_treat_ops(plan, p)
+
+    # 6. Chamfers and reliefs
+    _add_die_section_edge_ops(plan, p)
+
+    # 7. Polish and finishing
+    _add_die_section_finishing_ops(plan, p, is_carbide, complexity)
+
+    # 8. QA checks
+    _add_die_section_qa_checks(plan, p, complexity)
+
+    # 9. Fixturing notes
+    _add_die_section_fixturing_notes(plan, p)
+
+    # 10. Apply guardrails and sanity checks
+    _apply_die_section_guardrails(plan, p, is_carbide, complexity)
+
+    return plan
+
+
+def _add_die_section_stock_ops(plan: Dict[str, Any], p: DieSectionParams) -> None:
+    """Add stock procurement operation with oversize allowance."""
+    # Calculate stock size with grinding allowance
+    stock_L = p.length_in + 0.125 if p.length_in > 0 else 1.0
+    stock_W = p.width_in + 0.125 if p.width_in > 0 else 1.0
+    stock_T = p.thickness_in + 0.100 if p.thickness_in > 0 else 0.5
+
+    is_carbide = _is_carbide(p.material, p.material_group)
+    stock_size = f"{stock_L:.3f}\" x {stock_W:.3f}\" x {stock_T:.3f}\""
+
+    plan["ops"].append({
+        "op": "stock_procurement",
+        "material": p.material,
+        "stock_size": stock_size,
+        "stock_L": stock_L,
+        "stock_W": stock_W,
+        "stock_T": stock_T,
+        "note": f"Order {p.material} stock: {stock_size}",
+        "is_carbide": is_carbide,
+    })
+
+
+def _add_die_section_squaring_ops(plan: Dict[str, Any], p: DieSectionParams, is_carbide: bool) -> None:
+    """Add square-up and rough grinding operations."""
+    # Calculate volume for time estimation
+    volume_cuin = p.length_in * p.width_in * p.thickness_in
+
+    # Stock removal (0.125" L/W, 0.100" T total)
+    stock_removed = (0.125 * p.width_in * p.thickness_in * 2 +  # sides
+                     0.125 * p.length_in * p.thickness_in * 2 +  # ends
+                     0.100 * p.length_in * p.width_in)  # faces
+
+    # Material factor for carbide
+    grind_factor = 2.5 if is_carbide else 1.0
+
+    # Rough grind time: volume × base_rate × material_factor
+    # Base rate: 4.0 min/in³ for grinding
+    rough_grind_time = stock_removed * 4.0 * grind_factor
+
+    # Minimum time for die sections (at least 15 minutes for squaring)
+    rough_grind_time = max(rough_grind_time, 15.0 if is_carbide else 8.0)
+
+    plan["ops"].append({
+        "op": "rough_grind_all_faces",
+        "faces": 6,
+        "stock_removed_cuin": stock_removed,
+        "material_factor": grind_factor,
+        "time_minutes": rough_grind_time,
+        "note": f"Rough grind all 6 faces to establish datums ({stock_removed:.3f} in³ removed)",
+    })
+
+
+def _add_die_section_finish_grind_ops(plan: Dict[str, Any], p: DieSectionParams, is_carbide: bool) -> None:
+    """Add finish grinding for thickness and working faces."""
+    grind_factor = 2.5 if is_carbide else 1.0
+
+    # Finish grind thickness (top and bottom faces)
+    face_area = p.length_in * p.width_in
+    finish_stock = 0.010  # 0.005" per face
+    finish_volume = face_area * finish_stock
+
+    # Time calculation: precision grinding is slower
+    # 6.0 min/in³ for finish grinding × material factor
+    finish_time = finish_volume * 6.0 * grind_factor
+    finish_time = max(finish_time, 10.0 if is_carbide else 5.0)
+
+    plan["ops"].append({
+        "op": "finish_grind_thickness",
+        "faces": 2,
+        "stock_removed_cuin": finish_volume,
+        "material_factor": grind_factor,
+        "time_minutes": finish_time,
+        "flatness_target": 0.0002 if p.min_tolerance_in <= 0.0005 else 0.0005,
+        "note": f"Finish grind top/bottom to thickness ±{p.min_tolerance_in:.4f}\"",
+    })
+
+    # Finish grind working faces if more than 2
+    if p.num_working_faces > 2:
+        extra_faces = p.num_working_faces - 2
+        extra_time = extra_faces * 5.0 * grind_factor
+        plan["ops"].append({
+            "op": "finish_grind_working_faces",
+            "faces": extra_faces,
+            "material_factor": grind_factor,
+            "time_minutes": extra_time,
+            "note": f"Finish grind {extra_faces} additional working faces",
+        })
+
+
+def _add_die_section_form_ops(plan: Dict[str, Any], p: DieSectionParams, is_carbide: bool) -> None:
+    """Add form cutting operations (Wire EDM and/or form grinding)."""
+    if not p.has_internal_form and not p.has_edge_form:
+        return
+
+    # Calculate form perimeter if not provided
+    perimeter = p.form_perimeter_in
+    if perimeter <= 0:
+        # Estimate from geometry: assume form is ~60% of part perimeter
+        perimeter = 2 * (p.length_in + p.width_in) * 0.6
+
+    depth = p.form_depth_in if p.form_depth_in > 0 else p.thickness_in * 0.5
+
+    # Wire EDM for internal/edge forms
+    if p.requires_wire_edm or p.has_internal_form:
+        # Wire EDM time: perimeter × minutes_per_inch
+        # Carbide: ~0.36 min/in (2.8 ipm), Tool steel: ~0.25 min/in (4 ipm)
+        wire_mpi = 0.36 if is_carbide else 0.25
+        wire_time = perimeter * wire_mpi
+
+        # Add skim passes for tight tolerances
+        skims = 2 if p.min_tolerance_in <= 0.0005 else 1
+        wire_time += perimeter * 0.2 * skims  # Skims are faster
+
+        # Minimum wire EDM time for carbide die sections
+        wire_time = max(wire_time, 20.0 if is_carbide else 10.0)
+
+        plan["ops"].append({
+            "op": "wire_edm_form",
+            "wire_profile_perimeter_in": perimeter,
+            "thickness_in": depth,
+            "skims": skims,
+            "material_factor": 1.3 if is_carbide else 1.0,
+            "time_minutes": wire_time,
+            "note": f"Wire EDM form profile: {perimeter:.2f}\" perimeter × {depth:.3f}\" deep",
+        })
+
+    # Form grinding for precision forms
+    if p.requires_form_grind:
+        # Form grind time: perimeter × depth × rate × material factor
+        grind_factor = 2.5 if is_carbide else 1.0
+        form_grind_time = (perimeter * depth * 0.5) * grind_factor
+        form_grind_time = max(form_grind_time, 15.0 if is_carbide else 8.0)
+
+        plan["ops"].append({
+            "op": "form_grind",
+            "perimeter_in": perimeter,
+            "depth_in": depth,
+            "material_factor": grind_factor,
+            "time_minutes": form_grind_time,
+            "note": f"Form grind to final profile and tolerance",
+        })
+
+
+def _add_die_section_heat_treat_ops(plan: Dict[str, Any], p: DieSectionParams) -> None:
+    """Add heat treatment operation (skipped for carbide)."""
+    hardness_map = {
+        "A2": "60-62 RC", "D2": "58-60 RC", "M2": "62-64 RC",
+        "O1": "60-62 RC", "S7": "54-56 RC",
+    }
+    target_hardness = hardness_map.get(p.material, "58-62 RC")
+
+    plan["ops"].append({
+        "op": "heat_treat",
+        "material": p.material,
+        "target_hardness": target_hardness,
+        "note": f"Heat treat to {target_hardness}",
+    })
+
+
+def _add_die_section_edge_ops(plan: Dict[str, Any], p: DieSectionParams) -> None:
+    """Add chamfer and relief operations."""
+    if p.num_chamfers > 0:
+        chamfer_time = p.num_chamfers * 1.5  # 1.5 min per chamfer
+        plan["ops"].append({
+            "op": "chamfer_edges",
+            "qty": p.num_chamfers,
+            "time_minutes": chamfer_time,
+            "note": f"Chamfer {p.num_chamfers} edges on entry/exit",
+        })
+
+    if p.num_reliefs > 0:
+        relief_time = p.num_reliefs * 3.0  # 3 min per relief
+        plan["ops"].append({
+            "op": "machine_reliefs",
+            "qty": p.num_reliefs,
+            "time_minutes": relief_time,
+            "note": f"Machine {p.num_reliefs} relief cuts",
+        })
+
+
+def _add_die_section_finishing_ops(plan: Dict[str, Any], p: DieSectionParams,
+                                    is_carbide: bool, complexity: Dict[str, Any]) -> None:
+    """Add polish and finishing operations based on complexity.
+
+    Ensures minimum finishing time for carbide die sections.
+    """
+    # Base finishing time
+    base_time = 10.0 if is_carbide else 5.0
+
+    # Add time for cavity/working surface polish
+    if p.requires_polish or p.has_internal_form:
+        polish_time = 8.0 if is_carbide else 4.0
+        plan["ops"].append({
+            "op": "polish_cavity",
+            "time_minutes": polish_time,
+            "note": "Polish cavity/working surfaces to spec Ra",
+        })
+        base_time += polish_time
+
+    # Edge break time
+    edge_break_time = max(3.0, p.num_chamfers * 0.5 + 2.0)
+    plan["ops"].append({
+        "op": "edge_break",
+        "time_minutes": edge_break_time,
+        "note": "Edge break all entry/exit edges and corners",
+    })
+
+    # Deburr based on complexity
+    deburr_time = 3.0 + (complexity["score"] * 0.3)
+    plan["ops"].append({
+        "op": "deburr_and_clean",
+        "time_minutes": deburr_time,
+        "note": "Deburr, clean, and inspect surfaces",
+    })
+
+    # Total finishing time floor
+    total_finishing = base_time + edge_break_time + deburr_time
+    min_finishing = 10.0 if is_carbide else 5.0
+
+    if total_finishing < min_finishing:
+        plan["warnings"].append(
+            f"Finishing time ({total_finishing:.1f} min) below minimum; adjusted to {min_finishing} min"
+        )
+
+
+def _add_die_section_qa_checks(plan: Dict[str, Any], p: DieSectionParams,
+                                complexity: Dict[str, Any]) -> None:
+    """Add QA checks scaled by complexity and tolerances."""
+    qa = plan["qa"]
+
+    # Base dimensional inspection
+    qa.append(f"Verify overall dimensions L×W×T to ±{p.min_tolerance_in:.4f}\"")
+
+    # Form verification
+    if p.has_internal_form or p.has_edge_form:
+        qa.append("Verify form profile to optical comparator or CMM")
+
+    # Tight tolerance checks
+    if p.min_tolerance_in <= 0.0002:
+        qa.append(f"Critical dimension check: tolerance ±{p.min_tolerance_in:.4f}\"")
+        for tol in p.tight_tolerances[:5]:  # Show up to 5
+            if isinstance(tol, dict):
+                qa.append(f"  - {tol.get('name', 'Dim')}: {tol.get('value', '?')} ±{tol.get('tolerance', '?')}")
+
+    # Special callouts
+    if p.has_over_r_callout:
+        qa.append("Verify 'OVER R' dimensions with radius gauge")
+
+    if p.has_land_height:
+        qa.append("Verify land height to specification")
+
+    # Surface finish checks
+    if p.requires_polish:
+        qa.append("Verify surface finish Ra on working surfaces")
+
+    # Flatness/parallelism for ground faces
+    qa.append("Verify flatness and parallelism on ground faces")
+
+
+def _add_die_section_fixturing_notes(plan: Dict[str, Any], p: DieSectionParams) -> None:
+    """Add fixturing recommendations."""
+    fix = plan["fixturing"]
+
+    is_carbide = _is_carbide(p.material, p.material_group)
+
+    if is_carbide:
+        fix.append("Use diamond wheel for carbide grinding; maintain coolant flow")
+        fix.append("Support part fully during grinding to prevent chipping")
+
+    fix.append("Use precision vise or fixture block for squaring operations")
+
+    if p.has_internal_form:
+        fix.append("Wire EDM: Use stable workholding; verify perpendicularity before cutting")
+
+    if p.min_tolerance_in <= 0.0005:
+        fix.append("Temperature-stabilize part before final inspection")
+
+
+def _apply_die_section_guardrails(plan: Dict[str, Any], p: DieSectionParams,
+                                   is_carbide: bool, complexity: Dict[str, Any]) -> None:
+    """Apply sanity checks and guardrails for die sections.
+
+    Implements:
+    - Minimum programming time (never 0)
+    - Minimum machining time floors
+    - Machine cost verification
+    - High material cost warnings
+    """
+    warnings = plan["warnings"]
+    ops = plan["ops"]
+
+    # Calculate totals from operations
+    total_machine_time = sum(op.get("time_minutes", 0) for op in ops)
+    num_unique_ops = len(set(op.get("op", "") for op in ops))
+
+    # --- Task 2: Programming time must not be 0 ---
+    base_prog_time = 15.0  # Minimum for die sections
+
+    # Complexity adders
+    prog_time = base_prog_time
+    prog_time += num_unique_ops * 3.0  # +3 min per unique operation type
+
+    # Tight tolerance adder
+    if p.min_tolerance_in <= 0.0002:
+        prog_time += 10.0  # +10 min for very tight tolerances
+    elif p.min_tolerance_in <= 0.0005:
+        prog_time += 5.0  # +5 min for tight tolerances
+
+    # Over R callout adder
+    if p.has_over_r_callout:
+        prog_time += 5.0
+
+    # Carbide adder (slower prove-out)
+    if is_carbide:
+        prog_time *= 1.25
+
+    # Store in plan metadata
+    if "meta" not in plan:
+        plan["meta"] = {}
+    plan["meta"]["programming_time_min"] = prog_time
+    plan["meta"]["num_unique_operations"] = num_unique_ops
+
+    # --- Task 3: Minimum machining time floors ---
+    min_machine_time = 30.0 if is_carbide else 15.0
+    if total_machine_time < min_machine_time:
+        warnings.append(
+            f"Machining time ({total_machine_time:.1f} min) below minimum for "
+            f"{'carbide ' if is_carbide else ''}die section; floor is {min_machine_time} min"
+        )
+        plan["meta"]["machining_time_adjusted"] = True
+        plan["meta"]["machining_time_floor"] = min_machine_time
+
+    plan["meta"]["total_machine_time_min"] = max(total_machine_time, min_machine_time)
+
+    # --- Task 4: Inspection time scaling ---
+    base_insp_time = 10.0  # Higher base for die sections
+    insp_time = base_insp_time
+
+    # Per-tight-dimension adder
+    insp_time += len(p.tight_tolerances) * 2.0
+
+    # Complexity scaling
+    if complexity["level"] == "high":
+        insp_time *= 1.5
+    elif complexity["level"] == "medium":
+        insp_time *= 1.2
+
+    # Over R and land height checks
+    if p.has_over_r_callout:
+        insp_time += 5.0
+    if p.has_land_height:
+        insp_time += 3.0
+
+    plan["meta"]["inspection_time_min"] = insp_time
+
+    # --- Task 5: Machine cost tracking ---
+    # Calculate expected machine costs (will be used by cost calculator)
+    machine_rates = {
+        "wire_edm": 130.0,  # $/hr
+        "surface_grind": 95.0,
+        "form_grind": 110.0,
+        "default": 90.0,
+    }
+
+    estimated_machine_cost = 0.0
+    for op in ops:
+        op_name = op.get("op", "").lower()
+        time_min = op.get("time_minutes", 0)
+
+        if "wire_edm" in op_name:
+            rate = machine_rates["wire_edm"]
+        elif "form_grind" in op_name:
+            rate = machine_rates["form_grind"]
+        elif "grind" in op_name:
+            rate = machine_rates["surface_grind"]
+        else:
+            rate = machine_rates["default"]
+
+        op_cost = (time_min / 60.0) * rate
+        estimated_machine_cost += op_cost
+        op["estimated_cost"] = op_cost
+
+    plan["meta"]["estimated_machine_cost"] = estimated_machine_cost
+
+    # Guard: Flag if machine time > 0 but cost might be missing
+    if total_machine_time > 0 and estimated_machine_cost <= 0:
+        warnings.append(
+            "WARNING: Machining time present but estimated machine cost is $0. "
+            "Flag for review."
+        )
+
+    # --- Task 7: High material cost sanity check ---
+    # Estimate material cost for carbide
+    if is_carbide:
+        # Carbide density ~15.6 g/cc, price ~$0.30-0.50/g
+        volume_cuin = p.length_in * p.width_in * p.thickness_in
+        volume_cc = volume_cuin * 16.387  # 1 in³ = 16.387 cm³
+        weight_g = volume_cc * 15.6
+        est_material_cost = weight_g * 0.40  # $0.40/g average
+
+        plan["meta"]["estimated_material_cost"] = est_material_cost
+
+        # Flag if material cost exceeds threshold or is disproportionate
+        if est_material_cost > 1000:
+            warnings.append(
+                f"Manual Review Recommended: Carbide stock estimate (${est_material_cost:.2f}) "
+                f"exceeds $1,000 threshold. Verify catalog and SMB pricing."
+            )
+        elif est_material_cost > estimated_machine_cost * 2:
+            warnings.append(
+                f"Note: Carbide material cost (${est_material_cost:.2f}) is high relative "
+                f"to machining cost (${estimated_machine_cost:.2f}). Verify stock pricing."
+            )
+
+    # --- Task 8: Bounds checking ---
+    # Setup time bounds for die sections
+    setup_min = 20.0  # Minimum setup for die sections
+    setup_max = 120.0  # Maximum reasonable setup
+
+    calculated_setup = 15 + num_unique_ops * 3 + (5 if is_carbide else 0)
+    bounded_setup = max(setup_min, min(setup_max, calculated_setup))
+
+    plan["meta"]["setup_time_min"] = bounded_setup
+
+    # Store complexity score for downstream use
+    plan["meta"]["complexity_score"] = complexity["score"]
+    plan["meta"]["complexity_level"] = complexity["level"]
+    plan["meta"]["complexity_factors"] = complexity["factors"]
 
 
 def planner_special_processes(params: Dict[str, Any]) -> Plan:
@@ -536,6 +1279,9 @@ _FAM_KEYWORDS = {
             # new part name keywords
             "sensor block", "die section", "stock guide", "die chase",
             "punch block", "stripper insert", "pressure pad",
+            # carbide die section keywords
+            "form die", "carbide insert", "carbide section", "carbide block",
+            "form insert", "die insert", "cutting insert",
         },
         "none_of": set(),
     },
@@ -594,6 +1340,21 @@ def pick_family_and_hints(all_text: str | Iterable[str]) -> Dict[str, Any]:
     if fam_sorted and fam_sorted[0][1] > 0:
         if len(fam_sorted) == 1 or fam_sorted[0][1] > fam_sorted[1][1]:
             chosen_family = fam_sorted[0][0]
+        else:
+            # Tie-breaker: prefer Sections_blocks for carbide die sections
+            # If carbide is mentioned along with die section keywords, prefer Sections_blocks
+            top_score = fam_sorted[0][1]
+            tied = [fam for fam, s in fam_sorted if s == top_score]
+            if "Sections_blocks" in tied and "Special_processes" in tied:
+                # Check for die section keywords that indicate form work
+                die_section_keywords = {"die section", "form die", "carbide insert",
+                                        "form insert", "die insert", "carbide section"}
+                if any(kw in blob for kw in die_section_keywords):
+                    chosen_family = "Sections_blocks"
+                else:
+                    chosen_family = fam_sorted[0][0]
+            else:
+                chosen_family = fam_sorted[0][0]
 
     # 2) Extra ops
     extra_ops: List[Dict[str, Any]] = []
