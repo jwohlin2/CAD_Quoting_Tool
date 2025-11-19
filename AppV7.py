@@ -1259,7 +1259,12 @@ class AppV7:
                 else:
                     formatted_price = f"${stock_info.mcmaster_price:>13,.2f}"
 
-            report.append(f"  Stock Piece (McMaster part {stock_info.mcmaster_part_number or 'N/A'})".ljust(50) + f"{formatted_price:>24}")
+            # Format stock piece label - only show McMaster part number if we have a real one
+            if stock_info.mcmaster_part_number and stock_info.mcmaster_part_number != "N/A":
+                stock_label = f"  Stock Piece (McMaster part {stock_info.mcmaster_part_number})"
+            else:
+                stock_label = "  Stock Piece (no McMaster match)"
+            report.append(f"{stock_label}".ljust(50) + f"{formatted_price:>24}")
 
             if stock_info.mcmaster_price is not None:
                 report.append(f"  Tax".ljust(50) + f"+${cost_breakdown.tax:>22.2f}")
@@ -1591,28 +1596,35 @@ class AppV7:
                 report.append("")
 
             # MACHINE TIME BREAKDOWN
-            # Calculate conventional machining total (all ops except CMM)
-            machining_minutes = (
+            # Calculate visible machine minutes (operations shown individually in the report)
+            # NOTE: visible = drill + jig_grind + tap + cdrill + wet_grind + cmm
+            # Overhead captures cbore, milling, edm, and other operations
+            visible_machine_minutes = (
                 machine_hours.total_drill_minutes +
-                machine_hours.total_tap_minutes +
-                machine_hours.total_cbore_minutes +
-                machine_hours.total_cdrill_minutes +
                 machine_hours.total_jig_grind_minutes +
-                machine_hours.total_milling_minutes +
+                machine_hours.total_tap_minutes +
+                machine_hours.total_cdrill_minutes +
                 machine_hours.total_grinding_minutes +
-                machine_hours.total_edm_minutes +
-                machine_hours.total_other_minutes
+                machine_hours.total_cmm_minutes
             )
-            cmm_machine_minutes = machine_hours.total_cmm_minutes
-            misc_overhead_minutes = machine_hours.total_minutes - machining_minutes - cmm_machine_minutes
+            misc_machine_overhead_minutes = machine_hours.total_minutes - visible_machine_minutes
 
             report.append("MACHINE TIME BREAKDOWN")
             report.append("-" * 74)
-            report.append(f"  Conventional machining total:     {machining_minutes:>10.2f} min")
-            if cmm_machine_minutes > 0:
-                report.append(f"  CMM inspection (machine time):    {cmm_machine_minutes:>10.2f} min")
-            if abs(misc_overhead_minutes) > 0.01:  # Only show if non-zero
-                report.append(f"  Misc machine overhead:            {misc_overhead_minutes:>10.2f} min")
+            if machine_hours.total_drill_minutes > 0:
+                report.append(f"  Drilling:                         {machine_hours.total_drill_minutes:>10.2f} min")
+            if machine_hours.total_jig_grind_minutes > 0:
+                report.append(f"  Jig grind:                        {machine_hours.total_jig_grind_minutes:>10.2f} min")
+            if machine_hours.total_tap_minutes > 0:
+                report.append(f"  Tap:                              {machine_hours.total_tap_minutes:>10.2f} min")
+            if machine_hours.total_cdrill_minutes > 0:
+                report.append(f"  Center drill:                     {machine_hours.total_cdrill_minutes:>10.2f} min")
+            if machine_hours.total_grinding_minutes > 0:
+                report.append(f"  Wet grind:                        {machine_hours.total_grinding_minutes:>10.2f} min")
+            if machine_hours.total_cmm_minutes > 0:
+                report.append(f"  CMM (machine time):               {machine_hours.total_cmm_minutes:>10.2f} min")
+            if abs(misc_machine_overhead_minutes) > 0.01:  # Only show if non-zero
+                report.append(f"  Misc machine overhead (rapids, tool changes, etc.): {misc_machine_overhead_minutes:>4.2f} min")
             report.append("-" * 74)
 
             # Summary (read from temp variable set in main thread to avoid Tkinter widget access)

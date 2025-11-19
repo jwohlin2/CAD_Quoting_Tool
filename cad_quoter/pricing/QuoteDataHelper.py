@@ -852,20 +852,29 @@ def extract_quote_data_from_cad(
                 )
 
                 # Set machine hours from punch estimates
+                # Round each component to 2 decimal places for consistent display
                 time_estimates = punch_data.get("time_estimates", {})
                 mh = time_estimates.get("machine_hours", {})
-                punch_machine_hours = mh.get("total_hours", 0.0)
+                punch_milling_min = round(mh.get("total_milling_minutes", 0.0), 2)
+                punch_grinding_min = round(mh.get("total_grinding_minutes", 0.0), 2)
+                punch_tap_min = round(mh.get("total_tap_minutes", 0.0), 2)
+                punch_drill_min = round(mh.get("total_drill_minutes", 0.0), 2)
+                punch_edm_min = round(mh.get("total_edm_minutes", 0.0), 2)
+                punch_other_min = round(mh.get("total_other_minutes", 0.0), 2)
+                punch_cmm_min = round(mh.get("total_cmm_minutes", 0.0), 2)
+                punch_total_min = round(mh.get("total_minutes", 0.0), 2)
+                punch_machine_hours = round(punch_total_min / 60.0, 2)
                 quote_data.machine_hours = MachineHoursBreakdown(
-                    total_milling_minutes=mh.get("total_milling_minutes", 0.0),
-                    total_grinding_minutes=mh.get("total_grinding_minutes", 0.0),
-                    total_tap_minutes=mh.get("total_tap_minutes", 0.0),
-                    total_drill_minutes=mh.get("total_drill_minutes", 0.0),
-                    total_edm_minutes=mh.get("total_edm_minutes", 0.0),
-                    total_other_minutes=mh.get("total_other_minutes", 0.0),
-                    total_cmm_minutes=mh.get("total_cmm_minutes", 0.0),
-                    total_minutes=mh.get("total_minutes", 0.0),
+                    total_milling_minutes=punch_milling_min,
+                    total_grinding_minutes=punch_grinding_min,
+                    total_tap_minutes=punch_tap_min,
+                    total_drill_minutes=punch_drill_min,
+                    total_edm_minutes=punch_edm_min,
+                    total_other_minutes=punch_other_min,
+                    total_cmm_minutes=punch_cmm_min,
+                    total_minutes=punch_total_min,
                     total_hours=punch_machine_hours,
-                    machine_cost=punch_machine_hours * machine_rate,
+                    machine_cost=round(punch_machine_hours * machine_rate, 2),
                 )
 
                 # Set labor hours from punch estimates
@@ -1223,11 +1232,14 @@ def extract_quote_data_from_cad(
     )
 
     # Calculate direct cost breakdown
+    # NOTE: Keep total_material_cost in sync with printed line items (avoid 1¢ drift).
+    # Round each component to 2 decimal places before summing to ensure the total
+    # matches the sum of the displayed line items exactly.
     if mcmaster_price:
-        tax = mcmaster_price * 0.07
-        shipping = mcmaster_price * 0.125
-        scrap_credit = scrap_value_calc.get('scrap_value', 0.0)
-        net_cost = mcmaster_price + tax + shipping - scrap_credit
+        tax = round(mcmaster_price * 0.07, 2)
+        shipping = round(mcmaster_price * 0.125, 2)
+        scrap_credit = round(scrap_value_calc.get('scrap_value', 0.0), 2)
+        net_cost = round(mcmaster_price + tax + shipping - scrap_credit, 2)
     else:
         tax = shipping = scrap_credit = net_cost = 0.0
 
@@ -1419,13 +1431,26 @@ def extract_quote_data_from_cad(
         cmm_holes_checked = cmm_breakdown['holes_checked']
 
         # Calculate grand totals (machine time only includes CMM checking, not setup)
-        grand_total_minutes = (
+        # Round each component to 2 decimal places before summing to ensure the total
+        # matches the sum of the displayed line items exactly.
+        total_drill_min = round(total_drill_min, 2)
+        total_tap_min = round(total_tap_min, 2)
+        total_cbore_min = round(total_cbore_min, 2)
+        total_cdrill_min = round(total_cdrill_min, 2)
+        total_jig_grind_min = round(total_jig_grind_min, 2)
+        total_milling_min = round(total_milling_min, 2)
+        total_grinding_min = round(total_grinding_min, 2)
+        total_edm_min = round(total_edm_min, 2)
+        total_other_min = round(total_other_min, 2)
+        cmm_checking_machine_min = round(cmm_checking_machine_min, 2)
+
+        grand_total_minutes = round(
             total_drill_min + total_tap_min + total_cbore_min +
             total_cdrill_min + total_jig_grind_min +
             total_milling_min + total_grinding_min + total_edm_min + total_other_min +
-            cmm_checking_machine_min
+            cmm_checking_machine_min, 2
         )
-        grand_total_hours = grand_total_minutes / 60.0
+        grand_total_hours = round(grand_total_minutes / 60.0, 2)
 
         quote_data.machine_hours = MachineHoursBreakdown(
             drill_operations=drill_ops,
@@ -1448,7 +1473,7 @@ def extract_quote_data_from_cad(
             cmm_holes_checked=cmm_holes_checked,
             total_minutes=grand_total_minutes,
             total_hours=grand_total_hours,
-            machine_cost=grand_total_hours * machine_rate
+            machine_cost=round(grand_total_hours * machine_rate, 2)
         )
 
         if verbose:
@@ -1482,13 +1507,13 @@ def extract_quote_data_from_cad(
         labor_result = compute_labor_minutes(labor_inputs)
         minutes = labor_result['minutes']
 
-        # Extract individual category minutes
-        setup_min = minutes.get('Setup', 0.0)
-        programming_min = minutes.get('Programming', 0.0)
-        machining_min = minutes.get('Machining_Steps', 0.0)
-        inspection_min = minutes.get('Inspection', 0.0)
-        finishing_min = minutes.get('Finishing', 0.0)
-        labor_total = minutes.get('Labor_Total', 0.0)
+        # Extract individual category minutes with rounding for consistent display
+        setup_min = round(minutes.get('Setup', 0.0), 2)
+        programming_min = round(minutes.get('Programming', 0.0), 2)
+        machining_min = round(minutes.get('Machining_Steps', 0.0), 2)
+        inspection_min = round(minutes.get('Inspection', 0.0), 2)
+        finishing_min = round(minutes.get('Finishing', 0.0), 2)
+        labor_total = round(minutes.get('Labor_Total', 0.0), 2)
 
         # Calculate visible categories sum
         visible_labor_sum = (
@@ -1497,12 +1522,13 @@ def extract_quote_data_from_cad(
         )
 
         # Calculate any misc overhead (should be 0 if compute_labor_minutes is consistent)
-        misc_overhead_min = labor_total - visible_labor_sum
+        misc_overhead_min = round(labor_total - visible_labor_sum, 2)
 
         # Sanity check: total should equal sum of categories + overhead
         assert abs(labor_total - (visible_labor_sum + misc_overhead_min)) < 0.01, \
             f"Labor time mismatch: total={labor_total:.2f}, sum={visible_labor_sum:.2f}, overhead={misc_overhead_min:.2f}"
 
+        labor_total_hours = round(labor_total / 60.0, 2)
         quote_data.labor_hours = LaborHoursBreakdown(
             setup_minutes=setup_min,
             programming_minutes=programming_min,
@@ -1511,8 +1537,8 @@ def extract_quote_data_from_cad(
             finishing_minutes=finishing_min,
             misc_overhead_minutes=misc_overhead_min,
             total_minutes=labor_total,
-            total_hours=labor_total / 60.0,
-            labor_cost=(labor_total / 60.0) * labor_rate,
+            total_hours=labor_total_hours,
+            labor_cost=round(labor_total_hours * labor_rate, 2),
             ops_total=len(ops),
             holes_total=holes_total,
             tool_changes=len(ops) * 2
@@ -1542,23 +1568,25 @@ def extract_quote_data_from_cad(
     variable_labor_per_unit = machining_labor + inspection_labor + finishing_labor
 
     # Per-unit costs
-    per_unit_direct_cost = material_cost_per_unit
-    per_unit_machine_cost = machine_cost_per_unit
-    per_unit_labor_cost = amortized_setup_cost + variable_labor_per_unit
-    per_unit_total_cost = per_unit_direct_cost + per_unit_machine_cost + per_unit_labor_cost
+    # Round each component to 2 decimal places before summing to ensure the total
+    # matches the sum of the displayed line items exactly.
+    per_unit_direct_cost = round(material_cost_per_unit, 2)
+    per_unit_machine_cost = round(machine_cost_per_unit, 2)
+    per_unit_labor_cost = round(amortized_setup_cost + variable_labor_per_unit, 2)
+    per_unit_total_cost = round(per_unit_direct_cost + per_unit_machine_cost + per_unit_labor_cost, 2)
 
     # Total costs for all units
-    total_direct_cost = per_unit_direct_cost * quantity
-    total_machine_cost = per_unit_machine_cost * quantity
-    total_labor_cost = (setup_labor + programming_labor) + (variable_labor_per_unit * quantity)
-    total_total_cost = total_direct_cost + total_machine_cost + total_labor_cost
+    total_direct_cost = round(per_unit_direct_cost * quantity, 2)
+    total_machine_cost = round(per_unit_machine_cost * quantity, 2)
+    total_labor_cost = round((setup_labor + programming_labor) + (variable_labor_per_unit * quantity), 2)
+    total_total_cost = round(total_direct_cost + total_machine_cost + total_labor_cost, 2)
 
     # Margin and pricing
-    per_unit_margin_amount = per_unit_total_cost * margin_rate
-    per_unit_final_price = per_unit_total_cost + per_unit_margin_amount
+    per_unit_margin_amount = round(per_unit_total_cost * margin_rate, 2)
+    per_unit_final_price = round(per_unit_total_cost + per_unit_margin_amount, 2)
 
-    total_margin_amount = total_total_cost * margin_rate
-    total_final_price = total_total_cost + total_margin_amount
+    total_margin_amount = round(total_total_cost * margin_rate, 2)
+    total_final_price = round(total_total_cost + total_margin_amount, 2)
 
     quote_data.cost_summary = CostSummary(
         # Per-unit costs
