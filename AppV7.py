@@ -1491,7 +1491,7 @@ class AppV7:
             report.append("=" * 74)
             report.append(f"Material: {quote_data.material_info.material_name}")
             report.append(f"Thickness: {quote_data.part_dimensions.thickness:.3f}\"")
-            report.append(f"Hole entries: {len(machine_hours.drill_operations + machine_hours.tap_operations + machine_hours.cbore_operations)}")
+            report.append(f"Total holes: {machine_hours.holes_total}")
             report.append("")
 
             # TIME PER HOLE - DRILL GROUPS
