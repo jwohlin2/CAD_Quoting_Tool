@@ -607,6 +607,27 @@ def _grind_factor(material: str, material_group: str) -> float:
     return 1.0
 
 
+def _edm_material_factor(material: str, material_group: str) -> float:
+    """Get material-specific EDM time factor with fallback chain.
+
+    Searches for edm_time_factor, edm_factor, edm_material_factor, or material_factor.
+    Returns 1.0 if not found.
+    """
+    # Try Wire_EDM operation first, then Generic
+    for op_hint in ("Wire_EDM", "Wire_EDM_Rough", "Generic"):
+        row = _csv_row(material, material_group, operation_hint=op_hint)
+        for k in ("edm_time_factor", "edm_factor", "edm_material_factor", "material_factor"):
+            val = row.get(k)
+            if val not in (None, ""):
+                try:
+                    f = float(val)
+                    if f > 0:
+                        return f
+                except Exception:
+                    pass
+    return 1.0
+
+
 def estimate_face_grind_minutes(
     length_in: float,
     width_in: float,
