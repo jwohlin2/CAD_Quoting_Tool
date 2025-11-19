@@ -589,6 +589,13 @@ def _classify_operation(desc: str) -> str:
         return "tap"
     if "REAM" in upper or "DRILL" in upper:
         return "drill"
+    # Detect slot/obround features
+    if "SLOT" in upper or "OBROUND" in upper or "ELONGATED" in upper:
+        return "slot"
+    # Detect slot patterns like "R.094" with length indicators
+    import re
+    if re.search(r'\bR[\.\d]+\s*(?:X\s*[\d\.]+|OVER\s*R)', upper):
+        return "slot"
     return "other"
 
 
@@ -1621,6 +1628,59 @@ def classify_punch_family(text_dump: str) -> Tuple[str, str]:
     return family, shape
 
 
+def is_plate_geometry(geo_envelope: Dict[str, Any], diameter_dims: List[Dict[str, Any]]) -> bool:
+    """Check if geometry suggests a plate rather than a round/lathe part.
+
+    A part should be classified as a plate if:
+    - Thickness (Z) is relatively small (< 1.5")
+    - Both in-plane dimensions (X, Y) are larger than thickness
+    - The part doesn't have significant axisymmetric features (few/no diameter dimensions)
+
+    Args:
+        geo_envelope: Geometry envelope with overall_length_in, overall_width_in, overall_height_in
+        diameter_dims: List of diameter dimension dicts from drawing
+
+    Returns:
+        True if the geometry suggests a plate/insert rather than a round punch
+    """
+    length = geo_envelope.get("overall_length_in", 0.0)
+    width = geo_envelope.get("overall_width_in", 0.0)
+    height = geo_envelope.get("overall_height_in", 0.0)
+
+    # If we don't have height data, can't determine plate geometry
+    if height <= 0:
+        return False
+
+    # Plate characteristics:
+    # 1. Thickness is the smallest dimension (or close to it)
+    # 2. Thickness is relatively small (< 1.5")
+    # 3. Both in-plane dimensions are larger than thickness
+
+    min_dim = min(length, width, height) if all(d > 0 for d in [length, width, height]) else 0
+
+    # Check if height/thickness is the smallest or nearly smallest dimension
+    is_thin = height < 1.5 and height > 0
+    in_plane_larger = length > height and width > height
+
+    # Check for absence of significant axisymmetric features
+    # Large diameter dimensions (> 0.5") suggest turning operations
+    large_diameters = [d for d in diameter_dims if d.get("measurement", 0) > 0.5]
+    has_few_large_diameters = len(large_diameters) <= 1
+
+    # Additional check: aspect ratio suggests plate
+    # A typical plate has L and W within 5x of each other, and thickness much smaller
+    if length > 0 and width > 0:
+        aspect_ratio_planar = max(length, width) / min(length, width)
+        aspect_ratio_thick = max(length, width) / height if height > 0 else 0
+
+        # Plate: planar aspect < 5, thickness aspect > 1.5
+        is_plate_aspect = aspect_ratio_planar < 5 and aspect_ratio_thick > 1.5
+    else:
+        is_plate_aspect = False
+
+    return is_thin and in_plane_larger and has_few_large_diameters and is_plate_aspect
+
+
 def detect_punch_material(text_dump: str) -> Optional[str]:
     """Detect material callout from text."""
     text_upper = text_dump.upper()
@@ -1860,6 +1920,18 @@ def extract_punch_features_from_dxf(dxf_path: Path, text_dump: str) -> PunchFeat
     reasonable_diameters = [d["measurement"] for d in diameter_dims if 0 < d["measurement"] <= MAX_REASONABLE_PUNCH_OD]
     dim_diameter = max(reasonable_diameters) if reasonable_diameters else 0.0
 
+    # Geometry-based plate detection: Override text-based classification if geometry
+    # suggests this is a plate (thin, rectangular, no significant axisymmetric features)
+    if is_plate_geometry(geo_envelope, diameter_dims):
+        # Override to use plate/insert template instead of punch turning template
+        # Keep the original family name but mark as rectangular for plate processing
+        summary.shape_type = "rectangular"
+        # If classified as form_punch or round_punch based on text but geometry says plate,
+        # use die_insert which gets plate processing
+        if summary.family in ("form_punch", "round_punch"):
+            summary.family = "die_insert"
+        warnings.append(f"Geometry override: Detected plate geometry (L={geo_length:.3f}, W={geo_width:.3f}, T={geo_envelope.get('overall_height_in', 0):.3f}), using rectangular/plate template")
+
     def select_punch_dimension(geo_val, dim_val, max_reasonable):
         if 0 < dim_val <= max_reasonable:
             return dim_val
@@ -1970,6 +2042,7 @@ __all__ = [
     "extract_geometry_envelope",
     "extract_punch_dimensions",
     "classify_punch_family",
+    "is_plate_geometry",
     "detect_punch_material",
     "detect_punch_ops_features",
     "detect_punch_pain_flags",

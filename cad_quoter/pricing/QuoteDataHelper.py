@@ -762,10 +762,21 @@ def extract_quote_data_from_cad(
                 features = punch_data.get("punch_features", {})
 
                 # Set part dimensions from punch features
+                # For rectangular shapes (plates), use body_thickness_in
+                # For round shapes, use max_od_or_width_in as the "diameter"
+                shape_type = features.get("shape_type", "round")
+                if shape_type == "rectangular":
+                    thickness = features.get("body_thickness_in", 0.0)
+                    # Fallback if body_thickness_in not set
+                    if thickness <= 0:
+                        thickness = features.get("max_od_or_width_in", 0.0)
+                else:
+                    thickness = features.get("max_od_or_width_in", 0.0)  # OD for round
+
                 quote_data.part_dimensions = PartDimensions(
                     length=features.get("overall_length_in", 0.0),
                     width=features.get("max_od_or_width_in", 0.0),
-                    thickness=features.get("max_od_or_width_in", 0.0),  # OD for round
+                    thickness=thickness,
                 )
 
                 # If punch dimensions are zero, fall back to DimensionFinder
@@ -1270,6 +1281,39 @@ def extract_quote_data_from_cad(
         final_part_weight=scrap_calc.final_part_weight
     )
 
+    # Stock size sanity guardrails
+    # Check that stock dimensions are reasonable relative to part dimensions
+    stock_thickness_ratio = scrap_calc.mcmaster_thickness / part_info.thickness if part_info.thickness > 0 else 0
+    part_volume = part_info.length * part_info.width * part_info.thickness
+    stock_volume = scrap_calc.mcmaster_length * scrap_calc.mcmaster_width * scrap_calc.mcmaster_thickness
+    stock_volume_ratio = stock_volume / part_volume if part_volume > 0 else 0
+
+    # Warning thresholds
+    MAX_THICKNESS_RATIO = 3.0  # Stock thickness should be at most 3× part thickness
+    MAX_VOLUME_RATIO = 5.0     # Stock volume should be at most 5× part volume
+
+    stock_size_warnings = []
+    if stock_thickness_ratio > MAX_THICKNESS_RATIO:
+        stock_size_warnings.append(
+            f"Stock thickness ({scrap_calc.mcmaster_thickness:.3f}\") is {stock_thickness_ratio:.1f}× "
+            f"the part thickness ({part_info.thickness:.3f}\"). "
+            f"Consider using plate stock rules for thin parts."
+        )
+    if stock_volume_ratio > MAX_VOLUME_RATIO:
+        stock_size_warnings.append(
+            f"Stock volume ({stock_volume:.2f} in³) is {stock_volume_ratio:.1f}× "
+            f"the part volume ({part_volume:.2f} in³). "
+            f"Stock may be oversized for this part geometry."
+        )
+
+    if stock_size_warnings:
+        import logging
+        for warning in stock_size_warnings:
+            logging.warning(f"Stock size check: {warning}")
+        if verbose:
+            for warning in stock_size_warnings:
+                print(f"  WARNING: {warning}")
+
     # Populate scrap info
     scrap_pct = scrap_calc.scrap_percentage
     quote_data.scrap_info = ScrapInfo(
@@ -1314,31 +1358,225 @@ def extract_quote_data_from_cad(
     # ========================================================================
     # STEP 4: Calculate machine hours
     # ========================================================================
-    # Skip for punch parts - already calculated in punch extraction
+    if verbose:
+        print("[4/5] Calculating machine hours...")
+
+    # Always process hole operations - both punch and non-punch parts need hole times
+    # Use cached hole operations from plan if available (avoids redundant ODA conversion)
+    if 'hole_operations_data' in plan and plan['hole_operations_data']:
+        hole_table = plan['hole_operations_data']
+        if verbose:
+            print("  Using cached hole operations from plan")
+    else:
+        hole_table = extract_hole_operations_from_cad(cad_file_path)
+
+    # For punch parts, process holes and add times to punch base times
     if is_punch and punch_data and "error" not in punch_data:
         if verbose:
-            print("[4/5] Calculating machine hours...")
-            print(f"  [PUNCH] Using punch-calculated machine hours: {quote_data.machine_hours.total_hours:.2f} hr")
-            print(f"  Machine cost: ${quote_data.machine_hours.machine_cost:.2f}")
-    else:
-        if verbose:
-            print("[4/5] Calculating machine hours...")
+            print(f"  [PUNCH] Base punch times: {quote_data.machine_hours.total_hours:.2f} hr")
 
-        # Use cached hole operations from plan if available (avoids redundant ODA conversion)
-        if 'hole_operations_data' in plan and plan['hole_operations_data']:
-            hole_table = plan['hole_operations_data']
-            if verbose:
-                print("  Using cached hole operations from plan")
-        else:
-            # Use cached DXF path to avoid ODA conversion
-            hole_path = plan.get('cached_dxf_path', cad_file_path) if plan else cad_file_path
-            hole_table = extract_hole_operations_from_cad(hole_path)
+        # Get base punch times
+        punch_base_milling = quote_data.machine_hours.total_milling_minutes
+        punch_base_grinding = quote_data.machine_hours.total_grinding_minutes
+        punch_base_drill = quote_data.machine_hours.total_drill_minutes
+        punch_base_tap = quote_data.machine_hours.total_tap_minutes
+        punch_base_edm = quote_data.machine_hours.total_edm_minutes
+        punch_base_other = quote_data.machine_hours.total_other_minutes
+        punch_base_cmm = quote_data.machine_hours.total_cmm_minutes
 
-        # Calculate hole counts
-        # hole_entries = count of unique hole groups (A, B, C, etc.)
-        # holes_total = sum of QTY field from each hole entry (total individual holes)
+        # Process hole table for punch parts
         hole_entries = len(hole_table) if hole_table else 0
         holes_total = sum(int(hole.get('QTY', 1)) for hole in hole_table) if hole_table else 0
+
+        # Initialize hole operation accumulators
+        hole_drill_min = 0.0
+        hole_tap_min = 0.0
+        hole_cbore_min = 0.0
+        hole_cdrill_min = 0.0
+        hole_jig_grind_min = 0.0
+        hole_edm_min = 0.0
+
+        drill_ops = []
+        tap_ops = []
+        cbore_ops = []
+        cdrill_ops = []
+        jig_grind_ops = []
+        edm_ops = []
+
+        if hole_table:
+            times = estimate_hole_table_times(hole_table, material, part_info.thickness)
+
+            # Convert to HoleOperation objects
+            drill_ops = [
+                HoleOperation(
+                    hole_id=g['hole_id'],
+                    diameter=g['diameter'],
+                    depth=g['depth'],
+                    qty=g['qty'],
+                    operation_type='drill',
+                    time_per_hole=g['time_per_hole'],
+                    total_time=g['total_time'],
+                    sfm=g.get('sfm'),
+                    ipr=g.get('ipr')
+                )
+                for g in times.get('drill_groups', [])
+            ]
+
+            tap_ops = [
+                HoleOperation(
+                    hole_id=g['hole_id'],
+                    diameter=g['diameter'],
+                    depth=g['depth'],
+                    qty=g['qty'],
+                    operation_type='tap',
+                    time_per_hole=g['time_per_hole'],
+                    total_time=g['total_time'],
+                    sfm=g.get('sfm'),
+                    tpi=g.get('tpi')
+                )
+                for g in times.get('tap_groups', [])
+            ]
+
+            cbore_ops = [
+                HoleOperation(
+                    hole_id=g['hole_id'],
+                    diameter=g['diameter'],
+                    depth=g['depth'],
+                    qty=g['qty'],
+                    operation_type='cbore',
+                    time_per_hole=g['time_per_hole'],
+                    total_time=g['total_time'],
+                    sfm=g.get('sfm'),
+                    side=g.get('side')
+                )
+                for g in times.get('cbore_groups', [])
+            ]
+
+            cdrill_ops = [
+                HoleOperation(
+                    hole_id=g['hole_id'],
+                    diameter=g['diameter'],
+                    depth=g['depth'],
+                    qty=g['qty'],
+                    operation_type='cdrill',
+                    time_per_hole=g['time_per_hole'],
+                    total_time=g['total_time']
+                )
+                for g in times.get('cdrill_groups', [])
+            ]
+
+            jig_grind_ops = [
+                HoleOperation(
+                    hole_id=g['hole_id'],
+                    diameter=g['diameter'],
+                    depth=g['depth'],
+                    qty=g['qty'],
+                    operation_type='jig_grind',
+                    time_per_hole=g['time_per_hole'],
+                    total_time=g['total_time']
+                )
+                for g in times.get('jig_grind_groups', [])
+            ]
+
+            edm_ops = [
+                HoleOperation(
+                    hole_id=g['hole_id'],
+                    diameter=g['diameter'],
+                    depth=g['depth'],
+                    qty=g['qty'],
+                    operation_type='edm',
+                    time_per_hole=g['time_per_hole'],
+                    total_time=g['total_time']
+                )
+                for g in times.get('edm_groups', [])
+            ]
+
+            # Get hole operation times
+            hole_drill_min = times.get('total_drill_minutes', 0.0)
+            hole_tap_min = times.get('total_tap_minutes', 0.0)
+            hole_cbore_min = times.get('total_cbore_minutes', 0.0)
+            hole_cdrill_min = times.get('total_cdrill_minutes', 0.0)
+            hole_jig_grind_min = times.get('total_jig_grind_minutes', 0.0)
+            hole_edm_min = times.get('total_edm_minutes', 0.0)
+
+        # Merge hole times with punch base times
+        total_drill_min = round(punch_base_drill + hole_drill_min, 2)
+        total_tap_min = round(punch_base_tap + hole_tap_min, 2)
+        total_cbore_min = round(hole_cbore_min, 2)
+        total_cdrill_min = round(hole_cdrill_min, 2)
+        total_jig_grind_min = round(hole_jig_grind_min, 2)
+        total_milling_min = round(punch_base_milling, 2)
+        total_grinding_min = round(punch_base_grinding, 2)
+        total_edm_min = round(punch_base_edm + hole_edm_min, 2)
+        total_other_min = round(punch_base_other, 2)
+        total_cmm_min = round(punch_base_cmm, 2)
+
+        # Calculate updated grand total
+        grand_total_minutes = round(
+            total_drill_min + total_tap_min + total_cbore_min +
+            total_cdrill_min + total_jig_grind_min +
+            total_milling_min + total_grinding_min + total_edm_min + total_other_min +
+            total_cmm_min, 2
+        )
+        grand_total_hours = round(grand_total_minutes / 60.0, 2)
+        machine_cost = round(grand_total_minutes * (machine_rate / 60.0), 2)
+
+        # Update machine hours with merged times
+        quote_data.machine_hours = MachineHoursBreakdown(
+            drill_operations=drill_ops,
+            tap_operations=tap_ops,
+            cbore_operations=cbore_ops,
+            cdrill_operations=cdrill_ops,
+            jig_grind_operations=jig_grind_ops,
+            edm_operations=edm_ops,
+            milling_operations=[],  # Punch uses turning, not explicit milling ops
+            grinding_operations=[],  # Punch grinding handled differently
+            total_drill_minutes=total_drill_min,
+            total_tap_minutes=total_tap_min,
+            total_cbore_minutes=total_cbore_min,
+            total_cdrill_minutes=total_cdrill_min,
+            total_jig_grind_minutes=total_jig_grind_min,
+            total_milling_minutes=total_milling_min,
+            total_grinding_minutes=total_grinding_min,
+            total_edm_minutes=total_edm_min,
+            total_other_minutes=total_other_min,
+            total_cmm_minutes=total_cmm_min,
+            cmm_holes_checked=holes_total,
+            holes_total=holes_total,
+            hole_entries=hole_entries,
+            total_minutes=grand_total_minutes,
+            total_hours=grand_total_hours,
+            machine_cost=machine_cost
+        )
+
+        if verbose:
+            print(f"  [PUNCH] Updated with hole operations:")
+            print(f"    - Drilling: {total_drill_min:.1f} min (base: {punch_base_drill:.1f}, holes: {hole_drill_min:.1f})")
+            print(f"    - Tapping: {total_tap_min:.1f} min")
+            print(f"    - EDM: {total_edm_min:.1f} min (base: {punch_base_edm:.1f}, holes: {hole_edm_min:.1f})")
+            print(f"  [PUNCH] Total machine hours: {grand_total_hours:.2f} hr")
+            print(f"  Machine cost: ${machine_cost:.2f}")
+
+    else:
+        # Non-punch parts: Calculate hole counts
+        # hole_entries = count of unique hole groups (A, B, C, etc.)
+        # holes_total = sum of QTY field from each hole entry (total individual holes)
+        # Note: hole_table may contain multiple operations per hole group (e.g., drill + tap + cbore)
+        # so we count unique hole letters rather than operation count
+        if hole_table:
+            unique_holes = set(hole.get('HOLE', '') for hole in hole_table)
+            hole_entries = len(unique_holes)
+            # For holes_total, sum QTY only once per unique hole group
+            # Group by hole letter and take first QTY value
+            qty_by_hole = {}
+            for hole in hole_table:
+                hole_letter = hole.get('HOLE', '')
+                if hole_letter not in qty_by_hole:
+                    qty_by_hole[hole_letter] = int(hole.get('QTY', 1))
+            holes_total = sum(qty_by_hole.values())
+        else:
+            hole_entries = 0
+            holes_total = 0
 
         # Initialize time accumulators
         total_drill_min = 0.0
@@ -1454,8 +1692,11 @@ def extract_quote_data_from_cad(
             total_jig_grind_min = times.get('total_jig_grind_minutes', 0.0)
             # EDM time from "FOR WIRE EDM" holes (starter holes for wire EDM operations)
             hole_table_edm_min = times.get('total_edm_minutes', 0.0)
+            # Slot milling time (obround features)
+            slot_milling_min = times.get('total_slot_minutes', 0.0)
         else:
             hole_table_edm_min = 0.0
+            slot_milling_min = 0.0
 
         # Calculate times for plan operations (squaring, face milling, EDM, etc.)
         # Pass both final part thickness and McMaster stock thickness for proper removal calculations
@@ -1489,12 +1730,14 @@ def extract_quote_data_from_cad(
         total_other_min += milling_overhead_min + grinding_overhead_min
 
         # Use detailed ops totals for display (ensures Total Milling Time matches ops sum)
-        total_milling_min = total_milling_ops_min
+        # Add slot milling time from hole table to milling totals
+        total_milling_min = total_milling_ops_min + slot_milling_min
         total_grinding_min = total_grinding_ops_min
 
-        # Sanity check: totals should match
-        assert abs(total_milling_min - total_milling_ops_min) < 0.01, \
-            f"Milling time mismatch: {total_milling_min:.2f} vs ops sum {total_milling_ops_min:.2f}"
+        # Sanity check: totals should match (total_milling_min includes slot time + plan ops)
+        expected_milling = total_milling_ops_min + slot_milling_min
+        assert abs(total_milling_min - expected_milling) < 0.01, \
+            f"Milling time mismatch: {total_milling_min:.2f} vs expected {expected_milling:.2f}"
 
         # Convert detailed operations to dataclass objects
         milling_ops = [
