@@ -38,7 +38,7 @@ from typing import Any, Dict, Iterable, Mapping, Tuple, Optional, List
 import ssl
 
 from cad_quoter.config import configure_logging, logger
-from cad_quoter.pricing.materials import LB_PER_KG, usdkg_to_usdlb
+from cad_quoter.pricing.materials import usdkg_to_usdlb
 from cad_quoter.utils import jdump
 from cad_quoter.utils.numeric import coerce_positive_float as _coerce_positive_float
 

@@ -3,7 +3,7 @@
 import csv
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import List, Dict, Set, Optional, Any
+from typing import List, Dict, Set, Optional
 
 # Import MaterialMapper for material detection
 from cad_quoter.pricing.MaterialMapper import material_mapper
