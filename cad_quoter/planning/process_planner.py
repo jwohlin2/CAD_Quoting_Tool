@@ -2514,7 +2514,8 @@ def estimate_machine_hours_from_plan(
     plan: Dict[str, Any],
     material: str = "GENERIC",
     plate_LxW: Tuple[float, float] = (0, 0),
-    thickness: float = 0
+    thickness: float = 0,
+    stock_thickness: float = 0
 ) -> Dict[str, Any]:
     """
     Estimate machine hours from a process plan.
@@ -2523,14 +2524,15 @@ def estimate_machine_hours_from_plan(
         plan: Process plan dict (from plan_job or plan_from_cad_file)
         material: Material name for speeds/feeds lookup
         plate_LxW: Plate length and width in inches
-        thickness: Plate thickness in inches
+        thickness: Plate thickness in inches (final part thickness)
+        stock_thickness: Starting stock thickness in inches (McMaster stock)
 
     Returns:
         Dict with machine time breakdown by operation type
 
     Example:
         >>> plan = plan_from_cad_file("part.dxf")
-        >>> machine_time = estimate_machine_hours_from_plan(plan, "P20 Tool Steel", (8, 4), 0.5)
+        >>> machine_time = estimate_machine_hours_from_plan(plan, "P20 Tool Steel", (8, 4), 0.5, 0.75)
         >>> print(f"Total: {machine_time['total_hours']:.2f} hours")
     """
     from dataclasses import asdict
@@ -2538,6 +2540,7 @@ def estimate_machine_hours_from_plan(
     ops = plan.get('ops', [])
     L, W = plate_LxW
     T = thickness
+    stock_T = stock_thickness if stock_thickness > 0 else T  # Fall back to part thickness if not provided
 
     time_breakdown = {
         'drilling': 0,
@@ -2740,7 +2743,58 @@ def estimate_machine_hours_from_plan(
         elif op_type == 'wet_grind_square_all':
             # Wet grind squaring: time based on volume and material factor
             from cad_quoter.pricing.time_estimator import estimate_wet_grind_minutes
-            stock_removed = op.get('stock_removed_total', 0.050)
+
+            # Calculate actual thickness removal needed
+            # Total to remove = stock_thickness - final_part_thickness
+            total_thickness_to_remove = stock_T - T if (stock_T > T and T > 0) else 0.0
+
+            # Finish grind is always 0.050" (0.025" per face)
+            finish_grind_stock = 0.050
+
+            # Rough removal is everything else (milling)
+            rough_removal = max(0.0, total_thickness_to_remove - finish_grind_stock)
+
+            # Add rough milling operation if there's significant material to remove
+            if rough_removal > 0.010:  # More than 10 thou to remove
+                # Calculate rough milling time for face milling the excess thickness
+                # Use face milling rate: ~0.25 min/in³ for aluminum, adjusted for material
+                sf_face = get_speeds_feeds(material, "Endmill_Face")
+                if sf_face:
+                    sfm = sf_face.get('sfm_start', 200)
+                    # Slower for harder materials
+                    milling_min_per_cuin = 0.35 if sfm < 150 else 0.25
+                else:
+                    milling_min_per_cuin = 0.25
+
+                rough_volume = L * W * rough_removal
+                rough_milling_time = rough_volume * milling_min_per_cuin
+
+                # Add to milling time
+                time_breakdown['milling'] += rough_milling_time
+
+                # Create detailed operation for rough stock removal
+                milling_operations_detailed.append({
+                    'op_name': 'face_mill_rough_stock',
+                    'op_description': f'Face Mill - Rough Stock Removal ({rough_removal:.3f}")',
+                    'length': L,
+                    'width': W,
+                    'perimeter': 0,
+                    'tool_diameter': W / 3.0 if W > 0 else 0.75,
+                    'passes': 3,
+                    'stepover': 0,
+                    'radial_stock': None,
+                    'axial_step': None,
+                    'axial_passes': None,
+                    'radial_passes': None,
+                    'path_length': L * 3,  # 3 passes
+                    'feed_rate': 0,
+                    'time_minutes': rough_milling_time,
+                    '_used_override': False,
+                    'override_time_minutes': None
+                })
+
+            # Now handle the finish grind (0.050" total, 0.025" per face)
+            stock_removed = finish_grind_stock
             faces = op.get('faces', 2)
             grind_time, material_factor = estimate_wet_grind_minutes(
                 L, W, stock_removed, material, material_group='', faces=faces
@@ -2749,10 +2803,10 @@ def estimate_machine_hours_from_plan(
             min_per_cuin = 3.0
             time_breakdown['grinding'] += grind_time
 
-            # Create detailed operation object
+            # Create detailed operation object for finish grind
             grinding_operations_detailed.append({
                 'op_name': 'wet_grind_square_all',
-                'op_description': 'Wet Grind - Top/Bottom Pair',
+                'op_description': 'Wet Grind - Top/Bottom Pair (Finish)',
                 'length': L,
                 'width': W,
                 'area': L * W,
@@ -3194,6 +3248,7 @@ def estimate_hole_table_times(
     tap_groups = []
     cbore_groups = []
     cdrill_groups = []
+    edm_groups = []  # Wire EDM operations from "FOR WIRE EDM" notes
 
     for entry in hole_table:
         hole_id = entry.get('HOLE', '?')
@@ -3227,6 +3282,7 @@ def estimate_hole_table_times(
         is_tap = 'TAP' in op_text
         is_cbore = "C'BORE" in op_text or 'CBORE' in op_text or 'COUNTERBORE' in op_text
         is_cdrill = "C'DRILL" in op_text or 'CDRILL' in op_text or 'CENTER DRILL' in op_text
+        is_for_edm = 'FOR WIRE EDM' in op_text or 'FOR EDM' in op_text or 'WIRE EDM' in op_text
 
         # Determine depth for drilling operation
         if is_thru and not is_jig_grind:
@@ -3561,14 +3617,59 @@ def estimate_hole_table_times(
                 'description': entry.get('DESCRIPTION', '')
             })
 
+        # WIRE EDM operations - holes marked "FOR WIRE EDM" are starter holes
+        # These indicate wire EDM will be used to cut out shapes from these threading points
+        if is_for_edm:
+            # Wire EDM time calculation for starter holes
+            # Each starter hole represents a window to be cut
+            # Estimate perimeter per window based on typical die section geometry
+            # Default 4" perimeter per window if no other info available
+            estimated_perimeter_per_window = 4.0
+
+            # Use part thickness or default
+            edm_thickness = thickness if thickness > 0 else 0.5
+
+            # Calculate time using existing EDM formula:
+            # rough_time = (perimeter * thickness * num_windows) / rough_ipm
+            # skim_time = similar
+            # setup_time = num_windows * 5 minutes
+            sf_rough = get_speeds_feeds(material, "Wire_EDM_Rough")
+            rough_ipm = sf_rough.get('linear_cut_rate_ipm', 3.0) if sf_rough else 3.0
+
+            sf_skim = get_speeds_feeds(material, "Wire_EDM_Skim")
+            skim_ipm = sf_skim.get('linear_cut_rate_ipm', 2.0) if sf_skim else 2.0
+
+            # Calculate time per window
+            rough_time_per = (estimated_perimeter_per_window * edm_thickness) / rough_ipm
+            # Add one skim pass for precision
+            skim_time_per = (estimated_perimeter_per_window * edm_thickness) / skim_ipm
+            setup_time_per = 5.0  # 5 minutes setup per window (threading wire, etc.)
+
+            time_per_hole = round(rough_time_per + skim_time_per + setup_time_per, 2)
+            total_time = round(time_per_hole * qty, 2)
+
+            edm_groups.append({
+                'hole_id': hole_id,
+                'diameter': ref_dia,
+                'depth': edm_thickness,
+                'qty': qty,
+                'perimeter_per_window': estimated_perimeter_per_window,
+                'rough_ipm': rough_ipm,
+                'skim_ipm': skim_ipm,
+                'time_per_hole': time_per_hole,
+                'total_time': total_time,
+                'description': entry.get('DESCRIPTION', '')
+            })
+
     # Calculate totals - round after summing to ensure display consistency
     total_drill = round(sum(g['total_time'] for g in drill_groups), 2)
     total_jig_grind = round(sum(g['total_time'] for g in jig_grind_groups), 2)
     total_tap = round(sum(g['total_time'] for g in tap_groups), 2)
     total_cbore = round(sum(g['total_time'] for g in cbore_groups), 2)
     total_cdrill = round(sum(g['total_time'] for g in cdrill_groups), 2)
+    total_edm = round(sum(g['total_time'] for g in edm_groups), 2)
 
-    total_minutes = round(total_drill + total_jig_grind + total_tap + total_cbore + total_cdrill, 2)
+    total_minutes = round(total_drill + total_jig_grind + total_tap + total_cbore + total_cdrill + total_edm, 2)
 
     return {
         'drill_groups': drill_groups,
@@ -3576,11 +3677,13 @@ def estimate_hole_table_times(
         'tap_groups': tap_groups,
         'cbore_groups': cbore_groups,
         'cdrill_groups': cdrill_groups,
+        'edm_groups': edm_groups,
         'total_drill_minutes': total_drill,
         'total_jig_grind_minutes': total_jig_grind,
         'total_tap_minutes': total_tap,
         'total_cbore_minutes': total_cbore,
         'total_cdrill_minutes': total_cdrill,
+        'total_edm_minutes': total_edm,
         'total_minutes': total_minutes,
         'total_hours': total_minutes / 60,
         'material': material,

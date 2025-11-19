@@ -1397,13 +1397,19 @@ def extract_quote_data_from_cad(
             total_cbore_min = times.get('total_cbore_minutes', 0.0)
             total_cdrill_min = times.get('total_cdrill_minutes', 0.0)
             total_jig_grind_min = times.get('total_jig_grind_minutes', 0.0)
+            # EDM time from "FOR WIRE EDM" holes (starter holes for wire EDM operations)
+            hole_table_edm_min = times.get('total_edm_minutes', 0.0)
+        else:
+            hole_table_edm_min = 0.0
 
         # Calculate times for plan operations (squaring, face milling, EDM, etc.)
+        # Pass both final part thickness and McMaster stock thickness for proper removal calculations
         plan_machine_times = estimate_machine_hours_from_plan(
             plan,
             material=material,
             plate_LxW=(part_info.length, part_info.width),
-            thickness=part_info.thickness
+            thickness=part_info.thickness,
+            stock_thickness=scrap_calc.mcmaster_thickness if scrap_calc else part_info.thickness
         )
 
         # Add plan operation times to totals
@@ -1418,7 +1424,8 @@ def extract_quote_data_from_cad(
         # Get breakdown totals (may include non-detailed operations)
         breakdown_milling_min = plan_machine_times['breakdown_minutes'].get('milling', 0.0)
         breakdown_grinding_min = plan_machine_times['breakdown_minutes'].get('grinding', 0.0)
-        total_edm_min = plan_machine_times['breakdown_minutes'].get('edm', 0.0)
+        # EDM from plan operations + EDM from hole table "FOR WIRE EDM" entries
+        total_edm_min = plan_machine_times['breakdown_minutes'].get('edm', 0.0) + hole_table_edm_min
         total_other_min = plan_machine_times['breakdown_minutes'].get('other', 0.0)
 
         # Any milling/grinding time not in detailed ops goes to "other" for transparency
