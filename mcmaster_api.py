@@ -112,12 +112,25 @@ class McMasterAPI:
         if not isinstance(data, list):
             raise SystemExit(f"Unexpected price payload: {jdump(data, default=None)}")
         # Normalize keys casing just in case.
+        # Use 'if is not None' to preserve 0.0 values (which indicate "call for quote")
         norm = []
         for t in data:
+            min_qty = t.get("MinimumQuantity")
+            if min_qty is None:
+                min_qty = t.get("minimumQuantity")
+
+            amount = t.get("Amount")
+            if amount is None:
+                amount = t.get("amount")
+
+            uom = t.get("UnitOfMeasure")
+            if uom is None:
+                uom = t.get("unitOfMeasure")
+
             norm.append({
-                "MinimumQuantity": t.get("MinimumQuantity") or t.get("minimumQuantity"),
-                "Amount": t.get("Amount") or t.get("amount"),
-                "UnitOfMeasure": t.get("UnitOfMeasure") or t.get("unitOfMeasure"),
+                "MinimumQuantity": min_qty,
+                "Amount": amount,
+                "UnitOfMeasure": uom,
             })
         # Sort by MinimumQuantity ascending
         norm.sort(key=lambda x: (x["MinimumQuantity"] if x["MinimumQuantity"] is not None else 10**12))

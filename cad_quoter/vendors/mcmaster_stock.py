@@ -229,7 +229,12 @@ def lookup_sku_and_price_for_mm(
     if not tier:
         return item.part, None, None, (item.length, item.width, item.thickness)
 
-    price_each = float(tier["Amount"])
+    amount = tier.get("Amount")
+    # McMaster returns 0.0 for "call for quote" items
+    if amount is None or amount == 0:
+        return item.part, None, None, (item.length, item.width, item.thickness)
+
+    price_each = float(amount)
     uom = str(tier["UnitOfMeasure"])
     _PRICE_CACHE[cache_key] = (price_each, uom)
     return item.part, price_each, uom, (item.length, item.width, item.thickness)
