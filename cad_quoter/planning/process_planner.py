@@ -3312,6 +3312,7 @@ def estimate_hole_table_times(
     cbore_groups = []
     cdrill_groups = []
     edm_groups = []  # Wire EDM operations from "FOR WIRE EDM" notes
+    slot_groups = []  # Slot/obround features requiring milling
 
     for entry in hole_table:
         hole_id = entry.get('HOLE', '?')
@@ -3353,6 +3354,9 @@ def estimate_hole_table_times(
         is_cdrill = "C'DRILL" in op_text or "C\u2019DRILL" in op_text or 'CDRILL' in op_text or 'CENTER DRILL' in op_text
         # Check combined_text for EDM to catch "FOR WIRE EDM" in either OPERATION or DESCRIPTION field
         is_for_edm = 'FOR WIRE EDM' in combined_text or 'FOR EDM' in combined_text or 'WIRE EDM' in combined_text
+        # Check for slot/obround features
+        is_slot = ('SLOT' in combined_text or 'OBROUND' in combined_text or 'ELONGATED' in combined_text or
+                   re.search(r'\bR[\.\d]+\s*(?:X\s*[\d\.]+|OVER\s*R)', combined_text) is not None)
 
         # Determine depth for drilling operation
         if is_thru and not is_jig_grind:
@@ -3459,17 +3463,35 @@ def estimate_hole_table_times(
                     else:
                         tap_major_dia = 0.060 + (screw_num * 0.013)
                 else:
-                    # Fallback: use ref_dia as estimated major diameter
-                    # and apply validation to get a reasonable TPI
-                    corrected_major, corrected_tpi, was_corrected = validate_and_correct_thread(
-                        str(ref_dia), 20  # Start with 20 TPI as default guess
-                    )
-                    if corrected_major in THREAD_MAJOR_DIAMETERS:
-                        tap_major_dia = THREAD_MAJOR_DIAMETERS[corrected_major]
-                        tpi = corrected_tpi
+                    # Try bare number format like 4-40 (without # prefix)
+                    bare_num_match = re.search(r'\b(\d+)-(\d+)\b', combined_text)
+                    if bare_num_match:
+                        screw_num = int(bare_num_match.group(1))
+                        tpi = int(bare_num_match.group(2))
+                        # Only treat as number thread if screw_num <= 12 (valid number sizes)
+                        if screw_num <= 12:
+                            major_str = f"#{screw_num}"
+
+                            # Validate and correct thread specification
+                            corrected_major, corrected_tpi, was_corrected = validate_and_correct_thread(
+                                major_str, tpi
+                            )
+                            if was_corrected:
+                                import logging
+                                logging.debug(f"Thread corrected (drill calc): {major_str}-{tpi} -> {corrected_major}-{corrected_tpi}")
+                                tpi = corrected_tpi
+
+                            # Get major diameter from standard table
+                            if corrected_major in THREAD_MAJOR_DIAMETERS:
+                                tap_major_dia = THREAD_MAJOR_DIAMETERS[corrected_major]
+                            else:
+                                tap_major_dia = 0.060 + (screw_num * 0.013)
+                        else:
+                            tap_major_dia = ref_dia
+                            tpi = 20  # Default TPI
                     else:
                         tap_major_dia = ref_dia
-                        tpi = 20  # Default TPI if validation fails
+                        tpi = 20  # Default TPI
 
             # Calculate tap drill diameter: major_dia - (1/TPI)
             # This gives approximately 75% thread engagement
@@ -3624,20 +3646,35 @@ def estimate_hole_table_times(
                     else:
                         tap_dia = 0.060 + (screw_num * 0.013)
                 else:
-                    # Fallback: use ref_dia as estimated major diameter
-                    # and apply validation to get a reasonable TPI
-                    tap_dia = ref_dia
+                    # Try bare number format like 4-40 (without # prefix)
+                    bare_num_match = re.search(r'\b(\d+)-(\d+)\b', combined_text)
+                    if bare_num_match:
+                        screw_num = int(bare_num_match.group(1))
+                        tpi = int(bare_num_match.group(2))
+                        # Only treat as number thread if screw_num <= 12 (valid number sizes)
+                        if screw_num <= 12:
+                            major_str = f"#{screw_num}"
 
-                    # Try to match ref_dia to a standard thread size
-                    # and get the coarse TPI for that size
-                    corrected_major, corrected_tpi, was_corrected = validate_and_correct_thread(
-                        str(ref_dia), 20  # Start with 20 TPI as default guess
-                    )
-                    if corrected_major in THREAD_MAJOR_DIAMETERS:
-                        tap_dia = THREAD_MAJOR_DIAMETERS[corrected_major]
-                        tpi = corrected_tpi
+                            # Validate and correct thread specification
+                            corrected_major, corrected_tpi, was_corrected = validate_and_correct_thread(
+                                major_str, tpi
+                            )
+                            if was_corrected:
+                                import logging
+                                logging.debug(f"Thread corrected (tap time): {major_str}-{tpi} -> {corrected_major}-{corrected_tpi}")
+                                tpi = corrected_tpi
+
+                            # Get tap diameter from standard table
+                            if corrected_major in THREAD_MAJOR_DIAMETERS:
+                                tap_dia = THREAD_MAJOR_DIAMETERS[corrected_major]
+                            else:
+                                tap_dia = 0.060 + (screw_num * 0.013)
+                        else:
+                            tap_dia = ref_dia * 0.8  # Estimate tap drill size
+                            tpi = int(20 / tap_dia) if tap_dia > 0 else 20
                     else:
-                        tpi = 20  # Default TPI if validation fails
+                        tap_dia = ref_dia * 0.8  # Estimate tap drill size
+                        tpi = int(20 / tap_dia) if tap_dia > 0 else 20
 
             # Extract TAP depth - look for "TAP X {number} DEEP" or "X {number} DEEP"
             tap_depth_match = re.search(r'[TAP\s+]*X\s+(\d*\.\d+|\d+)\s+DEEP', combined_text)
@@ -3835,6 +3872,82 @@ def estimate_hole_table_times(
                 'description': entry.get('DESCRIPTION', '')
             })
 
+        # SLOT operations (milled slots/obrounds)
+        if is_slot:
+            # Extract slot geometry from description
+            # Pattern: "2X R.094 x 0.697 OVER R" or similar
+            slot_desc = combined_text
+
+            # Try to extract radius from pattern like "R.094" or "R0.094"
+            # Capture the full decimal number including leading period
+            radius_match = re.search(r'\bR(\.?\d*\.?\d+)', slot_desc)
+            slot_radius = float(radius_match.group(1)) if radius_match else ref_dia / 2
+
+            # Try to extract length from patterns like "0.697 OVER R" or "X 0.697"
+            length_match = re.search(r'(?:X\s*|^)([\d\.]+)\s*(?:OVER\s*R|LONG)', slot_desc)
+            if length_match:
+                slot_length = float(length_match.group(1))
+            else:
+                # Try alternate pattern like "0.697 OVER R"
+                over_r_match = re.search(r'([\d\.]+)\s*OVER\s*R', slot_desc)
+                if over_r_match:
+                    slot_length = float(over_r_match.group(1))
+                else:
+                    # Default to diameter if no length found
+                    slot_length = ref_dia
+
+            # Slot depth is plate thickness for THRU or extracted value
+            slot_depth = thickness if (is_thru or 'THRU' in slot_desc) and thickness > 0 else 0.5
+
+            # Calculate slot milling time
+            # Slot path length = straight section + two semicircles
+            # For obround: perimeter = 2 * straight_length + 2 * pi * radius
+            straight_section = max(0, slot_length - 2 * slot_radius)
+            slot_perimeter = 2 * straight_section + 2 * 3.14159 * slot_radius
+
+            # Get endmill speeds/feeds
+            sf_endmill = get_speeds_feeds(material, "Endmill_Profile")
+            if sf_endmill:
+                sfm = sf_endmill.get('sfm_start', 200)
+                fz = sf_endmill.get('fz_ipt', 0.003)
+                doc = sf_endmill.get('doc_ax_in', 0.1)
+            else:
+                sfm = 200
+                fz = 0.003
+                doc = 0.1
+
+            # Use slot radius * 2 as tool diameter (match end radius)
+            tool_dia = slot_radius * 2
+            rpm = (sfm * 12) / (3.14159 * tool_dia) if tool_dia > 0 else 1000
+            rpm = min(rpm, 5000)
+
+            # IPM = RPM * teeth * feed_per_tooth (assume 4 flute endmill)
+            ipm = rpm * 4 * fz
+
+            # Number of passes (depth of cut)
+            num_passes = max(1, int(slot_depth / doc) + 1)
+
+            # Time = (perimeter * passes) / feed_rate
+            cut_time = (slot_perimeter * num_passes) / ipm if ipm > 0 else 1.0
+            time_per_slot = cut_time + 0.2  # Add approach/retract
+
+            time_per_hole = round(time_per_slot, 2)
+            total_time = round(time_per_hole * qty, 2)
+
+            slot_groups.append({
+                'hole_id': hole_id,
+                'radius': slot_radius,
+                'length': slot_length,
+                'depth': slot_depth,
+                'qty': qty,
+                'sfm': sfm,
+                'rpm': rpm,
+                'ipm': ipm,
+                'time_per_hole': time_per_hole,
+                'total_time': total_time,
+                'description': entry.get('DESCRIPTION', '')
+            })
+
     # Calculate totals - round after summing to ensure display consistency
     total_drill = round(sum(g['total_time'] for g in drill_groups), 2)
     total_jig_grind = round(sum(g['total_time'] for g in jig_grind_groups), 2)
@@ -3842,8 +3955,9 @@ def estimate_hole_table_times(
     total_cbore = round(sum(g['total_time'] for g in cbore_groups), 2)
     total_cdrill = round(sum(g['total_time'] for g in cdrill_groups), 2)
     total_edm = round(sum(g['total_time'] for g in edm_groups), 2)
+    total_slot = round(sum(g['total_time'] for g in slot_groups), 2)
 
-    total_minutes = round(total_drill + total_jig_grind + total_tap + total_cbore + total_cdrill + total_edm, 2)
+    total_minutes = round(total_drill + total_jig_grind + total_tap + total_cbore + total_cdrill + total_edm + total_slot, 2)
 
     return {
         'drill_groups': drill_groups,
@@ -3852,12 +3966,14 @@ def estimate_hole_table_times(
         'cbore_groups': cbore_groups,
         'cdrill_groups': cdrill_groups,
         'edm_groups': edm_groups,
+        'slot_groups': slot_groups,
         'total_drill_minutes': total_drill,
         'total_jig_grind_minutes': total_jig_grind,
         'total_tap_minutes': total_tap,
         'total_cbore_minutes': total_cbore,
         'total_cdrill_minutes': total_cdrill,
         'total_edm_minutes': total_edm,
+        'total_slot_minutes': total_slot,
         'total_minutes': total_minutes,
         'total_hours': total_minutes / 60,
         'material': material,
