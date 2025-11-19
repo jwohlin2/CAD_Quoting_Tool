@@ -1567,12 +1567,14 @@ def extract_quote_data_from_cad(
         # Note: holes_total is already calculated earlier in STEP 4
 
         # Estimate labor inputs (simplified - could be more sophisticated)
+        # Pass machine_time_minutes for simple-part setup guardrail
         labor_inputs = LaborInputs(
             ops_total=len(ops),
             holes_total=holes_total,
             tool_changes=len(ops) * 2,  # Rough estimate
             fixturing_complexity=1,
-            cmm_setup_min=cmm_setup_labor_min  # Add CMM setup to inspection labor
+            cmm_setup_min=cmm_setup_labor_min,  # Add CMM setup to inspection labor
+            machine_time_minutes=grand_total_minutes  # For simple-part setup guardrail
         )
 
         labor_result = compute_labor_minutes(labor_inputs)

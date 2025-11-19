@@ -1917,6 +1917,9 @@ class LaborInputs:
     # Handling
     part_flips: int = 0
 
+    # Machine time for setup guardrail comparison
+    machine_time_minutes: float = 0.0
+
 
 def setup_minutes(i: LaborInputs) -> float:
     """
@@ -1937,8 +1940,16 @@ def setup_minutes(i: LaborInputs) -> float:
       + 2·(ream_press_dowel + ream_slip_dowel)  (was 1)
       + 2·(counterbore_qty + counterdrill_qty)  (was 1)
       + 6·outsource_touches             (was 4)
+
+    Simple-part guardrail:
+      If machine_time is provided and the part is simple (few ops, few holes,
+      no complex operations), setup is capped to avoid excessive ratios.
+      - Simple part: ops <= 8, holes <= 12, no EDM/jig-grind/thread-mill/NPT
+      - If setup > 4× machine_time on simple parts, reduce to 3× machine_time
+        with a floor of 10 minutes
     """
-    return (
+    # Calculate raw setup time
+    raw_setup = (
         15  # Was 10
         + 3 * i.tool_changes  # Was 2
         + 8 * i.fixturing_complexity  # Was 5
@@ -1952,6 +1963,34 @@ def setup_minutes(i: LaborInputs) -> float:
         + 2 * (i.counterbore_qty + i.counterdrill_qty)  # Was 1
         + 6 * i.outsource_touches  # Was 4
     )
+
+    # Apply simple-part guardrail if machine time is provided
+    if i.machine_time_minutes > 0:
+        # Check if this is a simple part
+        is_simple = (
+            i.ops_total <= 8
+            and i.holes_total <= 12
+            and i.edm_window_count == 0
+            and i.edm_skim_passes == 0
+            and i.jig_grind_bore_qty == 0
+            and i.thread_mill == 0
+            and i.tap_npt == 0
+            and i.outsource_touches == 0
+        )
+
+        if is_simple:
+            # For simple parts, cap setup at 4× machine time
+            # If exceeded, reduce to 3× machine time with floor of 10 min
+            max_ratio = 4.0
+            target_ratio = 3.0
+            min_setup = 10.0
+
+            if raw_setup > max_ratio * i.machine_time_minutes:
+                # Calculate reduced setup based on machine time
+                reduced_setup = max(min_setup, target_ratio * i.machine_time_minutes)
+                return reduced_setup
+
+    return raw_setup
 
 
 def programming_minutes(i: LaborInputs) -> float:
