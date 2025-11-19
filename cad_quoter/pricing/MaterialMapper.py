@@ -6,7 +6,6 @@ across different vendor systems (McMaster, Wieland, speeds/feeds databases).
 """
 
 import csv
-import os
 from pathlib import Path
 from typing import Optional, Dict, List
 import re

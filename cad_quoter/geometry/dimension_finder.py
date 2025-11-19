@@ -34,7 +34,7 @@ from __future__ import annotations
 import json
 import re
 from pathlib import Path
-from typing import List, Dict, Any, Optional, Tuple, Set
+from typing import List, Dict, Any, Optional, Tuple
 from dataclasses import dataclass
 
 # Optional ezdxf import for DXF file parsing
