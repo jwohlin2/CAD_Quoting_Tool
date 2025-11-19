@@ -1176,6 +1176,16 @@ class AppV7:
         oz = (weight_lbs - lbs) * 16
         return f"{lbs} lb {oz:.1f} oz"
 
+    def _abbreviate_scrap_source(self, source_label: str) -> str:
+        """Abbreviate long scrap price source names for display."""
+        if "ScrapMetalBuyers" in source_label:
+            return "SMB"
+        elif "Wieland" in source_label:
+            return "Wieland"
+        elif "house_rate" in source_label.lower():
+            return "house rate"
+        return source_label
+
     def _generate_direct_costs_report(self) -> str:
         """Generate formatted direct costs report using QuoteData."""
         self.direct_cost_total = None
@@ -1230,14 +1240,7 @@ class AppV7:
 
             if scrap_info.scrap_price_per_lb is not None:
                 source_label = scrap_info.scrap_price_source if scrap_info.scrap_price_source else "Scrap"
-
-                # Abbreviate long source names for better formatting
-                if "ScrapMetalBuyers" in source_label:
-                    source_label = "SMB"
-                elif "Wieland" in source_label:
-                    source_label = "Wieland"
-                elif "house_rate" in source_label.lower():
-                    source_label = "house rate"
+                source_label = self._abbreviate_scrap_source(source_label)
 
                 report.append(f"  Scrap Price: ${scrap_info.scrap_price_per_lb:.2f} / lb @ {source_label}")
             else:
@@ -1273,14 +1276,7 @@ class AppV7:
             if cost_breakdown.scrap_credit > 0:
                 # Use the scrap price source from scrap_info (could be Wieland, ScrapMetalBuyers, or house_rate)
                 source_label = scrap_info.scrap_price_source if scrap_info.scrap_price_source else "Scrap"
-
-                # Abbreviate long source names for better formatting
-                if "ScrapMetalBuyers" in source_label:
-                    source_label = "SMB"
-                elif "Wieland" in source_label:
-                    source_label = "Wieland"
-                elif "house_rate" in source_label.lower():
-                    source_label = "house rate"
+                source_label = self._abbreviate_scrap_source(source_label)
 
                 scrap_weight_formatted = self._format_weight(scrap_info.total_scrap_weight)
                 scrap_credit_line = f"  Scrap Credit @ {source_label} ${scrap_info.scrap_price_per_lb:.2f}/lb × {scrap_weight_formatted}"

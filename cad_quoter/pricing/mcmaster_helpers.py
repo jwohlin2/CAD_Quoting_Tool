@@ -34,6 +34,99 @@ def load_mcmaster_catalog_rows(path: str | None = None) -> list[dict[str, Any]]:
         return []
 
 
+@lru_cache(maxsize=1)
+def _load_catalog_indexed_by_material() -> dict[str, list[dict[str, Any]]]:
+    """Load catalog and pre-index by material for O(1) lookups.
+
+    Returns a dictionary mapping normalized material keys to lists of matching rows.
+    Each material is indexed under multiple variants (with/without underscores/spaces).
+    """
+    rows = load_mcmaster_catalog_rows()
+    indexed: dict[str, list[dict[str, Any]]] = {}
+
+    for row in rows:
+        material_text = str(
+            (row.get("material") or row.get("Material") or "")
+        ).strip().lower()
+        if not material_text:
+            continue
+
+        # Index under multiple normalized variants
+        material_norm = material_text.replace("_", " ")
+        material_compact = material_text.replace(" ", "").replace("_", "")
+
+        for key in [material_text, material_norm, material_compact]:
+            if key:
+                if key not in indexed:
+                    indexed[key] = []
+                # Avoid duplicates in same key
+                if row not in indexed[key]:
+                    indexed[key].append(row)
+
+    return indexed
+
+
+def _get_material_candidates(
+    target_key: str,
+    catalog_rows: Sequence[Mapping[str, Any]] | None = None,
+) -> list[dict[str, Any]]:
+    """Get catalog rows matching a material key using indexed lookup.
+
+    Falls back to linear search if custom catalog_rows are provided.
+    """
+    # If custom rows provided, fall back to linear search
+    if catalog_rows is not None:
+        rows = list(catalog_rows)
+        target_lower = target_key.strip().lower()
+
+        # Build variants once
+        variants = {target_lower}
+        if "_" in target_lower:
+            variants.add(target_lower.replace("_", " "))
+        if " " in target_lower:
+            variants.add(target_lower.replace(" ", ""))
+        variants = [v for v in variants if v]
+
+        candidates = []
+        for row in rows:
+            if not isinstance(row, Mapping):
+                continue
+            material_text = str(
+                (row.get("material") or row.get("Material") or "")
+            ).strip().lower()
+            if not material_text:
+                continue
+            normalised_material = material_text.replace("_", " ")
+            if any(variant in normalised_material for variant in variants):
+                candidates.append(dict(row) if isinstance(row, Mapping) else row)
+        return candidates
+
+    # Use indexed lookup for default catalog (O(1) instead of O(N))
+    indexed = _load_catalog_indexed_by_material()
+    target_lower = target_key.strip().lower()
+
+    # Try different variants of the target key
+    variants_to_try = [
+        target_lower,
+        target_lower.replace("_", " "),
+        target_lower.replace(" ", ""),
+        target_lower.replace(" ", "_"),
+    ]
+
+    # Collect all matching rows (deduplicated)
+    seen_ids: set[int] = set()
+    candidates: list[dict[str, Any]] = []
+
+    for variant in variants_to_try:
+        for row in indexed.get(variant, []):
+            row_id = id(row)
+            if row_id not in seen_ids:
+                seen_ids.add(row_id)
+                candidates.append(row)
+
+    return candidates
+
+
 def _coerce_inches_value(value: Any) -> float | None:
     if value is None:
         return None
@@ -105,29 +198,13 @@ def _pick_mcmaster_plate_sku_impl(
     # IMPORTANT: Stock must be >= needed thickness (never thinner)
     tolerance = 0.5  # Allow rounding up by up to 0.5" to next standard thickness
     candidates: list[dict[str, Any]] = []
-    material_matches = 0
     thickness_matches = 0
 
-    for row in rows:
-        if not isinstance(row, Mapping):
-            continue
-        material_text = str(
-            (row.get("material") or row.get("Material") or "")
-        ).strip().lower()
-        if not material_text:
-            continue
-        variants = {target_key}
-        if "_" in target_key:
-            variants.add(target_key.replace("_", " "))
-        if " " in target_key:
-            variants.add(target_key.replace(" ", ""))
-        normalised_material = material_text.replace("_", " ")
-        if not any(variant and variant in normalised_material for variant in variants):
-            continue
+    # Use indexed lookup for material candidates (O(1) instead of O(N))
+    material_rows = _get_material_candidates(target_key, catalog_rows)
+    material_matches = len(material_rows)
 
-        # Material matches
-        material_matches += 1
-
+    for row in material_rows:
         length = _coerce_inches_value(
             row.get("length_in")
             or row.get("L_in")
