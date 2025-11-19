@@ -1546,38 +1546,6 @@ def parse_punch_tolerances_from_text(text: str) -> List[float]:
     return tolerances
 
 
-def parse_tolerance_pairs_max(text: str) -> List[float]:
-    """Parse tolerance pairs and return max(up, low) for each pair."""
-    max_tolerances = []
-    matched_ranges = []
-
-    def add_max_match(start, end, tol_up, tol_low):
-        for s, e in matched_ranges:
-            if not (end <= s or start >= e):
-                return False
-        matched_ranges.append((start, end))
-        max_tolerances.append(max(abs(tol_up), abs(tol_low)))
-        return True
-
-    pm_pattern = r'±\s*(\d*\.?\d+)'
-    for match in re.finditer(pm_pattern, text):
-        tol = float(match.group(1))
-        max_tolerances.append(abs(tol))
-        matched_ranges.append((match.start(), match.end()))
-
-    slash_pattern = r'\+\s*(\d*\.?\d+)\s*/\s*-\s*(\d*\.?\d+)'
-    for match in re.finditer(slash_pattern, text):
-        add_max_match(match.start(), match.end(), float(match.group(1)), float(match.group(2)))
-
-    plus_minus_pattern = r'\+\s*(\d*\.?\d+)\s*-\s*(\d*\.?\d+)'
-    for match in re.finditer(plus_minus_pattern, text):
-        if any(s <= match.start() < e or s < match.end() <= e for s, e in matched_ranges):
-            continue
-        add_max_match(match.start(), match.end(), float(match.group(1)), float(match.group(2)))
-
-    return max_tolerances
-
-
 def classify_punch_family(text_dump: str) -> Tuple[str, str]:
     """Classify punch family and shape type from text."""
     text_upper = text_dump.upper()

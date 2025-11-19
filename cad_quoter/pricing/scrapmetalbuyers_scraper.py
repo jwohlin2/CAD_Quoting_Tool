@@ -29,8 +29,7 @@ import time
 import tempfile
 import urllib.request
 from dataclasses import dataclass
-from html import unescape as html_unescape
-from typing import Any, Dict, Iterable, Mapping, Tuple, Optional, List
+from typing import Any, Dict, Tuple, Optional, List
 
 import ssl
 
@@ -41,9 +40,8 @@ if __name__ == "__main__":
     if str(_root) not in sys.path:
         sys.path.insert(0, str(_root))
 
-from cad_quoter.config import configure_logging, logger
+from cad_quoter.config import logger
 from cad_quoter.pricing.materials import LB_PER_KG, usdkg_to_usdlb
-from cad_quoter.utils import jdump
 from cad_quoter.utils.numeric import coerce_positive_float as _coerce_positive_float
 
 try:  # pragma: no cover - optional dependency in production

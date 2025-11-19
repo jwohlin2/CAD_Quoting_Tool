@@ -3,7 +3,6 @@
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional, Dict, Any, Tuple, List
-import os
 
 # Import MaterialMapper for centralized material handling
 from cad_quoter.pricing.MaterialMapper import material_mapper
