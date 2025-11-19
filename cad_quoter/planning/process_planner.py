@@ -2056,9 +2056,9 @@ def render_square_up_block(
     setup_time_min: float = 0.0,
     flip_time_min: float = 0.0
 ) -> List[str]:
-    """Render a detailed square-up block with compact, transparent output.
+    """Return pre-wrapped lines for the Square-Up section.
 
-    Produces ≤106 char lines showing the squaring/finishing strategy.
+    Produces ≤106 char lines matching hole table style for consistency.
 
     Args:
         plan: Process plan dict with 'ops' list
@@ -2070,7 +2070,7 @@ def render_square_up_block(
     Returns:
         List of formatted strings for display
     """
-    lines = []
+    lines: List[str] = []
     total_time = 0.0
 
     # Find square-up operations
@@ -2097,19 +2097,33 @@ def render_square_up_block(
 
     # Header line
     if is_mill_route:
-        D = side_op.get('tool_diameter', 0) if side_op else (face_op.get('tool_diameter', 0) if face_op else 0)
-        header = f"SQUARE-UP — METHOD: Mill | ToolØ W/3 = {D:.3f} | Stock Sides 0.250 | Top/Bottom 0.025"
+        lines.append("SQUARE-UP — MILLING")
     else:
-        header = "SQUARE-UP — METHOD: Wet Grind | Stock Top/Bottom 0.025 per face"
+        lines.append("SQUARE-UP — WET GRIND")
 
-    lines.append(header[:106])
-    lines.append("-" * min(106, len(header)))
+    lines.append("-" * 106)
 
-    # Mill route details
+    # Context lines
     if is_mill_route:
-        # Rules note
-        lines.append("3-pass face strategy | Setup + Flip overhead included")
+        # Get tool diameter from side_op or face_op
+        D = side_op.get('tool_diameter', 0) if side_op else (face_op.get('tool_diameter', 0) if face_op else 0)
+        ctx1 = f"Method: Mill | ToolØ = W/3 ({D:.3f}\") | Side stock 0.250\" | Top/Bottom stock 0.025\""
+        ctx2 = "Strategy: 3-pass face | Setup+Flip included in times"
+        lines.append(ctx1)
+        lines.append(ctx2)
+    else:
+        # Grind context line
+        gf = grind_op.get('grind_material_factor', 1.0) if grind_op else 1.0
+        ctx = f"Method: Wet Grind | Faces: Top & Bottom | Stock total 0.050\" | min/in³ = 3.0 | Factor {gf:.2f}"
+        lines.append(ctx)
 
+    # Subheader
+    lines.append("")
+    lines.append("TIME PER OP - SQUARE/FINISH")
+    lines.append("-" * 106)
+
+    # Mill route op lines
+    if is_mill_route:
         # Side mill line
         if side_op:
             perim = side_op.get('perimeter', 0)
@@ -2122,18 +2136,21 @@ def render_square_up_block(
             used_ovr = side_op.get('_used_override', False)
 
             ovr_badge = " (ovr)" if used_ovr else ""
-            # Split into 2 lines if needed for ≤106 chars
-            line1 = f"  Side Mill: Perim {perim:.1f}\" | Ax {ax_passes}× Rad {rad_passes}× | ToolØ {tool_d:.3f}"
-            line2 = f"            IPM {ipm:.1f} | Path {path:.1f}\" | Time {time_min:.2f} min{ovr_badge}"
 
-            lines.append(line1[:106])
-            lines.append(line2[:106])
+            # Build line with optional IPM - use compact format to stay ≤106 chars
+            if ipm > 0:
+                # Compact format: use "P" instead of "Perim", compact passes format
+                line = (f"Side Mill – SQ UP (Rough) | P {perim:.1f}\" | {ax_passes}×{rad_passes} "
+                        f"| Ø {tool_d:.3f}\" |{ipm:.0f}ipm| Path {path:.1f}\" | t/op {time_min:.2f} min{ovr_badge}")
+            else:
+                line = (f"Side Mill – SQ UP (Rough) | Perim {perim:.1f}\" | Ax {ax_passes}× Rad {rad_passes}× "
+                        f"| Ø {tool_d:.3f}\" | Path {path:.1f}\" | t/op {time_min:.2f} min{ovr_badge}")
+
+            lines.append(line[:106])
             total_time += time_min
 
         # Face mill line
         if face_op:
-            L = face_op.get('length', 0)
-            passes = face_op.get('passes', 3)
             tool_d = face_op.get('tool_diameter', 0)
             stepover = face_op.get('stepover', 0)
             ipm = face_op.get('feed_rate', 0)
@@ -2142,33 +2159,34 @@ def render_square_up_block(
             used_ovr = face_op.get('_used_override', False)
 
             ovr_badge = " (ovr)" if used_ovr else ""
-            # Passes = 3×L description
-            line1 = f"  Face Mill: Passes {passes}×L = {passes * L:.1f}\" | ToolØ {tool_d:.3f} | Step {stepover:.3f}"
-            line2 = f"            IPM {ipm:.1f} | Path {path:.1f}\" | Time {time_min:.2f} min{ovr_badge}"
 
-            lines.append(line1[:106])
-            lines.append(line2[:106])
+            # Build line with optional IPM - use compact format to stay ≤106 chars
+            if ipm > 0:
+                # Compact format: shorter step format when IPM is present
+                line = (f"Face Mill – Top & Bottom | Passes 3×L | Ø {tool_d:.3f}\" | S {stepover:.3f}\" "
+                        f"|{ipm:.0f}ipm| Path {path:.1f}\" | t/op {time_min:.2f} min{ovr_badge}")
+            else:
+                line = (f"Face Mill – Top & Bottom  | Passes 3×L  | Ø {tool_d:.3f}\" | Step {stepover:.3f}\" "
+                        f"| Path {path:.1f}\" | t/op {time_min:.2f} min{ovr_badge}")
+
+            lines.append(line[:106])
             total_time += time_min
 
-    # Grind route details
+    # Grind route op line
     if is_grind_route:
         L = grind_op.get('length', 0)
         W = grind_op.get('width', 0)
         stock = grind_op.get('stock_removed_total', 0.050)
-        vol = grind_op.get('volume_removed', 0)
-        factor = grind_op.get('grind_material_factor', 1.0)
+        vol = L * W * stock
         time_min = grind_op.get('time_minutes', 0)
 
-        line1 = f"  Wet Grind: Volume {L:.3f} × {W:.3f} × {stock:.3f} = {vol:.4f} cu in"
-        line2 = f"            Rate 3.0 min/in³ | Factor {factor:.2f} | Time {time_min:.2f} min"
-
-        lines.append(line1[:106])
-        lines.append(line2[:106])
+        line = f"Face Grind – Pair         | Vol L×W×0.050 = {vol:.3f} in³ | t/op {time_min:.2f} min"
+        lines.append(line[:106])
         total_time += time_min
 
     # Total line
     lines.append("")
-    lines.append(f"TOTAL Square/Finish Time: {total_time:.2f} minutes")
+    lines.append(f"Total Square/Finish Time: {total_time:.2f} min")
 
     return lines
 
