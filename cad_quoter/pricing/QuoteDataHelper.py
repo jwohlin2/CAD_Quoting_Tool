@@ -1385,7 +1385,7 @@ def extract_quote_data_from_cad(
     # matches the sum of the displayed line items exactly.
     if mcmaster_price:
         tax = round(mcmaster_price * 0.07, 2)
-        shipping = round(mcmaster_price * 0.125, 2)
+        shipping = round(max(mcmaster_price * 0.125, 11.10), 2)
         scrap_credit = round(scrap_value_calc.get('scrap_value', 0.0), 2)
         net_cost = round(mcmaster_price + tax + shipping - scrap_credit, 2)
     else:

@@ -8,6 +8,9 @@ import os
 import sys
 import json
 
+# Add project root to path so we can import mcmaster_api
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
+
 os.environ['CAD_QUOTER_ALLOW_REQUESTS'] = '1'
 
 from mcmaster_api import McMasterAPI, load_env
