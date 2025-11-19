@@ -3264,7 +3264,9 @@ def estimate_hole_table_times(
             time_per_hole = (depth / feed_rate) if feed_rate > 0 else 1.0
             time_per_hole += 0.1  # Add approach/retract time
 
-            total_time = time_per_hole * qty
+            # Round times to 2 decimals for display consistency
+            time_per_hole = round(time_per_hole, 2)
+            total_time = round(time_per_hole * qty, 2)
 
             drill_groups.append({
                 'hole_id': hole_id,
@@ -3312,7 +3314,9 @@ def estimate_hole_table_times(
                 grinding_time_factor = sf_grind.get('grinding_time_factor', 1.0)
 
             time_per_hole = time_per_hole_base * grinding_time_factor
-            total_time = time_per_hole * qty
+            # Round times to 2 decimals for display consistency
+            time_per_hole = round(time_per_hole, 2)
+            total_time = round(time_per_hole * qty, 2)
 
             jig_grind_groups.append({
                 'hole_id': hole_id,
@@ -3385,7 +3389,9 @@ def estimate_hole_table_times(
             if is_rigid:
                 time_per_hole *= 0.7
 
-            total_time = time_per_hole * qty
+            # Round times to 2 decimals for display consistency
+            time_per_hole = round(time_per_hole, 2)
+            total_time = round(time_per_hole * qty, 2)
 
             tap_groups.append({
                 'hole_id': hole_id,
@@ -3435,7 +3441,9 @@ def estimate_hole_table_times(
             time_per_hole = (cbore_depth / cbore_feed) if cbore_feed > 0 else 0.5
             time_per_hole += 0.1
 
-            total_time = time_per_hole * qty
+            # Round times to 2 decimals for display consistency
+            time_per_hole = round(time_per_hole, 2)
+            total_time = round(time_per_hole * qty, 2)
 
             # Extract side info (FRONT or BACK) from description or op_text
             cbore_side = None
@@ -3469,7 +3477,9 @@ def estimate_hole_table_times(
 
             # Center drilling is quick - estimate based on depth
             time_per_hole = max(0.05, cdrill_depth * 0.5)  # Min 3 seconds, or 30 sec per inch
-            total_time = time_per_hole * qty
+            # Round times to 2 decimals for display consistency
+            time_per_hole = round(time_per_hole, 2)
+            total_time = round(time_per_hole * qty, 2)
 
             cdrill_groups.append({
                 'hole_id': hole_id,
@@ -3481,14 +3491,14 @@ def estimate_hole_table_times(
                 'description': entry.get('DESCRIPTION', '')
             })
 
-    # Calculate totals
-    total_drill = sum(g['total_time'] for g in drill_groups)
-    total_jig_grind = sum(g['total_time'] for g in jig_grind_groups)
-    total_tap = sum(g['total_time'] for g in tap_groups)
-    total_cbore = sum(g['total_time'] for g in cbore_groups)
-    total_cdrill = sum(g['total_time'] for g in cdrill_groups)
+    # Calculate totals - round after summing to ensure display consistency
+    total_drill = round(sum(g['total_time'] for g in drill_groups), 2)
+    total_jig_grind = round(sum(g['total_time'] for g in jig_grind_groups), 2)
+    total_tap = round(sum(g['total_time'] for g in tap_groups), 2)
+    total_cbore = round(sum(g['total_time'] for g in cbore_groups), 2)
+    total_cdrill = round(sum(g['total_time'] for g in cdrill_groups), 2)
 
-    total_minutes = total_drill + total_jig_grind + total_tap + total_cbore + total_cdrill
+    total_minutes = round(total_drill + total_jig_grind + total_tap + total_cbore + total_cdrill, 2)
 
     return {
         'drill_groups': drill_groups,

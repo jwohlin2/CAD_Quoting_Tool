@@ -864,6 +864,10 @@ def extract_quote_data_from_cad(
                 punch_cmm_min = round(mh.get("total_cmm_minutes", 0.0), 2)
                 punch_total_min = round(mh.get("total_minutes", 0.0), 2)
                 punch_machine_hours = round(punch_total_min / 60.0, 2)
+                # Compute machine cost directly from total minutes for accuracy
+                # (avoids rounding errors from hours conversion)
+                punch_machine_cost = round(punch_total_min * (machine_rate / 60.0), 2)
+
                 quote_data.machine_hours = MachineHoursBreakdown(
                     total_milling_minutes=punch_milling_min,
                     total_grinding_minutes=punch_grinding_min,
@@ -874,7 +878,7 @@ def extract_quote_data_from_cad(
                     total_cmm_minutes=punch_cmm_min,
                     total_minutes=punch_total_min,
                     total_hours=punch_machine_hours,
-                    machine_cost=round(punch_machine_hours * machine_rate, 2),
+                    machine_cost=punch_machine_cost,
                 )
 
                 # Set labor hours from punch estimates
@@ -893,6 +897,20 @@ def extract_quote_data_from_cad(
                 visible_sum = setup_min + programming_min + machining_min + inspection_min + finishing_min
                 misc_overhead_min = labor_total - visible_sum
 
+                # Round each category to 2 decimals for display consistency
+                setup_min = round(setup_min, 2)
+                programming_min = round(programming_min, 2)
+                machining_min = round(machining_min, 2)
+                inspection_min = round(inspection_min, 2)
+                finishing_min = round(finishing_min, 2)
+                labor_total = round(labor_total, 2)
+                misc_overhead_min = round(misc_overhead_min, 2)
+                punch_labor_hours = round(punch_labor_hours, 2)
+
+                # Compute labor cost directly from total minutes for accuracy
+                # (avoids rounding errors from hours conversion)
+                punch_labor_cost = round(labor_total * (labor_rate / 60.0), 2)
+
                 quote_data.labor_hours = LaborHoursBreakdown(
                     setup_minutes=setup_min,
                     programming_minutes=programming_min,
@@ -902,7 +920,7 @@ def extract_quote_data_from_cad(
                     misc_overhead_minutes=misc_overhead_min,
                     total_minutes=labor_total,
                     total_hours=punch_labor_hours,
-                    labor_cost=punch_labor_hours * labor_rate,
+                    labor_cost=punch_labor_cost,
                 )
 
                 # Store punch-specific data in quote_data
@@ -1452,6 +1470,10 @@ def extract_quote_data_from_cad(
         )
         grand_total_hours = round(grand_total_minutes / 60.0, 2)
 
+        # Compute machine cost directly from total minutes for accuracy
+        # (avoids rounding errors from hours conversion)
+        machine_cost = round(grand_total_minutes * (machine_rate / 60.0), 2)
+
         quote_data.machine_hours = MachineHoursBreakdown(
             drill_operations=drill_ops,
             tap_operations=tap_ops,
@@ -1473,7 +1495,7 @@ def extract_quote_data_from_cad(
             cmm_holes_checked=cmm_holes_checked,
             total_minutes=grand_total_minutes,
             total_hours=grand_total_hours,
-            machine_cost=round(grand_total_hours * machine_rate, 2)
+            machine_cost=machine_cost
         )
 
         # Sanity check: warn if milling/overhead time is disproportionately high for small jobs
@@ -1546,6 +1568,10 @@ def extract_quote_data_from_cad(
             f"Labor time mismatch: total={labor_total:.2f}, sum={visible_labor_sum:.2f}, overhead={misc_overhead_min:.2f}"
 
         labor_total_hours = round(labor_total / 60.0, 2)
+        # Compute labor cost directly from total minutes for accuracy
+        # (avoids rounding errors from hours conversion)
+        labor_cost = round(labor_total * (labor_rate / 60.0), 2)
+
         quote_data.labor_hours = LaborHoursBreakdown(
             setup_minutes=setup_min,
             programming_minutes=programming_min,
@@ -1555,7 +1581,7 @@ def extract_quote_data_from_cad(
             misc_overhead_minutes=misc_overhead_min,
             total_minutes=labor_total,
             total_hours=labor_total_hours,
-            labor_cost=round(labor_total_hours * labor_rate, 2),
+            labor_cost=labor_cost,
             ops_total=len(ops),
             holes_total=holes_total,
             tool_changes=len(ops) * 2
@@ -1569,20 +1595,23 @@ def extract_quote_data_from_cad(
     # STEP 6: Calculate cost summary with quantity-aware amortization
     # ========================================================================
 
-    # Calculate amortized setup costs (spread across all parts)
-    setup_labor = (quote_data.labor_hours.setup_minutes / 60.0) * labor_rate
-    programming_labor = (quote_data.labor_hours.programming_minutes / 60.0) * labor_rate
-    amortized_setup_cost = (setup_labor + programming_labor) / quantity
+    # Calculate costs directly from rounded minutes for accuracy
+    # Use the same formula as labor_hours.labor_cost to ensure consistency
+    setup_labor = round(quote_data.labor_hours.setup_minutes * (labor_rate / 60.0), 2)
+    programming_labor = round(quote_data.labor_hours.programming_minutes * (labor_rate / 60.0), 2)
+    amortized_setup_cost = round((setup_labor + programming_labor) / quantity, 2)
 
     # Calculate variable costs per unit (material, machining, inspection, finishing)
     material_cost_per_unit = quote_data.direct_cost_breakdown.net_material_cost
     machine_cost_per_unit = quote_data.machine_hours.machine_cost
 
     # Variable labor costs per unit (machining, inspection, finishing)
-    machining_labor = (quote_data.labor_hours.machining_steps_minutes / 60.0) * labor_rate
-    inspection_labor = (quote_data.labor_hours.inspection_minutes / 60.0) * labor_rate
-    finishing_labor = (quote_data.labor_hours.finishing_minutes / 60.0) * labor_rate
-    variable_labor_per_unit = machining_labor + inspection_labor + finishing_labor
+    # Round each component before summing for display consistency
+    machining_labor = round(quote_data.labor_hours.machining_steps_minutes * (labor_rate / 60.0), 2)
+    inspection_labor = round(quote_data.labor_hours.inspection_minutes * (labor_rate / 60.0), 2)
+    finishing_labor = round(quote_data.labor_hours.finishing_minutes * (labor_rate / 60.0), 2)
+    misc_overhead_labor = round(quote_data.labor_hours.misc_overhead_minutes * (labor_rate / 60.0), 2)
+    variable_labor_per_unit = machining_labor + inspection_labor + finishing_labor + misc_overhead_labor
 
     # Per-unit costs
     # Round each component to 2 decimal places before summing to ensure the total
@@ -1593,10 +1622,11 @@ def extract_quote_data_from_cad(
     per_unit_total_cost = round(per_unit_direct_cost + per_unit_machine_cost + per_unit_labor_cost, 2)
 
     # Total costs for all units
+    # Use displayed (rounded) components to ensure total = sum of displayed parts
     total_direct_cost = round(per_unit_direct_cost * quantity, 2)
     total_machine_cost = round(per_unit_machine_cost * quantity, 2)
     total_labor_cost = round((setup_labor + programming_labor) + (variable_labor_per_unit * quantity), 2)
-    total_total_cost = round(total_direct_cost + total_machine_cost + total_labor_cost, 2)
+    total_total_cost = total_direct_cost + total_machine_cost + total_labor_cost
 
     # Margin and pricing
     per_unit_margin_amount = round(per_unit_total_cost * margin_rate, 2)

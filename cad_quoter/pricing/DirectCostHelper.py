@@ -1055,10 +1055,12 @@ def calculate_total_scrap(
         "Scrap calculation error: volumes don't add up"
 
     # Calculate weights
+    # Round weights to 2 decimal places to ensure consistency between
+    # displayed values and calculations (e.g., scrap credit = weight × price)
     density = get_material_density(material)
-    mcmaster_weight = mcmaster_volume * density
-    final_part_weight = final_part_volume * density
-    total_scrap_weight = total_scrap_volume * density
+    mcmaster_weight = round(mcmaster_volume * density, 2)
+    final_part_weight = round(final_part_volume * density, 2)
+    total_scrap_weight = round(total_scrap_volume * density, 2)
 
     # Calculate percentages
     scrap_percentage = (total_scrap_volume / mcmaster_volume * 100) if mcmaster_volume > 0 else 0
@@ -1208,7 +1210,9 @@ def calculate_scrap_value(
         price_source = price_source or "No price available"
         scrap_value = 0.0
     else:
-        scrap_value = scrap_weight_lbs * scrap_price_per_lb
+        # Round weight to 2 decimals to match displayed value, then calculate
+        scrap_weight_rounded = round(scrap_weight_lbs, 2)
+        scrap_value = round(scrap_weight_rounded * scrap_price_per_lb, 2)
 
         if verbose:
             print(f"Scrap price: ${scrap_price_per_lb:.4f}/lb (source: {price_source})")
