@@ -3509,6 +3509,15 @@ def estimate_hole_table_times(
                 else:
                     tap_drill_depth = 0.6  # Default
 
+            # Sanity check: tap drill depth cannot exceed material thickness
+            if thickness > 0 and tap_drill_depth > thickness + 0.1:
+                import logging
+                logging.warning(
+                    f"Tap drill depth {tap_drill_depth:.3f}\" exceeds thickness {thickness:.3f}\" for hole {hole_id}, "
+                    f"clamping to thickness"
+                )
+                tap_drill_depth = thickness
+
             # Calculate drill time using tap drill diameter
             tap_drill_rpm = (sfm * 12) / (3.14159 * tap_drill_dia) if tap_drill_dia > 0 else 1000
             tap_drill_rpm = min(tap_drill_rpm, 3500)
@@ -3675,6 +3684,15 @@ def estimate_hole_table_times(
                 tap_depth = thickness if thickness > 0 else 2.0
             else:
                 tap_depth = 0.5  # Default
+
+            # Sanity check: tap depth cannot exceed material thickness
+            if thickness > 0 and tap_depth > thickness + 0.1:
+                import logging
+                logging.warning(
+                    f"Tap depth {tap_depth:.3f}\" exceeds thickness {thickness:.3f}\" for hole {hole_id}, "
+                    f"clamping to thickness"
+                )
+                tap_depth = thickness
 
             is_rigid = 'RIGID' in combined_text
 
