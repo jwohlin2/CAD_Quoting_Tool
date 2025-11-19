@@ -36,6 +36,9 @@ __all__ = [
     "estimate_face_grind_minutes",
     "estimate_od_grind_minutes",
     "estimate_wet_grind_minutes",
+    "estimate_square_up_side_mill_minutes",
+    "estimate_square_up_face_mill_minutes",
+    "estimate_square_up_grind_minutes",
     "MIN_PER_CUIN_GRIND",
     # Punch time estimation
     "PunchMachineHours",
@@ -733,6 +736,202 @@ def estimate_od_grind_minutes(
             vol = pi * (r * r - (r - stock) ** 2) * T
 
     return max(0.0, vol * MIN_PER_CUIN_GRIND * factor)
+
+
+def estimate_square_up_side_mill_minutes(
+    perimeter_in: float,
+    side_stock_in: float,
+    tool_diameter_in: float,
+    feed_ipm: float,
+    axial_depth_per_pass_in: float,
+    total_axial_depth_in: float,
+    material: str = "GENERIC",
+    material_group: str = "",
+    debug: dict[str, Any] | None = None,
+) -> float:
+    """Estimate side milling time for square-up operations.
+
+    Calculates time based on perimeter, radial stock removal, tool diameter,
+    feed rate, and number of passes required.
+
+    Args:
+        perimeter_in: Part perimeter in inches
+        side_stock_in: Radial stock to remove per side in inches
+        tool_diameter_in: Tool diameter in inches
+        feed_ipm: Feed rate in inches per minute
+        axial_depth_per_pass_in: Axial depth of cut per pass in inches
+        total_axial_depth_in: Total axial depth to cut (part height)
+        material: Material name for factor lookup
+        material_group: Material group for factor lookup
+        debug: Optional dict to populate with calculation details
+
+    Returns:
+        Estimated minutes for side milling operation
+    """
+    # Calculate number of radial passes needed (stepover-based)
+    stepover_in = tool_diameter_in * 0.5  # 50% stepover typical for roughing
+    radial_passes = max(1, int((side_stock_in / stepover_in) + 0.999))  # Round up
+
+    # Calculate number of axial passes needed
+    axial_passes = max(1, int((total_axial_depth_in / axial_depth_per_pass_in) + 0.999))
+
+    # Total pass count
+    total_passes = radial_passes * axial_passes
+
+    # Path length per pass (perimeter with approach/retract allowance)
+    path_per_pass_in = perimeter_in + (2.0 * tool_diameter_in)  # Entry/exit allowance
+
+    # Total path length
+    total_path_in = path_per_pass_in * total_passes
+
+    # Calculate volume removed for reference
+    volume_removed_cuin = perimeter_in * total_axial_depth_in * side_stock_in
+
+    # Calculate time
+    if feed_ipm > 0:
+        cut_time_min = total_path_in / feed_ipm
+    else:
+        cut_time_min = 0.0
+
+    # Add non-cutting overhead (tool changes, approach, etc.)
+    overhead_min = 0.5  # Minimal overhead for square-up
+    total_time_min = cut_time_min + overhead_min
+
+    # Populate debug dict if provided
+    if debug is not None:
+        debug["sq_perimeter"] = perimeter_in
+        debug["sq_side_stock"] = side_stock_in
+        debug["sq_tool_dia"] = tool_diameter_in
+        debug["sq_feed_ipm"] = feed_ipm
+        debug["sq_radial_passes"] = radial_passes
+        debug["sq_axial_passes"] = axial_passes
+        debug["sq_pass_count"] = total_passes
+        debug["sq_path_length"] = total_path_in
+        debug["volume_removed_cuin"] = volume_removed_cuin
+        debug["sq_time_min"] = total_time_min
+
+    return max(0.0, total_time_min)
+
+
+def estimate_square_up_face_mill_minutes(
+    length_in: float,
+    width_in: float,
+    top_bottom_stock_in: float,
+    tool_diameter_in: float,
+    feed_ipm: float,
+    pass_count: int = 3,
+    material: str = "GENERIC",
+    material_group: str = "",
+    debug: dict[str, Any] | None = None,
+) -> float:
+    """Estimate face milling time for square-up top/bottom operations.
+
+    Calculates time based on part dimensions, stock removal, tool diameter,
+    feed rate, and number of passes.
+
+    Args:
+        length_in: Part length in inches
+        width_in: Part width in inches
+        top_bottom_stock_in: Total stock to remove from top & bottom in inches
+        tool_diameter_in: Face mill diameter in inches
+        feed_ipm: Feed rate in inches per minute
+        pass_count: Number of passes per face (default 3)
+        material: Material name for factor lookup
+        material_group: Material group for factor lookup
+        debug: Optional dict to populate with calculation details
+
+    Returns:
+        Estimated minutes for face milling operation
+    """
+    # Calculate number of stripes needed to cover width
+    stepover_in = width_in / 3.0  # Typically 3 stripes with ~5% overlap
+    num_stripes = 3
+
+    # Path length per pass (length with entry/exit allowance)
+    path_per_pass_in = length_in + (2.0 * 0.5)  # Small entry/exit allowance
+
+    # Total passes = passes per face × 2 faces
+    total_passes = pass_count * 2
+
+    # Total path length
+    total_path_in = path_per_pass_in * total_passes
+
+    # Calculate surface area and volume removed
+    surface_area_sq_in = length_in * width_in * 2  # Both faces
+    volume_removed_cuin = length_in * width_in * top_bottom_stock_in
+
+    # Calculate time
+    if feed_ipm > 0:
+        cut_time_min = total_path_in / feed_ipm
+    else:
+        cut_time_min = 0.0
+
+    # Add overhead (5% for tool positioning)
+    overhead_factor = 1.05
+    total_time_min = cut_time_min * overhead_factor
+
+    # Populate debug dict if provided
+    if debug is not None:
+        debug["sq_length"] = length_in
+        debug["sq_width"] = width_in
+        debug["sq_top_bottom_stock"] = top_bottom_stock_in
+        debug["sq_tool_dia"] = tool_diameter_in
+        debug["sq_feed_ipm"] = feed_ipm
+        debug["sq_pass_count"] = total_passes
+        debug["sq_path_length"] = total_path_in
+        debug["surface_area_sq_in"] = surface_area_sq_in
+        debug["volume_removed_cuin"] = volume_removed_cuin
+        debug["sq_time_min"] = total_time_min
+
+    return max(0.0, total_time_min)
+
+
+def estimate_square_up_grind_minutes(
+    length_in: float,
+    width_in: float,
+    top_bottom_stock_in: float,
+    material: str = "GENERIC",
+    material_group: str = "",
+    faces: int = 2,
+    debug: dict[str, Any] | None = None,
+) -> float:
+    """Estimate grinding time for square-up operations.
+
+    Uses volume-based formula consistent with other grinding operations.
+
+    Args:
+        length_in: Part length in inches
+        width_in: Part width in inches
+        top_bottom_stock_in: Total stock to remove from top & bottom in inches
+        material: Material name for factor lookup
+        material_group: Material group for factor lookup
+        faces: Number of faces to grind (default 2)
+        debug: Optional dict to populate with calculation details
+
+    Returns:
+        Estimated minutes for grinding operation
+    """
+    # Calculate volume removed
+    volume_removed_cuin = length_in * width_in * top_bottom_stock_in
+    surface_area_sq_in = length_in * width_in * faces
+
+    # Get material factor
+    factor = _grind_factor(material, material_group)
+
+    # Use canonical grinding formula: minutes = volume × 3.0 × factor
+    grind_time_min = volume_removed_cuin * MIN_PER_CUIN_GRIND * factor
+
+    # Populate debug dict if provided
+    if debug is not None:
+        debug["sq_length"] = length_in
+        debug["sq_width"] = width_in
+        debug["sq_top_bottom_stock"] = top_bottom_stock_in
+        debug["surface_area_sq_in"] = surface_area_sq_in
+        debug["volume_removed_cuin"] = volume_removed_cuin
+        debug["grind_material_factor"] = factor
+        debug["grind_time_min"] = grind_time_min
+
+    return max(0.0, grind_time_min)
 
 
 def estimate_time_min(
