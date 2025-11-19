@@ -1069,8 +1069,6 @@ def calculate_total_scrap(
     high_scrap_warning = scrap_percentage > HIGH_SCRAP_THRESHOLD
 
     if verbose:
-        if high_scrap_warning:
-            print(f"\n*** HIGH SCRAP WARNING: {scrap_percentage:.1f}% exceeds {HIGH_SCRAP_THRESHOLD}% threshold ***")
         print(f"\nScrap Breakdown:")
         print(f"  Stock prep scrap: {stock_prep_scrap:.4f} in³")
         print(f"  Face milling scrap: {machining['face_milling_scrap']:.4f} in³")

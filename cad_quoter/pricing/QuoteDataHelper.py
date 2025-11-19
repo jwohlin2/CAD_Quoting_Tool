@@ -1153,22 +1153,25 @@ def extract_quote_data_from_cad(
     elif mcmaster_result:
         mcmaster_part_num = mcmaster_result.get('mcmaster_part')
         if mcmaster_part_num:
-            mcmaster_price = get_mcmaster_price(mcmaster_part_num, quantity=quantity)
+            # Check if catalog volume is more than 2x required stock (high scrap scenario)
+            catalog_vol = scrap_calc.mcmaster_volume
+            required_vol = scrap_calc.desired_volume
+            use_volume_pricing = required_vol > 0 and catalog_vol > 2 * required_vol
 
-            # If direct pricing failed, try volume-based estimation
-            if mcmaster_price is None:
+            if use_volume_pricing:
+                # Use volume-based pricing when catalog is much larger than required stock
                 if verbose:
-                    print(f"  No direct pricing available for {mcmaster_part_num}")
-                    print(f"  Attempting volume-based price estimation...")
+                    print(f"  Catalog volume ({catalog_vol:.2f} in³) > 2x required stock ({required_vol:.2f} in³)")
+                    print(f"  Using volume-based price estimation for better accuracy...")
 
                 from cad_quoter.pricing.DirectCostHelper import estimate_price_from_reference_part
 
                 # Map material to McMaster catalog key for price estimation
                 mcmaster_material = material_mapper.get_mcmaster_key(material) or material
                 mcmaster_price = estimate_price_from_reference_part(
-                    target_length=scrap_calc.mcmaster_length,
-                    target_width=scrap_calc.mcmaster_width,
-                    target_thickness=scrap_calc.mcmaster_thickness,
+                    target_length=scrap_calc.desired_length,
+                    target_width=scrap_calc.desired_width,
+                    target_thickness=scrap_calc.desired_thickness,
                     material=mcmaster_material,
                     catalog_csv_path=catalog_csv_path,
                     verbose=verbose
@@ -1178,21 +1181,67 @@ def extract_quote_data_from_cad(
                     price_is_estimated = True
                     if verbose:
                         print(f"  ✓ Estimated price from volume: ${mcmaster_price:.2f}")
+            else:
+                # Normal flow: try direct pricing first
+                mcmaster_price = get_mcmaster_price(mcmaster_part_num, quantity=quantity)
+
+                # If direct pricing failed, try volume-based estimation
+                if mcmaster_price is None:
+                    if verbose:
+                        print(f"  No direct pricing available for {mcmaster_part_num}")
+                        print(f"  Attempting volume-based price estimation...")
+
+                    from cad_quoter.pricing.DirectCostHelper import estimate_price_from_reference_part
+
+                    # Map material to McMaster catalog key for price estimation
+                    mcmaster_material = material_mapper.get_mcmaster_key(material) or material
+                    mcmaster_price = estimate_price_from_reference_part(
+                        target_length=scrap_calc.mcmaster_length,
+                        target_width=scrap_calc.mcmaster_width,
+                        target_thickness=scrap_calc.mcmaster_thickness,
+                        material=mcmaster_material,
+                        catalog_csv_path=catalog_csv_path,
+                        verbose=verbose
+                    )
+
+                    if mcmaster_price:
+                        price_is_estimated = True
+                        if verbose:
+                            print(f"  ✓ Estimated price from volume: ${mcmaster_price:.2f}")
 
     # If we still don't have a price and no part was found, try volume-based estimation
     if mcmaster_price is None and not mcmaster_part_num:
+        catalog_vol = scrap_calc.mcmaster_volume
+        required_vol = scrap_calc.desired_volume
+        use_required_stock = required_vol > 0 and catalog_vol > 2 * required_vol
+
         if verbose:
             print(f"  No McMaster part found in catalog")
-            print(f"  Attempting volume-based price estimation...")
+            if use_required_stock:
+                print(f"  Catalog volume ({catalog_vol:.2f} in³) > 2x required stock ({required_vol:.2f} in³)")
+                print(f"  Using volume-based price estimation on required stock...")
+            else:
+                print(f"  Attempting volume-based price estimation...")
 
         from cad_quoter.pricing.DirectCostHelper import estimate_price_from_reference_part
 
         # Map material to McMaster catalog key for price estimation
         mcmaster_material = material_mapper.get_mcmaster_key(material) or material
+
+        # Use required stock dimensions if catalog is much larger, otherwise use catalog dimensions
+        if use_required_stock:
+            target_length = scrap_calc.desired_length
+            target_width = scrap_calc.desired_width
+            target_thickness = scrap_calc.desired_thickness
+        else:
+            target_length = scrap_calc.mcmaster_length
+            target_width = scrap_calc.mcmaster_width
+            target_thickness = scrap_calc.mcmaster_thickness
+
         mcmaster_price = estimate_price_from_reference_part(
-            target_length=scrap_calc.mcmaster_length,
-            target_width=scrap_calc.mcmaster_width,
-            target_thickness=scrap_calc.mcmaster_thickness,
+            target_length=target_length,
+            target_width=target_width,
+            target_thickness=target_thickness,
             material=mcmaster_material,
             catalog_csv_path=catalog_csv_path,
             verbose=verbose

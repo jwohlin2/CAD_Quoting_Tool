@@ -1253,10 +1253,6 @@ class AppV7:
             report.append(f"  Starting Weight: {self._format_weight(stock_info.mcmaster_weight)}")
             report.append(f"  Net Weight: {self._format_weight(stock_info.final_part_weight)}")
             report.append(f"  Scrap Percentage: {scrap_info.scrap_percentage:.1f}%")
-            # Show high scrap warning if applicable
-            if scrap_info.high_scrap_warning:
-                report.append(f"  *** HIGH SCRAP WARNING: {scrap_info.scrap_percentage:.1f}% exceeds 80% threshold ***")
-                report.append(f"      Consider alternate stock or nesting multiple parts if possible.")
             report.append(f"  Scrap Weight: {self._format_weight(scrap_info.total_scrap_weight)}")
 
             if scrap_info.scrap_price_per_lb is not None:
