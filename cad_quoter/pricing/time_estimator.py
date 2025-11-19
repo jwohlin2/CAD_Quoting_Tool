@@ -868,9 +868,30 @@ PUNCH_TIME_CONSTANTS = {
     "tapping_per_hole": 3.0,
     "chamfer_per_edge": 1.5,
     "small_radius_per_edge": 2.0,
-    "polish_contour_base": 30.0,
-    "polish_per_sq_inch": 5.0,
+    "polish_contour_base": 10.0,  # Reduced base from 30.0 - was too high
+    "polish_per_sq_inch": 3.0,    # Reduced from 5.0 - was too aggressive
+    "polish_per_radius": 2.0,     # Time per blend radius
     "form_complexity_multiplier": {0: 1.0, 1: 1.5, 2: 2.0, 3: 3.0},
+    # Material factors for polish time - aluminum polishes faster than hardened steel
+    "polish_material_factor": {
+        "aluminum": 0.6,
+        "6061": 0.6,
+        "7075": 0.6,
+        "brass": 0.7,
+        "bronze": 0.7,
+        "copper": 0.7,
+        "a2": 1.0,
+        "d2": 1.2,
+        "m2": 1.2,
+        "carbide": 1.5,
+        "hss": 1.1,
+        "default": 1.0,
+    },
+    # Cap polish time as fraction of turning time for form_punch parts
+    # to prevent unreasonably high polish times on simple contours
+    "polish_turning_cap_fraction": 0.30,  # Max 30% of turning time
+    "polish_absolute_cap": 30.0,          # Absolute cap of 30 minutes for standard polish
+    "polish_high_requirement_cap": 60.0,  # Higher cap for explicit high-polish or EDM burn notes
     "sawing_base": 5.0,
     "inspection_per_diam": 3.0,
     "tight_tolerance_multiplier": {0.0001: 2.0, 0.0002: 1.5, 0.0005: 1.2, 0.001: 1.0},
@@ -941,9 +962,59 @@ def estimate_punch_machine_hours(punch_plan: dict[str, Any], punch_features: dic
     hours.chamfer_min += num_radii * tc["small_radius_per_edge"]
 
     if has_polish or has_3d:
+        # Calculate base polish time from contour area model
         contour_area = max_od * (overall_length * 0.3)
         form_mult = tc["form_complexity_multiplier"].get(form_level, 1.0)
-        hours.polishing_min = (tc["polish_contour_base"] + contour_area * tc["polish_per_sq_inch"]) * form_mult
+
+        # Base calculation: reduced base + area contribution + radius contribution
+        base_polish = tc["polish_contour_base"] + contour_area * tc["polish_per_sq_inch"]
+        base_polish += num_radii * tc["polish_per_radius"]
+        base_polish *= form_mult
+
+        # Apply material factor - aluminum and soft metals polish faster
+        material_callout = punch_features.get("material_callout", "")
+        material_lower = (material_callout or "").lower()
+        material_factor = tc["polish_material_factor"].get("default", 1.0)
+        for mat_key, factor in tc["polish_material_factor"].items():
+            if mat_key != "default" and mat_key in material_lower:
+                material_factor = factor
+                break
+
+        polish_time = base_polish * material_factor
+
+        # Get family for cap determination
+        family = punch_features.get("family", "")
+
+        # Calculate turning time for cap reference
+        turning_time = hours.rough_turning_min + hours.finish_turning_min
+
+        # Determine cap based on requirements
+        # Check for explicit high-polish requirements that should allow higher time
+        has_high_polish_requirement = any([
+            punch_features.get("has_no_step_permitted", False),
+            "edm" in material_lower or "burn" in material_lower,
+            "mirror" in (punch_features.get("text_dump", "") or "").lower(),
+            "optical" in (punch_features.get("text_dump", "") or "").lower(),
+        ])
+
+        # For form_punch parts, cap polish time relative to turning time
+        # unless there's an explicit high-polish requirement
+        if family == "form_punch" and not has_high_polish_requirement:
+            # Cap at 30% of turning time or absolute cap, whichever is lower
+            turning_cap = turning_time * tc["polish_turning_cap_fraction"]
+            absolute_cap = tc["polish_absolute_cap"]
+            effective_cap = min(turning_cap, absolute_cap) if turning_time > 0 else absolute_cap
+
+            # Ensure minimum polish time of 5 minutes for any polish work
+            polish_time = max(5.0, min(polish_time, effective_cap))
+        elif has_high_polish_requirement:
+            # Higher cap for explicit requirements
+            polish_time = min(polish_time, tc["polish_high_requirement_cap"])
+        else:
+            # Standard cap for non-form_punch parts
+            polish_time = min(polish_time, tc["polish_absolute_cap"])
+
+        hours.polishing_min = polish_time
 
     hours.inspection_min = num_diams * tc["inspection_per_diam"]
 
