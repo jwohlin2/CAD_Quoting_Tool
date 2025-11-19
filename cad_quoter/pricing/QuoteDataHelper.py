@@ -1524,16 +1524,36 @@ def extract_quote_data_from_cad(
         labor_result = compute_labor_minutes(labor_inputs)
         minutes = labor_result['minutes']
 
-        # Round labor components for consistent display
-        labor_total_min = round(minutes.get('Labor_Total', 0.0), 2)
-        labor_total_hours = round(labor_total_min / 60.0, 2)
+        # Extract individual category minutes with rounding for consistent display
+        setup_min = round(minutes.get('Setup', 0.0), 2)
+        programming_min = round(minutes.get('Programming', 0.0), 2)
+        machining_min = round(minutes.get('Machining_Steps', 0.0), 2)
+        inspection_min = round(minutes.get('Inspection', 0.0), 2)
+        finishing_min = round(minutes.get('Finishing', 0.0), 2)
+        labor_total = round(minutes.get('Labor_Total', 0.0), 2)
+
+        # Calculate visible categories sum
+        visible_labor_sum = (
+            setup_min + programming_min + machining_min +
+            inspection_min + finishing_min
+        )
+
+        # Calculate any misc overhead (should be 0 if compute_labor_minutes is consistent)
+        misc_overhead_min = round(labor_total - visible_labor_sum, 2)
+
+        # Sanity check: total should equal sum of categories + overhead
+        assert abs(labor_total - (visible_labor_sum + misc_overhead_min)) < 0.01, \
+            f"Labor time mismatch: total={labor_total:.2f}, sum={visible_labor_sum:.2f}, overhead={misc_overhead_min:.2f}"
+
+        labor_total_hours = round(labor_total / 60.0, 2)
         quote_data.labor_hours = LaborHoursBreakdown(
-            setup_minutes=round(minutes.get('Setup', 0.0), 2),
-            programming_minutes=round(minutes.get('Programming', 0.0), 2),
-            machining_steps_minutes=round(minutes.get('Machining_Steps', 0.0), 2),
-            inspection_minutes=round(minutes.get('Inspection', 0.0), 2),
-            finishing_minutes=round(minutes.get('Finishing', 0.0), 2),
-            total_minutes=labor_total_min,
+            setup_minutes=setup_min,
+            programming_minutes=programming_min,
+            machining_steps_minutes=machining_min,
+            inspection_minutes=inspection_min,
+            finishing_minutes=finishing_min,
+            misc_overhead_minutes=misc_overhead_min,
+            total_minutes=labor_total,
             total_hours=labor_total_hours,
             labor_cost=round(labor_total_hours * labor_rate, 2),
             ops_total=len(ops),
