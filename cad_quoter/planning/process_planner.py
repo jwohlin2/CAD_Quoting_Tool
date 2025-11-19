@@ -3256,9 +3256,9 @@ def estimate_hole_table_times(
         # For drilling, assume 2 flutes
         feed_rate = rpm * 2 * feed_per_tooth  # IPM
 
-        # DRILL operations (main hole) - skip if it's a jig grind, standalone cbore, or TAP operation
+        # DRILL operations (main hole) - skip if it's a jig grind or standalone cbore
         # C'BORE entries should not be added to drill_groups (they go in cbore_groups)
-        # TAP entries should not be added to drill_groups (they go in tap_groups)
+        # TAP entries need a drill operation first (tap drill hole), then tapping
         if not is_jig_grind and not is_cbore and not is_tap:
             # Time per hole: depth / feed_rate gives minutes (since feed_rate is IPM)
             time_per_hole = (depth / feed_rate) if feed_rate > 0 else 1.0
@@ -3278,6 +3278,76 @@ def estimate_hole_table_times(
                 'time_per_hole': time_per_hole,
                 'total_time': total_time,
                 'description': entry.get('DESCRIPTION', '')
+            })
+
+        # TAP holes also need a drill operation for the tap drill hole
+        # Calculate tap drill diameter from tap size (major_dia - 1/TPI)
+        if is_tap:
+            # Extract tap size to calculate tap drill diameter
+            tap_match = re.search(r'(\d+/\d+)-(\d+)', op_text)
+            if tap_match:
+                # Fractional tap (e.g., 5/16-18)
+                frac_parts = tap_match.group(1).split('/')
+                tap_major_dia = float(frac_parts[0]) / float(frac_parts[1])
+                tpi = int(tap_match.group(2))
+            else:
+                # Try #10-32 format
+                num_tap_match = re.search(r'#(\d+)-(\d+)', op_text)
+                if num_tap_match:
+                    screw_num = int(num_tap_match.group(1))
+                    tap_major_dia = 0.060 + (screw_num * 0.013)
+                    tpi = int(num_tap_match.group(2))
+                else:
+                    tap_major_dia = ref_dia
+                    tpi = 20  # Default TPI
+
+            # Calculate tap drill diameter: major_dia - (1/TPI)
+            # This gives approximately 75% thread engagement
+            tap_drill_dia = tap_major_dia - (1.0 / tpi) if tpi > 0 else tap_major_dia * 0.8
+            tap_drill_dia = max(tap_drill_dia, 0.05)  # Minimum drill size
+
+            # Determine drill depth for tap drill
+            if is_thru or 'TAP THRU' in op_text:
+                tap_drill_depth = thickness if thickness > 0 else 2.0
+            else:
+                # Extract depth from "TAP X {number} DEEP"
+                tap_depth_match = re.search(r'[TAP\s+]*X\s+(\d*\.\d+|\d+)\s+DEEP', op_text)
+                if tap_depth_match:
+                    tap_drill_depth = float(tap_depth_match.group(1)) + 0.1  # Drill slightly deeper than tap
+                else:
+                    tap_drill_depth = 0.6  # Default
+
+            # Calculate drill time using tap drill diameter
+            tap_drill_rpm = (sfm * 12) / (3.14159 * tap_drill_dia) if tap_drill_dia > 0 else 1000
+            tap_drill_rpm = min(tap_drill_rpm, 3500)
+
+            # Select feed based on tap drill diameter
+            if tap_drill_dia <= 0.1875:
+                tap_drill_fpt = sf_drill.get('fz_ipr_0_125in', 0.002)
+            elif tap_drill_dia <= 0.375:
+                tap_drill_fpt = sf_drill.get('fz_ipr_0_25in', 0.004)
+            else:
+                tap_drill_fpt = sf_drill.get('fz_ipr_0_5in', 0.008)
+
+            tap_drill_feed = tap_drill_rpm * 2 * tap_drill_fpt
+
+            time_per_hole = (tap_drill_depth / tap_drill_feed) if tap_drill_feed > 0 else 1.0
+            time_per_hole += 0.1  # Approach/retract
+
+            total_time = time_per_hole * qty
+
+            drill_groups.append({
+                'hole_id': hole_id,
+                'diameter': tap_drill_dia,
+                'depth': tap_drill_depth,
+                'qty': qty,
+                'sfm': sfm,
+                'ipr': tap_drill_fpt,
+                'rpm': tap_drill_rpm,
+                'feed_rate': tap_drill_feed,
+                'time_per_hole': time_per_hole,
+                'total_time': total_time,
+                'description': f"Tap drill for {entry.get('DESCRIPTION', op_text)}"
             })
 
         # JIG GRIND operations (using is_jig_grind check from above)

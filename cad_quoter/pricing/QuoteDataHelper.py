@@ -222,6 +222,7 @@ class MachineHoursBreakdown:
     total_other_minutes: float = 0.0
     total_cmm_minutes: float = 0.0  # CMM checking time (machine only, setup is in labor)
     cmm_holes_checked: int = 0  # Number of holes inspected by CMM
+    holes_total: int = 0  # Total number of holes from hole table (sum of QTY)
 
     # Overall totals
     total_minutes: float = 0.0
@@ -1471,6 +1472,7 @@ def extract_quote_data_from_cad(
             total_other_minutes=total_other_min,
             total_cmm_minutes=cmm_checking_machine_min,
             cmm_holes_checked=cmm_holes_checked,
+            holes_total=holes_total,
             total_minutes=grand_total_minutes,
             total_hours=grand_total_hours,
             machine_cost=round(grand_total_hours * machine_rate, 2)
