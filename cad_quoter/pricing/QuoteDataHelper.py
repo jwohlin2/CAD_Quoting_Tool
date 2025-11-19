@@ -1476,6 +1476,18 @@ def extract_quote_data_from_cad(
             machine_cost=round(grand_total_hours * machine_rate, 2)
         )
 
+        # Sanity check: warn if milling/overhead time is disproportionately high for small jobs
+        primary_ops_min = total_drill_min + total_grinding_min + total_jig_grind_min + total_tap_min
+        overhead_ops_min = total_milling_min + total_cbore_min + total_edm_min + total_other_min
+
+        if primary_ops_min < 5.0 and overhead_ops_min > primary_ops_min and overhead_ops_min > 1.0:
+            import logging
+            logging.info(
+                f"Machine time check: primary ops={primary_ops_min:.2f} min, "
+                f"overhead ops (milling/cbore/edm/other)={overhead_ops_min:.2f} min. "
+                f"High overhead ratio for small job - verify milling time is correct."
+            )
+
         if verbose:
             print(f"  Machine hours: {grand_total_hours:.2f} hr")
             print(f"    - Drilling: {total_drill_min:.1f} min")
@@ -1485,6 +1497,11 @@ def extract_quote_data_from_cad(
             print(f"    - EDM: {total_edm_min:.1f} min")
             print(f"    - CMM Inspection (checking only): {cmm_checking_machine_min:.1f} min")
             print(f"  Machine cost: ${quote_data.machine_hours.machine_cost:.2f}")
+
+            # Also print the sanity check warning in verbose mode
+            if primary_ops_min < 5.0 and overhead_ops_min > primary_ops_min and overhead_ops_min > 1.0:
+                print(f"  WARNING: High overhead ratio - primary ops={primary_ops_min:.1f} min, "
+                      f"overhead ops={overhead_ops_min:.1f} min")
 
         # ========================================================================
         # STEP 5: Calculate labor hours
