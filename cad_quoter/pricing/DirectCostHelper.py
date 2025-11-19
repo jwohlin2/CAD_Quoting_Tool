@@ -468,14 +468,14 @@ def estimate_price_from_reference_part(
         # Calculate volume
         stock_volume = length * width * thickness
 
-        # Prefer smaller parts (more likely to have qty-1 pricing)
+        # Prefer larger parts (better accuracy when scaling by volume ratio)
         # But not too small (should be at least 10% of target volume for reasonable accuracy)
         # For exotic materials with limited sizes, accept any size (volume check disabled)
         min_volume_ratio = 0.001 if is_exotic else 0.1  # 0.1% vs 10%
         if stock_volume < target_volume * min_volume_ratio:
             continue
 
-        if reference_part is None or stock_volume < reference_part["volume"]:
+        if reference_part is None or stock_volume > reference_part["volume"]:
             reference_part = {
                 "part_number": part_no,
                 "length": length,
