@@ -1651,9 +1651,71 @@ def detect_punch_material(text_dump: str) -> Optional[str]:
     return None
 
 
+def _filter_struck_out_text(text: str) -> str:
+    """Filter out struck-out/crossed-out text from AutoCAD annotations.
+
+    Detects and removes:
+    - %%O...%%O wrapped text (AutoCAD overline toggle, commonly used for struck-out)
+    - Text that contains strikethrough indicators
+
+    Args:
+        text: Raw text from drawing that may contain struck-out content
+
+    Returns:
+        Text with struck-out sections removed
+    """
+    if not text:
+        return text
+
+    # Remove %%O...%%O wrapped text (overline toggle in AutoCAD MTEXT)
+    # Pattern: %%O<struck text>%%O or %%o<struck text>%%o
+    result = re.sub(r'%%[Oo]([^%]*)%%[Oo]', '', text)
+
+    # Also handle case where %%O appears without closing (treat rest as struck)
+    # This handles "%%OTHIS SURFACE TO BE GROUND" where the whole line is struck
+    if '%%O' in result.upper():
+        # Remove everything from %%O to end of that line segment
+        result = re.sub(r'%%[Oo][^\n]*', '', result)
+
+    return result
+
+
+def _has_active_grind_note(text_upper: str) -> bool:
+    """Check if text contains an active (non-struck-out) grinding requirement.
+
+    Looks for explicit grinding callouts like:
+    - "TO BE GROUND"
+    - "GRIND" (standalone or as part of grinding instruction)
+    - "GROUND SURFACE"
+    - "GRINDING REQUIRED"
+
+    Args:
+        text_upper: Uppercase text that has already had struck-out content removed
+
+    Returns:
+        True if an active grind callout is present
+    """
+    grind_patterns = [
+        r'\bTO\s+BE\s+GROUND\b',
+        r'\bGRIND\s+(?:THIS\s+)?SURFACE\b',
+        r'\bGROUND\s+SURFACE\b',
+        r'\bGRINDING\s+REQUIRED\b',
+        r'\bSURFACE\s+(?:TO\s+BE\s+)?GROUND\b',
+        r'\bGRIND\s+(?:TO|FOR|ALL)\b',  # "GRIND TO .0001", "GRIND FOR FINISH", "GRIND ALL"
+    ]
+
+    for pattern in grind_patterns:
+        if re.search(pattern, text_upper):
+            return True
+
+    return False
+
+
 def detect_punch_ops_features(text_dump: str) -> Dict[str, Any]:
     """Detect operations-driving features from text."""
-    text_upper = text_dump.upper()
+    # First filter out any struck-out/crossed-out text
+    filtered_text = _filter_struck_out_text(text_dump)
+    text_upper = filtered_text.upper()
 
     features = {
         "num_chamfers": 0, "num_small_radii": 0, "has_3d_surface": False,
@@ -1677,8 +1739,27 @@ def detect_punch_ops_features(text_dump: str) -> Dict[str, Any]:
     if any(kw in text_upper for kw in has_3d_indicators):
         features["has_3d_surface"] = True
 
-    if "PERPENDICULAR" in text_upper or "PERP" in text_upper:
+    # Check for face grinding requirements
+    # Only trigger has_perp_face_grind if there's an actual grind callout
+    # "PERPENDICULAR TO CENTERLINE" alone is NOT a grinding requirement - it's an orientation callout
+    # Grinding is only required if there's an explicit grind note or if combined with grind terminology
+    has_grind_note = _has_active_grind_note(text_upper)
+
+    if has_grind_note:
+        # There's an explicit grind callout - set face grind flag
         features["has_perp_face_grind"] = True
+    elif "PERPENDICULAR" in text_upper or "PERP" in text_upper:
+        # Only trigger grinding if perpendicular is combined with grind-related terms
+        # e.g., "GRIND PERPENDICULAR" or "PERPENDICULAR GRIND"
+        # But NOT "PERPENDICULAR TO CENTERLINE" which is just orientation
+        perp_grind_patterns = [
+            r'\bGRIND\s+PERPENDICULAR\b',
+            r'\bPERPENDICULAR\s+GRIND\b',
+            r'\bGROUND\s+PERPENDICULAR\b',
+        ]
+        if any(re.search(p, text_upper) for p in perp_grind_patterns):
+            features["has_perp_face_grind"] = True
+        # Note: "PERPENDICULAR TO CENTERLINE" does NOT trigger grinding
 
     radius_count = len(re.findall(r'R\s*(?:0)?\.?\d+', text_upper))
     diameter_count = len(re.findall(r'[Ø]|%%C', text_upper, re.IGNORECASE))
