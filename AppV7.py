@@ -1408,8 +1408,60 @@ class AppV7:
                     self.machine_cost_total = machine_hours.machine_cost
                     return "\n".join(report)
                 else:
-                    # Standard message for other parts without holes
-                    return "No hole operations found in CAD file. (Note: If this is a form die section, verify family classification)"
+                    # Check if there's machine time from plan operations (milling, grinding, EDM)
+                    # even without drilled/tapped holes
+                    has_plan_machine_time = (
+                        machine_hours.total_milling_minutes > 0 or
+                        machine_hours.total_grinding_minutes > 0 or
+                        machine_hours.total_edm_minutes > 0 or
+                        machine_hours.total_other_minutes > 0
+                    )
+
+                    if has_plan_machine_time:
+                        # Get machine rate for display
+                        machine_rate = getattr(self, '_temp_machine_rate', self.MACHINE_RATE)
+                        machine_rate_label = f"@ ${machine_rate:.2f}/hr"
+                        if machine_rate != self.MACHINE_RATE:
+                            machine_rate_label += " (OVERRIDDEN)"
+
+                        # Generate machine hours report for parts with plan operations but no holes
+                        report = []
+                        report.append("MACHINE HOURS ESTIMATION - FORM / MACHINED PART")
+                        report.append("=" * 74)
+                        report.append(f"Material: {quote_data.material_info.material_name}")
+                        report.append("")
+
+                        report.append("INFO: No hole operations found in CAD file.")
+                        report.append("Machine time calculated from turning/grinding/EDM operations.")
+                        report.append("")
+
+                        report.append("MACHINE TIME BREAKDOWN")
+                        report.append("-" * 74)
+                        report.append(f"  Milling/Turning:                 {machine_hours.total_milling_minutes:>10.2f} minutes")
+                        report.append(f"  Grinding (OD/face/form):         {machine_hours.total_grinding_minutes:>10.2f} minutes")
+                        report.append(f"  EDM:                             {machine_hours.total_edm_minutes:>10.2f} minutes")
+                        report.append(f"  Other (chamfer/polish):          {machine_hours.total_other_minutes:>10.2f} minutes")
+                        report.append(f"  Inspection:                      {machine_hours.total_cmm_minutes:>10.2f} minutes")
+                        report.append("-" * 74)
+                        report.append(f"  TOTAL MACHINE TIME:              {machine_hours.total_minutes:>10.2f} minutes")
+                        report.append(f"                                   {machine_hours.total_hours:>10.2f} hours")
+                        report.append("")
+                        report.append("=" * 74)
+                        report.append(f"TOTAL MACHINE COST: ${machine_hours.machine_cost:.2f} {machine_rate_label}")
+                        report.append("=" * 74)
+                        report.append("")
+
+                        self.machine_cost_total = machine_hours.machine_cost
+                        return "\n".join(report)
+                    else:
+                        # Truly no machine operations - set cost to 0 with warning
+                        self.machine_cost_total = 0.0
+                        return ("WARNING: No hole operations or machining operations found in CAD file.\n"
+                                "Machine Cost: $0.00\n\n"
+                                "Note: If this part requires machining, verify:\n"
+                                "  - Part family classification (e.g., Punches, Sections_blocks)\n"
+                                "  - Material detection\n"
+                                "  - Dimension extraction")
 
             # Format helper functions
             def format_drill_group(op):
@@ -1903,12 +1955,31 @@ class AppV7:
             self._format_cost_summary_line("Labor Cost", self.labor_cost_total),
         ])
 
-        if None not in (self.direct_cost_total, self.machine_cost_total, self.labor_cost_total):
-            total_cost = (
-                (self.direct_cost_total or 0.0)
-                + (self.machine_cost_total or 0.0)
-                + (self.labor_cost_total or 0.0)
-            )
+        # Check for missing costs and warn user
+        missing_costs = []
+        if self.direct_cost_total is None:
+            missing_costs.append("Direct Cost")
+        if self.machine_cost_total is None:
+            missing_costs.append("Machine Cost")
+        if self.labor_cost_total is None:
+            missing_costs.append("Labor Cost")
+
+        if missing_costs:
+            summary_lines.append("-" * 74)
+            summary_lines.append("WARNING: Some costs could not be calculated:")
+            for cost_name in missing_costs:
+                summary_lines.append(f"  - {cost_name} is N/A")
+            summary_lines.append("Quote may be incomplete - manual review required.")
+            summary_lines.append("-" * 74)
+
+        # Calculate total even with missing costs (treat N/A as $0.00)
+        total_cost = (
+            (self.direct_cost_total or 0.0)
+            + (self.machine_cost_total or 0.0)
+            + (self.labor_cost_total or 0.0)
+        )
+
+        if total_cost > 0 or not missing_costs:
 
             # Use cost summary from quote_data for accurate per-unit and total costs
             margin_amount = total_cost * margin_rate
