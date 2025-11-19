@@ -1592,19 +1592,7 @@ class AppV7:
                 report.append("")
 
             # MACHINE TIME BREAKDOWN
-            # Calculate visible machine minutes (operations shown individually in the report)
-            # NOTE: visible = drill + jig_grind + tap + cdrill + wet_grind + cmm
-            # Overhead captures cbore, milling, edm, and other operations
-            visible_machine_minutes = (
-                machine_hours.total_drill_minutes +
-                machine_hours.total_jig_grind_minutes +
-                machine_hours.total_tap_minutes +
-                machine_hours.total_cdrill_minutes +
-                machine_hours.total_grinding_minutes +
-                machine_hours.total_cmm_minutes
-            )
-            misc_machine_overhead_minutes = machine_hours.total_minutes - visible_machine_minutes
-
+            # Show all operation types individually for full transparency
             report.append("MACHINE TIME BREAKDOWN")
             report.append("-" * 74)
             if machine_hours.total_drill_minutes > 0:
@@ -1615,12 +1603,18 @@ class AppV7:
                 report.append(f"  Tap:                              {machine_hours.total_tap_minutes:>10.2f} min")
             if machine_hours.total_cdrill_minutes > 0:
                 report.append(f"  Center drill:                     {machine_hours.total_cdrill_minutes:>10.2f} min")
+            if machine_hours.total_cbore_minutes > 0:
+                report.append(f"  Counterbore:                      {machine_hours.total_cbore_minutes:>10.2f} min")
+            if machine_hours.total_milling_minutes > 0:
+                report.append(f"  Milling (square-up, face):        {machine_hours.total_milling_minutes:>10.2f} min")
             if machine_hours.total_grinding_minutes > 0:
                 report.append(f"  Wet grind:                        {machine_hours.total_grinding_minutes:>10.2f} min")
+            if machine_hours.total_edm_minutes > 0:
+                report.append(f"  EDM:                              {machine_hours.total_edm_minutes:>10.2f} min")
+            if machine_hours.total_other_minutes > 0:
+                report.append(f"  Other operations:                 {machine_hours.total_other_minutes:>10.2f} min")
             if machine_hours.total_cmm_minutes > 0:
                 report.append(f"  CMM (machine time):               {machine_hours.total_cmm_minutes:>10.2f} min")
-            if abs(misc_machine_overhead_minutes) > 0.01:  # Only show if non-zero
-                report.append(f"  Misc machine overhead (rapids, tool changes, etc.): {misc_machine_overhead_minutes:>4.2f} min")
             report.append("-" * 74)
 
             # Summary (read from temp variable set in main thread to avoid Tkinter widget access)
