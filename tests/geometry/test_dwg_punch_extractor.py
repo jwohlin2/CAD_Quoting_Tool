@@ -16,6 +16,8 @@ from cad_quoter.geometry.dxf_enrich import (
     parse_punch_holes_from_text as parse_holes_from_text,
     parse_punch_tolerances_from_text as parse_tolerances_from_text,
     extract_punch_features_from_dxf,
+    _filter_struck_out_text,
+    _has_active_grind_note,
 )
 
 
@@ -195,9 +197,53 @@ class TestDetectOpsFeatures:
         features = detect_ops_features(text)
         assert features["has_3d_surface"] is True
 
-    def test_detect_perp_face(self):
-        """Test detection of perpendicular face requirement."""
+    def test_perp_to_centerline_no_grind(self):
+        """Test that PERPENDICULAR TO CENTERLINE alone does NOT trigger grinding.
+
+        This is just an orientation callout, not a grinding requirement.
+        Part 219 bug: the drawing had a struck-out grind note replaced with
+        'PERPENDICULAR TO CENTERLINE' but was still being charged for grinding.
+        """
         text = "THIS SURFACE PERPENDICULAR TO CENTERLINE"
+        features = detect_ops_features(text)
+        assert features["has_perp_face_grind"] is False
+
+    def test_explicit_grind_note_triggers_grinding(self):
+        """Test that explicit grind notes DO trigger face grinding."""
+        # "TO BE GROUND" should trigger
+        text = "THIS SURFACE TO BE GROUND"
+        features = detect_ops_features(text)
+        assert features["has_perp_face_grind"] is True
+
+        # "GRIND SURFACE" should trigger
+        text = "GRIND THIS SURFACE"
+        features = detect_ops_features(text)
+        assert features["has_perp_face_grind"] is True
+
+    def test_grind_perpendicular_triggers_grinding(self):
+        """Test that combining GRIND with PERPENDICULAR triggers grinding."""
+        text = "GRIND PERPENDICULAR TO DATUM A"
+        features = detect_ops_features(text)
+        assert features["has_perp_face_grind"] is True
+
+    def test_struck_out_grind_note_no_grinding(self):
+        """Test that struck-out (%%O wrapped) grind notes are ignored.
+
+        AutoCAD uses %%O to toggle overline/strikethrough.
+        """
+        # Struck-out "TO BE GROUND" with replacement note
+        text = "%%OTHIS SURFACE TO BE GROUND%%O\nPERPENDICULAR TO CENTERLINE"
+        features = detect_ops_features(text)
+        assert features["has_perp_face_grind"] is False
+
+        # Only the grind note is struck out
+        text = "%%OGRIND THIS SURFACE%%O"
+        features = detect_ops_features(text)
+        assert features["has_perp_face_grind"] is False
+
+    def test_active_grind_note_with_struck_out_text(self):
+        """Test that active grind notes are detected even with other struck-out text."""
+        text = "%%OOLD SPEC%%O\nTHIS SURFACE TO BE GROUND"
         features = detect_ops_features(text)
         assert features["has_perp_face_grind"] is True
 
@@ -500,6 +546,91 @@ class TestIntegration:
         assert summary.shape_type == "round"
         assert summary.material_callout == "D2"
         assert summary.confidence_score < 1.0  # Lower confidence
+
+
+class TestFilterStruckOutText:
+    """Test the _filter_struck_out_text helper function."""
+
+    def test_empty_string(self):
+        """Test with empty string."""
+        assert _filter_struck_out_text("") == ""
+
+    def test_no_struck_out_text(self):
+        """Test text without any struck-out markers."""
+        text = "THIS SURFACE TO BE GROUND"
+        assert _filter_struck_out_text(text) == text
+
+    def test_filter_paired_overline(self):
+        """Test filtering text wrapped in %%O...%%O pairs."""
+        text = "%%OTHIS SURFACE TO BE GROUND%%O"
+        result = _filter_struck_out_text(text)
+        assert "TO BE GROUND" not in result
+
+    def test_filter_unclosed_overline(self):
+        """Test filtering text with unclosed %%O marker."""
+        text = "%%OTHIS SURFACE TO BE GROUND\nPERPENDICULAR TO CENTERLINE"
+        result = _filter_struck_out_text(text)
+        assert "TO BE GROUND" not in result
+        assert "PERPENDICULAR TO CENTERLINE" in result
+
+    def test_preserve_non_struck_text(self):
+        """Test that non-struck text is preserved."""
+        text = "%%OOLD TEXT%%O\nNEW TEXT"
+        result = _filter_struck_out_text(text)
+        assert "OLD TEXT" not in result
+        assert "NEW TEXT" in result
+
+    def test_multiple_struck_sections(self):
+        """Test multiple struck-out sections."""
+        text = "%%OREMOVED%%O KEEP %%OALSO REMOVED%%O"
+        result = _filter_struck_out_text(text)
+        assert "REMOVED" not in result
+        assert "ALSO REMOVED" not in result
+        assert "KEEP" in result
+
+    def test_lowercase_overline(self):
+        """Test lowercase %%o markers."""
+        text = "%%oremoved text%%o KEEP"
+        result = _filter_struck_out_text(text)
+        assert "removed text" not in result
+        assert "KEEP" in result
+
+
+class TestHasActiveGrindNote:
+    """Test the _has_active_grind_note helper function."""
+
+    def test_to_be_ground(self):
+        """Test detection of 'TO BE GROUND'."""
+        assert _has_active_grind_note("THIS SURFACE TO BE GROUND") is True
+
+    def test_grind_surface(self):
+        """Test detection of 'GRIND SURFACE'."""
+        assert _has_active_grind_note("GRIND THIS SURFACE") is True
+
+    def test_ground_surface(self):
+        """Test detection of 'GROUND SURFACE'."""
+        assert _has_active_grind_note("GROUND SURFACE REQUIRED") is True
+
+    def test_grinding_required(self):
+        """Test detection of 'GRINDING REQUIRED'."""
+        assert _has_active_grind_note("GRINDING REQUIRED FOR FINISH") is True
+
+    def test_grind_to_tolerance(self):
+        """Test detection of 'GRIND TO'."""
+        assert _has_active_grind_note("GRIND TO .0001") is True
+
+    def test_no_grind_note(self):
+        """Test that non-grind text doesn't trigger."""
+        assert _has_active_grind_note("PERPENDICULAR TO CENTERLINE") is False
+
+    def test_background_not_grind(self):
+        """Test that 'background' doesn't false trigger on 'ground'."""
+        assert _has_active_grind_note("BACKGROUND IMAGE") is False
+
+    def test_grind_all_diameters(self):
+        """Test detection of 'GRIND ALL' pattern."""
+        text = "GRIND ALL DIAMETERS"
+        assert _has_active_grind_note(text) is True
 
 
 if __name__ == "__main__":
