@@ -1372,7 +1372,12 @@ class AppV7:
                         f"group {op.qty}x{op.time_per_hole:.2f} = {op.total_time:.2f} min")
 
             def format_cbore_group(op):
-                return (f"Hole {op.hole_id} | Dia {op.diameter:.4f}\" x {op.qty} | "
+                # Add side indicator if available (front/back)
+                if op.side:
+                    hole_label = f"Hole {op.hole_id} – C'BORE {op.side.upper()}"
+                else:
+                    hole_label = f"Hole {op.hole_id}"
+                return (f"{hole_label} | Dia {op.diameter:.4f}\" x {op.qty} | "
                         f"depth {op.depth:.3f}\" | {op.sfm:.0f} sfm | "
                         f"t/hole {op.time_per_hole:.2f} min | "
                         f"group {op.qty}x{op.time_per_hole:.2f} = {op.total_time:.2f} min")
@@ -1577,8 +1582,34 @@ class AppV7:
                 report.append(f"Time per hole: 1.0 min (first article)")
                 report.append(f"Total CMM time: {machine_hours.cmm_holes_checked} holes × 1.0 min = {machine_hours.total_cmm_minutes:.2f} min")
                 report.append("")
-                report.append(f"Note: CMM setup time (30 min) is included in Labor → Inspection")
+                report.append(f"Note: CMM run time ({machine_hours.total_cmm_minutes:.2f} min) is billed as MACHINE TIME.")
+                report.append(f"      CMM setup (30 min) is included in Labor → Inspection.")
                 report.append("")
+
+            # MACHINE TIME BREAKDOWN
+            # Calculate conventional machining total (all ops except CMM)
+            machining_minutes = (
+                machine_hours.total_drill_minutes +
+                machine_hours.total_tap_minutes +
+                machine_hours.total_cbore_minutes +
+                machine_hours.total_cdrill_minutes +
+                machine_hours.total_jig_grind_minutes +
+                machine_hours.total_milling_minutes +
+                machine_hours.total_grinding_minutes +
+                machine_hours.total_edm_minutes +
+                machine_hours.total_other_minutes
+            )
+            cmm_machine_minutes = machine_hours.total_cmm_minutes
+            misc_overhead_minutes = machine_hours.total_minutes - machining_minutes - cmm_machine_minutes
+
+            report.append("MACHINE TIME BREAKDOWN")
+            report.append("-" * 74)
+            report.append(f"  Conventional machining total:     {machining_minutes:>10.2f} min")
+            if cmm_machine_minutes > 0:
+                report.append(f"  CMM inspection (machine time):    {cmm_machine_minutes:>10.2f} min")
+            if abs(misc_overhead_minutes) > 0.01:  # Only show if non-zero
+                report.append(f"  Misc machine overhead:            {misc_overhead_minutes:>10.2f} min")
+            report.append("-" * 74)
 
             # Summary (read from temp variable set in main thread to avoid Tkinter widget access)
             machine_rate = getattr(self, '_temp_machine_rate', self.MACHINE_RATE)
@@ -1586,8 +1617,9 @@ class AppV7:
             if machine_rate != self.MACHINE_RATE:
                 machine_rate_label += " (OVERRIDDEN)"
 
+            report.append(f"  TOTAL MACHINE TIME:               {machine_hours.total_minutes:>10.2f} min ({machine_hours.total_hours:.2f} hours)")
+            report.append("")
             report.append("=" * 74)
-            report.append(f"TOTAL MACHINE TIME: {machine_hours.total_minutes:.2f} minutes ({machine_hours.total_hours:.2f} hours)")
             report.append(f"TOTAL MACHINE COST: ${machine_hours.machine_cost:.2f} {machine_rate_label}")
             report.append("=" * 74)
             report.append("")
