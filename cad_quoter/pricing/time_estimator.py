@@ -815,6 +815,10 @@ class PunchMachineHours:
     edm_min: float = 0.0
     sawing_min: float = 0.0
     inspection_min: float = 0.0
+    # Critical OD tracking for tolerance-sensitive operations
+    critical_od_grinding_min: float = 0.0  # Extra grinding for tight tolerances
+    critical_od_inspection_min: float = 0.0  # Extra inspection for critical dims
+    critical_od_tolerance_in: float = 0.0  # Tightest OD tolerance on part
     total_minutes: float = 0.0
     total_hours: float = 0.0
 
@@ -824,7 +828,8 @@ class PunchMachineHours:
             self.rough_turning_min + self.finish_turning_min +
             self.od_grinding_min + self.id_grinding_min + self.face_grinding_min +
             self.drilling_min + self.tapping_min + self.chamfer_min +
-            self.polishing_min + self.edm_min + self.sawing_min + self.inspection_min
+            self.polishing_min + self.edm_min + self.sawing_min + self.inspection_min +
+            self.critical_od_grinding_min + self.critical_od_inspection_min
         )
         self.total_hours = self.total_minutes / 60.0
 
@@ -878,6 +883,16 @@ PUNCH_TIME_CONSTANTS = {
     "deburring_per_edge": 1.0,
     "inspection_setup": 10.0,
     "first_article_base": 20.0,
+    # Simple round punch programming (no holes/threads, standard macros)
+    "simple_punch_programming_base": 15.0,  # Base for simple round punch
+    "simple_punch_per_extra_diam": 3.0,  # Per diameter step beyond first
+    "simple_punch_per_chamfer": 2.0,  # Per chamfer (capped at 4)
+    "simple_punch_per_radius": 1.0,  # Per small radius (capped at 4)
+    "simple_punch_programming_cap": 30.0,  # Max for simple punch
+    # Critical OD tolerance handling
+    "critical_od_grinding_adder": 5.0,  # Extra grinding per critical diameter
+    "critical_od_inspection_adder": 5.0,  # Extra inspection per critical diameter
+    "critical_od_tolerance_threshold": 0.0005,  # Total band ≤ this triggers critical
 }
 
 
@@ -931,6 +946,16 @@ def estimate_punch_machine_hours(punch_plan: dict[str, Any], punch_features: dic
         hours.polishing_min = (tc["polish_contour_base"] + contour_area * tc["polish_per_sq_inch"]) * form_mult
 
     hours.inspection_min = num_diams * tc["inspection_per_diam"]
+
+    # Critical OD tolerance handling: extra grinding and inspection for gage-pin tolerances
+    # Detect very tight diameter tolerances (total band <= 0.0005")
+    if min_dia_tol is not None and min_dia_tol <= tc["critical_od_tolerance_threshold"]:
+        hours.critical_od_tolerance_in = min_dia_tol
+        # Extra fine grinding passes for critical diameters
+        hours.critical_od_grinding_min = num_diams * tc["critical_od_grinding_adder"]
+        # Extra inspection time for gage-pin checks on critical dimensions
+        hours.critical_od_inspection_min = num_diams * tc["critical_od_inspection_adder"]
+
     hours.calculate_totals()
 
     return hours
@@ -947,6 +972,9 @@ def estimate_punch_labor_hours(punch_plan: dict[str, Any], punch_features: dict[
     num_radii = punch_features.get("num_small_radii", 0)
     tap_count = punch_features.get("tap_count", 0)
     has_polish = punch_features.get("has_polish_contour", False)
+    has_3d = punch_features.get("has_3d_surface", False)
+    num_diams = punch_features.get("num_ground_diams", 1)
+    shape_type = punch_features.get("shape_type", "round")
 
     needs_lathe = machine_hours.rough_turning_min > 0 or machine_hours.finish_turning_min > 0
     needs_grinder = machine_hours.od_grinding_min > 0 or machine_hours.face_grinding_min > 0
@@ -959,7 +987,37 @@ def estimate_punch_labor_hours(punch_plan: dict[str, Any], punch_features: dict[
     if needs_edm:
         labor.edm_setup_min = tc["edm_setup"]
 
-    labor.cam_programming_min = tc["cam_programming_base"] + num_ops * tc["cam_per_operation"]
+    # Programming time calculation with heuristic for simple round punches
+    # A "simple" punch is: round shape, no holes/taps, no 3D surfaces, no polish
+    is_simple_punch = (
+        shape_type == "round" and
+        tap_count == 0 and
+        not has_3d and
+        not has_polish and
+        not needs_edm
+    )
+
+    if is_simple_punch:
+        # Simple round punch: scale with turned features, not generic op count
+        # Base time (standard lathe macros available)
+        prog_time = tc["simple_punch_programming_base"]
+
+        # Add time per diameter step beyond first
+        if num_diams > 1:
+            prog_time += (num_diams - 1) * tc["simple_punch_per_extra_diam"]
+
+        # Add time per chamfer (capped at 4)
+        prog_time += min(num_chamfers, 4) * tc["simple_punch_per_chamfer"]
+
+        # Add time per small radius (capped at 4)
+        prog_time += min(num_radii, 4) * tc["simple_punch_per_radius"]
+
+        # Cap at maximum for simple punches
+        labor.cam_programming_min = min(prog_time, tc["simple_punch_programming_cap"])
+    else:
+        # Complex punch: use original formula based on operation count
+        labor.cam_programming_min = tc["cam_programming_base"] + num_ops * tc["cam_per_operation"]
+
     labor.handling_min = num_ops * tc["handling_per_operation"]
 
     total_edges = num_chamfers + num_radii + tap_count * 2
@@ -977,7 +1035,7 @@ def estimate_punch_labor_hours(punch_plan: dict[str, Any], punch_features: dict[
 
 def convert_punch_to_quote_machine_hours(machine_hours: PunchMachineHours, labor_hours: PunchLaborHours) -> dict[str, Any]:
     """Convert PunchMachineHours to QuoteDataHelper format."""
-    return {
+    result = {
         "total_drill_minutes": machine_hours.drilling_min,
         "total_tap_minutes": machine_hours.tapping_min,
         "total_cbore_minutes": 0.0,
@@ -987,10 +1045,20 @@ def convert_punch_to_quote_machine_hours(machine_hours: PunchMachineHours, labor
         "total_grinding_minutes": machine_hours.od_grinding_min + machine_hours.id_grinding_min + machine_hours.face_grinding_min,
         "total_edm_minutes": machine_hours.edm_min,
         "total_other_minutes": machine_hours.sawing_min + machine_hours.chamfer_min + machine_hours.polishing_min,
-        "total_cmm_minutes": machine_hours.inspection_min,
+        "total_cmm_minutes": machine_hours.inspection_min + machine_hours.critical_od_inspection_min,
         "total_minutes": machine_hours.total_minutes,
         "total_hours": machine_hours.total_hours,
     }
+
+    # Add critical OD tracking for breakdown visibility
+    if machine_hours.critical_od_tolerance_in > 0:
+        result["critical_od_tolerance_in"] = machine_hours.critical_od_tolerance_in
+        result["critical_od_grinding_minutes"] = machine_hours.critical_od_grinding_min
+        result["critical_od_inspection_minutes"] = machine_hours.critical_od_inspection_min
+        # Include critical OD grinding in total grinding
+        result["total_grinding_minutes"] += machine_hours.critical_od_grinding_min
+
+    return result
 
 
 def convert_punch_to_quote_labor_hours(labor_hours: PunchLaborHours) -> dict[str, Any]:
