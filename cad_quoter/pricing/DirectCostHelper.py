@@ -642,6 +642,10 @@ def get_material_cost_from_mcmaster(
 # SCRAP CALCULATION
 # ============================================================================
 
+# High scrap threshold (80%) - warn user when exceeded
+HIGH_SCRAP_THRESHOLD = 80.0  # percent
+
+
 @dataclass
 class ScrapInfo:
     """Scrap calculation results."""
@@ -680,6 +684,9 @@ class ScrapInfo:
     # Percentages
     scrap_percentage: float = 0.0  # Scrap as % of McMaster stock
     utilization_percentage: float = 0.0  # Final part as % of McMaster stock
+
+    # High scrap warning
+    high_scrap_warning: bool = False  # True if scrap_percentage > HIGH_SCRAP_THRESHOLD
 
 
 def calculate_stock_prep_scrap(
@@ -1057,7 +1064,12 @@ def calculate_total_scrap(
     scrap_percentage = (total_scrap_volume / mcmaster_volume * 100) if mcmaster_volume > 0 else 0
     utilization_percentage = (final_part_volume / mcmaster_volume * 100) if mcmaster_volume > 0 else 0
 
+    # Check for high scrap warning
+    high_scrap_warning = scrap_percentage > HIGH_SCRAP_THRESHOLD
+
     if verbose:
+        if high_scrap_warning:
+            print(f"\n*** HIGH SCRAP WARNING: {scrap_percentage:.1f}% exceeds {HIGH_SCRAP_THRESHOLD}% threshold ***")
         print(f"\nScrap Breakdown:")
         print(f"  Stock prep scrap: {stock_prep_scrap:.4f} in³")
         print(f"  Face milling scrap: {machining['face_milling_scrap']:.4f} in³")
@@ -1091,7 +1103,8 @@ def calculate_total_scrap(
         final_part_weight=final_part_weight,
         total_scrap_weight=total_scrap_weight,
         scrap_percentage=scrap_percentage,
-        utilization_percentage=utilization_percentage
+        utilization_percentage=utilization_percentage,
+        high_scrap_warning=high_scrap_warning
     )
 
 

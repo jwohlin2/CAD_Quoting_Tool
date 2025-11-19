@@ -1222,6 +1222,10 @@ class AppV7:
             report.append(f"  Starting Weight: {self._format_weight(stock_info.mcmaster_weight)}")
             report.append(f"  Net Weight: {self._format_weight(stock_info.final_part_weight)}")
             report.append(f"  Scrap Percentage: {scrap_info.scrap_percentage:.1f}%")
+            # Show high scrap warning if applicable
+            if scrap_info.high_scrap_warning:
+                report.append(f"  *** HIGH SCRAP WARNING: {scrap_info.scrap_percentage:.1f}% exceeds 80% threshold ***")
+                report.append(f"      Consider alternate stock or nesting multiple parts if possible.")
             report.append(f"  Scrap Weight: {self._format_weight(scrap_info.total_scrap_weight)}")
 
             if scrap_info.scrap_price_per_lb is not None:
@@ -1671,6 +1675,9 @@ class AppV7:
             report.append(f"  Machining Steps:                 {labor_hours.machining_steps_minutes:>10.2f} minutes")
             report.append(f"  Inspection:                      {labor_hours.inspection_minutes:>10.2f} minutes")
             report.append(f"  Finishing / Deburr:              {labor_hours.finishing_minutes:>10.2f} minutes")
+            # Show misc overhead if non-zero
+            if abs(labor_hours.misc_overhead_minutes) > 0.01:
+                report.append(f"  Misc / Overhead:                 {labor_hours.misc_overhead_minutes:>10.2f} minutes")
             report.append("-" * 74)
             report.append(f"  TOTAL LABOR TIME:                {labor_hours.total_minutes:>10.2f} minutes")
             report.append(f"                                   {labor_hours.total_hours:>10.2f} hours")

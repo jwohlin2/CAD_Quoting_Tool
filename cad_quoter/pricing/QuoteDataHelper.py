@@ -76,6 +76,10 @@ class StockInfo:
     final_part_weight: float = 0.0  # lbs
 
 
+# High scrap threshold (80%) - warn user when exceeded
+HIGH_SCRAP_THRESHOLD = 80.0  # percent
+
+
 @dataclass
 class ScrapInfo:
     """Scrap calculation results."""
@@ -94,6 +98,9 @@ class ScrapInfo:
     scrap_price_per_lb: Optional[float] = None  # $/lb
     scrap_value: float = 0.0  # Total scrap value ($)
     scrap_price_source: str = ""  # e.g., "Wieland aluminum scrap"
+
+    # High scrap warning
+    high_scrap_warning: bool = False  # True if scrap_percentage > HIGH_SCRAP_THRESHOLD
 
 
 @dataclass
@@ -248,6 +255,7 @@ class LaborHoursBreakdown:
     machining_steps_minutes: float = 0.0
     inspection_minutes: float = 0.0
     finishing_minutes: float = 0.0
+    misc_overhead_minutes: float = 0.0  # Any additional overhead not in categories
 
     # Totals
     total_minutes: float = 0.0
@@ -259,6 +267,17 @@ class LaborHoursBreakdown:
     holes_total: int = 0
     tool_changes: int = 0
     fixturing_complexity: int = 1  # 0=none, 1=light, 2=moderate, 3=complex
+
+    def categories_sum(self) -> float:
+        """Return sum of all category minutes."""
+        return (
+            self.setup_minutes +
+            self.programming_minutes +
+            self.machining_steps_minutes +
+            self.inspection_minutes +
+            self.finishing_minutes +
+            self.misc_overhead_minutes
+        )
 
 
 @dataclass
@@ -861,13 +880,27 @@ def extract_quote_data_from_cad(
                 # Set labor hours from punch estimates
                 lh = time_estimates.get("labor_hours", {})
                 punch_labor_hours = lh.get("total_hours", 0.0)
+
+                # Extract individual category minutes
+                setup_min = lh.get("total_setup_minutes", 0.0)
+                programming_min = lh.get("cam_programming_minutes", 0.0)
+                machining_min = lh.get("handling_minutes", 0.0)
+                inspection_min = lh.get("inspection_minutes", 0.0)
+                finishing_min = lh.get("deburring_minutes", 0.0)
+                labor_total = lh.get("total_minutes", 0.0)
+
+                # Calculate visible categories sum and misc overhead
+                visible_sum = setup_min + programming_min + machining_min + inspection_min + finishing_min
+                misc_overhead_min = labor_total - visible_sum
+
                 quote_data.labor_hours = LaborHoursBreakdown(
-                    setup_minutes=lh.get("total_setup_minutes", 0.0),
-                    programming_minutes=lh.get("cam_programming_minutes", 0.0),
-                    machining_steps_minutes=lh.get("handling_minutes", 0.0),
-                    inspection_minutes=lh.get("inspection_minutes", 0.0),
-                    finishing_minutes=lh.get("deburring_minutes", 0.0),
-                    total_minutes=lh.get("total_minutes", 0.0),
+                    setup_minutes=setup_min,
+                    programming_minutes=programming_min,
+                    machining_steps_minutes=machining_min,
+                    inspection_minutes=inspection_min,
+                    finishing_minutes=finishing_min,
+                    misc_overhead_minutes=misc_overhead_min,
+                    total_minutes=labor_total,
                     total_hours=punch_labor_hours,
                     labor_cost=punch_labor_hours * labor_rate,
                 )
@@ -1183,17 +1216,19 @@ def extract_quote_data_from_cad(
     )
 
     # Populate scrap info
+    scrap_pct = scrap_calc.scrap_percentage
     quote_data.scrap_info = ScrapInfo(
         stock_prep_scrap=scrap_calc.stock_prep_scrap,
         face_milling_scrap=scrap_calc.face_milling_scrap,
         hole_drilling_scrap=scrap_calc.hole_drilling_scrap,
         total_scrap_volume=scrap_calc.total_scrap_volume,
         total_scrap_weight=scrap_calc.total_scrap_weight,
-        scrap_percentage=scrap_calc.scrap_percentage,
+        scrap_percentage=scrap_pct,
         utilization_percentage=scrap_calc.utilization_percentage,
         scrap_price_per_lb=scrap_value_calc.get('scrap_price_per_lb'),
         scrap_value=scrap_value_calc.get('scrap_value', 0.0),
-        scrap_price_source=scrap_value_calc.get('price_source', '')
+        scrap_price_source=scrap_value_calc.get('price_source', ''),
+        high_scrap_warning=scrap_pct > HIGH_SCRAP_THRESHOLD
     )
 
     # Calculate direct cost breakdown
@@ -1353,17 +1388,39 @@ def extract_quote_data_from_cad(
         )
 
         # Add plan operation times to totals
-        total_milling_min = plan_machine_times['breakdown_minutes'].get('milling', 0.0)
-        total_grinding_min = plan_machine_times['breakdown_minutes'].get('grinding', 0.0)
+        # Use sum of detailed operations for consistency with displayed breakdown
+        milling_ops_raw = plan_machine_times.get('milling_operations', [])
+        grinding_ops_raw = plan_machine_times.get('grinding_operations', [])
+
+        # Calculate totals from detailed operations (what's displayed in report)
+        total_milling_ops_min = sum(op.get('time_minutes', 0.0) for op in milling_ops_raw)
+        total_grinding_ops_min = sum(op.get('time_minutes', 0.0) for op in grinding_ops_raw)
+
+        # Get breakdown totals (may include non-detailed operations)
+        breakdown_milling_min = plan_machine_times['breakdown_minutes'].get('milling', 0.0)
+        breakdown_grinding_min = plan_machine_times['breakdown_minutes'].get('grinding', 0.0)
         total_edm_min = plan_machine_times['breakdown_minutes'].get('edm', 0.0)
         total_other_min = plan_machine_times['breakdown_minutes'].get('other', 0.0)
 
+        # Any milling/grinding time not in detailed ops goes to "other" for transparency
+        milling_overhead_min = breakdown_milling_min - total_milling_ops_min
+        grinding_overhead_min = breakdown_grinding_min - total_grinding_ops_min
+        total_other_min += milling_overhead_min + grinding_overhead_min
+
+        # Use detailed ops totals for display (ensures Total Milling Time matches ops sum)
+        total_milling_min = total_milling_ops_min
+        total_grinding_min = total_grinding_ops_min
+
+        # Sanity check: totals should match
+        assert abs(total_milling_min - total_milling_ops_min) < 0.01, \
+            f"Milling time mismatch: {total_milling_min:.2f} vs ops sum {total_milling_ops_min:.2f}"
+
         # Convert detailed operations to dataclass objects
         milling_ops = [
-            MillingOperation(**op) for op in plan_machine_times.get('milling_operations', [])
+            MillingOperation(**op) for op in milling_ops_raw
         ]
         grinding_ops = [
-            GrindingOperation(**op) for op in plan_machine_times.get('grinding_operations', [])
+            GrindingOperation(**op) for op in grinding_ops_raw
         ]
 
         # Calculate CMM inspection time (split between labor setup and machine checking)
