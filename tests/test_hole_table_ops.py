@@ -171,3 +171,55 @@ class TestThreadValidation:
         assert THREAD_MAJOR_DIAMETERS["5/16"] == 0.3125
         assert THREAD_MAJOR_DIAMETERS["3/8"] == 0.3750
         assert THREAD_MAJOR_DIAMETERS["#10"] == 0.1900
+
+
+class TestTPISanityCheck:
+    """Tests for TPI sanity check (guard against bogus high TPI on larger taps)."""
+
+    def test_high_tpi_on_large_tap_triggers_guard(self):
+        """TPI > 40 on diameter > 0.19\" should trigger sanity check."""
+        # 1/4-80 TAP is suspicious - 1/4" tap shouldn't have 80 TPI
+        # Should be corrected by validate_and_correct_thread
+        major, tpi, corrected = validate_and_correct_thread("1/4", 80)
+        assert major == "1/4"
+        assert tpi == 32  # Corrected to finest standard (closest to 80 from [20, 28, 32])
+        assert corrected is True
+
+    def test_high_tpi_on_small_tap_allowed(self):
+        """TPI > 40 on small diameter (<=0.19\") should be allowed (e.g., #0-80)."""
+        # #0-80 is valid (diameter = 0.0600", TPI = 80)
+        major, tpi, corrected = validate_and_correct_thread("#0", 80)
+        assert major == "#0"
+        assert tpi == 80  # Should NOT be corrected - this is valid
+        assert corrected is False
+
+    def test_reasonable_tpi_on_large_tap_allowed(self):
+        """TPI <= 40 on large diameter should be allowed."""
+        # 1/4-20 is valid coarse thread
+        major, tpi, corrected = validate_and_correct_thread("1/4", 20)
+        assert major == "1/4"
+        assert tpi == 20
+        assert corrected is False
+
+        # 5/16-32 is valid extra-fine thread
+        major, tpi, corrected = validate_and_correct_thread("5/16", 32)
+        assert major == "5/16"
+        assert tpi == 32
+        assert corrected is False
+
+    def test_tpi_sanity_examples(self):
+        """Test specific examples of bogus vs valid TPI."""
+        # BOGUS: 5/16-80 TAP (should be 18, 24, or 32)
+        major, tpi, corrected = validate_and_correct_thread("5/16", 80)
+        assert corrected is True
+        assert tpi == 32  # Closest to 80 from [18, 24, 32]
+
+        # VALID: #10-32 TAP (standard fine thread)
+        major, tpi, corrected = validate_and_correct_thread("#10", 32)
+        assert corrected is False
+        assert tpi == 32
+
+        # VALID: #2-64 TAP (standard fine thread for small diameter)
+        major, tpi, corrected = validate_and_correct_thread("#2", 64)
+        assert corrected is False
+        assert tpi == 64

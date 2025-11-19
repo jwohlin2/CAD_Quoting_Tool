@@ -3734,6 +3734,30 @@ def estimate_hole_table_times(
                         tap_major_dia = ref_dia
                         tpi = 20  # Default TPI
 
+            # Sanity check: guard against bogus high TPI on larger taps
+            # If TPI > 40 and tap_major_dia > 0.19", mark "CHECK TPI" and fall back to default
+            if tpi > 40 and tap_major_dia > 0.19:
+                import logging
+                logging.debug(
+                    f"CHECK TPI (drill calc): Suspicious TPI {tpi} for tap diameter {tap_major_dia:.3f}\". "
+                    f"Falling back to default coarse thread."
+                )
+                # Fall back to coarse (first) TPI for this nominal size
+                # Need to determine the nominal size for lookup
+                # Check if we have major_str from earlier parsing
+                if 'major_str' in locals() and major_str in STANDARD_THREADS:
+                    tpi = STANDARD_THREADS[major_str][0]
+                    logging.debug(f"Using default TPI {tpi} for {major_str}")
+                else:
+                    # Conservative fallback based on diameter
+                    if tap_major_dia <= 0.25:
+                        tpi = 20
+                    elif tap_major_dia <= 0.5:
+                        tpi = 13
+                    else:
+                        tpi = 10
+                    logging.debug(f"Using conservative TPI {tpi} based on diameter {tap_major_dia:.3f}\"")
+
             # Calculate tap drill diameter: major_dia - (1/TPI)
             # This gives approximately 75% thread engagement
             tap_drill_dia = tap_major_dia - (1.0 / tpi) if tpi > 0 else tap_major_dia * 0.8
@@ -3936,6 +3960,23 @@ def estimate_hole_table_times(
                 tap_depth = thickness
 
             is_rigid = 'RIGID' in combined_text
+
+            # Sanity check: guard against bogus high TPI on larger taps
+            # If TPI > 40 and tap_dia > 0.19", mark "CHECK TPI" and fall back to default
+            if tpi > 40 and tap_dia > 0.19:
+                import logging
+                logging.debug(
+                    f"CHECK TPI: {major_str}-{tpi} has suspicious TPI {tpi} for diameter {tap_dia:.3f}\". "
+                    f"Falling back to default coarse thread."
+                )
+                # Fall back to coarse (first) TPI for this nominal size
+                if major_str in STANDARD_THREADS:
+                    tpi = STANDARD_THREADS[major_str][0]
+                    logging.debug(f"Using default TPI {tpi} for {major_str}")
+                else:
+                    # If not in standard threads, use conservative estimate
+                    tpi = 20
+                    logging.debug(f"Using conservative TPI {tpi} for non-standard size")
 
             # Look up material-specific tapping speeds/feeds
             sf_tap = get_speeds_feeds(material, "Tapping")
