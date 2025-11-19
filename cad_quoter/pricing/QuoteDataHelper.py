@@ -1216,6 +1216,29 @@ def extract_quote_data_from_cad(
                 print(f"  ✓ Estimated price from weight: ${mcmaster_price:.2f}")
                 print(f"     ({source})")
 
+    # Final fallback: if all estimation methods failed, use default price per lb × weight
+    if mcmaster_price is None:
+        if verbose:
+            print(f"  All price estimation methods failed")
+            print(f"  Using fallback: default price per lb × stock weight...")
+
+        from cad_quoter.pricing.materials import resolve_material_unit_price
+
+        # Get fallback price per lb for this material
+        fallback_price_per_lb, price_source = resolve_material_unit_price(material, unit="lb")
+
+        # Calculate price based on stock weight
+        stock_weight = scrap_calc.mcmaster_weight
+        if stock_weight and stock_weight > 0:
+            # Apply a factor to account for processing costs and typical markup
+            WEIGHT_PRICE_FACTOR = 1.5  # 50% markup over raw material cost
+            mcmaster_price = round(stock_weight * fallback_price_per_lb * WEIGHT_PRICE_FACTOR, 2)
+            price_is_estimated = True
+            if verbose:
+                print(f"  ✓ Fallback price: ${mcmaster_price:.2f}")
+                print(f"     (${fallback_price_per_lb:.2f}/lb × {stock_weight:.2f} lb × {WEIGHT_PRICE_FACTOR} factor)")
+                print(f"     (source: {price_source})")
+
     # Populate stock info
     # Use McMaster dimensions from scrap_calc (which already did the catalog lookup)
     quote_data.stock_info = StockInfo(

@@ -3263,6 +3263,10 @@ def estimate_hole_table_times(
         # Use OPERATION if available, otherwise use DESCRIPTION
         op_text = operation if operation else description
 
+        # For TAP detection, check both fields since description may contain TAP info
+        # even when OPERATION doesn't (e.g., compressed hole tables)
+        combined_text = f"{operation} {description}".upper()
+
         # Parse diameter - match decimal after ∅ symbol or standalone
         dia_match = re.search(r'[∅Ø]\s*(\d*\.\d+)', ref_diam_str)
         if not dia_match:
@@ -3277,9 +3281,10 @@ def estimate_hole_table_times(
             ref_dia = float(dia_match.group(1))
 
         # Determine operation type
+        # Use combined_text for TAP detection to catch TAP info in description field
         is_jig_grind = 'JIG GRIND' in op_text
         is_thru = 'THRU' in op_text
-        is_tap = 'TAP' in op_text
+        is_tap = 'TAP' in combined_text  # Check both OPERATION and DESCRIPTION for TAP
         is_cbore = "C'BORE" in op_text or 'CBORE' in op_text or 'COUNTERBORE' in op_text
         is_cdrill = "C'DRILL" in op_text or 'CDRILL' in op_text or 'CENTER DRILL' in op_text
         is_for_edm = 'FOR WIRE EDM' in op_text or 'FOR EDM' in op_text or 'WIRE EDM' in op_text
@@ -3314,8 +3319,9 @@ def estimate_hole_table_times(
 
         # DRILL operations (main hole) - skip if it's a jig grind or standalone cbore
         # C'BORE entries should not be added to drill_groups (they go in cbore_groups)
+        # C'DRILL entries should not be added to drill_groups (they go in cdrill_groups)
         # TAP entries need a drill operation first (tap drill hole), then tapping
-        if not is_jig_grind and not is_cbore and not is_tap:
+        if not is_jig_grind and not is_cbore and not is_tap and not is_cdrill:
             # Time per hole: depth / feed_rate gives minutes (since feed_rate is IPM)
             time_per_hole = (depth / feed_rate) if feed_rate > 0 else 1.0
             time_per_hole += 0.1  # Add approach/retract time
@@ -3342,7 +3348,8 @@ def estimate_hole_table_times(
         # Calculate tap drill diameter from tap size (major_dia - 1/TPI)
         if is_tap:
             # Extract tap size to calculate tap drill diameter
-            tap_match = re.search(r'(\d+/\d+)-(\d+)', op_text)
+            # Use combined_text to find tap spec in either OPERATION or DESCRIPTION
+            tap_match = re.search(r'(\d+/\d+)-(\d+)', combined_text)
             if tap_match:
                 # Fractional tap (e.g., 5/16-18)
                 frac_parts = tap_match.group(1).split('/')
@@ -3350,7 +3357,7 @@ def estimate_hole_table_times(
                 tpi = int(tap_match.group(2))
             else:
                 # Try #10-32 format
-                num_tap_match = re.search(r'#(\d+)-(\d+)', op_text)
+                num_tap_match = re.search(r'#(\d+)-(\d+)', combined_text)
                 if num_tap_match:
                     screw_num = int(num_tap_match.group(1))
                     tap_major_dia = 0.060 + (screw_num * 0.013)
@@ -3365,11 +3372,11 @@ def estimate_hole_table_times(
             tap_drill_dia = max(tap_drill_dia, 0.05)  # Minimum drill size
 
             # Determine drill depth for tap drill
-            if is_thru or 'TAP THRU' in op_text:
+            if is_thru or 'TAP THRU' in combined_text:
                 tap_drill_depth = thickness if thickness > 0 else 2.0
             else:
                 # Extract depth from "TAP X {number} DEEP"
-                tap_depth_match = re.search(r'[TAP\s+]*X\s+(\d*\.\d+|\d+)\s+DEEP', op_text)
+                tap_depth_match = re.search(r'[TAP\s+]*X\s+(\d*\.\d+|\d+)\s+DEEP', combined_text)
                 if tap_depth_match:
                     tap_drill_depth = float(tap_depth_match.group(1)) + 0.1  # Drill slightly deeper than tap
                 else:
@@ -3457,8 +3464,8 @@ def estimate_hole_table_times(
 
         # TAP operations
         if is_tap:
-            # Extract tap size
-            tap_match = re.search(r'(\d+/\d+)-(\d+)', op_text)
+            # Extract tap size - use combined_text to find tap spec
+            tap_match = re.search(r'(\d+/\d+)-(\d+)', combined_text)
             if tap_match:
                 # Fractional tap (e.g., 5/8-11)
                 frac_parts = tap_match.group(1).split('/')
@@ -3466,7 +3473,7 @@ def estimate_hole_table_times(
                 tpi = int(tap_match.group(2))
             else:
                 # Try #10-32 format
-                num_tap_match = re.search(r'#(\d+)-(\d+)', op_text)
+                num_tap_match = re.search(r'#(\d+)-(\d+)', combined_text)
                 if num_tap_match:
                     # #10 screw ≈ 0.190"
                     screw_num = int(num_tap_match.group(1))
@@ -3477,15 +3484,15 @@ def estimate_hole_table_times(
                     tpi = int(20 / tap_dia) if tap_dia > 0 else 20
 
             # Extract TAP depth - look for "TAP X {number} DEEP" or "X {number} DEEP"
-            tap_depth_match = re.search(r'[TAP\s+]*X\s+(\d*\.\d+|\d+)\s+DEEP', op_text)
+            tap_depth_match = re.search(r'[TAP\s+]*X\s+(\d*\.\d+|\d+)\s+DEEP', combined_text)
             if tap_depth_match:
                 tap_depth = float(tap_depth_match.group(1))
-            elif 'TAP THRU' in op_text or is_thru:
+            elif 'TAP THRU' in combined_text or is_thru:
                 tap_depth = thickness if thickness > 0 else 2.0
             else:
                 tap_depth = 0.5  # Default
 
-            is_rigid = 'RIGID' in op_text
+            is_rigid = 'RIGID' in combined_text
 
             # Look up material-specific tapping speeds/feeds
             sf_tap = get_speeds_feeds(material, "Tapping")
