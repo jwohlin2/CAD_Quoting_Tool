@@ -3285,8 +3285,9 @@ def estimate_hole_table_times(
         is_jig_grind = 'JIG GRIND' in op_text
         is_thru = 'THRU' in op_text
         is_tap = 'TAP' in combined_text  # Check both OPERATION and DESCRIPTION for TAP
-        is_cbore = "C'BORE" in op_text or 'CBORE' in op_text or 'COUNTERBORE' in op_text
-        is_cdrill = "C'DRILL" in op_text or 'CDRILL' in op_text or 'CENTER DRILL' in op_text
+        # Handle both straight apostrophe (') and curly apostrophe (') for C'BORE/C'DRILL
+        is_cbore = "C'BORE" in op_text or "C\u2019BORE" in op_text or 'CBORE' in op_text or 'COUNTERBORE' in op_text
+        is_cdrill = "C'DRILL" in op_text or "C\u2019DRILL" in op_text or 'CDRILL' in op_text or 'CENTER DRILL' in op_text
         is_for_edm = 'FOR WIRE EDM' in op_text or 'FOR EDM' in op_text or 'WIRE EDM' in op_text
 
         # Determine depth for drilling operation
@@ -3559,7 +3560,8 @@ def estimate_hole_table_times(
                         cbore_dia = float(cbore_dia_match.group(1)) / float(cbore_dia_match.group(2))
 
             # Extract counterbore depth - look for "X {number} DEEP"
-            cbore_depth_match = re.search(r'X\s+(\d*\.\d+|\d+)\s+DEEP', op_text)
+            # Handle both x/X and × (multiplication sign U+00D7)
+            cbore_depth_match = re.search(r'[Xx×]\s+(\d*\.\d+|\d+)\s+DEEP', op_text)
             if cbore_depth_match:
                 cbore_depth = float(cbore_depth_match.group(1))
             else:
@@ -3602,7 +3604,8 @@ def estimate_hole_table_times(
         # CENTER DRILL operations
         if is_cdrill:
             # Extract center drill depth if specified
-            cdrill_depth_match = re.search(r'[Xx]\s+(\d*\.\d+|\d+)\s+DEEP', op_text)
+            # Handle both x/X and × (multiplication sign U+00D7)
+            cdrill_depth_match = re.search(r'[Xx×]\s+(\d*\.\d+|\d+)\s+DEEP', op_text)
             if cdrill_depth_match:
                 cdrill_depth = float(cdrill_depth_match.group(1))
             else:

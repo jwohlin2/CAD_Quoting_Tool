@@ -533,7 +533,29 @@ def explode_rows_to_operations(text_rows: Iterable[str]) -> List[List[str]]:
     header_rows, body_rows = split_header_body(rows)
     holes = parse_header(header_rows)
     body_blob = prepare_body_blob(body_rows)
-    matches = list(DIAMETER_TOKEN_RE.finditer(body_blob))
+    all_matches = list(DIAMETER_TOKEN_RE.finditer(body_blob))
+    if not all_matches:
+        return []
+
+    # Filter out diameter tokens that appear in drill bit size notation like "#43 (Ø.089)"
+    # These are informational, not operation markers
+    # But preserve legitimate hole references like "Q"(Ø.332) which indicate hole ID and diameter
+    matches = []
+    for m in all_matches:
+        start = m.start()
+        end = m.end()
+        # Check if this diameter token is inside parentheses
+        before = body_blob[:start].rstrip()
+        after = body_blob[end:].lstrip()
+        if before.endswith('(') and after.startswith(')'):
+            # Check if this is drill bit size notation: #<number> (<Ø...>)
+            # Look for pattern like "#43 (" or "#7 (" before
+            drill_bit_pattern = re.search(r'#\d+\s*$', before.rstrip('(').rstrip())
+            if drill_bit_pattern:
+                # This is drill bit size notation - skip it
+                continue
+            # Otherwise keep it (e.g., "Q"(Ø.332) is a hole reference)
+        matches.append(m)
     if not matches:
         return []
     ops: Dict[str, List[List[str]]] = {}
