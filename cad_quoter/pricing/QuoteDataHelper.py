@@ -552,10 +552,17 @@ def extract_punch_quote_data(
             if verbose:
                 print(f"  Using cached text ({len(text_lines)} lines) from plan")
         else:
-            # Extract text from DXF
+            # Extract text from DXF - use cached DXF path if available
             from cad_quoter.geo_extractor import open_doc, collect_all_text
 
-            doc = open_doc(cad_file_path)
+            # Use cached DXF to avoid ODA conversion
+            doc_path = cad_file_path
+            if plan and plan.get('cached_dxf_path'):
+                doc_path = Path(plan['cached_dxf_path'])
+                if verbose:
+                    print(f"  Using cached DXF for text extraction: {doc_path.name}")
+
+            doc = open_doc(doc_path)
             text_records = list(collect_all_text(doc))
             text_lines = [rec["text"] for rec in text_records if rec.get("text")]
             text_dump = "\n".join(text_lines)
@@ -796,9 +803,11 @@ def extract_quote_data_from_cad(
                             if verbose:
                                 print("  [PUNCH] Cached dimensions are zero, DimensionFinder also failed")
                     else:
-                        # No cached dims, fall back to extraction (will trigger ODA conversion)
+                        # No cached dims, fall back to extraction - use cached DXF if available
                         from cad_quoter.planning.process_planner import extract_dimensions_from_cad
-                        dims = extract_dimensions_from_cad(cad_file_path)
+                        # Use cached DXF path to avoid ODA conversion
+                        dim_path = plan.get('cached_dxf_path', cad_file_path) if plan else cad_file_path
+                        dims = extract_dimensions_from_cad(dim_path)
                         if dims:
                             L, W, T = dims
                             quote_data.part_dimensions = PartDimensions(
