@@ -1959,7 +1959,8 @@ def programming_minutes(i: LaborInputs) -> float:
     Calculate Programming / Prove-out labor minutes.
 
     Programming minutes =
-        1·holes_total
+        base (10 min if any machine ops, else 0)
+      + 1·holes_total
       + 2·edm_window_count
       + 2·thread_mill
       + 2·jig_grind_bore_qty
@@ -1968,9 +1969,24 @@ def programming_minutes(i: LaborInputs) -> float:
 
     Note: Holes appear here and in Inspection by design. If you consider that
     "double counting" across buckets, set the `holes_total` term to 0 here.
+
+    The base minimum (10 min) ensures that any part with machining operations
+    gets at least basic programming/prove-out time for tool offsets, program
+    verification, and first article setup - even if there are no holes.
     """
+    # Base programming time: 10 minutes if there are any machine operations
+    # This covers basic program setup, tool offsets, and prove-out for turned/ground parts
+    has_machine_ops = (
+        i.ops_total > 0 or
+        i.grind_face_pairs > 0 or
+        i.edm_window_count > 0 or
+        i.tool_changes > 0
+    )
+    base_programming = 10 if has_machine_ops else 0
+
     return (
-        1 * i.holes_total
+        base_programming
+        + 1 * i.holes_total
         + 2 * i.edm_window_count
         + 2 * i.thread_mill
         + 2 * i.jig_grind_bore_qty
