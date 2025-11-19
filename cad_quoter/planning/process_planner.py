@@ -4403,6 +4403,11 @@ class PunchPlannerParams:
     body_thickness_in: Optional[float] = None
     num_ground_diams: int = 0
     total_ground_length_in: float = 0.0
+    # Turning time model parameters (round parts)
+    shank_length: float = 0.0  # Length of major diameter section
+    pilot_length: float = 0.0  # Length of minor/pilot diameter section
+    shoulder_count: int = 0  # Number of diameter transitions
+    flange_thickness: float = 0.0  # Flange/head thickness (if present)
     tap_count: int = 0
     tap_summary: list = None
     num_chamfers: int = 0

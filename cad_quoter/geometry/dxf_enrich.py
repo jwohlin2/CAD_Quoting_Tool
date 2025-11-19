@@ -1357,6 +1357,11 @@ class PunchFeatureSummary:
     form_length_in: Optional[float] = None
     num_ground_diams: int = 0
     total_ground_length_in: float = 0.0
+    # Turning time model parameters (round parts)
+    shank_length: float = 0.0  # Length of major diameter section
+    pilot_length: float = 0.0  # Length of minor/pilot diameter section
+    shoulder_count: int = 0  # Number of diameter transitions
+    flange_thickness: float = 0.0  # Flange/head thickness (if present)
     has_perp_face_grind: bool = False
     has_3d_surface: bool = False
     form_complexity_level: int = 0
@@ -1940,6 +1945,28 @@ def extract_punch_features_from_dxf(dxf_path: Path, text_dump: str) -> PunchFeat
 
     ground_fraction = 0.3 if summary.family == "form_punch" else (0.7 if summary.num_ground_diams > 2 else 0.5)
     summary.total_ground_length_in = summary.overall_length_in * ground_fraction
+
+    # Calculate turning time model parameters for round parts
+    if summary.shape_type == "round" and summary.overall_length_in > 0:
+        # shoulder_count: number of diameter transitions (one less than number of diameters)
+        summary.shoulder_count = max(0, summary.num_ground_diams - 1)
+
+        # For round parts, estimate shank/pilot split based on number of diameters
+        if summary.num_ground_diams >= 2:
+            # Multi-diameter part: assume 60% shank, 40% pilot
+            summary.shank_length = summary.overall_length_in * 0.60
+            summary.pilot_length = summary.overall_length_in * 0.40
+        elif summary.num_ground_diams == 1:
+            # Single diameter: all shank, no pilot
+            summary.shank_length = summary.overall_length_in
+            summary.pilot_length = 0.0
+        else:
+            # No diameters specified: conservative split
+            summary.shank_length = summary.overall_length_in * 0.70
+            summary.pilot_length = summary.overall_length_in * 0.30
+
+        # flange_thickness: default to 0 (could be enhanced with geometry analysis)
+        summary.flange_thickness = 0.0
 
     ops_features = detect_punch_ops_features(text_dump)
     summary.num_chamfers = ops_features["num_chamfers"]
