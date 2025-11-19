@@ -3351,7 +3351,8 @@ def estimate_hole_table_times(
         # Handle both straight apostrophe (') and curly apostrophe (') for C'BORE/C'DRILL
         is_cbore = "C'BORE" in op_text or "C\u2019BORE" in op_text or 'CBORE' in op_text or 'COUNTERBORE' in op_text
         is_cdrill = "C'DRILL" in op_text or "C\u2019DRILL" in op_text or 'CDRILL' in op_text or 'CENTER DRILL' in op_text
-        is_for_edm = 'FOR WIRE EDM' in op_text or 'FOR EDM' in op_text or 'WIRE EDM' in op_text
+        # Check combined_text for EDM to catch "FOR WIRE EDM" in either OPERATION or DESCRIPTION field
+        is_for_edm = 'FOR WIRE EDM' in combined_text or 'FOR EDM' in combined_text or 'WIRE EDM' in combined_text
 
         # Determine depth for drilling operation
         if is_thru and not is_jig_grind:

@@ -203,6 +203,7 @@ class MachineHoursBreakdown:
     cbore_operations: Optional[List[HoleOperation]] = None
     cdrill_operations: Optional[List[HoleOperation]] = None
     jig_grind_operations: Optional[List[HoleOperation]] = None
+    edm_operations: Optional[List[HoleOperation]] = None
 
     # Operations by type (plan operations)
     milling_operations: Optional[List[MillingOperation]] = None
@@ -223,6 +224,7 @@ class MachineHoursBreakdown:
     total_cmm_minutes: float = 0.0  # CMM checking time (machine only, setup is in labor)
     cmm_holes_checked: int = 0  # Number of holes inspected by CMM
     holes_total: int = 0  # Total number of holes from hole table (sum of QTY)
+    hole_entries: int = 0  # Count of unique hole groups (A, B, C, etc.) from hole table
 
     # Overall totals
     total_minutes: float = 0.0
@@ -241,6 +243,8 @@ class MachineHoursBreakdown:
             self.cdrill_operations = []
         if self.jig_grind_operations is None:
             self.jig_grind_operations = []
+        if self.edm_operations is None:
+            self.edm_operations = []
         if self.milling_operations is None:
             self.milling_operations = []
         if self.grinding_operations is None:
@@ -390,7 +394,7 @@ class QuoteData:
             # Convert hole operations lists
             machine_data = data['machine_hours']
             for key in ['drill_operations', 'tap_operations', 'cbore_operations',
-                       'cdrill_operations', 'jig_grind_operations']:
+                       'cdrill_operations', 'jig_grind_operations', 'edm_operations']:
                 if key in machine_data and isinstance(machine_data[key], list):
                     machine_data[key] = [HoleOperation(**op) if isinstance(op, dict) else op
                                         for op in machine_data[key]]
@@ -1319,7 +1323,10 @@ def extract_quote_data_from_cad(
         else:
             hole_table = extract_hole_operations_from_cad(cad_file_path)
 
-        # Calculate total hole count (sum QTY field from each hole entry)
+        # Calculate hole counts
+        # hole_entries = count of unique hole groups (A, B, C, etc.)
+        # holes_total = sum of QTY field from each hole entry (total individual holes)
+        hole_entries = len(hole_table) if hole_table else 0
         holes_total = sum(int(hole.get('QTY', 1)) for hole in hole_table) if hole_table else 0
 
         # Initialize time accumulators
@@ -1338,6 +1345,7 @@ def extract_quote_data_from_cad(
         cbore_ops = []
         cdrill_ops = []
         jig_grind_ops = []
+        edm_ops = []
 
         if hole_table:
             times = estimate_hole_table_times(hole_table, material, part_info.thickness)
@@ -1412,6 +1420,19 @@ def extract_quote_data_from_cad(
                     total_time=g['total_time']
                 )
                 for g in times.get('jig_grind_groups', [])
+            ]
+
+            edm_ops = [
+                HoleOperation(
+                    hole_id=g['hole_id'],
+                    diameter=g['diameter'],
+                    depth=g['depth'],  # This is the thickness for EDM
+                    qty=g['qty'],
+                    operation_type='edm',
+                    time_per_hole=g['time_per_hole'],
+                    total_time=g['total_time']
+                )
+                for g in times.get('edm_groups', [])
             ]
 
             # Accumulate hole operation times
@@ -1511,6 +1532,7 @@ def extract_quote_data_from_cad(
             cbore_operations=cbore_ops,
             cdrill_operations=cdrill_ops,
             jig_grind_operations=jig_grind_ops,
+            edm_operations=edm_ops,
             milling_operations=milling_ops,
             grinding_operations=grinding_ops,
             total_drill_minutes=total_drill_min,
@@ -1525,6 +1547,7 @@ def extract_quote_data_from_cad(
             total_cmm_minutes=cmm_checking_machine_min,
             cmm_holes_checked=cmm_holes_checked,
             holes_total=holes_total,
+            hole_entries=hole_entries,
             total_minutes=grand_total_minutes,
             total_hours=grand_total_hours,
             machine_cost=machine_cost
