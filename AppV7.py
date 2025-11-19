@@ -540,8 +540,9 @@ class AppV7:
         self.status_bar.pack(side=tk.BOTTOM, fill=tk.X)
 
     def _clear_cad_cache(self) -> None:
-        """Clear cached CAD extraction results (QuoteData)."""
+        """Clear cached CAD extraction results (QuoteData and DXF path)."""
         self._cached_quote_data = None
+        self._cached_dxf_path = None  # Clear cached DXF conversion
         print("[AppV7] Cleared CAD extraction cache")
 
     def _get_ocr_cache_path(self, cad_file_path: str) -> Path:
@@ -663,8 +664,11 @@ class AppV7:
             family_override = self._get_part_family()
 
             try:
+                # Use cached DXF path if available to avoid redundant ODA conversion
+                cad_path_for_quote = self._cached_dxf_path if hasattr(self, '_cached_dxf_path') and self._cached_dxf_path else self.cad_file_path
+
                 self._cached_quote_data = extract_quote_data_from_cad(
-                    cad_file_path=self.cad_file_path,
+                    cad_file_path=cad_path_for_quote,
                     machine_rate=machine_rate,
                     labor_rate=labor_rate,
                     margin_rate=margin_rate,
@@ -1072,8 +1076,25 @@ class AppV7:
                 # Reset previous quote inputs so cache will be regenerated
                 self._previous_quote_inputs = None
 
-                # Load and extract hole table data
-                self._extract_and_display_hole_table(filename)
+                # Pre-convert DWG to DXF once to avoid multiple ODA converter invocations
+                # This cached path will be used for hole table extraction AND quote generation
+                file_for_extraction = filename
+                if filename.lower().endswith('.dwg'):
+                    try:
+                        from cad_quoter.geometry import convert_dwg_to_dxf
+                        self.status_bar.config(text=f"Converting DWG to DXF (one-time)...")
+                        self.root.update_idletasks()
+                        dxf_path = convert_dwg_to_dxf(filename)
+                        if dxf_path:
+                            self._cached_dxf_path = dxf_path
+                            file_for_extraction = dxf_path
+                            print(f"[AppV7] Cached DXF conversion: {Path(dxf_path).name}")
+                    except Exception as e:
+                        print(f"[AppV7] DWG conversion failed, will retry per-function: {e}")
+                        # Fall back to original - each function will try its own conversion
+
+                # Load and extract hole table data using cached DXF if available
+                self._extract_and_display_hole_table(file_for_extraction)
 
                 # Check for existing drawing image (fast, <1ms)
                 has_existing_image = self._find_existing_drawing_image(filename)
