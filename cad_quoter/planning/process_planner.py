@@ -65,7 +65,20 @@ def plan_job(family: str, params: Dict[str, Any]) -> Dict[str, Any]:
             family = matched
         else:
             raise ValueError(f"Unsupported family '{family}'. Known: {sorted(PLANNERS)}")
+
+    # Validate family classification and potentially correct it
+    corrected_family, classification_warning = _validate_family_classification(family, params)
+    if corrected_family != family:
+        family = corrected_family
+
     plan = PLANNERS[family](params)
+
+    # Add classification warning if present
+    if classification_warning:
+        plan_dict = normalize_plan(plan)
+        plan_dict.setdefault("warnings", []).append(classification_warning)
+        return plan_dict
+
     return normalize_plan(plan)
 
 # ---------------------------------------------------------------------------
@@ -176,6 +189,168 @@ def derive_directs(plan_dict: Dict[str, Any]) -> None:
     # hardware flag is left to caller to set explicitly or via hole semantics
 
 
+def _validate_thickness_removal(
+    stock_thk: float,
+    finished_thk: float,
+    rough_mill_thk: float,
+    grind_thk_total: float,
+    context: str = ""
+) -> Optional[str]:
+    """Validate thickness removal consistency.
+
+    Args:
+        stock_thk: Starting stock thickness (inches)
+        finished_thk: Final finished thickness (inches)
+        rough_mill_thk: Thickness removed by rough milling (inches)
+        grind_thk_total: Thickness removed by grinding (inches)
+        context: Context string for the warning message
+
+    Returns:
+        Warning message if mismatch > 0.050", None otherwise
+    """
+    modeled_removed = rough_mill_thk + grind_thk_total
+    actual_removed = stock_thk - finished_thk
+    difference = abs(actual_removed - modeled_removed)
+
+    if difference > 0.050:
+        warning = (
+            f"THICKNESS REMOVAL MISMATCH{' (' + context + ')' if context else ''}: "
+            f"|actual_removed - modeled_removed| = {difference:.4f}\" > 0.050\"\n"
+            f"  stock_thk={stock_thk:.4f}\", finished_thk={finished_thk:.4f}\"\n"
+            f"  rough_mill_thk={rough_mill_thk:.4f}\", grind_thk_total={grind_thk_total:.4f}\"\n"
+            f"  actual_removed={actual_removed:.4f}\", modeled_removed={modeled_removed:.4f}\""
+        )
+        print(f"DEBUG: {warning}")
+        return warning
+
+    # Debug output even when no warning
+    print(f"DEBUG: Thickness removal validation{' (' + context + ')' if context else ''}:")
+    print(f"  stock_thk={stock_thk:.4f}\", finished_thk={finished_thk:.4f}\"")
+    print(f"  rough_mill_thk={rough_mill_thk:.4f}\", grind_thk_total={grind_thk_total:.4f}\"")
+    print(f"  actual_removed={actual_removed:.4f}\", modeled_removed={modeled_removed:.4f}\"")
+    print(f"  difference={difference:.4f}\" (OK)")
+
+    return None
+
+
+def _has_cylindrical_feature(params: Dict[str, Any], min_length_threshold: float = 0.25) -> bool:
+    """Check if part has cylindrical features long enough to warrant turning operations.
+
+    Args:
+        params: Part parameters dictionary
+        min_length_threshold: Minimum cylindrical section length (inches) to qualify
+
+    Returns:
+        True if part has at least one cylindrical section with length > threshold
+    """
+    # Check for round shape type (punch family)
+    if params.get("shape_type") == "round":
+        # Check if there are ground diameters with sufficient length
+        num_diams = params.get("num_ground_diams", 0)
+        total_ground_length = params.get("total_ground_length_in", 0.0)
+        if num_diams > 0 and total_ground_length > min_length_threshold:
+            return True
+
+    # Check for explicit cylindrical sections in feature map
+    feature_map = params.get("feature_map", {})
+    if feature_map:
+        cylindrical_sections = feature_map.get("cylindrical_sections", [])
+        for section in cylindrical_sections:
+            section_length = section.get("length", 0.0)
+            if section_length > min_length_threshold:
+                return True
+
+    # Check for OD dimensions that suggest cylindrical geometry
+    max_od = params.get("max_od_or_width_in", 0.0)
+    overall_length = params.get("overall_length_in", 0.0)
+    if max_od > 0 and overall_length > min_length_threshold:
+        # If we have a diameter and sufficient length, might be cylindrical
+        # But only if not explicitly classified as rectangular
+        has_width_thickness = (
+            params.get("body_width_in") is not None or
+            params.get("width_in") is not None
+        )
+        if not has_width_thickness:
+            return True
+
+    return False
+
+
+def _validate_family_classification(family: str, params: Dict[str, Any]) -> Tuple[str, Optional[str]]:
+    """Validate and potentially correct family classification based on geometry and features.
+
+    Family classification guards:
+    - If thickness < min(length, width) AND no long cylindrical shaft AND
+      majority ops are drilling/EDM/milling on a rectangular profile
+      → classify as "die_section" / "block_plate", not "form_punch" or "round_punch"
+
+    Args:
+        family: Proposed family classification
+        params: Part parameters dictionary
+
+    Returns:
+        Tuple of (corrected_family, warning_message)
+    """
+    # Extract dimensions based on family type
+    if family in ["Punches", "punch", "round_punch", "form_punch"]:
+        # For punches, check if this should actually be a block/plate
+        length = params.get("overall_length_in", 0.0)
+        width = params.get("max_od_or_width_in", 0.0) or params.get("body_width_in", 0.0)
+        thickness = params.get("body_thickness_in", 0.0)
+
+        # If no thickness specified, might be round - use diameter as "thickness"
+        if thickness == 0.0 and params.get("shape_type") == "round":
+            thickness = width  # For round parts, OD is effectively the "thickness"
+
+    elif family in ["Sections_blocks", "die_section", "cam_or_hemmer"]:
+        length = params.get("length_in", 0.0) or params.get("L", 0.0)
+        width = params.get("width_in", 0.0) or params.get("W", 0.0)
+        thickness = params.get("thickness_in", 0.0) or params.get("T", 0.0)
+
+    elif family in ["Plates", "die_plate"]:
+        length = params.get("L", 0.0) or params.get("length", 0.0)
+        width = params.get("W", 0.0) or params.get("width", 0.0)
+        thickness = params.get("T", 0.0) or params.get("thickness", 0.0)
+
+    else:
+        # Unknown family, can't validate
+        return family, None
+
+    # Skip validation if dimensions are missing
+    if length == 0.0 or width == 0.0 or thickness == 0.0:
+        return family, None
+
+    # Check if this looks like a block/plate (thickness < min(length, width))
+    min_planar_dim = min(length, width)
+    is_plate_like = thickness < min_planar_dim
+
+    # Check for cylindrical features
+    has_cylindrical = _has_cylindrical_feature(params, min_length_threshold=0.25)
+
+    # Check for rectangular/plate operations
+    has_drilling = params.get("hole_count", 0) > 0 or len(params.get("hole_sets", [])) > 0
+    has_edm = params.get("requires_wire_edm", False) or params.get("has_wire_profile", False)
+    has_milling = params.get("has_internal_form", False) or params.get("has_edge_form", False)
+    majority_ops_rectangular = has_drilling or has_edm or has_milling
+
+    # Classification logic
+    if is_plate_like and not has_cylindrical and majority_ops_rectangular:
+        # This should be classified as a block/plate, not a punch
+        if family in ["Punches", "punch", "round_punch", "form_punch"]:
+            corrected_family = "Sections_blocks"
+            warning = (
+                f"FAMILY CLASSIFICATION CORRECTED: {family} → {corrected_family}\n"
+                f"  Reason: thickness ({thickness:.3f}\") < min(length, width) ({min_planar_dim:.3f}\"), "
+                f"no cylindrical features > 0.25\", and majority ops are drilling/EDM/milling\n"
+                f"  Dimensions: L={length:.3f}\", W={width:.3f}\", T={thickness:.3f}\""
+            )
+            print(f"DEBUG: {warning}")
+            return corrected_family, warning
+
+    # Family is appropriate
+    return family, None
+
+
 # ---------------------------------------------------------------------------
 # Family planners
 # ---------------------------------------------------------------------------
@@ -224,6 +399,46 @@ def planner_die_plate(params: Dict[str, Any]) -> Plan:
 
         # Total time with overhead
         total_square_up_time = milling_time + grinding_time + setup_time + flip_time
+
+        # Thickness removal calculations for validation
+        stock_thk = stock_T
+        finished_thk = T
+        total_thickness_to_remove = stock_thk - finished_thk
+
+        # Calculate thickness removed by each operation
+        # For square-up: thickness removal comes from top/bottom faces
+        rough_mill_thk = total_thickness_to_remove * 0.90  # 90% by rough milling
+        grind_thk_total = total_thickness_to_remove * 0.10  # 10% by grinding
+
+        # Calculate modeled thickness removed for square-up specifically
+        # radial_stock affects sides, face operations affect top/bottom
+        modeled_thickness_removed_squareup = rough_mill_thk + grind_thk_total
+
+        # DEBUG output for square-up
+        print(f"DEBUG: Square-up operation (die_plate):")
+        print(f"  final_thickness={finished_thk:.4f}\", stock_thickness={stock_thk:.4f}\"")
+        print(f"  total_thickness_to_remove={total_thickness_to_remove:.4f}\"")
+        print(f"  modeled_thickness_removed_squareup={modeled_thickness_removed_squareup:.4f}\"")
+        print(f"  rough_mill_thk={rough_mill_thk:.4f}\" (90% of removal)")
+        print(f"  grind_thk_total={grind_thk_total:.4f}\" (10% of removal)")
+
+        # Check for mismatch
+        thickness_mismatch = abs(total_thickness_to_remove - modeled_thickness_removed_squareup)
+        if thickness_mismatch > 0.050:
+            warning = f"Square-up thickness mismatch > 0.050\": {thickness_mismatch:.4f}\""
+            print(f"DEBUG: WARNING - {warning}")
+            p.warnings.append(warning)
+
+        # Validate thickness removal consistency
+        validation_warning = _validate_thickness_removal(
+            stock_thk=stock_thk,
+            finished_thk=finished_thk,
+            rough_mill_thk=rough_mill_thk,
+            grind_thk_total=grind_thk_total,
+            context="die_plate square-up"
+        )
+        if validation_warning:
+            p.warnings.append(validation_warning)
 
         # Add operations with calculated times
         D = W / 3.0
@@ -706,6 +921,32 @@ def _add_die_section_squaring_ops(plan: Dict[str, Any], p: DieSectionParams, is_
     stock_removed = (0.125 * p.width_in * p.thickness_in * 2 +  # sides
                      0.125 * p.length_in * p.thickness_in * 2 +  # ends
                      0.100 * p.length_in * p.width_in)  # faces
+
+    # Thickness-specific calculations
+    stock_thk = p.thickness_in + 0.100  # Total stock on thickness (0.050" per face)
+    finished_thk = p.thickness_in
+    total_thickness_to_remove = stock_thk - finished_thk
+
+    # Calculate thickness removed by rough grinding vs finish grinding
+    # Rough grind removes most of the stock, finish grind removes the last bit
+    rough_mill_thk = total_thickness_to_remove * 0.75  # 75% in rough grind
+    grind_thk_total = total_thickness_to_remove * 0.25  # 25% in finish grind
+    modeled_thickness_removed_squareup = rough_mill_thk + grind_thk_total
+
+    # DEBUG output for square-up
+    print(f"DEBUG: Square-up operation (die_section):")
+    print(f"  final_thickness={finished_thk:.4f}\", stock_thickness={stock_thk:.4f}\"")
+    print(f"  total_thickness_to_remove={total_thickness_to_remove:.4f}\"")
+    print(f"  modeled_thickness_removed_squareup={modeled_thickness_removed_squareup:.4f}\"")
+    print(f"  rough_mill_thk (rough grind)={rough_mill_thk:.4f}\" (75% of removal)")
+    print(f"  grind_thk_total (finish grind)={grind_thk_total:.4f}\" (25% of removal)")
+
+    # Check for mismatch
+    thickness_mismatch = abs(total_thickness_to_remove - modeled_thickness_removed_squareup)
+    if thickness_mismatch > 0.050:
+        warning = f"Die section square-up thickness mismatch > 0.050\": {thickness_mismatch:.4f}\""
+        print(f"DEBUG: WARNING - {warning}")
+        plan["warnings"].append(warning)
 
     # Material factor for carbide
     grind_factor = 2.5 if is_carbide else 1.0
@@ -4109,11 +4350,34 @@ def _add_punch_roughing_ops(plan: Dict[str, Any], p: PunchPlannerParams) -> None
 
     if p.shape_type == "round":
         if p.num_ground_diams > 0:
-            plan["ops"].append({
-                "op": "rough_turning",
-                "num_diams": p.num_ground_diams,
-                "note": f"Rough turn {p.num_ground_diams} diameter sections"
-            })
+            # Check for cylindrical features before allowing turning
+            params_dict = {
+                "shape_type": p.shape_type,
+                "num_ground_diams": p.num_ground_diams,
+                "total_ground_length_in": p.total_ground_length_in,
+                "max_od_or_width_in": p.max_od_or_width_in,
+                "overall_length_in": p.overall_length_in,
+            }
+            has_cylindrical = _has_cylindrical_feature(params_dict, min_length_threshold=0.25)
+
+            if has_cylindrical:
+                plan["ops"].append({
+                    "op": "rough_turning",
+                    "num_diams": p.num_ground_diams,
+                    "note": f"Rough turn {p.num_ground_diams} diameter sections"
+                })
+            else:
+                # No cylindrical features long enough - use milling instead
+                warning = (
+                    f"Turning operation disabled: No cylindrical sections > 0.25\" found. "
+                    f"Using plate-style milling instead."
+                )
+                print(f"DEBUG: {warning}")
+                plan.setdefault("warnings", []).append(warning)
+                plan["ops"].append({
+                    "op": "rough_milling",
+                    "note": "Rough mill (no cylindrical features > 0.25\" for turning)"
+                })
     else:
         plan["ops"].append({
             "op": "rough_milling",
@@ -4183,27 +4447,52 @@ def _add_punch_grinding_ops(plan: Dict[str, Any], p: PunchPlannerParams) -> None
             _add_punch_wire_edm_ops(plan, p)
 
         if p.num_ground_diams > 0:
-            tol_factor = 1.0
-            if p.min_dia_tol_in and p.min_dia_tol_in < 0.0002:
-                tol_factor = 1.5
-            if p.has_no_step_permitted:
-                tol_factor *= 1.3
+            # Check for cylindrical features before allowing OD grinding (turning-style operation)
+            params_dict = {
+                "shape_type": p.shape_type,
+                "num_ground_diams": p.num_ground_diams,
+                "total_ground_length_in": p.total_ground_length_in,
+                "max_od_or_width_in": p.max_od_or_width_in,
+                "overall_length_in": p.overall_length_in,
+            }
+            has_cylindrical = _has_cylindrical_feature(params_dict, min_length_threshold=0.25)
 
-            # Add rough and finish OD grind
-            plan["ops"].append({
-                "op": "OD_grind_rough",
-                "num_diams": p.num_ground_diams,
-                "total_length_in": p.total_ground_length_in,
-                "tol_factor": tol_factor,
-                "note": f"Rough grind {p.num_ground_diams} diameters"
-            })
-            plan["ops"].append({
-                "op": "OD_grind_finish",
-                "num_diams": p.num_ground_diams,
-                "total_length_in": p.total_ground_length_in,
-                "tol_factor": tol_factor,
-                "note": f"Finish grind {p.num_ground_diams} diameters, {p.total_ground_length_in:.2f}\" total"
-            })
+            if has_cylindrical:
+                tol_factor = 1.0
+                if p.min_dia_tol_in and p.min_dia_tol_in < 0.0002:
+                    tol_factor = 1.5
+                if p.has_no_step_permitted:
+                    tol_factor *= 1.3
+
+                # Add rough and finish OD grind
+                plan["ops"].append({
+                    "op": "OD_grind_rough",
+                    "num_diams": p.num_ground_diams,
+                    "total_length_in": p.total_ground_length_in,
+                    "tol_factor": tol_factor,
+                    "note": f"Rough grind {p.num_ground_diams} diameters"
+                })
+                plan["ops"].append({
+                    "op": "OD_grind_finish",
+                    "num_diams": p.num_ground_diams,
+                    "total_length_in": p.total_ground_length_in,
+                    "tol_factor": tol_factor,
+                    "note": f"Finish grind {p.num_ground_diams} diameters, {p.total_ground_length_in:.2f}\" total"
+                })
+            else:
+                # No cylindrical features - use plate-style grinding instead
+                warning = (
+                    f"OD grinding disabled: No cylindrical sections > 0.25\" found. "
+                    f"Using plate-style surface grinding instead."
+                )
+                print(f"DEBUG: {warning}")
+                plan.setdefault("warnings", []).append(warning)
+                plan["ops"].append({
+                    "op": "surface_grind_faces",
+                    "stock_removed_total": 0.010,
+                    "faces": 4,  # All sides
+                    "note": "Surface grind all faces (no cylindrical features > 0.25\" for OD grind)"
+                })
 
         # Grind_length: faces both ends
         plan["ops"].append({
