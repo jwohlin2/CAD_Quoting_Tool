@@ -32,15 +32,29 @@ class PartDimensions:
     length: float = 0.0  # inches
     width: float = 0.0   # inches
     thickness: float = 0.0  # inches
+    diameter: float = 0.0  # inches (for cylindrical parts)
     volume: float = 0.0  # cubic inches
     area: float = 0.0    # square inches (L × W)
+    is_cylindrical: bool = False  # True for guide posts, spring pins, etc.
 
     def __post_init__(self):
         """Calculate derived properties if not set."""
         if self.volume == 0.0:
-            self.volume = self.length * self.width * self.thickness
+            if self.is_cylindrical and self.diameter > 0 and self.length > 0:
+                # Volume = π * r² * length
+                import math
+                radius = self.diameter / 2.0
+                self.volume = math.pi * radius * radius * self.length
+            else:
+                self.volume = self.length * self.width * self.thickness
         if self.area == 0.0:
-            self.area = self.length * self.width
+            if self.is_cylindrical and self.diameter > 0:
+                # Cross-sectional area = π * r²
+                import math
+                radius = self.diameter / 2.0
+                self.area = math.pi * radius * radius
+            else:
+                self.area = self.length * self.width
 
 
 @dataclass
@@ -60,12 +74,14 @@ class StockInfo:
     desired_length: float = 0.0
     desired_width: float = 0.0
     desired_thickness: float = 0.0
+    desired_diameter: float = 0.0  # For cylindrical parts
     desired_volume: float = 0.0
 
     # McMaster catalog stock
     mcmaster_length: float = 0.0
     mcmaster_width: float = 0.0
     mcmaster_thickness: float = 0.0
+    mcmaster_diameter: float = 0.0  # For cylindrical parts
     mcmaster_volume: float = 0.0
     mcmaster_part_number: Optional[str] = None
     mcmaster_price: Optional[float] = None  # Unit price
@@ -634,6 +650,7 @@ def extract_quote_data_from_cad(
     material_override: Optional[str] = None,
     catalog_csv_path: Optional[str] = None,
     dimension_override: Optional[tuple[float, float, float]] = None,
+    diameter_override: Optional[float] = None,
     mcmaster_price_override: Optional[float] = None,
     scrap_value_override: Optional[float] = None,
     quantity: int = 1,
@@ -654,6 +671,7 @@ def extract_quote_data_from_cad(
         material_override: Optional material name override
         catalog_csv_path: Optional path to McMaster catalog CSV
         dimension_override: Optional (length, width, thickness) tuple to override OCR extraction
+        diameter_override: Optional diameter override (inches) for cylindrical parts
         mcmaster_price_override: Optional manual stock price - skips McMaster API lookup
         scrap_value_override: Optional manual scrap value - skips automatic scrap value calculation
         quantity: Number of parts to quote (affects setup cost amortization and material pricing)
@@ -697,6 +715,7 @@ def extract_quote_data_from_cad(
     from cad_quoter.pricing.MaterialMapper import material_mapper
     from cad_quoter.pricing.mcmaster_helpers import (
         pick_mcmaster_plate_sku,
+        pick_mcmaster_cylindrical_sku,
         load_mcmaster_catalog_rows
     )
     from cad_quoter.resources import default_catalog_csv
@@ -761,6 +780,10 @@ def extract_quote_data_from_cad(
                 # Use punch features for part dimensions
                 features = punch_data.get("punch_features", {})
 
+                # Determine if part is cylindrical based on family
+                family = features.get("family", "")
+                is_cylindrical = family in ("guide_post", "round_punch", "pilot_pin", "bushing")
+
                 # Set part dimensions from punch features
                 # For rectangular shapes (plates), use body_thickness_in
                 # For round shapes, use max_od_or_width_in as the "diameter"
@@ -773,10 +796,15 @@ def extract_quote_data_from_cad(
                 else:
                     thickness = features.get("max_od_or_width_in", 0.0)  # OD for round
 
+                # For cylindrical parts, the diameter is the max_od_or_width_in
+                diameter = features.get("max_od_or_width_in", 0.0) if is_cylindrical else 0.0
+
                 quote_data.part_dimensions = PartDimensions(
                     length=features.get("overall_length_in", 0.0),
                     width=features.get("max_od_or_width_in", 0.0),
                     thickness=thickness,
+                    diameter=diameter,
+                    is_cylindrical=is_cylindrical,
                 )
 
                 # If punch dimensions are zero, fall back to DimensionFinder
@@ -864,6 +892,28 @@ def extract_quote_data_from_cad(
 
                     if verbose:
                         print(f"  [PUNCH] Plan regenerated with dimension overrides")
+
+                # Apply diameter override for cylindrical punch parts
+                if diameter_override and is_cylindrical:
+                    if verbose:
+                        print(f"  [PUNCH] Diameter override: {diameter_override:.3f}\"")
+
+                    quote_data.part_dimensions.diameter = diameter_override
+
+                    # Update punch features with new diameter
+                    features["max_od_or_width_in"] = diameter_override
+
+                    # Regenerate punch plan with new diameter
+                    from dataclasses import asdict
+                    from cad_quoter.planning.process_planner import create_punch_plan
+
+                    updated_features_dict = features  # Already a dict
+                    punch_plan = create_punch_plan(updated_features_dict)
+                    punch_data["punch_plan"] = punch_plan
+                    punch_data["punch_features"] = features
+
+                    if verbose:
+                        print(f"  [PUNCH] Plan regenerated with diameter override")
 
                 # Set material from punch features
                 punch_material = features.get("material_callout") or DEFAULT_MATERIAL
@@ -1133,13 +1183,32 @@ def extract_quote_data_from_cad(
     # We just need to get the part number for pricing lookup
     catalog_rows = load_mcmaster_catalog_rows(catalog_csv_path)
 
-    mcmaster_result = pick_mcmaster_plate_sku(
-        need_L_in=desired_L,
-        need_W_in=desired_W,
-        need_T_in=desired_T,
-        material_key=material,
-        catalog_rows=catalog_rows
-    )
+    # Check if part is cylindrical (guide posts, spring pins, etc.)
+    is_cylindrical = quote_data.part_dimensions.is_cylindrical if quote_data.part_dimensions else False
+    part_diameter = quote_data.part_dimensions.diameter if quote_data.part_dimensions else 0.0
+    part_length = quote_data.part_dimensions.length if quote_data.part_dimensions else 0.0
+
+    if is_cylindrical and part_diameter > 0 and part_length > 0:
+        # Use cylindrical lookup for guide posts, spring pins, etc.
+        if verbose:
+            print(f"  [CYLINDRICAL] Using cylindrical stock lookup (diam={part_diameter:.3f}\", length={part_length:.3f}\")")
+
+        mcmaster_result = pick_mcmaster_cylindrical_sku(
+            need_diam_in=part_diameter,
+            need_length_in=part_length,
+            material_key=material,
+            catalog_rows=catalog_rows,
+            verbose=verbose
+        )
+    else:
+        # Use standard plate lookup
+        mcmaster_result = pick_mcmaster_plate_sku(
+            need_L_in=desired_L,
+            need_W_in=desired_W,
+            need_T_in=desired_T,
+            material_key=material,
+            catalog_rows=catalog_rows
+        )
 
     mcmaster_part_num = None
     mcmaster_price = None
@@ -1314,14 +1383,24 @@ def extract_quote_data_from_cad(
 
     # Populate stock info
     # Use McMaster dimensions from scrap_calc (which already did the catalog lookup)
+    # For cylindrical parts, also include diameter
+    if is_cylindrical:
+        desired_diameter = part_diameter
+        mcmaster_diameter = mcmaster_result.get('stock_diam_in', 0.0) if mcmaster_result else 0.0
+    else:
+        desired_diameter = 0.0
+        mcmaster_diameter = 0.0
+
     quote_data.stock_info = StockInfo(
         desired_length=desired_L,
         desired_width=desired_W,
         desired_thickness=desired_T,
+        desired_diameter=desired_diameter,
         desired_volume=desired_L * desired_W * desired_T,
         mcmaster_length=scrap_calc.mcmaster_length,
         mcmaster_width=scrap_calc.mcmaster_width,
         mcmaster_thickness=scrap_calc.mcmaster_thickness,
+        mcmaster_diameter=mcmaster_diameter,
         mcmaster_volume=scrap_calc.mcmaster_length * scrap_calc.mcmaster_width * scrap_calc.mcmaster_thickness,
         mcmaster_part_number=mcmaster_part_num,
         mcmaster_price=mcmaster_price,
