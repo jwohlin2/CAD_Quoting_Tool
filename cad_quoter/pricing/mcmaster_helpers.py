@@ -315,6 +315,141 @@ def _pick_mcmaster_plate_sku_impl(
     }
 
 
+def pick_mcmaster_cylindrical_sku(
+    need_diam_in: float,
+    need_length_in: float,
+    *,
+    material_key: str = "303 Stainless Steel",
+    catalog_rows: Sequence[Mapping[str, Any]] | None = None,
+    verbose: bool = False,
+) -> dict[str, Any] | None:
+    """Return the smallest McMaster cylindrical stock covering the requested dimensions.
+
+    For cylindrical parts (guide posts, spring pins, etc.), we match by diameter and length
+    instead of plate dimensions (L × W × T).
+
+    Args:
+        need_diam_in: Required diameter in inches
+        need_length_in: Required length in inches
+        material_key: Material identifier (e.g., "303 Stainless Steel")
+        catalog_rows: Optional pre-loaded catalog rows
+        verbose: Print debug information
+
+    Returns:
+        Dict with stock info or None if no match found
+    """
+    if verbose:
+        print(f"[Cylindrical Lookup] Searching for: diam={need_diam_in:.3f} in, length={need_length_in:.3f} in")
+        print(f"[Cylindrical Lookup] Material key: '{material_key}'")
+
+    if not (need_diam_in > 0 and need_length_in > 0):
+        if verbose:
+            print(f"[Cylindrical Lookup] ERROR: Invalid dimensions")
+        return None
+
+    rows = list(catalog_rows) if catalog_rows is not None else load_mcmaster_catalog_rows()
+    if not rows:
+        if verbose:
+            print(f"[Cylindrical Lookup] ERROR: No catalog rows loaded")
+        return None
+
+    # Map material to McMaster catalog key
+    mcmaster_material = material_mapper.get_mcmaster_key(material_key) or material_key
+    target_key = str(mcmaster_material or "").strip().lower()
+
+    if not target_key:
+        if verbose:
+            print(f"[Cylindrical Lookup] ERROR: Empty material key")
+        return None
+
+    # Get material candidates
+    material_rows = _get_material_candidates(target_key, catalog_rows)
+    material_matches = len(material_rows)
+
+    if verbose:
+        print(f"[Cylindrical Lookup] Material matches: {material_matches}")
+
+    candidates: list[dict[str, Any]] = []
+
+    # Tolerance for diameter matching (allow rounding up to next standard size)
+    diam_tolerance = 0.125  # Allow up to 1/8" larger diameter
+    length_tolerance = 0.5  # Allow up to 0.5" longer stock
+
+    for row in material_rows:
+        # Check for diam_in column (cylindrical parts)
+        diameter = _coerce_inches_value(
+            row.get("diam_in") or row.get("diameter_in") or row.get("diameter")
+        )
+
+        # Skip if no diameter specified (not a cylindrical part)
+        if diameter is None or diameter <= 0:
+            continue
+
+        length = _coerce_inches_value(
+            row.get("length_in")
+            or row.get("L_in")
+            or row.get("len_in")
+            or row.get("length")
+        )
+
+        if length is None or length <= 0:
+            continue
+
+        # Stock must be >= needed dimensions (only round UP, never down)
+        if diameter < need_diam_in or (diameter - need_diam_in) > diam_tolerance:
+            continue
+        if length < need_length_in or (length - need_length_in) > length_tolerance:
+            continue
+
+        part_no = str(
+            row.get("mcmaster_part")
+            or row.get("part")
+            or row.get("sku")
+            or ""
+        ).strip()
+
+        if not part_no:
+            continue
+
+        # Calculate material waste metrics
+        import math as _math
+        stock_volume = _math.pi * (diameter / 2.0) ** 2 * length
+        needed_volume = _math.pi * (need_diam_in / 2.0) ** 2 * need_length_in
+        waste_volume = stock_volume - needed_volume
+
+        candidates.append({
+            "diam_in": float(diameter),
+            "len_in": float(length),
+            "mcmaster_part": part_no,
+            "waste_volume": float(waste_volume),
+            "stock_volume": float(stock_volume),
+            "source": row.get("source") or "mcmaster-catalog",
+        })
+
+    if verbose:
+        print(f"[Cylindrical Lookup] Final candidates: {len(candidates)}")
+
+    if not candidates:
+        if verbose:
+            print(f"[Cylindrical Lookup] ERROR: No matching cylindrical parts found")
+        return None
+
+    # Sort by waste volume (smallest waste first)
+    candidates.sort(key=lambda c: c["waste_volume"])
+    best = candidates[0]
+
+    if verbose:
+        print(f"[Cylindrical Lookup] FOUND: diam={best['diam_in']:.3f} in, length={best['len_in']:.3f} in")
+        print(f"[Cylindrical Lookup] Part: {best['mcmaster_part']}")
+
+    return {
+        "stock_diam_in": float(best["diam_in"]),
+        "stock_L_in": float(best["len_in"]),
+        "mcmaster_part": best["mcmaster_part"],
+        "source": best.get("source") or "mcmaster-catalog",
+    }
+
+
 def pick_mcmaster_plate_sku(
     need_L_in: float,
     need_W_in: float,
@@ -670,6 +805,7 @@ __all__ = [
     "load_mcmaster_catalog_rows",
     "_coerce_inches_value",
     "pick_mcmaster_plate_sku",
+    "pick_mcmaster_cylindrical_sku",
     "resolve_mcmaster_plate_for_quote",
     "get_qty_one_tier",
     "compute_price_per_cubic_inch",

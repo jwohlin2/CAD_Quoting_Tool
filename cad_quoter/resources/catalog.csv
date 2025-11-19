@@ -1,4 +1,4 @@
-material,thickness_in,length_in,width_in,part,,,,,,,,,,,,,
+material,thickness_in,length_in,width_in,diam_in,part,,,,,,,,,,,,,
 303 Stainless Steel,0.5,6,6,1243T11,,,,,,,,,,,,,
 303 Stainless Steel,0.5,12,12,1243T12,,,,,,,,,,,,,
 303 Stainless Steel,0.5,3,3,1243T153,,,,,,,,,,,,,
