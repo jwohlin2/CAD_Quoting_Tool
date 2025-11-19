@@ -124,6 +124,7 @@ class HoleOperation:
     sfm: Optional[float] = None  # Surface feet per minute
     ipr: Optional[float] = None  # Inches per revolution
     tpi: Optional[int] = None  # Threads per inch (for taps)
+    side: Optional[str] = None  # For C'BORE: "front", "back", or None
 
 
 @dataclass
@@ -1292,7 +1293,8 @@ def extract_quote_data_from_cad(
                     operation_type='cbore',
                     time_per_hole=g['time_per_hole'],
                     total_time=g['total_time'],
-                    sfm=g.get('sfm')
+                    sfm=g.get('sfm'),
+                    side=g.get('side')
                 )
                 for g in times.get('cbore_groups', [])
             ]

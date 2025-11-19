@@ -2536,14 +2536,21 @@ def estimate_hole_table_times(
             if depth >= 3 * ref_dia:
                 spark_out_min += 0.2
 
-            # Total time per hole
-            time_per_hole = (
+            # Base time per hole (geometry-based)
+            time_per_hole_base = (
                 setup_min +
                 (grind_area * mpsi) +
                 (stock_diam / stock_rate_diam) +
                 spark_out_min
             )
 
+            # Apply material grinding factor (aluminum < 1.0, tool steel = 1.0, etc.)
+            sf_grind = get_speeds_feeds(material, "Endmill_Profile")
+            grinding_time_factor = 1.0
+            if sf_grind:
+                grinding_time_factor = sf_grind.get('grinding_time_factor', 1.0)
+
+            time_per_hole = time_per_hole_base * grinding_time_factor
             total_time = time_per_hole * qty
 
             jig_grind_groups.append({
@@ -2553,7 +2560,8 @@ def estimate_hole_table_times(
                 'qty': qty,
                 'time_per_hole': time_per_hole,
                 'total_time': total_time,
-                'description': entry.get('DESCRIPTION', '')
+                'description': entry.get('DESCRIPTION', ''),
+                'grinding_time_factor': grinding_time_factor
             })
 
         # TAP operations
@@ -2668,6 +2676,13 @@ def estimate_hole_table_times(
 
             total_time = time_per_hole * qty
 
+            # Extract side info (FRONT or BACK) from description or op_text
+            cbore_side = None
+            if "BACK" in op_text.upper():
+                cbore_side = "back"
+            elif "FRONT" in op_text.upper():
+                cbore_side = "front"
+
             cbore_groups.append({
                 'hole_id': hole_id,
                 'diameter': cbore_dia,
@@ -2678,7 +2693,8 @@ def estimate_hole_table_times(
                 'feed_rate': cbore_feed,
                 'time_per_hole': time_per_hole,
                 'total_time': total_time,
-                'description': entry.get('DESCRIPTION', '')
+                'description': entry.get('DESCRIPTION', ''),
+                'side': cbore_side
             })
 
         # CENTER DRILL operations
