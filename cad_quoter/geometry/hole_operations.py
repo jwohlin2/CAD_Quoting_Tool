@@ -94,6 +94,8 @@ FRONT_BACK_RE = re.compile(
     re.I,
 )
 LIST_OF_COORDS_RE = re.compile(r"LIST\s+OF\s+COORDINATES", re.I)
+# Pre-compiled regex for whitespace normalization (faster than split/join)
+_WHITESPACE_RE = re.compile(r'\s+')
 
 
 # =============================================================================
@@ -316,7 +318,8 @@ def find_hole_for_token(token: str, holes: Sequence[HoleSpec], current_index: in
 
 def add_operation(ops: Dict[str, List[List[str]]], hole: HoleSpec, ref: str, desc: str) -> None:
     """Add an operation to the ops dictionary."""
-    desc_clean = " ".join(desc.strip().split())
+    # Use pre-compiled regex for faster whitespace normalization
+    desc_clean = _WHITESPACE_RE.sub(' ', desc.strip())
     if not desc_clean or desc_clean == ";":
         return
     ops.setdefault(hole.name, []).append([hole.name, ref, hole.qty, desc_clean])
@@ -505,11 +508,13 @@ def process_segment(
                     continue
                 hole_spec = holes[idx]
                 ref_for_op = ref_for_current
-                if "TAP" in fragment.upper():
+                # Cache uppercase to avoid repeated string allocation
+                fragment_upper = fragment.upper()
+                if "TAP" in fragment_upper:
                     ref_for_op = hole_spec.ref
                 add_operation(ops, hole_spec, ref_for_op, fragment)
                 if (
-                    fragment.upper() == "THRU"
+                    fragment_upper == "THRU"
                     and match_idx is not None
                     and holes[match_idx].name == hole_spec.name
                     and not forced_thru
