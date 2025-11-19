@@ -52,6 +52,136 @@ INCH_TO_MM = 25.4
 
 NUM_PATTERN = r"(?:\d*\.\d+|\d+)"
 
+# Standard thread combinations: major diameter (inches) -> list of valid TPI values
+# These are the common UNC (coarse), UNF (fine), and UNEF (extra fine) threads
+STANDARD_THREADS: Dict[str, List[int]] = {
+    # Number threads
+    "#0": [80],
+    "#1": [64, 72],
+    "#2": [56, 64],
+    "#3": [48, 56],
+    "#4": [40, 48],
+    "#5": [40, 44],
+    "#6": [32, 40],
+    "#8": [32, 36],
+    "#10": [24, 32],
+    "#12": [24, 28],
+    # Fractional threads
+    "1/4": [20, 28, 32],
+    "5/16": [18, 24, 32],
+    "3/8": [16, 24, 32],
+    "7/16": [14, 20, 28],
+    "1/2": [13, 20, 28],
+    "9/16": [12, 18, 24],
+    "5/8": [11, 18, 24],
+    "3/4": [10, 16, 20],
+    "7/8": [9, 14, 20],
+    "1": [8, 12, 14, 20],
+}
+
+# Major diameters in inches for each nominal size
+THREAD_MAJOR_DIAMETERS: Dict[str, float] = {
+    "#0": 0.0600, "#1": 0.0730, "#2": 0.0860, "#3": 0.0990, "#4": 0.1120,
+    "#5": 0.1250, "#6": 0.1380, "#8": 0.1640, "#10": 0.1900, "#12": 0.2160,
+    "1/4": 0.2500, "5/16": 0.3125, "3/8": 0.3750, "7/16": 0.4375, "1/2": 0.5000,
+    "9/16": 0.5625, "5/8": 0.6250, "3/4": 0.7500, "7/8": 0.8750, "1": 1.0000,
+}
+
+
+def validate_and_correct_thread(
+    major: str,
+    tpi: int,
+    nearby_diameters: Optional[List[float]] = None
+) -> tuple[str, int, bool]:
+    """
+    Validate a parsed thread specification and correct if invalid.
+
+    Args:
+        major: Parsed major diameter (e.g., "5/16", "#10", "0.2500")
+        tpi: Parsed threads per inch
+        nearby_diameters: List of nearby dimension values (boss/counterbore) in inches
+
+    Returns:
+        tuple of (corrected_major, corrected_tpi, was_corrected)
+    """
+    # Normalize major to standard format
+    normalized_major = major.strip()
+
+    # If major is a decimal, try to map to closest standard size
+    if re.match(r"^\d*\.\d+$", normalized_major):
+        decimal_val = float(normalized_major)
+        closest_nom = None
+        closest_diff = float('inf')
+
+        for nom, dia in THREAD_MAJOR_DIAMETERS.items():
+            diff = abs(decimal_val - dia)
+            if diff < closest_diff:
+                closest_diff = diff
+                closest_nom = nom
+
+        if closest_nom and closest_diff < 0.02:  # Within 0.02" tolerance
+            normalized_major = closest_nom
+
+    # Check if the thread spec is valid
+    if normalized_major in STANDARD_THREADS:
+        valid_tpis = STANDARD_THREADS[normalized_major]
+        if tpi in valid_tpis:
+            return (normalized_major, tpi, False)  # Valid as-is
+
+        # Invalid TPI for this nominal - find closest valid TPI
+        closest_tpi = min(valid_tpis, key=lambda t: abs(t - tpi))
+        return (normalized_major, closest_tpi, True)
+
+    # Major not in standard list - try to find best match using nearby dimensions
+    if nearby_diameters:
+        # Find the closest standard nominal to the largest nearby diameter
+        # (boss diameter is typically larger than thread major by ~0.05-0.10")
+        for nearby_dia in sorted(nearby_diameters, reverse=True):
+            for nom, thread_dia in THREAD_MAJOR_DIAMETERS.items():
+                # Boss diameter should be >= thread major diameter
+                # Check if nearby diameter matches a thread's boss size
+                # Typical clearance for tapped holes: major + 0.03" to + 0.10"
+                if thread_dia <= nearby_dia <= thread_dia + 0.15:
+                    if nom in STANDARD_THREADS:
+                        # Use coarse thread as default (first in list)
+                        default_tpi = STANDARD_THREADS[nom][0]
+                        return (nom, default_tpi, True)
+
+    # Last resort: try to correct based on the parsed decimal major diameter
+    if re.match(r"^\d*\.\d+$", major):
+        decimal_val = float(major)
+        closest_nom = None
+        closest_diff = float('inf')
+
+        for nom, dia in THREAD_MAJOR_DIAMETERS.items():
+            diff = abs(decimal_val - dia)
+            if diff < closest_diff:
+                closest_diff = diff
+                closest_nom = nom
+
+        if closest_nom and closest_diff < 0.1:
+            # Use standard coarse thread
+            default_tpi = STANDARD_THREADS[closest_nom][0]
+            return (closest_nom, default_tpi, True)
+
+    # Cannot correct - return as-is but flag as potentially invalid
+    return (major, tpi, False)
+
+
+def is_valid_thread_spec(major: str, tpi: int) -> bool:
+    """Check if a thread specification is a valid standard combination."""
+    # Normalize decimal to nominal if possible
+    if re.match(r"^\d*\.\d+$", major):
+        decimal_val = float(major)
+        for nom, dia in THREAD_MAJOR_DIAMETERS.items():
+            if abs(decimal_val - dia) < 0.01:
+                major = nom
+                break
+
+    if major in STANDARD_THREADS:
+        return tpi in STANDARD_THREADS[major]
+    return False
+
 
 def _frac_to_mm(n: int, d: int) -> float:
     return (n / d) * INCH_TO_MM
@@ -302,13 +432,54 @@ def _parse_description(desc: str) -> List[Dict[str, Any]]:
     text = " ".join(desc.upper().split())
     tokens: List[Dict[str, Any]] = []
 
-    tap_re = re.compile(r"(\d+/\d+|\#\d+)\s*-\s*(\d+)|(\d+(?:\.\d+)?)\s*-\s*(\d+)")
+    # Improved thread parsing with validation
+    # Priority 1: Standard fractional or number thread format (e.g., "5/16-18", "#10-32")
+    # Priority 2: Decimal format immediately before TAP (e.g., "0.250-20 TAP")
+    # The decimal format is more restrictive to avoid mis-parsing depth values
+
     if "TAP" in text:
-        match = tap_re.search(text)
+        major = None
+        pitch = None
+
+        # Try standard thread format first (most reliable)
+        std_tap_re = re.compile(r"(\d+/\d+|\#\d+)\s*-\s*(\d+)")
+        match = std_tap_re.search(text)
         if match:
-            major = match.group(1) or match.group(3)
-            pitch = match.group(2) or match.group(4)
-            major_mm = parse_drill_token(major) if major else None
+            major = match.group(1)
+            pitch = match.group(2)
+        else:
+            # Try decimal format, but require it to be immediately before TAP
+            # This avoids matching "X 1.00 DEEP" + some unrelated "80" elsewhere
+            decimal_tap_re = re.compile(r"(\d+\.\d+)\s*-\s*(\d+)\s*TAP")
+            match = decimal_tap_re.search(text)
+            if match:
+                major = match.group(1)
+                pitch = match.group(2)
+
+        if major and pitch:
+            tpi = int(pitch)
+
+            # Validate and correct the thread specification
+            corrected_major, corrected_tpi, was_corrected = validate_and_correct_thread(
+                major, tpi, nearby_diameters=None
+            )
+
+            # Use corrected values for calculations
+            if was_corrected:
+                # Log the correction for debugging
+                import logging
+                logging.debug(
+                    f"Thread corrected: {major}-{tpi} -> {corrected_major}-{corrected_tpi}"
+                )
+                major = corrected_major
+                pitch = str(corrected_tpi)
+
+            # Calculate major_mm from the corrected major
+            if corrected_major in THREAD_MAJOR_DIAMETERS:
+                major_mm = THREAD_MAJOR_DIAMETERS[corrected_major] * INCH_TO_MM
+            else:
+                major_mm = parse_drill_token(major) if major else None
+
             depth_mm, thru = _depth_or_thru(text)
             from_face = _from_face(text)
             tokens.append(
@@ -320,6 +491,7 @@ def _parse_description(desc: str) -> List[Dict[str, Any]]:
                     "thru": thru,
                     "from_face": from_face,
                     "source": "desc",
+                    "was_corrected": was_corrected,
                 }
             )
 

@@ -1155,6 +1155,14 @@ def plan_from_helpers(dummy_dims_helper, dummy_hole_helper) -> Dict[str, Any]:
 import re
 from fractions import Fraction
 
+# Import thread validation functions from hole_table_parser
+from cad_quoter.geometry.hole_table_parser import (
+    validate_and_correct_thread,
+    is_valid_thread_spec,
+    STANDARD_THREADS,
+    THREAD_MAJOR_DIAMETERS,
+)
+
 FRACTIONAL_THREAD_MAJORS = {
     "5/8": 0.6250, "3/8": 0.3750, "5/16": 0.3125, "1/2": 0.5000, "1/4": 0.2500,
 }
@@ -3408,16 +3416,47 @@ def estimate_hole_table_times(
             tap_match = re.search(r'(\d+/\d+)-(\d+)', combined_text)
             if tap_match:
                 # Fractional tap (e.g., 5/16-18)
-                frac_parts = tap_match.group(1).split('/')
-                tap_major_dia = float(frac_parts[0]) / float(frac_parts[1])
+                major_str = tap_match.group(1)
                 tpi = int(tap_match.group(2))
+
+                # Validate and correct thread specification
+                corrected_major, corrected_tpi, was_corrected = validate_and_correct_thread(
+                    major_str, tpi
+                )
+                if was_corrected:
+                    import logging
+                    logging.debug(f"Thread corrected (drill calc): {major_str}-{tpi} -> {corrected_major}-{corrected_tpi}")
+                    tpi = corrected_tpi
+                    major_str = corrected_major
+
+                # Get major diameter from standard table or calculate from fraction
+                if corrected_major in THREAD_MAJOR_DIAMETERS:
+                    tap_major_dia = THREAD_MAJOR_DIAMETERS[corrected_major]
+                else:
+                    frac_parts = major_str.split('/')
+                    tap_major_dia = float(frac_parts[0]) / float(frac_parts[1])
             else:
                 # Try #10-32 format
                 num_tap_match = re.search(r'#(\d+)-(\d+)', combined_text)
                 if num_tap_match:
                     screw_num = int(num_tap_match.group(1))
-                    tap_major_dia = 0.060 + (screw_num * 0.013)
                     tpi = int(num_tap_match.group(2))
+                    major_str = f"#{screw_num}"
+
+                    # Validate and correct thread specification
+                    corrected_major, corrected_tpi, was_corrected = validate_and_correct_thread(
+                        major_str, tpi
+                    )
+                    if was_corrected:
+                        import logging
+                        logging.debug(f"Thread corrected (drill calc): {major_str}-{tpi} -> {corrected_major}-{corrected_tpi}")
+                        tpi = corrected_tpi
+
+                    # Get major diameter from standard table
+                    if corrected_major in THREAD_MAJOR_DIAMETERS:
+                        tap_major_dia = THREAD_MAJOR_DIAMETERS[corrected_major]
+                    else:
+                        tap_major_dia = 0.060 + (screw_num * 0.013)
                 else:
                     tap_major_dia = ref_dia
                     tpi = 20  # Default TPI
@@ -3524,17 +3563,47 @@ def estimate_hole_table_times(
             tap_match = re.search(r'(\d+/\d+)-(\d+)', combined_text)
             if tap_match:
                 # Fractional tap (e.g., 5/8-11)
-                frac_parts = tap_match.group(1).split('/')
-                tap_dia = float(frac_parts[0]) / float(frac_parts[1])
+                major_str = tap_match.group(1)
                 tpi = int(tap_match.group(2))
+
+                # Validate and correct thread specification
+                corrected_major, corrected_tpi, was_corrected = validate_and_correct_thread(
+                    major_str, tpi
+                )
+                if was_corrected:
+                    import logging
+                    logging.debug(f"Thread corrected (tap time): {major_str}-{tpi} -> {corrected_major}-{corrected_tpi}")
+                    tpi = corrected_tpi
+                    major_str = corrected_major
+
+                # Get tap diameter from standard table or calculate from fraction
+                if corrected_major in THREAD_MAJOR_DIAMETERS:
+                    tap_dia = THREAD_MAJOR_DIAMETERS[corrected_major]
+                else:
+                    frac_parts = major_str.split('/')
+                    tap_dia = float(frac_parts[0]) / float(frac_parts[1])
             else:
                 # Try #10-32 format
                 num_tap_match = re.search(r'#(\d+)-(\d+)', combined_text)
                 if num_tap_match:
-                    # #10 screw ≈ 0.190"
                     screw_num = int(num_tap_match.group(1))
-                    tap_dia = 0.060 + (screw_num * 0.013)
                     tpi = int(num_tap_match.group(2))
+                    major_str = f"#{screw_num}"
+
+                    # Validate and correct thread specification
+                    corrected_major, corrected_tpi, was_corrected = validate_and_correct_thread(
+                        major_str, tpi
+                    )
+                    if was_corrected:
+                        import logging
+                        logging.debug(f"Thread corrected (tap time): {major_str}-{tpi} -> {corrected_major}-{corrected_tpi}")
+                        tpi = corrected_tpi
+
+                    # Get tap diameter from standard table
+                    if corrected_major in THREAD_MAJOR_DIAMETERS:
+                        tap_dia = THREAD_MAJOR_DIAMETERS[corrected_major]
+                    else:
+                        tap_dia = 0.060 + (screw_num * 0.013)
                 else:
                     tap_dia = ref_dia * 0.8  # Estimate tap drill size
                     tpi = int(20 / tap_dia) if tap_dia > 0 else 20
