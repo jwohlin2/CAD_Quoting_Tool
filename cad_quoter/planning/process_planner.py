@@ -2035,7 +2035,9 @@ def plan_from_cad_file(
     from cad_quoter.geometry.dxf_enrich import (
         detect_edge_break_operation,
         detect_etch_operation,
-        detect_polish_contour_operation
+        detect_polish_contour_operation,
+        detect_waterjet_openings,
+        detect_waterjet_profile
     )
     text_dump = plan["text_dump"]
 
@@ -2056,6 +2058,20 @@ def plan_from_cad_file(
     plan["has_polish_contour"] = has_polish_contour
     if has_polish_contour and verbose:
         print("[PLANNER] Detected polish contour operation requirement")
+
+    # Waterjet openings detection
+    has_waterjet_openings, waterjet_openings_tol = detect_waterjet_openings(text_dump)
+    plan["has_waterjet_openings"] = has_waterjet_openings
+    plan["waterjet_openings_tolerance"] = waterjet_openings_tol
+    if has_waterjet_openings and verbose:
+        print(f"[PLANNER] Detected waterjet openings requirement (±{waterjet_openings_tol:.3f})")
+
+    # Waterjet profile detection
+    has_waterjet_profile, waterjet_profile_tol = detect_waterjet_profile(text_dump)
+    plan["has_waterjet_profile"] = has_waterjet_profile
+    plan["waterjet_profile_tolerance"] = waterjet_profile_tol
+    if has_waterjet_profile and verbose:
+        print(f"[PLANNER] Detected waterjet profile requirement (±{waterjet_profile_tol:.3f})")
 
     if verbose:
         print(f"[PLANNER] Plan complete: {len(plan['ops'])} operations")
@@ -3924,6 +3940,52 @@ def estimate_machine_hours_from_plan(
         )
         time_breakdown['other'] += polish_minutes
 
+    # Check for waterjet operations from text extraction
+    waterjet_openings_minutes = 0.0
+    waterjet_profile_minutes = 0.0
+
+    if plan.get('has_waterjet_openings', False):
+        qty = 1  # Default to 1 part unless specified
+        tolerance = plan.get('waterjet_openings_tolerance', 0.005)
+
+        # TODO: Extract actual opening geometry from plan
+        # For now, use reasonable defaults based on typical parts
+        # In full implementation, sum perimeters of all waterjet openings from geometry
+        total_length_in = 10.0  # inches - placeholder, should be calculated from geometry
+        pierce_count = 4  # number of openings - placeholder, should be calculated from geometry
+        thickness_in = T if T > 0 else 0.5  # Use actual thickness or default
+
+        # Calculate waterjet openings time
+        waterjet_openings_minutes = calc_waterjet_minutes(
+            total_length_in=total_length_in,
+            thickness_in=thickness_in,
+            tol_plusminus=tolerance,
+            pierce_count=pierce_count,
+            qty=qty
+        )
+        time_breakdown['other'] += waterjet_openings_minutes
+
+    if plan.get('has_waterjet_profile', False):
+        qty = 1  # Default to 1 part unless specified
+        tolerance = plan.get('waterjet_profile_tolerance', 0.003)
+
+        # TODO: Extract actual profile geometry from plan
+        # For now, use part perimeter as reasonable estimate
+        # In full implementation, calculate perimeter of specific waterjet profile
+        total_length_in = (L + W) * 2 if L > 0 and W > 0 else 12.0  # inches
+        pierce_count = 1  # typically 1 pierce for profile cutting
+        thickness_in = T if T > 0 else 0.5  # Use actual thickness or default
+
+        # Calculate waterjet profile time
+        waterjet_profile_minutes = calc_waterjet_minutes(
+            total_length_in=total_length_in,
+            thickness_in=thickness_in,
+            tol_plusminus=tolerance,
+            pierce_count=pierce_count,
+            qty=qty
+        )
+        time_breakdown['other'] += waterjet_profile_minutes
+
     # Calculate total
     total_minutes = sum(time_breakdown.values())
 
@@ -3940,6 +4002,8 @@ def estimate_machine_hours_from_plan(
         'edge_break_minutes': edge_break_minutes,
         'etch_minutes': etch_minutes,
         'polish_minutes': polish_minutes,
+        'waterjet_openings_minutes': waterjet_openings_minutes,
+        'waterjet_profile_minutes': waterjet_profile_minutes,
     }
 
 
@@ -4315,6 +4379,67 @@ def calc_polish_contour_minutes(
     polish_min_total = max(polish_min_total, MIN_POLISH_TIME_PER_LOT)
 
     return polish_min_total
+
+
+def calc_waterjet_minutes(
+    total_length_in: float,
+    thickness_in: float,
+    tol_plusminus: float,
+    pierce_count: int,
+    qty: int
+) -> float:
+    """Calculate time for waterjet cutting operations.
+
+    This handles operations like:
+    - "WATERJET ALL OPENINGS ±.005"
+    - "WATERJET TO ±.003"
+
+    Args:
+        total_length_in: Total cut length per part (inches)
+        thickness_in: Material thickness (inches)
+        tol_plusminus: Tolerance requirement (e.g., 0.005 or 0.003)
+        pierce_count: Number of pierces required per part
+        qty: Lot quantity
+
+    Returns:
+        Total time in minutes for the lot
+    """
+    # Constants - keep these at top for easy tuning
+    WJ_SETUP_MIN = 8.0           # minutes per lot - setup, programming, material handling
+    WJ_MIN_PER_IN_BASE = 0.03    # min per inch at reference thickness & ±0.005 tolerance
+    WJ_REF_THK_IN = 0.50         # reference thickness for base rate (0.5 inches)
+    WJ_PIERCE_MIN = 0.15         # min per pierce
+    MIN_WJ_MIN_PER_LOT = 10.0    # minimum time for any waterjet lot
+
+    # Validation - return 0 for invalid inputs
+    if total_length_in <= 0 or qty <= 0:
+        return 0.0
+
+    # Thickness factor: thicker material cuts slower
+    # Use max(0.4, ...) to avoid going too low on thin material
+    thk_factor = max(0.4, thickness_in / WJ_REF_THK_IN)
+
+    # Tolerance factor: tighter tolerance requires slower cutting
+    if tol_plusminus <= 0.003:
+        tol_factor = 1.3  # Very tight tolerance - slow cutting
+    elif tol_plusminus <= 0.005:
+        tol_factor = 1.0  # Standard tolerance - baseline speed
+    else:
+        tol_factor = 0.9  # Loose tolerance - faster cutting
+
+    # Calculate per-part cutting time
+    cut_min_per_part = (
+        total_length_in * WJ_MIN_PER_IN_BASE * thk_factor * tol_factor
+        + pierce_count * WJ_PIERCE_MIN
+    )
+
+    # Total lot time: setup + per-part time × quantity
+    wj_min_total = WJ_SETUP_MIN + qty * cut_min_per_part
+
+    # Apply minimum time floor
+    wj_min_total = max(wj_min_total, MIN_WJ_MIN_PER_LOT)
+
+    return wj_min_total
 
 
 def estimate_hole_table_times(
