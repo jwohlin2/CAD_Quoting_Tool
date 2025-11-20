@@ -1114,12 +1114,12 @@ def calculate_scrap_value(
     verbose: bool = False
 ) -> Dict[str, Any]:
     """
-    Calculate the dollar value of scrap using Wieland scrap prices.
+    Calculate the dollar value of scrap using live scrap prices (ScrapMetalBuyers primary, Wieland fallback).
 
     Args:
         scrap_weight_lbs: Weight of scrap in pounds
         material: Material name (e.g., "aluminum MIC6", "P20 Tool Steel", "17-4 PH Stainless")
-        fallback_scrap_price_per_lb: Fallback scrap price if Wieland lookup fails
+        fallback_scrap_price_per_lb: Fallback scrap price if scrap lookup fails
         verbose: Print detailed output
 
     Returns:
@@ -1137,11 +1137,11 @@ def calculate_scrap_value(
     """
     from cad_quoter.pricing.scrap_pricing import get_unified_scrap_price_per_lb
 
-    # Get Wieland key (material family) from MaterialMapper
+    # Get material family key from MaterialMapper (used for scrap pricing lookup)
     wieland_key = material_mapper.get_wieland_key(material)
 
-    # Map Wieland keys to material families for scrap pricing
-    # Wieland uses: AL, SS, TI, STEEL, COPPER, etc.
+    # Map material family keys to scrap pricing families
+    # Keys: AL, SS, TI, STEEL, COPPER, etc.
     wieland_to_family = {
         "AL": "aluminum",
         "SS": "stainless",
@@ -1195,7 +1195,7 @@ def calculate_scrap_value(
         scrap_price_per_lb = 0.0
         price_source = "worthless (ceramic has no scrap value)"
     else:
-        # Look up scrap price from unified source (Wieland + ScrapMetalBuyers fallback)
+        # Look up scrap price from unified source (ScrapMetalBuyers primary, Wieland fallback)
         scrap_price_per_lb, price_source = get_unified_scrap_price_per_lb(
             material_family,
             fallback=fallback_scrap_price_per_lb
@@ -1253,7 +1253,7 @@ def calculate_total_scrap_with_value(
         desired_width: Desired starting stock width (if None, uses part W + allowance)
         desired_thickness: Desired starting stock thickness (if None, uses part T + allowance)
         catalog_csv_path: Path to McMaster catalog CSV
-        fallback_scrap_price_per_lb: Fallback scrap price if Wieland lookup fails
+        fallback_scrap_price_per_lb: Fallback scrap price if scrap lookup fails
         verbose: Print detailed output
 
     Returns:

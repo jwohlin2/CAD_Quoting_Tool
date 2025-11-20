@@ -4,12 +4,12 @@
 Unified scrap metal pricing interface.
 
 Provides a single API that can fetch scrap prices from multiple sources:
-- Wieland (primary, more comprehensive)
-- ScrapMetalBuyers (fallback)
+- ScrapMetalBuyers (primary, comprehensive with carbide/titanium support)
+- Wieland (fallback)
 
 Configuration via environment variable:
   SCRAP_PRICE_SOURCE = "wieland" | "scrapmetalbuyers" | "auto"
-  Default: "auto" (tries Wieland first, falls back to ScrapMetalBuyers)
+  Default: "auto" (tries ScrapMetalBuyers first, falls back to Wieland)
 
 Public API:
   get_unified_scrap_price_per_lb(material_family, fallback) -> (price, source)
@@ -75,9 +75,8 @@ def get_unified_scrap_price_per_lb(
     Behavior based on SCRAP_PRICE_SOURCE:
         - "wieland": Only use Wieland scraper
         - "scrapmetalbuyers": Only use ScrapMetalBuyers scraper
-        - "auto" (default): Material-specific source preference:
-            * Aluminum: Wieland first (better AL pricing), then ScrapMetalBuyers
-            * All others: ScrapMetalBuyers first (carbide, titanium), then Wieland
+        - "auto" (default): Try ScrapMetalBuyers first for all materials,
+            then fall back to Wieland if not found
 
     Examples:
         >>> price, source = get_unified_scrap_price_per_lb("copper")
@@ -103,43 +102,27 @@ def get_unified_scrap_price_per_lb(
     if SCRAP_PRICE_SOURCE == "scrapmetalbuyers":
         return _get_from_scrapmetalbuyers(material_family, fallback)
 
-    # Auto mode: material-specific source preference
+    # Auto mode: Try ScrapMetalBuyers first for all materials, then Wieland as fallback
     if SCRAP_PRICE_SOURCE == "auto":
-        # For aluminum: try Wieland first (better pricing for AL)
-        # For everything else: use ScrapMetalBuyers first (carbide, titanium, etc.)
-        if material_family and "aluminum" in material_family.lower():
-            # Aluminum: Wieland first, then ScrapMetalBuyers
-            logger.debug(f"Aluminum detected - trying Wieland first")
-            price, source = _get_from_wieland(material_family, fallback=None)
+        # ScrapMetalBuyers first (comprehensive coverage for all materials)
+        logger.debug(f"{material_family} - trying ScrapMetalBuyers first")
+        price, source = _get_from_scrapmetalbuyers(material_family, fallback=None)
 
-            if price is not None and "house_rate" not in source.lower():
-                return (price, source)
+        if price is not None and "house_rate" not in source.lower():
+            return (price, source)
 
-            logger.debug("Wieland failed for aluminum, trying ScrapMetalBuyers")
-            price, source = _get_from_scrapmetalbuyers(material_family, fallback=None)
+        # Fallback to Wieland if ScrapMetalBuyers fails
+        logger.debug("ScrapMetalBuyers failed, trying Wieland as fallback")
+        price, source = _get_from_wieland(material_family, fallback=None)
 
-            if price is not None and "house_rate" not in source.lower():
-                return (price, source)
-
-        else:
-            # Non-aluminum: ScrapMetalBuyers first (carbide, titanium, steel, etc.)
-            logger.debug(f"{material_family} - trying ScrapMetalBuyers first")
-            price, source = _get_from_scrapmetalbuyers(material_family, fallback=None)
-
-            if price is not None and "house_rate" not in source.lower():
-                return (price, source)
-
-            logger.debug("ScrapMetalBuyers failed, trying Wieland as fallback")
-            price, source = _get_from_wieland(material_family, fallback=None)
-
-            if price is not None and "house_rate" not in source.lower():
-                return (price, source)
+        if price is not None and "house_rate" not in source.lower():
+            return (price, source)
 
         # Both failed, use fallback
         if fallback is not None:
-            return (fallback, "house_rate (not found in Wieland or ScrapMetalBuyers)")
+            return (fallback, "house_rate (not found in ScrapMetalBuyers or Wieland)")
 
-        return (None, "not found in Wieland or ScrapMetalBuyers")
+        return (None, "not found in ScrapMetalBuyers or Wieland")
 
     # Should never reach here due to validation above
     if fallback is not None:
