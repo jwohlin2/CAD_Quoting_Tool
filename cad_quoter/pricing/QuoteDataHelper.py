@@ -2013,11 +2013,17 @@ def extract_quote_data_from_cad(
         total_other_min = round(total_other_min, 2)
         cmm_checking_machine_min = round(cmm_checking_machine_min, 2)
 
+        # Extract special operation times (edge break, etch, polish)
+        total_edge_break_min = round(plan_machine_times.get('edge_break_minutes', 0.0), 2)
+        total_etch_min = round(plan_machine_times.get('etch_minutes', 0.0), 2)
+        total_polish_min = round(plan_machine_times.get('polish_minutes', 0.0), 2)
+
         grand_total_minutes = round(
             total_drill_min + total_tap_min + total_cbore_min +
             total_cdrill_min + total_jig_grind_min +
             total_milling_min + total_grinding_min + total_pocket_min + total_slot_min +
             total_edm_min + total_other_min +
+            total_edge_break_min + total_etch_min + total_polish_min +
             cmm_checking_machine_min, 2
         )
         grand_total_hours = round(grand_total_minutes / 60.0, 2)
@@ -2042,6 +2048,9 @@ def extract_quote_data_from_cad(
             total_cbore_minutes=total_cbore_min,
             total_cdrill_minutes=total_cdrill_min,
             total_jig_grind_minutes=total_jig_grind_min,
+            total_edge_break_minutes=total_edge_break_min,
+            total_etch_minutes=total_etch_min,
+            total_polish_minutes=total_polish_min,
             total_milling_minutes=total_milling_min,
             total_grinding_minutes=total_grinding_min,
             total_pocket_minutes=total_pocket_min,
