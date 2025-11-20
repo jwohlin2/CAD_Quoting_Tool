@@ -554,7 +554,7 @@ def detect_punch_drawing(cad_file_path: Path, text_dump: str = None) -> bool:
     filename = cad_file_path.stem.upper()
 
     # Exclusion patterns - these are NOT punches even if they reference punches
-    exclusion_patterns = ["SHOE", "HOLDER", "BASE", "PLATE", "DIE SET", "BLOCK", "INSERT"]
+    exclusion_patterns = ["SHOE", "HOLDER", "BASE", "PLATE", "DIE SET", "BLOCK", "INSERT", "SPACER"]
     if any(excl in filename for excl in exclusion_patterns):
         return False
 
@@ -582,6 +582,7 @@ def detect_punch_drawing(cad_file_path: Path, text_dump: str = None) -> bool:
             "STRIPPER PLATE",
             "STRIPPER INSERT",
             "PUNCH BLOCK",
+            "PUNCH SPACER",
         ]
         if any(excl in text_upper for excl in exclusion_indicators):
             return False

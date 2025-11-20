@@ -4247,6 +4247,9 @@ def estimate_hole_table_times(
         # TAP holes also need a drill operation for the tap drill hole
         # Calculate tap drill diameter from tap size (major_dia - 1/TPI)
         if is_tap:
+            # Initialize major_str to None - it may not be assigned if no pattern matches
+            major_str = None
+
             # Extract tap size to calculate tap drill diameter
             # Use combined_text to find tap spec in either OPERATION or DESCRIPTION
             tap_match = re.search(r'(\d+/\d+)-(\d+)', combined_text)
@@ -4335,7 +4338,7 @@ def estimate_hole_table_times(
                 # Fall back to coarse (first) TPI for this nominal size
                 # Need to determine the nominal size for lookup
                 # Check if we have major_str from earlier parsing
-                if 'major_str' in locals() and major_str in STANDARD_THREADS:
+                if major_str and major_str in STANDARD_THREADS:
                     tpi = STANDARD_THREADS[major_str][0]
                     logging.debug(f"Using default TPI {tpi} for {major_str}")
                 else:
@@ -4498,6 +4501,9 @@ def estimate_hole_table_times(
 
         # TAP operations
         if is_tap:
+            # Initialize major_str to None - it may not be assigned if no pattern matches
+            major_str = None
+
             # Extract tap size - use combined_text to find tap spec
             tap_match = re.search(r'(\d+/\d+)-(\d+)', combined_text)
             if tap_match:
@@ -4599,11 +4605,11 @@ def estimate_hole_table_times(
             if tpi > 40 and tap_dia > 0.19:
                 import logging
                 logging.debug(
-                    f"CHECK TPI: {major_str}-{tpi} has suspicious TPI {tpi} for diameter {tap_dia:.3f}\". "
+                    f"CHECK TPI: {major_str + '-' if major_str else ''}{tpi} has suspicious TPI {tpi} for diameter {tap_dia:.3f}\". "
                     f"Falling back to default coarse thread."
                 )
                 # Fall back to coarse (first) TPI for this nominal size
-                if major_str in STANDARD_THREADS:
+                if major_str and major_str in STANDARD_THREADS:
                     tpi = STANDARD_THREADS[major_str][0]
                     logging.debug(f"Using default TPI {tpi} for {major_str}")
                 else:
