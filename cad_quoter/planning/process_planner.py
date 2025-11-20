@@ -2031,6 +2031,32 @@ def plan_from_cad_file(
     # Add text dump for punch detection
     plan["text_dump"] = "\n".join(all_text) if all_text else ""
 
+    # Detect special operations from text
+    from cad_quoter.geometry.dxf_enrich import (
+        detect_edge_break_operation,
+        detect_etch_operation,
+        detect_polish_contour_operation
+    )
+    text_dump = plan["text_dump"]
+
+    # Edge break detection
+    has_edge_break = detect_edge_break_operation(text_dump)
+    plan["has_edge_break"] = has_edge_break
+    if has_edge_break and verbose:
+        print("[PLANNER] Detected edge break operation requirement")
+
+    # Etch detection
+    has_etch = detect_etch_operation(text_dump)
+    plan["has_etch"] = has_etch
+    if has_etch and verbose:
+        print("[PLANNER] Detected etch/marking operation requirement")
+
+    # Polish contour detection
+    has_polish_contour = detect_polish_contour_operation(text_dump)
+    plan["has_polish_contour"] = has_polish_contour
+    if has_polish_contour and verbose:
+        print("[PLANNER] Detected polish contour operation requirement")
+
     if verbose:
         print(f"[PLANNER] Plan complete: {len(plan['ops'])} operations")
 
@@ -3843,6 +3869,61 @@ def estimate_machine_hours_from_plan(
     geometry_based_other_min = _calculate_other_ops_minutes(plan, ops, L, W, T)
     time_breakdown['other'] += geometry_based_other_min
 
+    # Check for edge break operation from text extraction
+    edge_break_minutes = 0.0
+    if plan.get('has_edge_break', False):
+        # Calculate perimeter for edge break time estimation
+        perimeter_in = 2.0 * (L + W) if L > 0 and W > 0 else 0.0
+        qty = 1  # Default to 1 part unless specified
+
+        # Extract material group from material name
+        # Common material name patterns -> material groups
+        material_upper = material.upper()
+        if 'ALUMINUM' in material_upper or 'AL' in material_upper:
+            material_group = 'ALUMINUM'
+        elif '52100' in material_upper:
+            material_group = '52100'
+        elif 'STAINLESS' in material_upper or 'SS' in material_upper or '316' in material_upper or '304' in material_upper:
+            material_group = 'STAINLESS'
+        elif 'CARBIDE' in material_upper:
+            material_group = 'CARBIDE'
+        elif 'CERAMIC' in material_upper:
+            material_group = 'CERAMIC'
+        else:
+            # Default to TOOL_STEEL for P20, H13, A2, D2, O1, S7, etc.
+            material_group = 'TOOL_STEEL'
+
+        # Calculate edge break time
+        edge_break_minutes = calc_edge_break_minutes(perimeter_in, qty, material_group)
+        time_breakdown['other'] += edge_break_minutes
+
+    # Check for etch operation from text extraction
+    etch_minutes = 0.0
+    if plan.get('has_etch', False):
+        qty = 1  # Default to 1 part unless specified
+        details_with_etch = 1  # Default to 1 mark per part (vendor & drawing no.)
+
+        # Calculate etch time
+        etch_minutes = calc_etch_minutes(has_etch_note=True, qty=qty, details_with_etch=details_with_etch)
+        time_breakdown['other'] += etch_minutes
+
+    # Check for polish contour operation from text extraction
+    polish_minutes = 0.0
+    if plan.get('has_polish_contour', False):
+        qty = 1  # Default to 1 part unless specified
+        # Use default contour dimensions (0.40" × 0.25") unless geometry is available
+        contour_length_in = None  # Will use default 0.40"
+        contour_width_in = None   # Will use default 0.25"
+
+        # Calculate polish contour time
+        polish_minutes = calc_polish_contour_minutes(
+            has_polish_contour=True,
+            qty=qty,
+            contour_length_in=contour_length_in,
+            contour_width_in=contour_width_in
+        )
+        time_breakdown['other'] += polish_minutes
+
     # Calculate total
     total_minutes = sum(time_breakdown.values())
 
@@ -3856,6 +3937,9 @@ def estimate_machine_hours_from_plan(
         'grinding_operations': grinding_operations_detailed,
         'pocket_operations': pocket_operations_detailed,
         'slot_operations': slot_operations_detailed,
+        'edge_break_minutes': edge_break_minutes,
+        'etch_minutes': etch_minutes,
+        'polish_minutes': polish_minutes,
     }
 
 
@@ -4111,6 +4195,126 @@ def render_punch_grind_block(
         lines.append(f"  TOTAL Punch Grind Time: {total_time:.2f} minutes")
 
     return lines
+
+
+def calc_edge_break_minutes(perim_in: float, qty: int, material_group: str) -> float:
+    """Calculate time for breaking/deburring outside sharp corners.
+
+    This is for operations like "BREAK ALL OUTSIDE SHARP CORNERS" found in text.
+
+    Args:
+        perim_in: Perimeter in inches (outside edge length per part)
+        qty: Quantity of parts
+        material_group: Material group name (ALUMINUM, TOOL_STEEL, etc.)
+
+    Returns:
+        Time in minutes for edge break operation
+    """
+    # Constants (tune these based on shop experience)
+    BASE_MIN_PER_LOT = 3.0  # "grab Scotch-Brite, setup" time
+    MIN_PER_IN_BASE = 0.02  # min/in on tool steel (~1.2 sec/in)
+    MIN_DEBURR_PER_LOT = 5.0  # don't go below this
+
+    # Material factors for edge breaking (similar to grinding)
+    material_factor_map = {
+        "ALUMINUM": 0.6,
+        "TOOL_STEEL": 1.0,
+        "52100": 1.4,
+        "STAINLESS": 1.3,
+        "CARBIDE": 2.5,
+        "CERAMIC": 3.5,
+        "GENERIC": 1.0,
+    }
+    material_factor = material_factor_map.get(material_group.upper(), 1.0)
+
+    # Top + bottom outside edges for all parts
+    edge_length_total_in = 2.0 * perim_in * qty
+
+    deburr_min = BASE_MIN_PER_LOT + edge_length_total_in * MIN_PER_IN_BASE * material_factor
+    deburr_min = max(deburr_min, MIN_DEBURR_PER_LOT)
+
+    return deburr_min
+
+
+def calc_etch_minutes(has_etch_note: bool, qty: int, details_with_etch: int = 1) -> float:
+    """Calculate time for etching/marking operations.
+
+    This is for operations like "ETCH ON DETAIL; VENDOR & DRAWING NO." found in text.
+
+    Args:
+        has_etch_note: Whether etching requirement was detected
+        qty: Quantity of parts in the lot
+        details_with_etch: Number of separate marks per part (usually 1)
+
+    Returns:
+        Time in minutes for etching operation
+    """
+    if not has_etch_note:
+        return 0.0
+
+    # Constants (tune these based on shop experience)
+    ETCH_SETUP_MIN = 4.0  # minutes per lot - setup etching machine, load file
+    ETCH_MIN_PER_MARK = 0.75  # minutes per mark - position part, run etch, verify
+    MIN_ETCH_TIME_PER_LOT = 5.0  # floor time so small lots aren't under-quoted
+
+    # Total number of marks in the lot
+    mark_count = qty * details_with_etch
+
+    etch_min = ETCH_SETUP_MIN + mark_count * ETCH_MIN_PER_MARK
+
+    # Don't go below a small floor so tiny lots aren't under-quoted
+    etch_min = max(etch_min, MIN_ETCH_TIME_PER_LOT)
+
+    return etch_min
+
+
+def calc_polish_contour_minutes(
+    has_polish_contour: bool,
+    qty: int,
+    contour_length_in: float = None,
+    contour_width_in: float = None
+) -> float:
+    """Calculate time for polishing contoured surfaces.
+
+    This is for operations like "POLISH CONTOUR" found in text.
+
+    Args:
+        has_polish_contour: Whether polish contour requirement was detected
+        qty: Quantity of parts in the lot
+        contour_length_in: Length of contoured zone (inches), optional
+        contour_width_in: Width/diameter across contour (inches), optional
+
+    Returns:
+        Time in minutes for polish contour operation
+    """
+    if not has_polish_contour:
+        return 0.0
+
+    # Constants (tune these based on shop experience)
+    POLISH_SETUP_MIN = 2.0  # minutes per lot - gather materials, setup bench
+    POLISH_MIN_PER_SQIN = 6.0  # min/sq.in of contour - intensive hand work
+    POLISH_BASE_PER_PART = 0.5  # min/part - handling, inspection
+    MIN_POLISH_TIME_PER_LOT = 5.0  # floor time so small lots aren't under-quoted
+
+    # If we don't have exact geometry, fall back to a "typical" spring punch nose
+    if contour_length_in is None:
+        contour_length_in = 0.40  # inches - typical contour length
+    if contour_width_in is None:
+        contour_width_in = 0.25  # inches - typical contour width
+
+    # Approximate area of the contoured region that needs polishing
+    contour_area_sqin = contour_length_in * contour_width_in
+
+    # Time to polish one part
+    polish_min_per_part = POLISH_BASE_PER_PART + contour_area_sqin * POLISH_MIN_PER_SQIN
+
+    # Total time for the lot
+    polish_min_total = POLISH_SETUP_MIN + qty * polish_min_per_part
+
+    # Don't go below a small floor
+    polish_min_total = max(polish_min_total, MIN_POLISH_TIME_PER_LOT)
+
+    return polish_min_total
 
 
 def estimate_hole_table_times(
