@@ -456,9 +456,19 @@ def planner_die_plate(params: Dict[str, Any]) -> Plan:
               tool_diameter_in=D,
               target_pass_count=3,
               override_time_minutes=grinding_time + (flip_time + setup_time / 2))
+
+        # Add note about square/finish milling time drivers
+        p.warnings.append(
+            "Square/finish milling time driven by stock_removed_total, tool diameters, passes and feed."
+        )
     else:
         # Wet grind for smaller parts
         p.add("wet_grind_square_all", stock_removed_total=0.050, faces=2)
+
+        # Add note about square/finish grinding time drivers
+        p.warnings.append(
+            "Square/finish grinding time driven by stock_removed_total, volume and material factor."
+        )
 
     # 1) Face strategy (Blanchard vs mill) — big or tight spec → Blanchard first
     if max(L, W) > 10.0 or (flatness_spec is not None and flatness_spec <= 0.001):
@@ -3141,6 +3151,9 @@ def estimate_machine_hours_from_plan(
             min_per_cuin = 3.0
             time_breakdown['grinding'] += grind_time
 
+            # Calculate surface area for debug output
+            surface_area_sq_in = L * W * faces if (L and W) else 0
+
             # Create detailed operation object for finish grind
             grinding_operations_detailed.append({
                 'op_name': 'wet_grind_square_all',
@@ -3155,8 +3168,23 @@ def estimate_machine_hours_from_plan(
                 'material_factor': material_factor,
                 'grind_material_factor': material_factor,  # For renderer display
                 'time_minutes': grind_time,
-                '_used_override': False  # Wet grind doesn't use overrides
+                '_used_override': False,  # Wet grind doesn't use overrides
+                # Additional debug field
+                'surface_area_sq_in': surface_area_sq_in
             })
+
+            # DEBUG: Print all square-up grinding parameters and price drivers
+            print(f"\nDEBUG: SQUARE-UP WET GRIND (Price Drivers):")
+            print(f"  sq_length              = {L:.4f}\"")
+            print(f"  sq_width               = {W:.4f}\"")
+            print(f"  sq_top_bottom_stock    = {stock_removed:.4f}\"")
+            print(f"  sq_faces               = {faces}")
+            print(f"  surface_area_sq_in     = {surface_area_sq_in:.3f} in²")
+            print(f"  volume_removed_cuin    = {volume_cuin:.4f} in³")
+            print(f"  grind_min_per_cuin     = {min_per_cuin:.1f}")
+            print(f"  grind_material_factor  = {material_factor:.2f}")
+            print(f"  grind_time_min         = {grind_time:.2f} min")
+            print(f"  NOTE: Square/finish grinding time driven by stock_removed_total, volume and material factor.")
 
         # Squaring operations (mill - rough faces)
         elif op_type == 'square_up_rough_faces':
@@ -3188,6 +3216,11 @@ def estimate_machine_hours_from_plan(
 
             time_breakdown['milling'] += minutes
 
+            # Calculate additional metrics for debug output
+            top_bottom_stock = op.get('finish_doc', 0.025) * 2  # Stock on top and bottom
+            surface_area_sq_in = L * W * 2 if (L and W) else 0
+            volume_removed_cuin = L * W * top_bottom_stock if (L and W) else 0
+
             # Create detailed operation object
             milling_operations_detailed.append({
                 'op_name': 'square_up_rough_faces',
@@ -3206,8 +3239,28 @@ def estimate_machine_hours_from_plan(
                 'feed_rate': ipm,
                 'time_minutes': minutes,
                 '_used_override': used_override,
-                'override_time_minutes': override_time
+                'override_time_minutes': override_time,
+                # Additional debug fields
+                'sq_top_bottom_stock': top_bottom_stock,
+                'surface_area_sq_in': surface_area_sq_in,
+                'volume_removed_cuin': volume_removed_cuin
             })
+
+            # DEBUG: Print all square-up face mill parameters and price drivers
+            print(f"\nDEBUG: SQUARE-UP FACE MILL (Price Drivers):")
+            print(f"  sq_length           = {L:.4f}\"")
+            print(f"  sq_width            = {W:.4f}\"")
+            print(f"  sq_top_bottom_stock = {top_bottom_stock:.4f}\"")
+            print(f"  sq_tool_dia         = {D:.4f}\"")
+            print(f"  sq_feed_ipm         = {ipm:.1f} ipm")
+            print(f"  sq_pass_count       = {target_passes} passes/face × 2 faces = {target_passes * 2}")
+            print(f"  sq_path_length      = {path_in:.2f}\"")
+            print(f"  surface_area_sq_in  = {surface_area_sq_in:.3f} in²")
+            print(f"  volume_removed_cuin = {volume_removed_cuin:.4f} in³")
+            print(f"  sq_time_min         = {minutes:.2f} min")
+            if used_override:
+                print(f"  (Using override time)")
+            print(f"  NOTE: Square/finish milling time driven by stock_removed_total, tool diameter, passes and feed.")
 
         # Squaring operations (mill - rough sides)
         elif op_type == 'square_up_rough_sides':
@@ -3248,6 +3301,9 @@ def estimate_machine_hours_from_plan(
 
             time_breakdown['milling'] += minutes
 
+            # Calculate volume removed for debug output
+            volume_removed_cuin = perimeter * T * radial_stock if (perimeter and T) else 0
+
             # Create detailed operation object
             milling_operations_detailed.append({
                 'op_name': 'square_up_rough_sides',
@@ -3266,8 +3322,26 @@ def estimate_machine_hours_from_plan(
                 'feed_rate': ipm,
                 'time_minutes': minutes,
                 '_used_override': used_override,
-                'override_time_minutes': override_time
+                'override_time_minutes': override_time,
+                # Additional debug field
+                'volume_removed_cuin': volume_removed_cuin
             })
+
+            # DEBUG: Print all square-up side mill parameters and price drivers
+            print(f"\nDEBUG: SQUARE-UP SIDE MILL (Price Drivers):")
+            print(f"  sq_perimeter        = {perimeter:.4f}\"")
+            print(f"  sq_side_stock       = {radial_stock:.4f}\"")
+            print(f"  sq_tool_dia         = {D:.4f}\"")
+            print(f"  sq_feed_ipm         = {ipm:.1f} ipm")
+            print(f"  sq_axial_passes     = {axial_passes}")
+            print(f"  sq_radial_passes    = {radial_passes}")
+            print(f"  sq_pass_count       = {axial_passes * radial_passes} (total)")
+            print(f"  sq_path_length      = {path_in:.2f}\"")
+            print(f"  volume_removed_cuin = {volume_removed_cuin:.4f} in³")
+            print(f"  sq_time_min         = {minutes:.2f} min")
+            if used_override:
+                print(f"  (Using override time)")
+            print(f"  NOTE: Square/finish milling time driven by stock_removed_total, tool diameter, passes and feed.")
 
         # Grinding operations (general handler - punch-specific handlers are earlier)
         elif 'grind' in op_type or 'jig_grind' in op_type:
