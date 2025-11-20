@@ -794,12 +794,27 @@ def calculate_machining_scrap_from_cad(
         print(f"Part dimensions: L={part_L:.3f}\", W={part_W:.3f}\", T={part_T:.3f}\"")
 
     # Calculate desired starting stock size (with machining allowances)
+    # Use size-based overage tiers (matching square-up logic):
+    # - Small blanks (max_dim < 3.0"): +0.25" L/W, +0.125" T
+    # - Normal blanks (max_dim ≥ 3.0"): +0.50" L/W, +0.25" T
+    max_dim = max(part_L, part_W)
+    if max_dim < 3.0:
+        # Small blanks
+        over_L = 0.25
+        over_W = 0.25
+        over_T = 0.125
+    else:
+        # Normal blanks
+        over_L = 0.50
+        over_W = 0.50
+        over_T = 0.25
+
     if desired_length is None:
-        desired_length = part_L + 0.25  # +0.25" for face milling
+        desired_length = part_L + over_L
     if desired_width is None:
-        desired_width = part_W + 0.25
+        desired_width = part_W + over_W
     if desired_thickness is None:
-        desired_thickness = part_T + 0.125  # +0.125" for thickness
+        desired_thickness = part_T + over_T
 
     if verbose:
         print(f"Desired stock: L={desired_length:.3f}\", W={desired_width:.3f}\", T={desired_thickness:.3f}\"")
@@ -977,12 +992,27 @@ def calculate_total_scrap(
             print(f"Extracted part dimensions: {part_L:.2f} x {part_W:.2f} x {part_T:.2f} in")
 
     # Calculate desired stock dimensions if not provided
+    # Use size-based overage tiers (matching square-up logic):
+    # - Small blanks (max_dim < 3.0"): +0.25" L/W, +0.125" T
+    # - Normal blanks (max_dim ≥ 3.0"): +0.50" L/W, +0.25" T
+    max_dim = max(part_L, part_W)
+    if max_dim < 3.0:
+        # Small blanks
+        over_L = 0.25
+        over_W = 0.25
+        over_T = 0.125
+    else:
+        # Normal blanks
+        over_L = 0.50
+        over_W = 0.50
+        over_T = 0.25
+
     if desired_length is None:
-        desired_length = part_L + 0.25
+        desired_length = part_L + over_L
     if desired_width is None:
-        desired_width = part_W + 0.25
+        desired_width = part_W + over_W
     if desired_thickness is None:
-        desired_thickness = part_T + 0.125
+        desired_thickness = part_T + over_T
 
     # Look up McMaster stock size if not provided
     if mcmaster_length is None or mcmaster_width is None or mcmaster_thickness is None:
