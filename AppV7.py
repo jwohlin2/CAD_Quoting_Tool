@@ -1377,7 +1377,15 @@ class AppV7:
             is_carbide_die_section = (quote_data.raw_plan and
                                        quote_data.raw_plan.get("meta", {}).get("is_carbide_die_section", False))
 
-            if not machine_hours.drill_operations and not machine_hours.tap_operations:
+            # Check if there are ANY hole operations (drill, tap, cbore, cdrill, jig grind, or EDM)
+            has_any_hole_ops = (machine_hours.drill_operations or
+                                machine_hours.tap_operations or
+                                machine_hours.cbore_operations or
+                                machine_hours.cdrill_operations or
+                                machine_hours.jig_grind_operations or
+                                machine_hours.edm_operations)
+
+            if not has_any_hole_ops:
                 # For die sections, provide appropriate messaging instead of implying "no machining"
                 if is_die_section or is_carbide_die_section:
                     # Get machine rate for display
