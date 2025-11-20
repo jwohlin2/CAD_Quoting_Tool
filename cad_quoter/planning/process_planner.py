@@ -2032,13 +2032,20 @@ def plan_from_cad_file(
     plan["text_dump"] = "\n".join(all_text) if all_text else ""
 
     # Detect edge break operation from text
-    from cad_quoter.geometry.dxf_enrich import detect_edge_break_operation
+    from cad_quoter.geometry.dxf_enrich import detect_edge_break_operation, detect_etch_operation
     text_dump = plan["text_dump"]
     has_edge_break = detect_edge_break_operation(text_dump)
     plan["has_edge_break"] = has_edge_break
 
     if has_edge_break and verbose:
         print("[PLANNER] Detected edge break operation requirement")
+
+    # Detect etch operation from text
+    has_etch = detect_etch_operation(text_dump)
+    plan["has_etch"] = has_etch
+
+    if has_etch and verbose:
+        print("[PLANNER] Detected etch/marking operation requirement")
 
     if verbose:
         print(f"[PLANNER] Plan complete: {len(plan['ops'])} operations")
@@ -3880,6 +3887,16 @@ def estimate_machine_hours_from_plan(
         edge_break_minutes = calc_edge_break_minutes(perimeter_in, qty, material_group)
         time_breakdown['other'] += edge_break_minutes
 
+    # Check for etch operation from text extraction
+    etch_minutes = 0.0
+    if plan.get('has_etch', False):
+        qty = 1  # Default to 1 part unless specified
+        details_with_etch = 1  # Default to 1 mark per part (vendor & drawing no.)
+
+        # Calculate etch time
+        etch_minutes = calc_etch_minutes(has_etch_note=True, qty=qty, details_with_etch=details_with_etch)
+        time_breakdown['other'] += etch_minutes
+
     # Calculate total
     total_minutes = sum(time_breakdown.values())
 
@@ -3894,6 +3911,7 @@ def estimate_machine_hours_from_plan(
         'pocket_operations': pocket_operations_detailed,
         'slot_operations': slot_operations_detailed,
         'edge_break_minutes': edge_break_minutes,
+        'etch_minutes': etch_minutes,
     }
 
 
@@ -4188,6 +4206,38 @@ def calc_edge_break_minutes(perim_in: float, qty: int, material_group: str) -> f
     deburr_min = max(deburr_min, MIN_DEBURR_PER_LOT)
 
     return deburr_min
+
+
+def calc_etch_minutes(has_etch_note: bool, qty: int, details_with_etch: int = 1) -> float:
+    """Calculate time for etching/marking operations.
+
+    This is for operations like "ETCH ON DETAIL; VENDOR & DRAWING NO." found in text.
+
+    Args:
+        has_etch_note: Whether etching requirement was detected
+        qty: Quantity of parts in the lot
+        details_with_etch: Number of separate marks per part (usually 1)
+
+    Returns:
+        Time in minutes for etching operation
+    """
+    if not has_etch_note:
+        return 0.0
+
+    # Constants (tune these based on shop experience)
+    ETCH_SETUP_MIN = 4.0  # minutes per lot - setup etching machine, load file
+    ETCH_MIN_PER_MARK = 0.75  # minutes per mark - position part, run etch, verify
+    MIN_ETCH_TIME_PER_LOT = 5.0  # floor time so small lots aren't under-quoted
+
+    # Total number of marks in the lot
+    mark_count = qty * details_with_etch
+
+    etch_min = ETCH_SETUP_MIN + mark_count * ETCH_MIN_PER_MARK
+
+    # Don't go below a small floor so tiny lots aren't under-quoted
+    etch_min = max(etch_min, MIN_ETCH_TIME_PER_LOT)
+
+    return etch_min
 
 
 def estimate_hole_table_times(

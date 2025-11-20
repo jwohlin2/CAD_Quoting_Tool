@@ -1842,6 +1842,38 @@ def detect_edge_break_operation(text_dump: str) -> bool:
     return False
 
 
+def detect_etch_operation(text_dump: str) -> bool:
+    """Detect if etching operation is required from text.
+
+    Returns True if "ETCH ON DETAIL" or similar text is found.
+    """
+    if not text_dump:
+        return False
+
+    # First filter out any struck-out/crossed-out text
+    filtered_text = _filter_struck_out_text(text_dump)
+    text_upper = filtered_text.upper()
+
+    # Patterns for etching operations (use word boundaries to avoid false positives)
+    etch_patterns = [
+        r'\bETCH\s+ON\s+DETAIL',
+        r'\bETCH\s+DETAIL',
+        r'\bETCH.*VENDOR.*DRAWING',
+        r'\bETCH.*DRAWING.*NO',
+        r'\bETCH\s+PART\s+NUMBER',
+        r'\bETCH\s+P/?N',
+        r'\bMARK\s+ON\s+DETAIL',
+        r'\bLASER\s+ETCH',
+        r'\bELECTRO\s*-?\s*ETCH',
+    ]
+
+    for pattern in etch_patterns:
+        if re.search(pattern, text_upper):
+            return True
+
+    return False
+
+
 def detect_punch_pain_flags(text_dump: str) -> Dict[str, bool]:
     """Detect quality/pain flags from text."""
     text_upper = text_dump.upper()
