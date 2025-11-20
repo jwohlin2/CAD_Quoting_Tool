@@ -1874,6 +1874,36 @@ def detect_etch_operation(text_dump: str) -> bool:
     return False
 
 
+def detect_polish_contour_operation(text_dump: str) -> bool:
+    """Detect if polish contour operation is required from text.
+
+    Returns True if "POLISH CONTOUR" or similar text is found.
+    """
+    if not text_dump:
+        return False
+
+    # First filter out any struck-out/crossed-out text
+    filtered_text = _filter_struck_out_text(text_dump)
+    text_upper = filtered_text.upper()
+
+    # Patterns for polish contour operations
+    polish_patterns = [
+        r'\bPOLISH\s+CONTOUR',
+        r'\bPOLISH\s+CONTOURED',
+        r'\bPOLISHED\s+CONTOUR',
+        r'\bCONTOUR\s+POLISH',
+        r'\bPOLISH.*FORM',
+        r'\bPOLISH.*RADIUS',
+        r'\bPOLISH.*SURFACE',
+    ]
+
+    for pattern in polish_patterns:
+        if re.search(pattern, text_upper):
+            return True
+
+    return False
+
+
 def detect_punch_pain_flags(text_dump: str) -> Dict[str, bool]:
     """Detect quality/pain flags from text."""
     text_upper = text_dump.upper()

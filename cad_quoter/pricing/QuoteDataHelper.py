@@ -295,6 +295,7 @@ class MachineHoursBreakdown:
     edm_operations: Optional[List[HoleOperation]] = None
     edge_break_operations: Optional[List[HoleOperation]] = None
     etch_operations: Optional[List[HoleOperation]] = None
+    polish_operations: Optional[List[HoleOperation]] = None
 
     # Operations by type (plan operations)
     milling_operations: Optional[List[MillingOperation]] = None
@@ -310,6 +311,7 @@ class MachineHoursBreakdown:
     total_jig_grind_minutes: float = 0.0
     total_edge_break_minutes: float = 0.0
     total_etch_minutes: float = 0.0
+    total_polish_minutes: float = 0.0
 
     # Time totals by operation category (from plan operations)
     total_milling_minutes: float = 0.0  # Includes squaring ops
@@ -346,6 +348,8 @@ class MachineHoursBreakdown:
             self.edge_break_operations = []
         if self.etch_operations is None:
             self.etch_operations = []
+        if self.polish_operations is None:
+            self.polish_operations = []
         if self.milling_operations is None:
             self.milling_operations = []
         if self.grinding_operations is None:
