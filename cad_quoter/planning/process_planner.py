@@ -2031,6 +2031,15 @@ def plan_from_cad_file(
     # Add text dump for punch detection
     plan["text_dump"] = "\n".join(all_text) if all_text else ""
 
+    # Detect edge break operation from text
+    from cad_quoter.geometry.dxf_enrich import detect_edge_break_operation
+    text_dump = plan["text_dump"]
+    has_edge_break = detect_edge_break_operation(text_dump)
+    plan["has_edge_break"] = has_edge_break
+
+    if has_edge_break and verbose:
+        print("[PLANNER] Detected edge break operation requirement")
+
     if verbose:
         print(f"[PLANNER] Plan complete: {len(plan['ops'])} operations")
 
@@ -3843,6 +3852,34 @@ def estimate_machine_hours_from_plan(
     geometry_based_other_min = _calculate_other_ops_minutes(plan, ops, L, W, T)
     time_breakdown['other'] += geometry_based_other_min
 
+    # Check for edge break operation from text extraction
+    edge_break_minutes = 0.0
+    if plan.get('has_edge_break', False):
+        # Calculate perimeter for edge break time estimation
+        perimeter_in = 2.0 * (L + W) if L > 0 and W > 0 else 0.0
+        qty = 1  # Default to 1 part unless specified
+
+        # Extract material group from material name
+        # Common material name patterns -> material groups
+        material_upper = material.upper()
+        if 'ALUMINUM' in material_upper or 'AL' in material_upper:
+            material_group = 'ALUMINUM'
+        elif '52100' in material_upper:
+            material_group = '52100'
+        elif 'STAINLESS' in material_upper or 'SS' in material_upper or '316' in material_upper or '304' in material_upper:
+            material_group = 'STAINLESS'
+        elif 'CARBIDE' in material_upper:
+            material_group = 'CARBIDE'
+        elif 'CERAMIC' in material_upper:
+            material_group = 'CERAMIC'
+        else:
+            # Default to TOOL_STEEL for P20, H13, A2, D2, O1, S7, etc.
+            material_group = 'TOOL_STEEL'
+
+        # Calculate edge break time
+        edge_break_minutes = calc_edge_break_minutes(perimeter_in, qty, material_group)
+        time_breakdown['other'] += edge_break_minutes
+
     # Calculate total
     total_minutes = sum(time_breakdown.values())
 
@@ -3856,6 +3893,7 @@ def estimate_machine_hours_from_plan(
         'grinding_operations': grinding_operations_detailed,
         'pocket_operations': pocket_operations_detailed,
         'slot_operations': slot_operations_detailed,
+        'edge_break_minutes': edge_break_minutes,
     }
 
 
@@ -4111,6 +4149,45 @@ def render_punch_grind_block(
         lines.append(f"  TOTAL Punch Grind Time: {total_time:.2f} minutes")
 
     return lines
+
+
+def calc_edge_break_minutes(perim_in: float, qty: int, material_group: str) -> float:
+    """Calculate time for breaking/deburring outside sharp corners.
+
+    This is for operations like "BREAK ALL OUTSIDE SHARP CORNERS" found in text.
+
+    Args:
+        perim_in: Perimeter in inches (outside edge length per part)
+        qty: Quantity of parts
+        material_group: Material group name (ALUMINUM, TOOL_STEEL, etc.)
+
+    Returns:
+        Time in minutes for edge break operation
+    """
+    # Constants (tune these based on shop experience)
+    BASE_MIN_PER_LOT = 3.0  # "grab Scotch-Brite, setup" time
+    MIN_PER_IN_BASE = 0.02  # min/in on tool steel (~1.2 sec/in)
+    MIN_DEBURR_PER_LOT = 5.0  # don't go below this
+
+    # Material factors for edge breaking (similar to grinding)
+    material_factor_map = {
+        "ALUMINUM": 0.6,
+        "TOOL_STEEL": 1.0,
+        "52100": 1.4,
+        "STAINLESS": 1.3,
+        "CARBIDE": 2.5,
+        "CERAMIC": 3.5,
+        "GENERIC": 1.0,
+    }
+    material_factor = material_factor_map.get(material_group.upper(), 1.0)
+
+    # Top + bottom outside edges for all parts
+    edge_length_total_in = 2.0 * perim_in * qty
+
+    deburr_min = BASE_MIN_PER_LOT + edge_length_total_in * MIN_PER_IN_BASE * material_factor
+    deburr_min = max(deburr_min, MIN_DEBURR_PER_LOT)
+
+    return deburr_min
 
 
 def estimate_hole_table_times(

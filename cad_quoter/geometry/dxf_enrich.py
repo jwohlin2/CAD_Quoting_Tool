@@ -1812,6 +1812,36 @@ def detect_punch_ops_features(text_dump: str) -> Dict[str, Any]:
     return features
 
 
+def detect_edge_break_operation(text_dump: str) -> bool:
+    """Detect if edge break/deburr operation is required from text.
+
+    Returns True if "BREAK ALL OUTSIDE SHARP CORNERS" or similar text is found.
+    """
+    if not text_dump:
+        return False
+
+    # First filter out any struck-out/crossed-out text
+    filtered_text = _filter_struck_out_text(text_dump)
+    text_upper = filtered_text.upper()
+
+    # Patterns for edge break operations
+    edge_break_patterns = [
+        r'BREAK\s+ALL\s+OUTSIDE\s+SHARP\s+CORNERS',
+        r'BREAK\s+ALL\s+SHARP\s+CORNERS',
+        r'BREAK\s+ALL\s+OUTSIDE\s+CORNERS',
+        r'BREAK\s+ALL\s+EDGES',
+        r'BREAK\s+SHARP\s+CORNERS',
+        r'DEBURR\s+ALL\s+EDGES',
+        r'DEBURR\s+ALL\s+CORNERS',
+    ]
+
+    for pattern in edge_break_patterns:
+        if re.search(pattern, text_upper):
+            return True
+
+    return False
+
+
 def detect_punch_pain_flags(text_dump: str) -> Dict[str, bool]:
     """Detect quality/pain flags from text."""
     text_upper = text_dump.upper()
