@@ -1966,8 +1966,10 @@ def extract_quote_data_from_cad(
         ]
 
         # Calculate CMM inspection time (split between labor setup and machine checking)
+        # Use inspection_level from plan, or default to "critical_only"
         from cad_quoter.planning.process_planner import cmm_inspection_minutes
-        cmm_breakdown = cmm_inspection_minutes(holes_total)
+        inspection_level = plan.get('inspection_level', 'critical_only')
+        cmm_breakdown = cmm_inspection_minutes(holes_total, inspection_level=inspection_level)
         cmm_setup_labor_min = cmm_breakdown['setup_labor_min']
         cmm_checking_machine_min = cmm_breakdown['checking_machine_min']
         cmm_holes_checked = cmm_breakdown['holes_checked']
@@ -2076,6 +2078,9 @@ def extract_quote_data_from_cad(
             tool_changes=len(ops) * 2,  # Rough estimate
             fixturing_complexity=1,
             cmm_setup_min=cmm_setup_labor_min,  # Add CMM setup to inspection labor
+            cmm_holes_checked=cmm_holes_checked,  # Holes checked by CMM (avoid double counting)
+            inspection_level=inspection_level,  # Inspection intensity knob
+            net_weight_lb=quote_data.final_part_weight,  # Part weight for handling bump
             machine_time_minutes=grand_total_minutes  # For simple-part setup guardrail
         )
 

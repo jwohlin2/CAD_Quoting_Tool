@@ -2185,9 +2185,14 @@ class LaborInputs:
 
     # CMM inspection setup (labor)
     cmm_setup_min: float = 0.0
+    cmm_holes_checked: int = 0  # Number of holes checked by CMM (to avoid double counting)
+
+    # Inspection intensity knob
+    inspection_level: str = "critical_only"  # "full_first_article", "critical_only", "spot_check"
 
     # Handling
     part_flips: int = 0
+    net_weight_lb: float = 0.0  # Part weight for handling bump calculation
 
     # Machine time for setup guardrail comparison
     machine_time_minutes: float = 0.0
@@ -2212,6 +2217,7 @@ def setup_minutes(i: LaborInputs) -> float:
       + 2·(ream_press_dowel + ream_slip_dowel)  (was 1)
       + 2·(counterbore_qty + counterdrill_qty)  (was 1)
       + 6·outsource_touches             (was 4)
+      + 10 if net_weight_lb > 40        (heavy-part handling)
 
     Simple-part guardrail:
       If machine_time is provided and the part is simple (few ops, few holes,
@@ -2235,6 +2241,12 @@ def setup_minutes(i: LaborInputs) -> float:
         + 2 * (i.counterbore_qty + i.counterdrill_qty)  # Was 1
         + 6 * i.outsource_touches  # Was 4
     )
+
+    # Heavy-part handling bump (>40 lbs)
+    if i.net_weight_lb > 40:
+        raw_setup += 10
+        import logging
+        logging.debug(f"Handling bump applied for {i.net_weight_lb:.1f} lb part (+10 min setup)")
 
     # Apply simple-part guardrail if machine time is provided
     if i.machine_time_minutes > 0:
@@ -2284,6 +2296,10 @@ def programming_minutes(i: LaborInputs) -> float:
     The base minimum (10 min) ensures that any part with machining operations
     gets at least basic programming/prove-out time for tool offsets, program
     verification, and first article setup - even if there are no holes.
+
+    Simple-part cap:
+      For easy plates/small blocks (holes ≤ 3-4, no jig grind, no EDM, no CMM),
+      cap programming minutes to 6-10 min.
     """
     # Base programming time: 10 minutes if there are any machine operations
     # This covers basic program setup, tool offsets, and prove-out for turned/ground parts
@@ -2295,7 +2311,7 @@ def programming_minutes(i: LaborInputs) -> float:
     )
     base_programming = 10 if has_machine_ops else 0
 
-    return (
+    raw_programming = (
         base_programming
         + 1 * i.holes_total
         + 2 * i.edm_window_count
@@ -2304,6 +2320,21 @@ def programming_minutes(i: LaborInputs) -> float:
         + 1 * i.deep_holes
         + 1 * i.grind_face_pairs
     )
+
+    # Simple-part cap: For easy plates/small blocks
+    is_simple_part = (
+        i.holes_total <= 4
+        and i.jig_grind_bore_qty == 0
+        and i.edm_window_count == 0
+        and i.cmm_holes_checked == 0  # No CMM required
+    )
+
+    if is_simple_part and raw_programming > 10:
+        import logging
+        logging.debug(f"Simple-part cap applied: programming reduced from {raw_programming:.1f} to 10 min")
+        return 10.0
+
+    return raw_programming
 
 
 def machining_minutes(i: LaborInputs) -> float:
@@ -2321,8 +2352,9 @@ def machining_minutes(i: LaborInputs) -> float:
       + 1·edm_window_count
       + 0.5·edm_skim_passes
       + 1·grind_face_pairs
+      + 5 if net_weight_lb > 40  # heavy-part handling
     """
-    return (
+    raw_machining = (
         0.5 * i.ops_total
         + 0.2 * i.holes_total
         + 0.5 * i.tool_changes
@@ -2333,39 +2365,126 @@ def machining_minutes(i: LaborInputs) -> float:
         + 1 * i.grind_face_pairs
     )
 
+    # Heavy-part handling bump (>40 lbs)
+    if i.net_weight_lb > 40:
+        raw_machining += 5
 
-def inspection_minutes(i: LaborInputs) -> float:
+    return raw_machining
+
+
+def inspection_minutes(i: LaborInputs) -> Dict[str, float]:
     """
-    Calculate Inspection labor minutes (base = 6 minutes).
+    Calculate Inspection labor minutes with breakdown (base = 6 minutes).
 
     Includes hole-driven and feature-driven checks, plus CMM setup.
+    Scales based on inspection_level: "full_first_article", "critical_only", "spot_check".
 
-    Inspection minutes =
-        6
-      + 1·holes_total
-      + 2·jig_grind_bore_qty
-      + 1·ream_press_dowel
-      + 1·ream_slip_dowel
-      + 0.5·(counterbore_qty + counterdrill_qty)
-      + 1·deep_holes
-      + 2·grind_face_pairs
-      + 1·edm_window_count
-      + inspection_frequency·ops_total
-      + cmm_setup_min (load, clamp, datum setup)
+    Returns a dict with breakdown:
+        - insp_base_min: Base inspection time
+        - insp_dim_checks_min: Dimensional checks (holes, features)
+        - insp_runout_concentricity_min: Runout/concentricity checks (jig grind bores, reaming)
+        - insp_other_features_min: EDM, grinding, deep holes
+        - insp_sampling_min: Sampling frequency checks
+        - insp_cmm_setup_min: CMM setup (labor only, not machine time)
+        - insp_handling_bump_min: Heavy-part handling (>40 lbs)
+        - total_min: Total inspection labor minutes
+
+    Inspection level scaling:
+        - full_first_article: 1.0x hole time, higher base (8 min)
+        - critical_only: 0.5x hole time, standard base (6 min)  [DEFAULT]
+        - spot_check: 0.25x hole time, lower base (4 min)
+
+    Note: holes_total excludes CMM-inspected holes to avoid double counting.
+          CMM checking time goes into MACHINE TIME, not inspection labor.
     """
-    return (
-        6
-        + 1 * i.holes_total
-        + 2 * i.jig_grind_bore_qty
+    # Get inspection level scaling factors
+    level = i.inspection_level.lower()
+    if level == "full_first_article":
+        base_min = 8.0
+        hole_scale = 1.0
+    elif level == "spot_check":
+        base_min = 4.0
+        hole_scale = 0.25
+    else:  # "critical_only" (default)
+        base_min = 6.0
+        hole_scale = 0.5
+
+    # Calculate holes to inspect (exclude CMM-inspected holes to avoid double counting)
+    manual_inspect_holes = max(0, i.holes_total - i.cmm_holes_checked)
+
+    # Base inspection time
+    insp_base_min = base_min
+
+    # Dimensional checks (holes, counterbores, counterdrills)
+    insp_dim_checks_min = (
+        hole_scale * manual_inspect_holes
+        + 0.5 * (i.counterbore_qty + i.counterdrill_qty)
+    )
+
+    # Runout/concentricity checks (jig grind bores, reaming for dowels)
+    insp_runout_concentricity_min = (
+        2 * i.jig_grind_bore_qty
         + 1 * i.ream_press_dowel
         + 1 * i.ream_slip_dowel
-        + 0.5 * (i.counterbore_qty + i.counterdrill_qty)
-        + 1 * i.deep_holes
-        + 2 * i.grind_face_pairs
-        + 1 * i.edm_window_count
-        + i.inspection_frequency * i.ops_total
-        + i.cmm_setup_min
     )
+
+    # Other feature inspection (EDM windows, grinding faces, deep holes)
+    insp_other_features_min = (
+        1 * i.edm_window_count
+        + 2 * i.grind_face_pairs
+        + 1 * i.deep_holes
+    )
+
+    # Sampling frequency checks
+    insp_sampling_min = i.inspection_frequency * i.ops_total
+
+    # CMM setup time (labor only - datum setup, clamping, warmup)
+    insp_cmm_setup_min = i.cmm_setup_min
+
+    # Heavy-part handling bump (>40 lbs)
+    insp_handling_bump_min = 5.0 if i.net_weight_lb > 40 else 0.0
+
+    # Calculate total before applying simple-part cap
+    raw_total = (
+        insp_base_min
+        + insp_dim_checks_min
+        + insp_runout_concentricity_min
+        + insp_other_features_min
+        + insp_sampling_min
+        + insp_cmm_setup_min
+        + insp_handling_bump_min
+    )
+
+    # Simple-part cap: For easy plates/small blocks
+    is_simple_part = (
+        i.holes_total <= 4
+        and i.jig_grind_bore_qty == 0
+        and i.edm_window_count == 0
+        and i.cmm_holes_checked == 0  # No CMM required
+    )
+
+    if is_simple_part and raw_total > 8:
+        import logging
+        logging.debug(f"Simple-part cap applied: inspection reduced from {raw_total:.1f} to 8 min")
+        # Scale down proportionally
+        scale_factor = 8.0 / raw_total
+        insp_base_min *= scale_factor
+        insp_dim_checks_min *= scale_factor
+        insp_runout_concentricity_min *= scale_factor
+        insp_other_features_min *= scale_factor
+        insp_sampling_min *= scale_factor
+        raw_total = 8.0
+
+    return {
+        "insp_base_min": insp_base_min,
+        "insp_dim_checks_min": insp_dim_checks_min,
+        "insp_runout_concentricity_min": insp_runout_concentricity_min,
+        "insp_other_features_min": insp_other_features_min,
+        "insp_sampling_min": insp_sampling_min,
+        "insp_cmm_setup_min": insp_cmm_setup_min,
+        "insp_handling_bump_min": insp_handling_bump_min,
+        "total_min": raw_total
+    }
 
 
 def finishing_minutes(i: LaborInputs) -> float:
@@ -2392,7 +2511,7 @@ def finishing_minutes(i: LaborInputs) -> float:
     )
 
 
-def cmm_inspection_minutes(holes_total: int) -> Dict[str, float]:
+def cmm_inspection_minutes(holes_total: int, inspection_level: str = "critical_only") -> Dict[str, float]:
     """
     Calculate CMM inspection time split into setup (labor) and checking (machine).
 
@@ -2403,22 +2522,36 @@ def cmm_inspection_minutes(holes_total: int) -> Dict[str, float]:
     - Pick up 3 datums/planes, coordinate system: 5-10 min
     - Quick size/flatness/squareness checks: 10-15 min
 
-    Per hole time (~1.0 min) - MACHINE:
+    Per hole time (scaled by inspection_level) - MACHINE:
     - First article (building/debugging program)
     - Move to position, take 4-6 circle touches, retract, process
 
+    Inspection level scaling:
+        - full_first_article: 1.0 min/hole
+        - critical_only: 0.5 min/hole  [DEFAULT]
+        - spot_check: 0.3 min/hole
+
     Args:
         holes_total: Total number of holes to inspect
+        inspection_level: Inspection intensity ("full_first_article", "critical_only", "spot_check")
 
     Returns:
         Dict with 'setup_labor_min', 'checking_machine_min', 'total_min', 'holes_checked'
 
     Example:
-        >>> cmm_inspection_minutes(88)
-        {'setup_labor_min': 30, 'checking_machine_min': 88, 'total_min': 118, 'holes_checked': 88}
+        >>> cmm_inspection_minutes(88, "critical_only")
+        {'setup_labor_min': 30, 'checking_machine_min': 44, 'total_min': 74, 'holes_checked': 88}
     """
     base_block_min = 30  # Base setup and datum time (LABOR)
-    minutes_per_hole = 1.0  # First article inspection time per hole (MACHINE)
+
+    # Scale CMM checking time based on inspection level
+    level = inspection_level.lower()
+    if level == "full_first_article":
+        minutes_per_hole = 1.0  # Full first article inspection
+    elif level == "spot_check":
+        minutes_per_hole = 0.3  # Quick spot checks only
+    else:  # "critical_only" (default)
+        minutes_per_hole = 0.5  # Critical dimensions only
 
     # Only do CMM if there are holes to inspect (threshold: >20 holes)
     if holes_total > 20:
@@ -2447,7 +2580,7 @@ def compute_labor_minutes(i: LaborInputs) -> Dict[str, Any]:
       1) Setup
       2) Programming
       3) Machining_Steps
-      4) Inspection
+      4) Inspection (with breakdown)
       5) Finishing
 
     Plus a Labor_Total field.
@@ -2456,7 +2589,8 @@ def compute_labor_minutes(i: LaborInputs) -> Dict[str, Any]:
         i: LaborInputs dataclass with all the operation counts
 
     Returns:
-        Dict with 'inputs' (as dict) and 'minutes' (breakdown by bucket)
+        Dict with 'inputs' (as dict), 'minutes' (breakdown by bucket), and
+        'inspection_breakdown' (detailed inspection components)
 
     Example:
         >>> from dataclasses import asdict
@@ -2469,14 +2603,15 @@ def compute_labor_minutes(i: LaborInputs) -> Dict[str, Any]:
     setup = setup_minutes(i)
     programming = programming_minutes(i)
     machining = machining_minutes(i)
-    inspection = inspection_minutes(i)
+    inspection_result = inspection_minutes(i)  # Now returns a dict
+    inspection_total = inspection_result["total_min"]
     finishing = finishing_minutes(i)
 
     buckets = {
         "Setup": setup,
         "Programming": programming,
         "Machining_Steps": machining,
-        "Inspection": inspection,
+        "Inspection": inspection_total,
         "Finishing": finishing,
     }
     buckets["Labor_Total"] = sum(buckets.values())
@@ -2484,6 +2619,7 @@ def compute_labor_minutes(i: LaborInputs) -> Dict[str, Any]:
     return {
         "inputs": asdict(i),
         "minutes": buckets,
+        "inspection_breakdown": inspection_result,  # Include detailed breakdown
     }
 
 
