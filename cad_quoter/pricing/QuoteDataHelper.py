@@ -979,10 +979,20 @@ def extract_quote_data_from_cad(
                     if verbose:
                         print(f"  [PUNCH] Reordered to: length={length}, width={width}, thickness={thickness}")
 
+                    # For cylindrical parts, use width as diameter (width = OD for round punches)
+                    if is_cylindrical:
+                        diameter = width
+                        if verbose:
+                            print(f"  [PUNCH] Cylindrical part - using width as diameter: {diameter:.3f}\"")
+                    else:
+                        diameter = 0.0
+
                     quote_data.part_dimensions = PartDimensions(
                         length=length,
                         width=width,
                         thickness=thickness,
+                        diameter=diameter,
+                        is_cylindrical=is_cylindrical,
                     )
 
                     # Also update punch_features dict so punch plan uses correct values
