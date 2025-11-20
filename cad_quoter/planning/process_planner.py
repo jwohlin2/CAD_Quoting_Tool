@@ -1967,12 +1967,23 @@ def plan_from_cad_file(
     if verbose:
         print(f"[PLANNER] Found {len(hole_table)} unique holes -> {len(hole_operations)} operations")
 
-    # 3. Extract all text for family detection
+    # 3. Extract all text for family detection and quantity extraction
     if verbose:
         print("[PLANNER] Extracting text for family detection...")
     all_text = extract_all_text_from_cad(cad_path_for_extraction)
     if verbose:
         print(f"[PLANNER] Extracted {len(all_text)} text records")
+
+    # 3a. Extract part quantity from text
+    part_quantity = 1  # Default
+    try:
+        from cad_quoter.geo_extractor import extract_part_quantity_from_text
+        part_quantity = extract_part_quantity_from_text(all_text)
+        if verbose and part_quantity > 1:
+            print(f"[PLANNER] Detected part quantity: {part_quantity}")
+    except Exception as e:
+        if verbose:
+            print(f"[PLANNER] Could not extract part quantity: {e}")
 
     # 4. Convert hole table to hole_sets format
     hole_sets = _convert_hole_table_to_hole_sets(hole_table)
@@ -2013,6 +2024,8 @@ def plan_from_cad_file(
     plan["hole_operations_data"] = hole_operations
     # Add text dump for punch detection
     plan["text_dump"] = "\n".join(all_text) if all_text else ""
+    # Add extracted part quantity
+    plan["extracted_part_quantity"] = part_quantity
 
     # Detect special operations from text
     from cad_quoter.geometry.dxf_enrich import (
