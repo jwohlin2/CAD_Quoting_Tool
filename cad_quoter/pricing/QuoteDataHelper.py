@@ -979,11 +979,14 @@ def extract_quote_data_from_cad(
                     if verbose:
                         print(f"  [PUNCH] Reordered to: length={length}, width={width}, thickness={thickness}")
 
-                    # For cylindrical parts, use width as diameter (width = OD for round punches)
+                    # For cylindrical parts, preserve the original detected diameter
+                    # Dimension overrides (L×W×T) are intended for rectangular plates,
+                    # not for overriding the diameter of round parts
                     if is_cylindrical:
-                        diameter = width
+                        # Keep original diameter from punch features (already set at line 912)
+                        diameter = quote_data.part_dimensions.diameter
                         if verbose:
-                            print(f"  [PUNCH] Cylindrical part - using width as diameter: {diameter:.3f}\"")
+                            print(f"  [PUNCH] Cylindrical part - preserving detected diameter: {diameter:.3f}\" (use Diameter 1/2 fields to override)")
                     else:
                         diameter = 0.0
 
@@ -997,11 +1000,18 @@ def extract_quote_data_from_cad(
 
                     # Also update punch_features dict so punch plan uses correct values
                     features["overall_length_in"] = length
-                    features["max_od_or_width_in"] = width
-                    if width != thickness:
-                        # Rectangular punch - set body dimensions
-                        features["body_width_in"] = width
-                        features["body_thickness_in"] = thickness
+
+                    # For cylindrical parts, preserve the detected diameter in max_od_or_width_in
+                    # For rectangular parts, use the width from dimension override
+                    if is_cylindrical:
+                        # Keep max_od_or_width_in unchanged (it's the detected diameter)
+                        pass  # Don't overwrite features["max_od_or_width_in"]
+                    else:
+                        features["max_od_or_width_in"] = width
+                        if width != thickness:
+                            # Rectangular punch - set body dimensions
+                            features["body_width_in"] = width
+                            features["body_thickness_in"] = thickness
 
                     # Regenerate punch plan with new dimensions
                     from dataclasses import asdict
