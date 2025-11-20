@@ -1904,6 +1904,92 @@ def detect_polish_contour_operation(text_dump: str) -> bool:
     return False
 
 
+def detect_waterjet_openings(text_dump: str) -> tuple[bool, float]:
+    """Detect if waterjet cutting of openings is required from text.
+
+    Returns:
+        Tuple of (has_waterjet_openings, tolerance_plusminus)
+        Example: (True, 0.005) for "WATERJET ALL OPENINGS ±.005"
+    """
+    if not text_dump:
+        return False, 0.0
+
+    # First filter out any struck-out/crossed-out text
+    filtered_text = _filter_struck_out_text(text_dump)
+    text_upper = filtered_text.upper()
+
+    # Patterns for waterjet openings
+    openings_patterns = [
+        r'\bWATERJET\s+ALL\s+OPENINGS',
+        r'\bWATERJET\s+OPENINGS',
+        r'\bWATER\s+JET\s+ALL\s+OPENINGS',
+        r'\bWATER\s+JET\s+OPENINGS',
+    ]
+
+    has_waterjet = False
+    for pattern in openings_patterns:
+        if re.search(pattern, text_upper):
+            has_waterjet = True
+            break
+
+    if not has_waterjet:
+        return False, 0.0
+
+    # Extract tolerance from text (e.g., "±.005", "±0.005", "+/-.003")
+    tolerance = 0.005  # Default tolerance
+    tol_match = re.search(r'[±+/-]\s*\.?0*\.(\d+)', text_upper)
+    if tol_match:
+        # Convert matched digits to float (e.g., "005" -> 0.005, "003" -> 0.003)
+        digits = tol_match.group(1)
+        tolerance = float(f"0.{digits}")
+
+    return True, tolerance
+
+
+def detect_waterjet_profile(text_dump: str) -> tuple[bool, float]:
+    """Detect if waterjet cutting of profile is required from text.
+
+    Returns:
+        Tuple of (has_waterjet_profile, tolerance_plusminus)
+        Example: (True, 0.003) for "WATERJET TO ±.003"
+    """
+    if not text_dump:
+        return False, 0.0
+
+    # First filter out any struck-out/crossed-out text
+    filtered_text = _filter_struck_out_text(text_dump)
+    text_upper = filtered_text.upper()
+
+    # Patterns for waterjet profile cutting
+    profile_patterns = [
+        r'\bWATERJET\s+TO\s+[±+/-]',
+        r'\bWATER\s+JET\s+TO\s+[±+/-]',
+        r'\bWATERJET\s+PROFILE',
+        r'\bWATER\s+JET\s+PROFILE',
+        r'\bWATERJET\s+CUT',
+        r'\bWATER\s+JET\s+CUT',
+    ]
+
+    has_waterjet = False
+    for pattern in profile_patterns:
+        if re.search(pattern, text_upper):
+            has_waterjet = True
+            break
+
+    if not has_waterjet:
+        return False, 0.0
+
+    # Extract tolerance from text (e.g., "±.003", "±0.003", "+/-.005")
+    tolerance = 0.003  # Default tolerance for profile (typically tighter)
+    tol_match = re.search(r'[±+/-]\s*\.?0*\.(\d+)', text_upper)
+    if tol_match:
+        # Convert matched digits to float (e.g., "003" -> 0.003, "005" -> 0.005)
+        digits = tol_match.group(1)
+        tolerance = float(f"0.{digits}")
+
+    return True, tolerance
+
+
 def detect_punch_pain_flags(text_dump: str) -> Dict[str, bool]:
     """Detect quality/pain flags from text."""
     text_upper = text_dump.upper()
