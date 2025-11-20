@@ -4408,6 +4408,10 @@ class PunchPlannerParams:
     pilot_length: float = 0.0  # Length of minor/pilot diameter section
     shoulder_count: int = 0  # Number of diameter transitions
     flange_thickness: float = 0.0  # Flange/head thickness (if present)
+    # Grinding time model parameters (round parts)
+    grind_pilot_len: float = 0.0  # Length of pilot section to be ground
+    grind_shank_len: float = 0.0  # Length of shank section to be ground
+    grind_head_faces: int = 0  # Number of head/flange faces to grind
     tap_count: int = 0
     tap_summary: list = None
     num_chamfers: int = 0
