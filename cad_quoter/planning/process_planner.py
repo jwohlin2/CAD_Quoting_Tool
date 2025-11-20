@@ -371,10 +371,22 @@ def planner_die_plate(params: Dict[str, Any]) -> Plan:
     material = params.get("material", "GENERIC")
 
     # Squaring/Finishing strategy with volume-based time calculation
-    # Use fixed stock overage for all parts
-    stock_L = params.get('stock_length', L + 0.50)
-    stock_W = params.get('stock_width', W + 0.50)
-    stock_T = params.get('stock_thickness', T + 0.25)
+    # Determine stock overage based on part size
+    max_dim = max(L, W)
+    if max_dim < 3.0:
+        # Small blanks (tiny stuff)
+        over_L = 0.25
+        over_W = 0.25
+        over_T = 0.125
+    else:
+        # Normal blanks (everything else)
+        over_L = 0.50
+        over_W = 0.50
+        over_T = 0.25
+
+    stock_L = params.get('stock_length', L + over_L)
+    stock_W = params.get('stock_width', W + over_W)
+    stock_T = params.get('stock_thickness', T + over_T)
 
     # Calculate volume removed for full blank square-up
     # Volume for facing to thickness (both faces)
@@ -401,8 +413,10 @@ def planner_die_plate(params: Dict[str, Any]) -> Plan:
     time_min_squareup = volume_cuin_squareup * min_per_cuin_squareup * material_factor
 
     # DEBUG output for square-up
+    overage_tier = "Small blank" if max_dim < 3.0 else "Normal blank"
     print(f"DEBUG: Full-Blank Square-up operation (die_plate):")
     print(f"  Finished dimensions: L={L:.3f}\", W={W:.3f}\", T={T:.3f}\"")
+    print(f"  Max dimension: {max_dim:.3f}\" → {overage_tier} overage")
     print(f"  Stock dimensions: L={stock_L:.3f}\", W={stock_W:.3f}\", T={stock_T:.3f}\"")
     print(f"  Stock overage: +{stock_L - L:.3f}\" L, +{stock_W - W:.3f}\" W, +{stock_T - T:.3f}\" T")
     print(f"  Volume breakdown:")
