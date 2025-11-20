@@ -801,6 +801,30 @@ def collect_available_plate_thicknesses(
     return sorted(thicknesses)
 
 
+def estimate_mcmaster_shipping(weight_lb: float) -> float:
+    """Rough McMaster shipping estimator (weight-based only).
+
+    Args:
+        weight_lb: Weight of the material in pounds
+
+    Returns:
+        Estimated shipping cost in dollars
+    """
+    # 1) Tiny packages
+    if weight_lb <= 1.25:
+        return 11.00
+
+    # 2) Regular parcel
+    if weight_lb <= 60:
+        ship = 13.50 + 0.15 * weight_lb
+        ship = max(11.00, ship)
+        return round(ship, 2)
+
+    # 3) Heavy / freight-ish
+    ship = 0.35 * weight_lb
+    return round(ship, 2)
+
+
 __all__ = [
     "load_mcmaster_catalog_rows",
     "_coerce_inches_value",
@@ -811,4 +835,5 @@ __all__ = [
     "compute_price_per_cubic_inch",
     "estimate_price_for_part_from_volume",
     "collect_available_plate_thicknesses",
+    "estimate_mcmaster_shipping",
 ]

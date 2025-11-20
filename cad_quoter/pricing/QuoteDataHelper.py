@@ -797,7 +797,8 @@ def extract_quote_data_from_cad(
     from cad_quoter.pricing.mcmaster_helpers import (
         pick_mcmaster_plate_sku,
         pick_mcmaster_cylindrical_sku,
-        load_mcmaster_catalog_rows
+        load_mcmaster_catalog_rows,
+        estimate_mcmaster_shipping
     )
     from cad_quoter.resources import default_catalog_csv
 
@@ -1545,7 +1546,9 @@ def extract_quote_data_from_cad(
     # matches the sum of the displayed line items exactly.
     if mcmaster_price:
         tax = round(mcmaster_price * 0.07, 2)
-        shipping = round(max(mcmaster_price * 0.125, 11.10), 2)
+        # Use weight-based shipping estimator instead of percentage
+        stock_weight = scrap_calc.mcmaster_weight if scrap_calc.mcmaster_weight else 0.0
+        shipping = round(estimate_mcmaster_shipping(stock_weight), 2)
         scrap_credit = round(scrap_value_calc.get('scrap_value', 0.0), 2)
         net_cost = max(0, round(mcmaster_price + tax + shipping - scrap_credit, 2))
     else:
@@ -2087,7 +2090,7 @@ def extract_quote_data_from_cad(
             cmm_setup_min=cmm_setup_labor_min,  # Add CMM setup to inspection labor
             cmm_holes_checked=cmm_holes_checked,  # Holes checked by CMM (avoid double counting)
             inspection_level=inspection_level,  # Inspection intensity knob
-            net_weight_lb=quote_data.final_part_weight,  # Part weight for handling bump
+            net_weight_lb=quote_data.stock_info.final_part_weight,  # Part weight for handling bump
             machine_time_minutes=grand_total_minutes  # For simple-part setup guardrail
         )
 
