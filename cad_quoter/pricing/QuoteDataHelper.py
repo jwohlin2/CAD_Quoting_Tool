@@ -1278,6 +1278,17 @@ def extract_quote_data_from_cad(
 
     # Calculate scrap info
     # Pass desired dimensions explicitly to ensure catalog lookup uses correct values
+    # For cylindrical parts, pass diameter and is_cylindrical flag
+    is_cylindrical = quote_data.part_dimensions.is_cylindrical if quote_data.part_dimensions else False
+    part_diameter = quote_data.part_dimensions.diameter if quote_data.part_dimensions else None
+    part_diameter_2 = quote_data.part_dimensions.diameter_2 if quote_data.part_dimensions else None
+
+    # For tapered parts, use the larger diameter for stock lookup
+    if is_cylindrical and part_diameter_2 and part_diameter_2 > part_diameter:
+        stock_diameter = part_diameter_2
+    else:
+        stock_diameter = part_diameter
+
     scrap_calc = calculate_total_scrap(
         cad_file_path=cad_file_path,
         material=material,
@@ -1288,6 +1299,8 @@ def extract_quote_data_from_cad(
         part_width=part_info.width,
         part_thickness=part_info.thickness,
         catalog_csv_path=catalog_csv_path,
+        is_cylindrical=is_cylindrical,
+        part_diameter=stock_diameter,
         verbose=verbose
     )
 
@@ -1522,7 +1535,7 @@ def extract_quote_data_from_cad(
     if is_cylindrical:
         # For tapered parts, use the larger diameter that was used for stock selection
         desired_diameter = stock_diameter if part_diameter_2 > 0 else part_diameter
-        mcmaster_diameter = mcmaster_result.get('diam_in', 0.0) if mcmaster_result else 0.0
+        mcmaster_diameter = mcmaster_result.get('stock_diam_in', 0.0) if mcmaster_result else 0.0
     else:
         desired_diameter = 0.0
         mcmaster_diameter = 0.0

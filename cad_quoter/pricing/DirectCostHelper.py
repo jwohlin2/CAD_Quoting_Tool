@@ -911,6 +911,8 @@ def calculate_total_scrap(
     part_width: Optional[float] = None,
     part_thickness: Optional[float] = None,
     catalog_csv_path: Optional[str] = None,
+    is_cylindrical: bool = False,
+    part_diameter: Optional[float] = None,
     verbose: bool = False
 ) -> ScrapInfo:
     """
@@ -936,17 +938,28 @@ def calculate_total_scrap(
         desired_width: Desired starting stock width (if None, uses part W + allowance)
         desired_thickness: Desired starting stock thickness (if None, uses part T + allowance)
         catalog_csv_path: Path to McMaster catalog CSV
+        is_cylindrical: True for round bar stock (guide posts, punches, etc.)
+        part_diameter: Diameter for cylindrical parts (used for stock lookup)
         verbose: Print detailed output
 
     Returns:
         ScrapInfo dataclass with complete scrap breakdown
 
     Example:
-        >>> # Auto-lookup McMaster stock size
+        >>> # Auto-lookup McMaster stock size (plate)
         >>> scrap = calculate_total_scrap("part.dxf", material="aluminum MIC6")
         >>> print(f"Total scrap: {scrap.total_scrap_volume:.2f} in³")
         >>> print(f"Scrap weight: {scrap.total_scrap_weight:.2f} lbs")
         >>> print(f"Material utilization: {scrap.utilization_percentage:.1f}%")
+
+        >>> # Cylindrical part (round bar)
+        >>> scrap = calculate_total_scrap(
+        ...     "punch.dxf",
+        ...     material="A2",
+        ...     is_cylindrical=True,
+        ...     part_diameter=2.5,
+        ...     part_length=8.0
+        ... )
 
         >>> # Or specify McMaster stock dimensions manually
         >>> scrap = calculate_total_scrap(
@@ -960,6 +973,7 @@ def calculate_total_scrap(
     from cad_quoter.resources import default_catalog_csv
     from cad_quoter.pricing.mcmaster_helpers import (
         pick_mcmaster_plate_sku,
+        pick_mcmaster_cylindrical_sku,
         load_mcmaster_catalog_rows
     )
     from cad_quoter.planning.process_planner import extract_dimensions_from_cad
@@ -1023,29 +1037,57 @@ def calculate_total_scrap(
             catalog_csv_path = str(default_catalog_csv())
 
         catalog_rows = load_mcmaster_catalog_rows(catalog_csv_path)
-        result = pick_mcmaster_plate_sku(
-            need_L_in=desired_length,
-            need_W_in=desired_width,
-            need_T_in=desired_thickness,
-            material_key=material,
-            catalog_rows=catalog_rows,
-            verbose=verbose
-        )
 
-        if result:
-            mcmaster_length = result.get('stock_L_in', desired_length)
-            mcmaster_width = result.get('stock_W_in', desired_width)
-            mcmaster_thickness = result.get('stock_T_in', desired_thickness)
-
+        # Use cylindrical lookup for round bar stock
+        if is_cylindrical and part_diameter is not None and part_length is not None:
             if verbose:
-                print(f"Found McMaster stock: {mcmaster_length}\" x {mcmaster_width}\" x {mcmaster_thickness}\"")
+                print(f"  [CYLINDRICAL] Using round bar stock lookup (diam={part_diameter:.3f}\", length={part_length:.3f}\")")
+
+            result = pick_mcmaster_cylindrical_sku(
+                need_diam_in=part_diameter,
+                need_length_in=part_length,
+                material_key=material,
+                catalog_rows=catalog_rows,
+                verbose=verbose
+            )
+
+            if result:
+                mcmaster_length = result.get('stock_L_in', part_length)
+                mcmaster_width = result.get('stock_diam_in', part_diameter)
+                mcmaster_thickness = result.get('stock_diam_in', part_diameter)
+                if verbose:
+                    print(f"Found McMaster cylindrical stock: diam={mcmaster_width}\" x length={mcmaster_length}\"")
+            else:
+                # Fallback: use part dimensions for cylindrical
+                mcmaster_length = part_length
+                mcmaster_width = part_diameter
+                mcmaster_thickness = part_diameter
+                if verbose:
+                    print(f"No McMaster cylindrical stock found, using part dimensions")
         else:
-            # Fallback: use desired dimensions
-            mcmaster_length = desired_length
-            mcmaster_width = desired_width
-            mcmaster_thickness = desired_thickness
-            if verbose:
-                print(f"No McMaster stock found, using desired dimensions")
+            # Use standard plate lookup
+            result = pick_mcmaster_plate_sku(
+                need_L_in=desired_length,
+                need_W_in=desired_width,
+                need_T_in=desired_thickness,
+                material_key=material,
+                catalog_rows=catalog_rows,
+                verbose=verbose
+            )
+
+            if result:
+                mcmaster_length = result.get('stock_L_in', desired_length)
+                mcmaster_width = result.get('stock_W_in', desired_width)
+                mcmaster_thickness = result.get('stock_T_in', desired_thickness)
+                if verbose:
+                    print(f"Found McMaster stock: {mcmaster_length}\" x {mcmaster_width}\" x {mcmaster_thickness}\"")
+            else:
+                # Fallback: use desired dimensions
+                mcmaster_length = desired_length
+                mcmaster_width = desired_width
+                mcmaster_thickness = desired_thickness
+                if verbose:
+                    print(f"No McMaster stock found, using desired dimensions")
 
     # Calculate machining scrap
     if verbose:
