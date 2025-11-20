@@ -2973,6 +2973,194 @@ def get_material_removal_rates(material: str) -> Dict[str, float]:
     return default_rates
 
 
+def _requires_grinding(plan: Dict[str, Any], ops: List[Dict[str, Any]]) -> bool:
+    """Check if grinding is actually required based on drawing callouts.
+
+    Scans for:
+    - "GRIND" or "GROUND" keywords in notes/dimensions
+    - Flatness/parallelism tighter than 0.0005"
+    - Surface finish callouts (< 32 Ra typically implies grinding)
+
+    Args:
+        plan: Process plan dict that may contain notes, dims_and_tols, etc.
+        ops: List of operations from the plan
+
+    Returns:
+        True if grinding callouts detected, False otherwise
+    """
+    import re
+
+    # Check plan metadata for notes/dimensions
+    all_text = []
+
+    # Collect text from various plan fields
+    if 'notes' in plan:
+        notes = plan['notes']
+        if isinstance(notes, str):
+            all_text.append(notes)
+        elif isinstance(notes, list):
+            all_text.extend(str(n) for n in notes)
+
+    if 'dims_and_tols' in plan:
+        dims = plan['dims_and_tols']
+        if isinstance(dims, str):
+            all_text.append(dims)
+        elif isinstance(dims, list):
+            all_text.extend(str(d) for d in dims)
+
+    # Also check QA notes which might mention grinding
+    if 'qa' in plan:
+        all_text.extend(str(q) for q in plan.get('qa', []))
+
+    # Check operations for grinding keywords
+    for op in ops:
+        desc = op.get('description', '')
+        if desc:
+            all_text.append(str(desc))
+
+    combined_text = ' '.join(all_text).upper()
+
+    # Check for explicit grinding callouts
+    if re.search(r'\bGRIND\b|\bGROUND\b', combined_text):
+        return True
+
+    # Check for tight flatness/parallelism (< 0.0005")
+    # Patterns: "0.0002", ".0003", "0.0004 FLAT", etc.
+    flatness_pattern = r'(?:FLATNESS|PARALLELISM|PARALLEL).*?(?:0\.000[1-4]|\.000[1-4])'
+    if re.search(flatness_pattern, combined_text):
+        return True
+
+    # Alternative: tight tolerance followed by FLAT/PARALLEL
+    tight_tol_pattern = r'(?:0\.000[1-4]|\.000[1-4]).*?(?:FLAT|PARALLEL)'
+    if re.search(tight_tol_pattern, combined_text):
+        return True
+
+    # Check for surface finish better than 32 Ra (common grinding threshold)
+    # Patterns: "16 Ra", "8 μin", "32/", etc.
+    finish_pattern = r'(?:(?:[1-2][0-9]|[1-9])\s*(?:RA|μIN|MICROINCH)|(?:32|16|8)/)'
+    if re.search(finish_pattern, combined_text):
+        return True
+
+    return False
+
+
+def _calculate_other_ops_minutes(
+    plan: Dict[str, Any],
+    ops: List[Dict[str, Any]],
+    L: float,
+    W: float,
+    T: float
+) -> float:
+    """Calculate other operations time based on actual part geometry and features.
+
+    Drives other_ops_min from:
+    - Number of chamfered edges
+    - Number of small radii / form arcs
+    - Explicit polish/contour notes
+    - Part size
+    - For extremely simple parts: cap at 2-3 min
+
+    Args:
+        plan: Process plan dict that may contain geometry features
+        ops: List of operations
+        L, W, T: Part dimensions in inches
+
+    Returns:
+        Estimated other operations time in minutes
+    """
+    # Extract geometry features from plan metadata if available
+    meta = plan.get('meta', {})
+
+    # Try to get chamfer count
+    num_chamfers = meta.get('num_chamfers', 0)
+    if num_chamfers == 0:
+        # Fall back to checking operations for chamfer keywords
+        for op in ops:
+            op_type = op.get('op', '').lower()
+            if 'chamfer' in op_type or 'deburr' in op_type:
+                num_chamfers += 1
+
+    # Try to get small radius count
+    num_small_radii = meta.get('num_small_radii', 0)
+    if num_small_radii == 0:
+        num_small_radii = meta.get('small_radius_count', 0)
+
+    # Check for polish/contour requirements
+    has_polish = meta.get('has_polish_contour', False) or meta.get('requires_polish', False)
+
+    # Check notes for polish/contour keywords
+    polish_detected = False
+    if 'notes' in plan or 'qa' in plan:
+        all_text = []
+        if 'notes' in plan:
+            notes = plan['notes']
+            if isinstance(notes, str):
+                all_text.append(notes)
+            elif isinstance(notes, list):
+                all_text.extend(str(n) for n in notes)
+        if 'qa' in plan:
+            all_text.extend(str(q) for q in plan.get('qa', []))
+
+        combined = ' '.join(all_text).upper()
+        if any(kw in combined for kw in ['POLISH', 'CONTOUR', 'HAND WORK', 'HANDWORK', 'BLEND']):
+            polish_detected = True
+
+    has_polish = has_polish or polish_detected
+
+    # Calculate part size factor (larger parts = more deburr/cleanup time)
+    part_volume = L * W * T if (L > 0 and W > 0 and T > 0) else 0
+    size_factor = min(part_volume / 10.0, 1.0)  # Normalize to 0-1, max at 10 cu.in.
+
+    # Check if this is an extremely simple part
+    # Criteria: 1 tapped hole, tiny profile, no EDM/grind, minimal features
+    has_edm = any('edm' in op.get('op', '').lower() for op in ops)
+    has_grinding = any('grind' in op.get('op', '').lower() for op in ops)
+    num_taps = sum(1 for op in ops if 'tap' in op.get('op', '').lower())
+    num_drills = sum(1 for op in ops if 'drill' in op.get('op', '').lower())
+    num_pockets = sum(1 for op in ops if 'pocket' in op.get('op', '').lower())
+    num_profiles = sum(1 for op in ops if 'profile' in op.get('op', '').lower())
+
+    is_simple_part = (
+        not has_edm and
+        not has_grinding and
+        num_taps <= 1 and
+        num_drills <= 3 and
+        num_pockets == 0 and
+        num_profiles <= 1 and
+        num_chamfers <= 2 and
+        num_small_radii == 0 and
+        not has_polish and
+        part_volume < 5.0  # Small part (< 5 cubic inches)
+    )
+
+    # Calculate base time from geometry features
+    other_time = 0.0
+
+    # Chamfer/deburr time: ~0.5 min per edge (reduced from generic 5 min)
+    other_time += num_chamfers * 0.5
+
+    # Small radii/form work: ~1.0 min per feature
+    other_time += num_small_radii * 1.0
+
+    # Polish/contour work: 3-5 min depending on part size
+    if has_polish:
+        other_time += 3.0 + size_factor * 2.0
+
+    # Add baseline for general cleanup/deburr (scaled by part size)
+    baseline = 1.0 + size_factor * 1.5
+    other_time += baseline
+
+    # For simple parts, cap at 2-3 minutes
+    if is_simple_part:
+        other_time = min(other_time, 2.5)
+
+    # For complex parts with many features, ensure we don't go too low
+    if (num_chamfers + num_small_radii) > 10 or has_polish:
+        other_time = max(other_time, 4.0)
+
+    return round(other_time, 1)
+
+
 def estimate_machine_hours_from_plan(
     plan: Dict[str, Any],
     material: str = "GENERIC",
@@ -3229,6 +3417,10 @@ def estimate_machine_hours_from_plan(
 
         # Squaring operations (wet grind)
         elif op_type == 'wet_grind_square_all':
+            # Check if grinding is actually required before adding wet-grind time
+            # Don't assume grinding where not called out
+            grinding_required = _requires_grinding(plan, ops)
+
             # Wet grind squaring: time based on volume and material factor
             from cad_quoter.pricing.time_estimator import estimate_wet_grind_minutes
 
@@ -3236,8 +3428,9 @@ def estimate_machine_hours_from_plan(
             # Total to remove = stock_thickness - final_part_thickness
             total_thickness_to_remove = stock_T - T if (stock_T > T and T > 0) else 0.0
 
-            # Finish grind is always 0.050" (0.025" per face)
-            finish_grind_stock = 0.050
+            # Finish grind is always 0.050" (0.025" per face) if grinding is required
+            # Otherwise, treat as milled only
+            finish_grind_stock = 0.050 if grinding_required else 0.0
 
             # Rough removal is everything else (milling)
             rough_removal = max(0.0, total_thickness_to_remove - finish_grind_stock)
@@ -3281,50 +3474,57 @@ def estimate_machine_hours_from_plan(
                     'override_time_minutes': None
                 })
 
-            # Now handle the finish grind (0.050" total, 0.025" per face)
+            # Now handle the finish grind (0.050" total, 0.025" per face) if required
             stock_removed = finish_grind_stock
             faces = op.get('faces', 2)
-            grind_time, material_factor = estimate_wet_grind_minutes(
-                L, W, stock_removed, material, material_group='', faces=faces
-            )
-            volume_cuin = L * W * stock_removed
-            min_per_cuin = 3.0
-            time_breakdown['grinding'] += grind_time
 
-            # Calculate surface area for debug output
-            surface_area_sq_in = L * W * faces if (L and W) else 0
+            if grinding_required:
+                grind_time, material_factor = estimate_wet_grind_minutes(
+                    L, W, stock_removed, material, material_group='', faces=faces
+                )
+                volume_cuin = L * W * stock_removed
+                min_per_cuin = 3.0
+                time_breakdown['grinding'] += grind_time
 
-            # Create detailed operation object for finish grind
-            grinding_operations_detailed.append({
-                'op_name': 'wet_grind_square_all',
-                'op_description': 'Wet Grind - Top/Bottom Pair (Finish)',
-                'length': L,
-                'width': W,
-                'area': L * W,
-                'stock_removed_total': stock_removed,
-                'faces': faces,
-                'volume_removed': volume_cuin,
-                'min_per_cuin': min_per_cuin,
-                'material_factor': material_factor,
-                'grind_material_factor': material_factor,  # For renderer display
-                'time_minutes': grind_time,
-                '_used_override': False,  # Wet grind doesn't use overrides
-                # Additional debug field
-                'surface_area_sq_in': surface_area_sq_in
-            })
+                # Calculate surface area for debug output
+                surface_area_sq_in = L * W * faces if (L and W) else 0
 
-            # DEBUG: Print all square-up grinding parameters and price drivers
-            print(f"\nDEBUG: SQUARE-UP WET GRIND (Price Drivers):")
-            print(f"  sq_length              = {L:.4f}\"")
-            print(f"  sq_width               = {W:.4f}\"")
-            print(f"  sq_top_bottom_stock    = {stock_removed:.4f}\"")
-            print(f"  sq_faces               = {faces}")
-            print(f"  surface_area_sq_in     = {surface_area_sq_in:.3f} in²")
-            print(f"  volume_removed_cuin    = {volume_cuin:.4f} in³")
-            print(f"  grind_min_per_cuin     = {min_per_cuin:.1f}")
-            print(f"  grind_material_factor  = {material_factor:.2f}")
-            print(f"  grind_time_min         = {grind_time:.2f} min")
-            print(f"  NOTE: Square/finish grinding time driven by stock_removed_total, volume and material factor.")
+                # Create detailed operation object for finish grind
+                grinding_operations_detailed.append({
+                    'op_name': 'wet_grind_square_all',
+                    'op_description': 'Wet Grind - Top/Bottom Pair (Finish)',
+                    'length': L,
+                    'width': W,
+                    'area': L * W,
+                    'stock_removed_total': stock_removed,
+                    'faces': faces,
+                    'volume_removed': volume_cuin,
+                    'min_per_cuin': min_per_cuin,
+                    'material_factor': material_factor,
+                    'grind_material_factor': material_factor,  # For renderer display
+                    'time_minutes': grind_time,
+                    '_used_override': False,  # Wet grind doesn't use overrides
+                    # Additional debug field
+                    'surface_area_sq_in': surface_area_sq_in
+                })
+
+                # DEBUG: Print all square-up grinding parameters and price drivers
+                print(f"\nDEBUG: SQUARE-UP WET GRIND (Price Drivers):")
+                print(f"  sq_length              = {L:.4f}\"")
+                print(f"  sq_width               = {W:.4f}\"")
+                print(f"  sq_top_bottom_stock    = {stock_removed:.4f}\"")
+                print(f"  sq_faces               = {faces}")
+                print(f"  surface_area_sq_in     = {surface_area_sq_in:.3f} in²")
+                print(f"  volume_removed_cuin    = {volume_cuin:.4f} in³")
+                print(f"  grind_min_per_cuin     = {min_per_cuin:.1f}")
+                print(f"  grind_material_factor  = {material_factor:.2f}")
+                print(f"  grind_time_min         = {grind_time:.2f} min")
+                print(f"  NOTE: Square/finish grinding time driven by stock_removed_total, volume and material factor.")
+            else:
+                # No grinding callouts detected - treat as milled only
+                print(f"\nDEBUG: SQUARE-UP WET GRIND SKIPPED (no grinding callouts detected)")
+                print(f"  NOTE: No GRIND/GROUND keywords, tight flatness/parallelism, or surface finish callouts found.")
+                print(f"  NOTE: Treating as milled finish only (time_on_wheel_min = 0)")
 
         # Squaring operations (mill - rough faces)
         elif op_type == 'square_up_rough_faces':
@@ -3636,8 +3836,12 @@ def estimate_machine_hours_from_plan(
                 # Reduce generic estimate since we can't model it precisely
                 time_breakdown['other'] += 3  # 3 minutes for unmodeled pocket/slot/profile
             else:
-                # Generic estimate for truly other operations
-                time_breakdown['other'] += 5  # 5 minutes
+                # Don't add generic time here - we'll calculate based on geometry after the loop
+                pass
+
+    # Add geometry-based other operations time (chamfers, radii, polish, etc.)
+    geometry_based_other_min = _calculate_other_ops_minutes(plan, ops, L, W, T)
+    time_breakdown['other'] += geometry_based_other_min
 
     # Calculate total
     total_minutes = sum(time_breakdown.values())
