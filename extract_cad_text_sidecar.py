@@ -7,18 +7,21 @@ Simple standalone script for extracting all text from DWG/DXF files.
 Used for testing and debugging text extraction.
 
 Usage:
-    python extract_cad_text_sidecar.py <path_to_cad_file.dxf|dwg>
+    python extract_cad_text_sidecar.py [path_to_cad_file.dxf|dwg]
 
-    # Examples:
+    # If no file path is provided, you will be prompted interactively
+    python extract_cad_text_sidecar.py
+
+    # Examples with file path:
     python extract_cad_text_sidecar.py "Cad Files/301_redacted.dxf"
-    python extract_cad_text_sidecar.py test.dwg --format json
+    python extract_cad_text_sidecar.py test.dwg --format csv
     python extract_cad_text_sidecar.py test.dxf --text-only
 
-Output formats:
-    - default: Human-readable formatted output
-    - --format json: JSON output with full metadata
-    - --format csv: CSV format
-    - --text-only: Just the text strings, one per line
+Default behavior:
+    - Automatically saves output as JSON file alongside the CAD file
+    - Output filename: {input_name}_text_extraction.json
+    - Use --output to specify a different location
+    - Use --format to change output format (human, json, csv)
 """
 
 import sys
@@ -143,19 +146,21 @@ def format_csv(records):
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Extract all text from a CAD file (DXF or DWG)",
+        description="Extract all text from a CAD file (DXF or DWG) and save as JSON",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
-  %(prog)s drawing.dxf
-  %(prog)s drawing.dwg --format json
-  %(prog)s drawing.dxf --text-only
-  %(prog)s drawing.dxf --block-depth 10 --format csv
+  %(prog)s                              # Interactive mode - prompts for file
+  %(prog)s drawing.dxf                   # Saves as drawing_text_extraction.json
+  %(prog)s drawing.dwg -o output.json    # Custom output location
+  %(prog)s drawing.dxf --format csv      # Save as CSV instead
+  %(prog)s drawing.dxf --block-depth 10  # Increase block recursion depth
         """
     )
 
     parser.add_argument(
         "cad_file",
+        nargs="?",  # Make it optional
         help="Path to CAD file (DXF or DWG)"
     )
 
@@ -163,7 +168,7 @@ Examples:
         "--format",
         choices=["human", "json", "csv"],
         default="human",
-        help="Output format (default: human-readable)"
+        help="Output format (default: json when auto-saving, human otherwise)"
     )
 
     parser.add_argument(
@@ -182,10 +187,28 @@ Examples:
     parser.add_argument(
         "--output",
         "-o",
-        help="Write output to file instead of stdout"
+        help="Output file path (default: auto-generated as {input_name}_text_extraction.json)"
     )
 
     args = parser.parse_args()
+
+    # If no file was provided, prompt the user
+    if not args.cad_file:
+        print("CAD Text Extraction Tool", file=sys.stderr)
+        print("=" * 40, file=sys.stderr)
+        cad_file = input("Enter path to CAD file (DXF or DWG): ").strip()
+
+        # Remove surrounding quotes if present
+        if cad_file.startswith('"') and cad_file.endswith('"'):
+            cad_file = cad_file[1:-1]
+        elif cad_file.startswith("'") and cad_file.endswith("'"):
+            cad_file = cad_file[1:-1]
+
+        if not cad_file:
+            print("ERROR: No file path provided", file=sys.stderr)
+            return 1
+
+        args.cad_file = cad_file
 
     try:
         # Extract text
@@ -201,12 +224,21 @@ Examples:
         else:  # human
             output = format_human_readable(records)
 
+        # Auto-generate output filename if not specified
+        if not args.output:
+            input_path = Path(args.cad_file)
+            # Default to JSON format and save alongside the CAD file
+            output_filename = f"{input_path.stem}_text_extraction.json"
+            args.output = str(input_path.parent / output_filename)
+            # Override format to JSON when auto-generating filename
+            if not args.text_only:
+                output = json.dumps(records, indent=2, ensure_ascii=False)
+
         # Write output
-        if args.output:
-            Path(args.output).write_text(output, encoding="utf-8")
-            print(f"Output written to: {args.output}", file=sys.stderr)
-        else:
-            print(output)
+        Path(args.output).write_text(output, encoding="utf-8")
+        print(f"\n✓ Extraction complete!", file=sys.stderr)
+        print(f"✓ Output written to: {args.output}", file=sys.stderr)
+        print(f"✓ Found {len(records)} text records", file=sys.stderr)
 
         return 0
 
