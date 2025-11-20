@@ -554,6 +554,15 @@ _QTY_PATTERNS = (
     re.compile(r'["\']?([A-Z])["\']?\s*(?:-|=)?\s*(\d+)\s*(?:X|EA|EACH|PL)', re.IGNORECASE),
 )
 
+# Pattern to extract overall part quantity from title blocks or parts lists
+# Matches format like: "A 134 8 A2 SPRING PIN ... QTY MATERIAL..."
+# where 8 is the quantity appearing before the QTY label
+# This pattern finds all numbers, and we'll select the one closest to QTY
+_PART_QTY_PATTERN = re.compile(
+    r'\b(\d{1,4})\b(?=.*?\bQTY\b)',
+    re.IGNORECASE
+)
+
 
 def _to_float(token: str) -> Optional[float]:
     token = (token or "").strip()
@@ -642,6 +651,94 @@ def _collect_qty_hints(lines: Iterable[str]) -> Dict[str, int]:
                 except Exception:
                     continue
     return qty
+
+
+def extract_part_quantity_from_text(text_records) -> int:
+    """
+    Extract overall part quantity from CAD text records.
+
+    Looks for patterns like "A 134 8 A2 SPRING PIN ... QTY MATERIAL..."
+    where a number appears before the "QTY" label (typically in title blocks
+    or parts lists). When multiple numbers are found before QTY, prefers the
+    one closest to the QTY keyword.
+
+    Args:
+        text_records: Iterable of text strings OR dicts with a 'text' field
+
+    Returns:
+        Extracted quantity if found and confident, otherwise 1 (default)
+
+    Examples:
+        >>> records = [{"text": "A 134 8 A2 SPRING PIN 56-58 ROCK C REV DETAIL QTY MATERIAL"}]
+        >>> extract_part_quantity_from_text(records)
+        8
+
+        >>> text_list = ["A 134 8 A2 SPRING PIN 56-58 ROCK C REV DETAIL QTY MATERIAL"]
+        >>> extract_part_quantity_from_text(text_list)
+        8
+
+        >>> records = [{"text": "NO QTY INFO HERE"}]
+        >>> extract_part_quantity_from_text(records)
+        1
+    """
+    candidates = []
+
+    for record in text_records:
+        # Handle both string and dict inputs
+        if isinstance(record, str):
+            text = record
+        elif isinstance(record, dict):
+            text = record.get("text", "")
+        else:
+            continue
+
+        if not text or "QTY" not in text.upper():
+            continue
+
+        # Find position of QTY keyword (case-insensitive)
+        qty_match = re.search(r'\bQTY\b', text, re.IGNORECASE)
+        if not qty_match:
+            continue
+        qty_pos = qty_match.start()
+
+        # Find all numbers before QTY and their positions
+        text_before_qty = text[:qty_pos]
+        number_matches = []
+
+        # Match standalone numbers, but not those in ranges like "56-58" or fractions like "1/4"
+        for match in re.finditer(r'(?<![0-9/-])\b(\d{1,4})\b(?![0-9/-])', text_before_qty):
+            qty_str = match.group(1)
+            try:
+                qty = int(qty_str)
+                # Sanity check: reasonable quantity range
+                if 1 <= qty <= 9999:
+                    # Store (quantity, distance_to_qty)
+                    distance = qty_pos - match.end()
+                    number_matches.append((qty, distance))
+            except (ValueError, TypeError):
+                continue
+
+        # If we found numbers, prefer the one closest to QTY (smallest distance)
+        if number_matches:
+            # Sort by distance (ascending) - closest first
+            number_matches.sort(key=lambda x: x[1])
+            # Take the closest number
+            candidates.append(number_matches[0][0])
+
+    # If we found exactly one candidate, use it with confidence
+    if len(candidates) == 1:
+        return candidates[0]
+
+    # If we found multiple candidates, check if they're all the same
+    if len(candidates) > 1:
+        unique_candidates = set(candidates)
+        if len(unique_candidates) == 1:
+            # All matches agree on the same quantity
+            return candidates[0]
+        # Multiple different quantities found - not confident, default to 1
+
+    # No matches or ambiguous - default to 1
+    return 1
 
 
 def rebuild_structured_rows(lines: Iterable[str]) -> List[Dict[str, Any]]:

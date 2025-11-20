@@ -844,6 +844,13 @@ def extract_quote_data_from_cad(
     plan = plan_from_cad_file(cad_file_path, use_paddle_ocr=use_ocr, verbose=False)
     quote_data.raw_plan = plan if verbose else None  # Only store if verbose
 
+    # Use extracted quantity from plan if available and user didn't specify a quantity
+    extracted_qty = plan.get("extracted_part_quantity", 1)
+    if quantity == 1 and extracted_qty > 1:
+        quote_data.quantity = extracted_qty
+        if verbose:
+            print(f"  Using extracted part quantity: {extracted_qty}")
+
     # ========================================================================
     # CHECK: Is this a punch drawing?
     # ========================================================================
