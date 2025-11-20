@@ -7,7 +7,7 @@ pass around quote data throughout the application.
 """
 
 from __future__ import annotations
-from dataclasses import dataclass, asdict
+from dataclasses import dataclass, asdict, fields
 from pathlib import Path
 from typing import Optional, Dict, Any, List
 import json
@@ -1975,17 +1975,29 @@ def extract_quote_data_from_cad(
             f"Milling time mismatch: {total_milling_min:.2f} vs expected {expected_milling:.2f}"
 
         # Convert detailed operations to dataclass objects
+        # Filter out extra fields that aren't part of the dataclass definitions
+        milling_field_names = {f.name for f in fields(MillingOperation)}
         milling_ops = [
-            MillingOperation(**op) for op in milling_ops_raw
+            MillingOperation(**{k: v for k, v in op.items() if k in milling_field_names})
+            for op in milling_ops_raw
         ]
+
+        grinding_field_names = {f.name for f in fields(GrindingOperation)}
         grinding_ops = [
-            GrindingOperation(**op) for op in grinding_ops_raw
+            GrindingOperation(**{k: v for k, v in op.items() if k in grinding_field_names})
+            for op in grinding_ops_raw
         ]
+
+        pocket_field_names = {f.name for f in fields(PocketOperation)}
         pocket_ops = [
-            PocketOperation(**op) for op in pocket_ops_raw
+            PocketOperation(**{k: v for k, v in op.items() if k in pocket_field_names})
+            for op in pocket_ops_raw
         ]
+
+        slot_field_names = {f.name for f in fields(SlotOperation)}
         slot_ops = [
-            SlotOperation(**op) for op in slot_ops_raw
+            SlotOperation(**{k: v for k, v in op.items() if k in slot_field_names})
+            for op in slot_ops_raw
         ]
 
         # Calculate CMM inspection time (split between labor setup and machine checking)
