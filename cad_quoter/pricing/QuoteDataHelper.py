@@ -211,6 +211,72 @@ class GrindingOperation:
 
 
 @dataclass
+class PocketOperation:
+    """Detailed pocket/profile milling operation breakdown."""
+    op_name: str = ""  # e.g., "pocket_mill", "profile_mill"
+    op_description: str = ""  # Human-readable description
+
+    # Geometry
+    pocket_area: float = 0.0  # square inches
+    pocket_depth: float = 0.0  # inches
+    pocket_width: float = 0.0  # inches (for rectangular pockets)
+    pocket_length: float = 0.0  # inches (for rectangular pockets)
+
+    # Tool parameters
+    tool_diameter: float = 0.0  # inches
+
+    # Cut parameters
+    stepover: float = 0.0  # inches (radial step)
+    stepdown: float = 0.0  # inches (axial step per pass)
+    z_passes: int = 1  # number of depth passes
+
+    # Path and feed
+    pocket_path_length_in: float = 0.0  # total path length in inches
+    feed_ipm: float = 0.0  # feed rate in inches per minute
+
+    # Time
+    pocket_time_min: float = 0.0  # total time in minutes
+
+    # Override tracking
+    _used_override: bool = False
+    override_time_minutes: Optional[float] = None
+
+
+@dataclass
+class SlotOperation:
+    """Detailed slot milling operation breakdown."""
+    op_name: str = ""  # e.g., "slot_mill"
+    op_description: str = ""  # Human-readable description
+
+    # Geometry (two radii + straight sides)
+    slot_length: float = 0.0  # inches (overall length)
+    slot_width: float = 0.0  # inches (diameter of endmill / slot width)
+    slot_depth: float = 0.0  # inches
+    slot_radius: float = 0.0  # inches (end radius)
+
+    # Tool parameters
+    tool_diameter: float = 0.0  # inches
+
+    # Cut parameters
+    stepdown: float = 0.0  # inches (axial step per pass)
+    z_passes: int = 1  # number of depth passes
+
+    # Path and feed
+    slot_path_length_in: float = 0.0  # total path length in inches
+    feed_ipm: float = 0.0  # feed rate in inches per minute
+
+    # Time calculation (using formula: base + k_len * length + k_dep * depth)
+    base_slot_min: float = 0.0  # base time constant
+    k_len: float = 0.0  # length coefficient
+    k_dep: float = 0.0  # depth coefficient
+    slot_mill_time_min: float = 0.0  # total time in minutes
+
+    # Override tracking
+    _used_override: bool = False
+    override_time_minutes: Optional[float] = None
+
+
+@dataclass
 class MachineHoursBreakdown:
     """Machine hours estimation breakdown."""
     # Operations by type (hole operations)
@@ -224,6 +290,8 @@ class MachineHoursBreakdown:
     # Operations by type (plan operations)
     milling_operations: Optional[List[MillingOperation]] = None
     grinding_operations: Optional[List[GrindingOperation]] = None
+    pocket_operations: Optional[List[PocketOperation]] = None
+    slot_operations: Optional[List[SlotOperation]] = None
 
     # Time totals by operation type (from hole table)
     total_drill_minutes: float = 0.0
@@ -235,6 +303,8 @@ class MachineHoursBreakdown:
     # Time totals by operation category (from plan operations)
     total_milling_minutes: float = 0.0  # Includes squaring ops
     total_grinding_minutes: float = 0.0  # Includes wet grind squaring
+    total_pocket_minutes: float = 0.0  # Pocket milling operations
+    total_slot_minutes: float = 0.0  # Slot milling operations
     total_edm_minutes: float = 0.0
     total_other_minutes: float = 0.0
     total_cmm_minutes: float = 0.0  # CMM checking time (machine only, setup is in labor)
@@ -265,6 +335,10 @@ class MachineHoursBreakdown:
             self.milling_operations = []
         if self.grinding_operations is None:
             self.grinding_operations = []
+        if self.pocket_operations is None:
+            self.pocket_operations = []
+        if self.slot_operations is None:
+            self.slot_operations = []
 
 
 @dataclass
@@ -1840,27 +1914,37 @@ def extract_quote_data_from_cad(
         # Use sum of detailed operations for consistency with displayed breakdown
         milling_ops_raw = plan_machine_times.get('milling_operations', [])
         grinding_ops_raw = plan_machine_times.get('grinding_operations', [])
+        pocket_ops_raw = plan_machine_times.get('pocket_operations', [])
+        slot_ops_raw = plan_machine_times.get('slot_operations', [])
 
         # Calculate totals from detailed operations (what's displayed in report)
         total_milling_ops_min = sum(op.get('time_minutes', 0.0) for op in milling_ops_raw)
         total_grinding_ops_min = sum(op.get('time_minutes', 0.0) for op in grinding_ops_raw)
+        total_pocket_ops_min = sum(op.get('pocket_time_min', 0.0) for op in pocket_ops_raw)
+        total_slot_ops_min = sum(op.get('slot_mill_time_min', 0.0) for op in slot_ops_raw)
 
         # Get breakdown totals (may include non-detailed operations)
         breakdown_milling_min = plan_machine_times['breakdown_minutes'].get('milling', 0.0)
         breakdown_grinding_min = plan_machine_times['breakdown_minutes'].get('grinding', 0.0)
+        breakdown_pocket_min = plan_machine_times['breakdown_minutes'].get('pockets', 0.0)
+        breakdown_slot_min = plan_machine_times['breakdown_minutes'].get('slots', 0.0)
         # EDM from plan operations + EDM from hole table "FOR WIRE EDM" entries
         total_edm_min = plan_machine_times['breakdown_minutes'].get('edm', 0.0) + hole_table_edm_min
         total_other_min = plan_machine_times['breakdown_minutes'].get('other', 0.0)
 
-        # Any milling/grinding time not in detailed ops goes to "other" for transparency
+        # Any milling/grinding/pocket/slot time not in detailed ops goes to "other" for transparency
         milling_overhead_min = breakdown_milling_min - total_milling_ops_min
         grinding_overhead_min = breakdown_grinding_min - total_grinding_ops_min
-        total_other_min += milling_overhead_min + grinding_overhead_min
+        pocket_overhead_min = breakdown_pocket_min - total_pocket_ops_min
+        slot_overhead_min = breakdown_slot_min - total_slot_ops_min
+        total_other_min += milling_overhead_min + grinding_overhead_min + pocket_overhead_min + slot_overhead_min
 
         # Use detailed ops totals for display (ensures Total Milling Time matches ops sum)
-        # Add slot milling time from hole table to milling totals
+        # Add slot milling time from hole table to milling totals (legacy slot handling)
         total_milling_min = total_milling_ops_min + slot_milling_min
         total_grinding_min = total_grinding_ops_min
+        total_pocket_min = total_pocket_ops_min
+        total_slot_min = total_slot_ops_min
 
         # Sanity check: totals should match (total_milling_min includes slot time + plan ops)
         expected_milling = total_milling_ops_min + slot_milling_min
@@ -1873,6 +1957,12 @@ def extract_quote_data_from_cad(
         ]
         grinding_ops = [
             GrindingOperation(**op) for op in grinding_ops_raw
+        ]
+        pocket_ops = [
+            PocketOperation(**op) for op in pocket_ops_raw
+        ]
+        slot_ops = [
+            SlotOperation(**op) for op in slot_ops_raw
         ]
 
         # Calculate CMM inspection time (split between labor setup and machine checking)
@@ -1892,6 +1982,8 @@ def extract_quote_data_from_cad(
         total_jig_grind_min = round(total_jig_grind_min, 2)
         total_milling_min = round(total_milling_min, 2)
         total_grinding_min = round(total_grinding_min, 2)
+        total_pocket_min = round(total_pocket_min, 2)
+        total_slot_min = round(total_slot_min, 2)
         total_edm_min = round(total_edm_min, 2)
         total_other_min = round(total_other_min, 2)
         cmm_checking_machine_min = round(cmm_checking_machine_min, 2)
@@ -1899,7 +1991,8 @@ def extract_quote_data_from_cad(
         grand_total_minutes = round(
             total_drill_min + total_tap_min + total_cbore_min +
             total_cdrill_min + total_jig_grind_min +
-            total_milling_min + total_grinding_min + total_edm_min + total_other_min +
+            total_milling_min + total_grinding_min + total_pocket_min + total_slot_min +
+            total_edm_min + total_other_min +
             cmm_checking_machine_min, 2
         )
         grand_total_hours = round(grand_total_minutes / 60.0, 2)
@@ -1917,6 +2010,8 @@ def extract_quote_data_from_cad(
             edm_operations=edm_ops,
             milling_operations=milling_ops,
             grinding_operations=grinding_ops,
+            pocket_operations=pocket_ops,
+            slot_operations=slot_ops,
             total_drill_minutes=total_drill_min,
             total_tap_minutes=total_tap_min,
             total_cbore_minutes=total_cbore_min,
@@ -1924,6 +2019,8 @@ def extract_quote_data_from_cad(
             total_jig_grind_minutes=total_jig_grind_min,
             total_milling_minutes=total_milling_min,
             total_grinding_minutes=total_grinding_min,
+            total_pocket_minutes=total_pocket_min,
+            total_slot_minutes=total_slot_min,
             total_edm_minutes=total_edm_min,
             total_other_minutes=total_other_min,
             total_cmm_minutes=cmm_checking_machine_min,
