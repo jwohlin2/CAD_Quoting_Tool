@@ -1042,6 +1042,7 @@ def calculate_total_scrap(
         if is_cylindrical and part_diameter is not None and part_length is not None:
             if verbose:
                 print(f"  [CYLINDRICAL] Using round bar stock lookup (diam={part_diameter:.3f}\", length={part_length:.3f}\")")
+                print(f"  [CYLINDRICAL] DEBUG: part_length={part_length}, desired_length={desired_length}")
 
             result = pick_mcmaster_cylindrical_sku(
                 need_diam_in=part_diameter,

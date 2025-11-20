@@ -987,16 +987,21 @@ def extract_quote_data_from_cad(
                         diameter = quote_data.part_dimensions.diameter
                         if verbose:
                             print(f"  [PUNCH] Cylindrical part - preserving detected diameter: {diameter:.3f}\" (use Diameter 1/2 fields to override)")
+                            print(f"  [PUNCH] DEBUG: quote_data.part_dimensions before update = diameter:{quote_data.part_dimensions.diameter}, is_cyl:{quote_data.part_dimensions.is_cylindrical}")
                     else:
                         diameter = 0.0
 
                     quote_data.part_dimensions = PartDimensions(
                         length=length,
-                        width=width,
-                        thickness=thickness,
+                        width=diameter if is_cylindrical else width,
+                        thickness=diameter if is_cylindrical else thickness,
                         diameter=diameter,
                         is_cylindrical=is_cylindrical,
                     )
+
+                    if verbose and is_cylindrical:
+                        print(f"  [PUNCH] DEBUG: quote_data.part_dimensions AFTER update = diameter:{quote_data.part_dimensions.diameter}, is_cyl:{quote_data.part_dimensions.is_cylindrical}")
+                        print(f"  [PUNCH] Cylindrical part dimensions set to: L={length:.3f}\", W={diameter:.3f}\", T={diameter:.3f}\" (W and T match diameter)")
 
                     # Also update punch_features dict so punch plan uses correct values
                     features["overall_length_in"] = length
@@ -1037,10 +1042,14 @@ def extract_quote_data_from_cad(
                     diameter_1_override = diameter_override
 
                 if diameter_1_override and is_cylindrical:
+                    original_diameter = quote_data.part_dimensions.diameter
                     if verbose:
-                        print(f"  [PUNCH] Diameter 1 override: {diameter_1_override:.3f}\"")
+                        print(f"  [PUNCH] Applying diameter override(s):")
+                        print(f"    Original detected diameter: {original_diameter:.3f}\"")
+                        print(f"    Diameter 1 override: {diameter_1_override:.3f}\"")
                         if diameter_2_override:
-                            print(f"  [PUNCH] Diameter 2 override: {diameter_2_override:.3f}\" (tapered)")
+                            print(f"    Diameter 2 override: {diameter_2_override:.3f}\" (tapered)")
+                        print(f"    → Stock lookup will use diameter: {max(diameter_1_override, diameter_2_override) if diameter_2_override else diameter_1_override:.3f}\"")
 
                     quote_data.part_dimensions.diameter = diameter_1_override
                     if diameter_2_override:
@@ -1049,6 +1058,15 @@ def extract_quote_data_from_cad(
                     # Update punch features with new diameter (use larger diameter for stock selection)
                     max_diameter = max(diameter_1_override, diameter_2_override) if diameter_2_override else diameter_1_override
                     features["max_od_or_width_in"] = max_diameter
+
+                    # IMPORTANT: For cylindrical parts, also update width and thickness to match the diameter
+                    # This ensures scrap calculations use the correct dimensions
+                    # (width and thickness should equal the diameter for round bar stock)
+                    quote_data.part_dimensions.width = max_diameter
+                    quote_data.part_dimensions.thickness = max_diameter
+
+                    if verbose:
+                        print(f"    → Updated part dimensions: L={quote_data.part_dimensions.length:.3f}\", W={max_diameter:.3f}\", T={max_diameter:.3f}\"")
 
                     # Regenerate punch plan with new diameter
                     from dataclasses import asdict
@@ -1308,6 +1326,11 @@ def extract_quote_data_from_cad(
         stock_diameter = part_diameter_2
     else:
         stock_diameter = part_diameter
+
+    if verbose and is_cylindrical:
+        print(f"  DEBUG [Scrap calc inputs]:")
+        print(f"    part_diameter={part_diameter}, part_diameter_2={part_diameter_2}, stock_diameter={stock_diameter}")
+        print(f"    part_length={part_info.length:.3f}, desired_length={desired_L:.3f}")
 
     scrap_calc = calculate_total_scrap(
         cad_file_path=cad_file_path,

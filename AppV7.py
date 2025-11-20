@@ -804,6 +804,10 @@ class AppV7:
             diameter_1 = float(diameter_1_val) if diameter_1_val else None
             diameter_2 = float(diameter_2_val) if diameter_2_val else None
 
+            # Log what was read
+            if diameter_1 or diameter_2:
+                print(f"[AppV7] Read diameter overrides from Quote Editor: Diameter 1={diameter_1}, Diameter 2={diameter_2}")
+
             # Validate positive values
             if diameter_1 is not None and diameter_1 <= 0:
                 messagebox.showerror(

@@ -373,7 +373,7 @@ def pick_mcmaster_cylindrical_sku(
 
     # Tolerance for diameter matching (allow rounding up to next standard size)
     diam_tolerance = 0.125  # Allow up to 1/8" larger diameter
-    length_tolerance = 0.5  # Allow up to 0.5" longer stock
+    length_tolerance = 12.0  # Allow up to 12" longer stock (round bar comes in standard lengths like 12", 36")
 
     for row in material_rows:
         # Check for diam_in column (cylindrical parts)
