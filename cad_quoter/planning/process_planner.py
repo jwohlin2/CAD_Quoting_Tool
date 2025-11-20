@@ -371,104 +371,62 @@ def planner_die_plate(params: Dict[str, Any]) -> Plan:
     material = params.get("material", "GENERIC")
 
     # Squaring/Finishing strategy with volume-based time calculation
-    if L > 5.0 and W > 5.0 and T > 1.0:
-        # Get starting stock dimensions (default: +0.50" L/W, +0.25" T)
-        stock_L = params.get('stock_length', L + 0.50)
-        stock_W = params.get('stock_width', W + 0.50)
-        stock_T = params.get('stock_thickness', T + 0.25)
+    # Use fixed stock overage for all parts
+    stock_L = params.get('stock_length', L + 0.50)
+    stock_W = params.get('stock_width', W + 0.50)
+    stock_T = params.get('stock_thickness', T + 0.25)
 
-        # Calculate volume removed
-        volume_start = stock_L * stock_W * stock_T
-        volume_finish = L * W * T
-        volume_removed = volume_start - volume_finish
+    # Calculate volume removed for full blank square-up
+    # Volume for facing to thickness (both faces)
+    volume_thickness = L * W * (stock_T - T)
 
-        # Split: 90% milling (rough), 10% grinding (finish)
-        volume_milling = volume_removed * 0.90
-        volume_grinding = volume_removed * 0.10
+    # Volume for trimming length (both ends)
+    volume_length_trim = (stock_L - L) * W * T
 
-        # Get material-specific removal rates
-        rates = get_material_removal_rates(material)
-        milling_rate = rates['milling_min_per_cuin']
-        grinding_rate = rates['grinding_min_per_cuin']
-        setup_time = rates['setup_overhead_min']
-        flip_time = rates['flip_deburr_min']
+    # Volume for trimming width (both sides)
+    volume_width_trim = L * (stock_W - W) * T
 
-        # Calculate raw cutting times
-        milling_time = volume_milling * milling_rate
-        grinding_time = volume_grinding * grinding_rate
+    # Total volume removed during square-up
+    volume_cuin_squareup = volume_thickness + volume_length_trim + volume_width_trim
 
-        # Total time with overhead
-        total_square_up_time = milling_time + grinding_time + setup_time + flip_time
+    # Get material-specific removal rates
+    rates = get_material_removal_rates(material)
+    min_per_cuin_squareup = rates['milling_min_per_cuin']
 
-        # Thickness removal calculations for validation
-        stock_thk = stock_T
-        finished_thk = T
-        total_thickness_to_remove = stock_thk - finished_thk
+    # Get material factor - reuse existing grinding/machining material factors
+    # This accounts for material hardness (P2=1.0, aluminum<1, stainless/tool steel>1)
+    material_factor = get_grind_factor(material)
 
-        # Calculate thickness removed by each operation
-        # For square-up: thickness removal comes from top/bottom faces
-        rough_mill_thk = total_thickness_to_remove * 0.90  # 90% by rough milling
-        grind_thk_total = total_thickness_to_remove * 0.10  # 10% by grinding
+    # Calculate full square-up milling time
+    time_min_squareup = volume_cuin_squareup * min_per_cuin_squareup * material_factor
 
-        # Calculate modeled thickness removed for square-up specifically
-        # radial_stock affects sides, face operations affect top/bottom
-        modeled_thickness_removed_squareup = rough_mill_thk + grind_thk_total
+    # DEBUG output for square-up
+    print(f"DEBUG: Full-Blank Square-up operation (die_plate):")
+    print(f"  Finished dimensions: L={L:.3f}\", W={W:.3f}\", T={T:.3f}\"")
+    print(f"  Stock dimensions: L={stock_L:.3f}\", W={stock_W:.3f}\", T={stock_T:.3f}\"")
+    print(f"  Stock overage: +{stock_L - L:.3f}\" L, +{stock_W - W:.3f}\" W, +{stock_T - T:.3f}\" T")
+    print(f"  Volume breakdown:")
+    print(f"    - Thickness (both faces): {volume_thickness:.4f} in³")
+    print(f"    - Length trim (both ends): {volume_length_trim:.4f} in³")
+    print(f"    - Width trim (both sides): {volume_width_trim:.4f} in³")
+    print(f"    - Total volume removed: {volume_cuin_squareup:.4f} in³")
+    print(f"  Material factor: {material_factor:.2f}")
+    print(f"  Milling rate: {min_per_cuin_squareup:.3f} min/in³")
+    print(f"  Total square-up time: {time_min_squareup:.2f} min")
 
-        # DEBUG output for square-up
-        print(f"DEBUG: Square-up operation (die_plate):")
-        print(f"  final_thickness={finished_thk:.4f}\", stock_thickness={stock_thk:.4f}\"")
-        print(f"  total_thickness_to_remove={total_thickness_to_remove:.4f}\"")
-        print(f"  modeled_thickness_removed_squareup={modeled_thickness_removed_squareup:.4f}\"")
-        print(f"  rough_mill_thk={rough_mill_thk:.4f}\" (90% of removal)")
-        print(f"  grind_thk_total={grind_thk_total:.4f}\" (10% of removal)")
-
-        # Check for mismatch
-        thickness_mismatch = abs(total_thickness_to_remove - modeled_thickness_removed_squareup)
-        if thickness_mismatch > 0.050:
-            warning = f"Square-up thickness mismatch > 0.050\": {thickness_mismatch:.4f}\""
-            print(f"DEBUG: WARNING - {warning}")
-            p.warnings.append(warning)
-
-        # Validate thickness removal consistency
-        validation_warning = _validate_thickness_removal(
-            stock_thk=stock_thk,
-            finished_thk=finished_thk,
-            rough_mill_thk=rough_mill_thk,
-            grind_thk_total=grind_thk_total,
-            context="die_plate square-up"
-        )
-        if validation_warning:
-            p.warnings.append(validation_warning)
-
-        # Add operations with calculated times
-        D = W / 3.0
-        axial_step = min(0.75, T / 2.0)
-
-        # Pass override times to suppress physics-based calc
-        p.add("square_up_rough_sides",
-              radial_stock=0.250,
-              axial_step=axial_step,
-              tool_diameter_in=D,
-              override_time_minutes=milling_time + (setup_time / 2))
-
-        p.add("square_up_rough_faces",
-              finish_doc=0.025,
-              tool_diameter_in=D,
-              target_pass_count=3,
-              override_time_minutes=grinding_time + (flip_time + setup_time / 2))
-
-        # Add note about square/finish milling time drivers
-        p.warnings.append(
-            "Square/finish milling time driven by stock_removed_total, tool diameters, passes and feed."
-        )
-    else:
-        # Wet grind for smaller parts
-        p.add("wet_grind_square_all", stock_removed_total=0.050, faces=2)
-
-        # Add note about square/finish grinding time drivers
-        p.warnings.append(
-            "Square/finish grinding time driven by stock_removed_total, volume and material factor."
-        )
+    # Add single full square-up milling operation
+    D = W / 3.0 if W > 0 else 0.75
+    p.add("full_square_up_mill",
+          length=L,
+          width=W,
+          thickness=T,
+          stock_length=stock_L,
+          stock_width=stock_W,
+          stock_thickness=stock_T,
+          volume_removed=volume_cuin_squareup,
+          tool_diameter_in=D,
+          material_factor=material_factor,
+          override_time_minutes=time_min_squareup)
 
     # 1) Face strategy (Blanchard vs mill) — big or tight spec → Blanchard first
     if max(L, W) > 10.0 or (flatness_spec is not None and flatness_spec <= 0.001):
@@ -3568,6 +3526,82 @@ def estimate_machine_hours_from_plan(
                 print(f"  NOTE: No GRIND/GROUND keywords, tight flatness/parallelism, or surface finish callouts found.")
                 print(f"  NOTE: Treating as milled finish only (time_on_wheel_min = 0)")
 
+        # Full square-up milling (new unified approach)
+        elif op_type == 'full_square_up_mill':
+            # Get operation parameters
+            op_length = op.get('length', L)
+            op_width = op.get('width', W)
+            op_thickness = op.get('thickness', T)
+            stock_L = op.get('stock_length', op_length + 0.50)
+            stock_W = op.get('stock_width', op_width + 0.50)
+            stock_T = op.get('stock_thickness', op_thickness + 0.25)
+            volume_removed = op.get('volume_removed', 0.0)
+            D = op.get('tool_diameter_in', op_width / 3.0 if op_width > 0 else 0.75)
+            mat_factor = op.get('material_factor', 1.0)
+
+            # Get time (should be from override)
+            override_time = op.get('override_time_minutes')
+            used_override = override_time is not None
+            if used_override:
+                minutes = override_time
+            else:
+                # Fallback calculation if no override
+                rates = get_material_removal_rates(material)
+                fallback_mat_factor = get_grind_factor(material)
+                minutes = volume_removed * rates['milling_min_per_cuin'] * fallback_mat_factor
+
+            time_breakdown['milling'] += minutes
+
+            # Calculate volume breakdown for display
+            volume_thickness = op_length * op_width * (stock_T - op_thickness)
+            volume_length_trim = (stock_L - op_length) * op_width * op_thickness
+            volume_width_trim = op_length * (stock_W - op_width) * op_thickness
+
+            # Create detailed operation object
+            milling_operations_detailed.append({
+                'op_name': 'full_square_up_mill',
+                'op_description': f'Face Mill - Full Square-Up',
+                'length': op_length,
+                'width': op_width,
+                'thickness': op_thickness,
+                'stock_length': stock_L,
+                'stock_width': stock_W,
+                'stock_thickness': stock_T,
+                'perimeter': 2 * (op_length + op_width),
+                'tool_diameter': D,
+                'passes': 0,  # Not applicable for combined op
+                'stepover': 0,
+                'radial_stock': 0.50,  # Stock on sides
+                'axial_step': stock_T - op_thickness,  # Stock on faces
+                'axial_passes': None,
+                'radial_passes': None,
+                'path_length': 0,
+                'feed_rate': 0,
+                'time_minutes': minutes,
+                '_used_override': used_override,
+                'override_time_minutes': override_time,
+                'material_factor': mat_factor,
+                'volume_removed_cuin': volume_removed,
+                'volume_thickness': volume_thickness,
+                'volume_length_trim': volume_length_trim,
+                'volume_width_trim': volume_width_trim
+            })
+
+            # DEBUG: Print all full square-up parameters and price drivers
+            print(f"\nDEBUG: FULL SQUARE-UP MILL (Price Drivers):")
+            print(f"  Finished: L={op_length:.3f}\", W={op_width:.3f}\", T={op_thickness:.3f}\"")
+            print(f"  Stock: L={stock_L:.3f}\", W={stock_W:.3f}\", T={stock_T:.3f}\"")
+            print(f"  Stock overage: +{stock_L - op_length:.3f}\" L, +{stock_W - op_width:.3f}\" W, +{stock_T - op_thickness:.3f}\" T")
+            print(f"  Volume breakdown:")
+            print(f"    - Thickness (faces): {volume_thickness:.4f} in³")
+            print(f"    - Length trim: {volume_length_trim:.4f} in³")
+            print(f"    - Width trim: {volume_width_trim:.4f} in³")
+            print(f"    - Total volume: {volume_removed:.4f} in³")
+            print(f"  Material factor: {mat_factor:.2f}")
+            print(f"  sq_time_min = {minutes:.2f} min")
+            if used_override:
+                print(f"  (Using override time)")
+
         # Squaring operations (mill - rough faces)
         elif op_type == 'square_up_rough_faces':
             # Get operation parameters (needed for detailed object regardless of override)
@@ -4035,26 +4069,32 @@ def render_square_up_block(
     side_op = None
     face_op = None
     grind_op = None
+    full_square_up_op = None
 
     for op in milling_ops:
         if op.get('op_name') == 'square_up_rough_sides':
             side_op = op
         elif op.get('op_name') == 'square_up_rough_faces':
             face_op = op
+        elif op.get('op_name') == 'full_square_up_mill':
+            full_square_up_op = op
 
     for op in grinding_ops:
         if op.get('op_name') == 'wet_grind_square_all':
             grind_op = op
 
     # Determine method
+    is_full_square_up = full_square_up_op is not None
     is_mill_route = side_op is not None or face_op is not None
     is_grind_route = grind_op is not None
 
-    if not is_mill_route and not is_grind_route:
+    if not is_mill_route and not is_grind_route and not is_full_square_up:
         return []  # No square-up operations
 
     # Header line
-    if is_mill_route:
+    if is_full_square_up:
+        lines.append("SQUARE-UP — MILLING (Full Blank)")
+    elif is_mill_route:
         lines.append("SQUARE-UP — MILLING")
     else:
         lines.append("SQUARE-UP — WET GRIND")
@@ -4062,7 +4102,22 @@ def render_square_up_block(
     lines.append("-" * 106)
 
     # Context lines
-    if is_mill_route:
+    if is_full_square_up:
+        # Get details from full square-up operation
+        stock_L = full_square_up_op.get('stock_length', 0)
+        stock_W = full_square_up_op.get('stock_width', 0)
+        stock_T = full_square_up_op.get('stock_thickness', 0)
+        fin_L = full_square_up_op.get('length', 0)
+        fin_W = full_square_up_op.get('width', 0)
+        fin_T = full_square_up_op.get('thickness', 0)
+        D = full_square_up_op.get('tool_diameter', 0)
+        mat_factor = full_square_up_op.get('material_factor', 1.0)
+
+        ctx1 = f"Method: Mill | ToolØ = W/3 ({D:.3f}\") | Stock overage: +{stock_L - fin_L:.2f}\" L, +{stock_W - fin_W:.2f}\" W, +{stock_T - fin_T:.2f}\" T"
+        ctx2 = f"Strategy: Volume-based | Material factor: {mat_factor:.2f} | Includes facing + trimming all sides"
+        lines.append(ctx1)
+        lines.append(ctx2)
+    elif is_mill_route:
         # Get tool diameter from side_op or face_op
         D = side_op.get('tool_diameter', 0) if side_op else (face_op.get('tool_diameter', 0) if face_op else 0)
         ctx1 = f"Method: Mill | ToolØ = W/3 ({D:.3f}\") | Side stock 0.250\" | Top/Bottom stock 0.025\""
@@ -4080,8 +4135,36 @@ def render_square_up_block(
     lines.append("TIME PER OP - SQUARE/FINISH")
     lines.append("-" * 106)
 
+    # Full square-up mill line (new unified approach)
+    if is_full_square_up:
+        fin_L = full_square_up_op.get('length', 0)
+        fin_W = full_square_up_op.get('width', 0)
+        fin_T = full_square_up_op.get('thickness', 0)
+        volume_removed = full_square_up_op.get('volume_removed_cuin', 0)
+        volume_thickness = full_square_up_op.get('volume_thickness', 0)
+        volume_length = full_square_up_op.get('volume_length_trim', 0)
+        volume_width = full_square_up_op.get('volume_width_trim', 0)
+        tool_d = full_square_up_op.get('tool_diameter', 0)
+        time_min = full_square_up_op.get('time_minutes', 0)
+        mat_factor = full_square_up_op.get('material_factor', 1.0)
+        used_ovr = full_square_up_op.get('_used_override', False)
+
+        ovr_badge = " (ovr)" if used_ovr else ""
+
+        # Build line with finished dimensions and volume - stay ≤106 chars
+        line = (f"Face Mill - Full Square-Up | W {fin_W:.3f}\" | L {fin_L:.3f}\" | T {fin_T:.3f}\" | "
+                f"Vol {volume_removed:.3f} in³ | Time {time_min:.2f} min{ovr_badge}")
+
+        lines.append(line[:106])
+        total_time += time_min
+
+        # Add volume breakdown line for clarity
+        breakdown_line = (f"  Volume: Thickness {volume_thickness:.3f} + Length {volume_length:.3f} + "
+                          f"Width {volume_width:.3f} in³ | Factor {mat_factor:.2f}")
+        lines.append(breakdown_line[:106])
+
     # Mill route op lines
-    if is_mill_route:
+    elif is_mill_route:
         # Side mill line
         if side_op:
             perim = side_op.get('perimeter', 0)
