@@ -362,7 +362,18 @@ def planner_die_plate(params: Dict[str, Any]) -> Plan:
 
     # Dimensions
     L, W = _read_plate_LW(params)
-    T = float(params.get("T") or params.get("thickness") or 0.0)
+    T = float(params.get("T") or params.get("thickness") or params.get("thickness_in") or 0.0)
+
+    # Add warning if dimensions are missing or invalid
+    if T <= 0:
+        warning_msg = f"WARNING: Die plate thickness is zero or missing (T={T}). Square-up calculation will be incorrect."
+        print(f"DEBUG: {warning_msg}")
+        p.warnings.append(warning_msg)
+    if L <= 0 or W <= 0:
+        warning_msg = f"WARNING: Die plate dimensions are zero or missing (L={L}, W={W}). Square-up calculation will be incorrect."
+        print(f"DEBUG: {warning_msg}")
+        p.warnings.append(warning_msg)
+
     profile_tol = params.get("profile_tol")  # float in inches
     flatness_spec = params.get("flatness_spec")
     parallelism_spec = params.get("parallelism_spec")
