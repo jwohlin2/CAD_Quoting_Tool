@@ -203,6 +203,7 @@ class DimensionFinder:
                     dimtype == 3 or
                     "%%c" in raw_text.lower() or
                     "Ø" in raw_text or
+                    "⌀" in raw_text or
                     "DIA" in raw_text.upper()
                 )
 

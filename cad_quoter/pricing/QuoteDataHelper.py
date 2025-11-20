@@ -32,7 +32,8 @@ class PartDimensions:
     length: float = 0.0  # inches
     width: float = 0.0   # inches
     thickness: float = 0.0  # inches
-    diameter: float = 0.0  # inches (for cylindrical parts)
+    diameter: float = 0.0  # inches (for cylindrical parts - primary diameter)
+    diameter_2: float = 0.0  # inches (secondary diameter for tapered parts)
     volume: float = 0.0  # cubic inches
     area: float = 0.0    # square inches (L × W)
     is_cylindrical: bool = False  # True for guide posts, spring pins, etc.
@@ -744,7 +745,8 @@ def extract_quote_data_from_cad(
     material_override: Optional[str] = None,
     catalog_csv_path: Optional[str] = None,
     dimension_override: Optional[tuple[float, float, float]] = None,
-    diameter_override: Optional[float] = None,
+    diameter_override: Optional[float] = None,  # Deprecated: use diameter_overrides instead
+    diameter_overrides: Optional[tuple[Optional[float], Optional[float]]] = None,  # (diameter_1, diameter_2) for tapered parts
     mcmaster_price_override: Optional[float] = None,
     scrap_value_override: Optional[float] = None,
     quantity: int = 1,
@@ -765,7 +767,9 @@ def extract_quote_data_from_cad(
         material_override: Optional material name override
         catalog_csv_path: Optional path to McMaster catalog CSV
         dimension_override: Optional (length, width, thickness) tuple to override OCR extraction
-        diameter_override: Optional diameter override (inches) for cylindrical parts
+        diameter_override: Optional diameter override (inches) for cylindrical parts (deprecated - use diameter_overrides)
+        diameter_overrides: Optional (diameter_1, diameter_2) tuple for cylindrical parts. Either value can be None.
+                           Used for tapered punches where diameter varies along length.
         mcmaster_price_override: Optional manual stock price - skips McMaster API lookup
         scrap_value_override: Optional manual scrap value - skips automatic scrap value calculation
         quantity: Number of parts to quote (affects setup cost amortization and material pricing)
@@ -783,6 +787,12 @@ def extract_quote_data_from_cad(
         >>> quote_data = extract_quote_data_from_cad(
         ...     "part.dxf",
         ...     dimension_override=(10.0, 8.0, 0.5)
+        ... )
+
+        >>> # With diameter overrides for tapered punch
+        >>> quote_data = extract_quote_data_from_cad(
+        ...     "tapered_punch.dxf",
+        ...     diameter_overrides=(1.5, 1.25)
         ... )
         >>> quote_data.to_json("quote_results.json")
     """
@@ -995,15 +1005,30 @@ def extract_quote_data_from_cad(
                     if verbose:
                         print(f"  [PUNCH] Plan regenerated with dimension overrides")
 
-                # Apply diameter override for cylindrical punch parts
-                if diameter_override and is_cylindrical:
+                # Apply diameter overrides for cylindrical punch parts
+                # Support both new diameter_overrides tuple and legacy diameter_override
+                diameter_1_override = None
+                diameter_2_override = None
+
+                if diameter_overrides and is_cylindrical:
+                    diameter_1_override, diameter_2_override = diameter_overrides
+                elif diameter_override and is_cylindrical:
+                    # Backward compatibility: treat old diameter_override as diameter_1
+                    diameter_1_override = diameter_override
+
+                if diameter_1_override and is_cylindrical:
                     if verbose:
-                        print(f"  [PUNCH] Diameter override: {diameter_override:.3f}\"")
+                        print(f"  [PUNCH] Diameter 1 override: {diameter_1_override:.3f}\"")
+                        if diameter_2_override:
+                            print(f"  [PUNCH] Diameter 2 override: {diameter_2_override:.3f}\" (tapered)")
 
-                    quote_data.part_dimensions.diameter = diameter_override
+                    quote_data.part_dimensions.diameter = diameter_1_override
+                    if diameter_2_override:
+                        quote_data.part_dimensions.diameter_2 = diameter_2_override
 
-                    # Update punch features with new diameter
-                    features["max_od_or_width_in"] = diameter_override
+                    # Update punch features with new diameter (use larger diameter for stock selection)
+                    max_diameter = max(diameter_1_override, diameter_2_override) if diameter_2_override else diameter_1_override
+                    features["max_od_or_width_in"] = max_diameter
 
                     # Regenerate punch plan with new diameter
                     from dataclasses import asdict
@@ -1015,7 +1040,7 @@ def extract_quote_data_from_cad(
                     punch_data["punch_features"] = features
 
                     if verbose:
-                        print(f"  [PUNCH] Plan regenerated with diameter override")
+                        print(f"  [PUNCH] Plan regenerated with diameter override(s)")
 
                 # Set material from punch features
                 punch_material = features.get("material_callout") or DEFAULT_MATERIAL
@@ -1288,15 +1313,23 @@ def extract_quote_data_from_cad(
     # Check if part is cylindrical (guide posts, spring pins, etc.)
     is_cylindrical = quote_data.part_dimensions.is_cylindrical if quote_data.part_dimensions else False
     part_diameter = quote_data.part_dimensions.diameter if quote_data.part_dimensions else 0.0
+    part_diameter_2 = quote_data.part_dimensions.diameter_2 if quote_data.part_dimensions else 0.0
     part_length = quote_data.part_dimensions.length if quote_data.part_dimensions else 0.0
 
     if is_cylindrical and part_diameter > 0 and part_length > 0:
+        # For tapered parts, use the larger diameter for stock selection
+        stock_diameter = max(part_diameter, part_diameter_2) if part_diameter_2 > 0 else part_diameter
+
         # Use cylindrical lookup for guide posts, spring pins, etc.
         if verbose:
-            print(f"  [CYLINDRICAL] Using cylindrical stock lookup (diam={part_diameter:.3f}\", length={part_length:.3f}\")")
+            if part_diameter_2 > 0:
+                print(f"  [CYLINDRICAL] Tapered part detected (diam1={part_diameter:.3f}\", diam2={part_diameter_2:.3f}\")")
+                print(f"  [CYLINDRICAL] Using larger diameter for stock lookup (diam={stock_diameter:.3f}\", length={part_length:.3f}\")")
+            else:
+                print(f"  [CYLINDRICAL] Using cylindrical stock lookup (diam={stock_diameter:.3f}\", length={part_length:.3f}\")")
 
         mcmaster_result = pick_mcmaster_cylindrical_sku(
-            need_diam_in=part_diameter,
+            need_diam_in=stock_diameter,
             need_length_in=part_length,
             material_key=material,
             catalog_rows=catalog_rows,
@@ -1487,8 +1520,9 @@ def extract_quote_data_from_cad(
     # Use McMaster dimensions from scrap_calc (which already did the catalog lookup)
     # For cylindrical parts, also include diameter
     if is_cylindrical:
-        desired_diameter = part_diameter
-        mcmaster_diameter = mcmaster_result.get('stock_diam_in', 0.0) if mcmaster_result else 0.0
+        # For tapered parts, use the larger diameter that was used for stock selection
+        desired_diameter = stock_diameter if part_diameter_2 > 0 else part_diameter
+        mcmaster_diameter = mcmaster_result.get('diam_in', 0.0) if mcmaster_result else 0.0
     else:
         desired_diameter = 0.0
         mcmaster_diameter = 0.0
