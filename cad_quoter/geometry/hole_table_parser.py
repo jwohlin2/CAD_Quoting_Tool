@@ -431,6 +431,7 @@ def _from_face(desc: str) -> Optional[str]:
 def _parse_description(desc: str) -> List[Dict[str, Any]]:
     text = " ".join(desc.upper().split())
     tokens: List[Dict[str, Any]] = []
+    has_tap = False
 
     # Improved thread parsing with validation
     # Priority 1: Standard fractional or number thread format (e.g., "5/16-18", "#10-32")
@@ -494,28 +495,32 @@ def _parse_description(desc: str) -> List[Dict[str, Any]]:
                     "was_corrected": was_corrected,
                 }
             )
+            has_tap = True
 
-    tol_pattern = rf"(?:\s*[±\+\-]\s*{NUM_PATTERN})?"
-    drill_pattern = rf"Ø?\(?\s*({NUM_PATTERN})\s*\)?{tol_pattern}\s*(?:DRILL|THRU|TYP|$)"
-    for match in re.finditer(drill_pattern, text):
-        start = match.start(1)
-        preceding = text[:start].rstrip()
-        if preceding and preceding[-1] in {"±", "+", "-"}:
-            continue
-        dia_mm = parse_drill_token(match.group(1))
-        if dia_mm:
-            depth_mm, thru = _depth_or_thru(text)
-            from_face = _from_face(text)
-            tokens.append(
-                {
-                    "type": "drill",
-                    "dia_mm": dia_mm,
-                    "depth_mm": depth_mm,
-                    "thru": thru,
-                    "from_face": from_face,
-                    "source": "desc",
-                }
-            )
+    # Skip DRILL parsing if we already found a TAP operation
+    # TAP operations include their own drill operation (tap drill), so we don't want to create duplicates
+    if not has_tap:
+        tol_pattern = rf"(?:\s*[±\+\-]\s*{NUM_PATTERN})?"
+        drill_pattern = rf"Ø?\(?\s*({NUM_PATTERN})\s*\)?{tol_pattern}\s*(?:DRILL|THRU|TYP|$)"
+        for match in re.finditer(drill_pattern, text):
+            start = match.start(1)
+            preceding = text[:start].rstrip()
+            if preceding and preceding[-1] in {"±", "+", "-"}:
+                continue
+            dia_mm = parse_drill_token(match.group(1))
+            if dia_mm:
+                depth_mm, thru = _depth_or_thru(text)
+                from_face = _from_face(text)
+                tokens.append(
+                    {
+                        "type": "drill",
+                        "dia_mm": dia_mm,
+                        "depth_mm": depth_mm,
+                        "thru": thru,
+                        "from_face": from_face,
+                        "source": "desc",
+                    }
+                )
 
     cbore_depth = re.search(rf"C['’]?BORE\s+X\s+({NUM_PATTERN})\s*DEEP", text)
     if cbore_depth:
