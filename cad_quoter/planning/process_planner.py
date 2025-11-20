@@ -4392,19 +4392,11 @@ def estimate_hole_table_times(
 
             total_time = time_per_hole * qty
 
-            drill_groups.append({
-                'hole_id': hole_id,
-                'diameter': tap_drill_dia,
-                'depth': tap_drill_depth,
-                'qty': qty,
-                'sfm': sfm,
-                'ipr': tap_drill_fpt,
-                'rpm': tap_drill_rpm,
-                'feed_rate': tap_drill_feed,
-                'time_per_hole': time_per_hole,
-                'total_time': total_time,
-                'description': f"Tap drill for {entry.get('DESCRIPTION', op_text)}"
-            })
+            # NOTE: We calculate tap drill time for cost estimation, but do NOT add it to drill_groups
+            # Tap drill operations are part of the tapping process and should not appear in "DRILL GROUPS"
+            # The tap drill time will be included in the overall tapping time below
+            tap_drill_time_per_hole = time_per_hole
+            tap_drill_total_time = total_time
 
         # JIG GRIND operations (using is_jig_grind check from above)
         if is_jig_grind:
