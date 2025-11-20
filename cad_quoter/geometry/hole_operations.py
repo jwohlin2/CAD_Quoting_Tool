@@ -378,8 +378,30 @@ def split_clause_on_thread(
     """Split clause on thread specifications."""
     while True:
         match = THREAD_SPEC_RE.search(clause)
-        if not match or match.start() == 0:
+        if not match:
             break
+        # Handle thread spec at the start of clause (consecutive thread specs)
+        if match.start() == 0:
+            # This means we have a thread spec for a new hole with no preceding text
+            # Check if there's another thread spec after this one
+            remaining = clause[match.end():].strip()
+            next_match = THREAD_SPEC_RE.search(remaining)
+            if next_match:
+                # There's another thread spec - this means the current clause is for current_idx
+                # Extract just this thread spec's operation
+                thread_end = match.end() + next_match.start()
+                this_clause = clause[:thread_end].strip()
+                for chunk in split_front_back(this_clause):
+                    add_operation(ops, holes[current_idx], ref_for_current, chunk)
+                # Move to next hole and continue processing
+                clause = clause[thread_end:].strip()
+                current_idx = min(current_idx + 1, len(holes) - 1)
+                ref_for_current = holes[current_idx].ref
+                continue
+            else:
+                # No more thread specs - this is the last one, process and break
+                break
+        # Thread spec in the middle - add everything before it to current hole
         before = clause[: match.start()].strip()
         if before:
             for chunk in split_front_back(before):
