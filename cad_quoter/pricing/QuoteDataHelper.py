@@ -176,6 +176,13 @@ class MillingOperation:
     path_length: float = 0.0  # total inches
     feed_rate: float = 0.0  # IPM
 
+    # Volume removal (for grinding operations)
+    volume_removed_cuin: float = 0.0  # cubic inches
+
+    # Additional debug fields for square-up operations
+    sq_top_bottom_stock: Optional[float] = None  # inches - stock removed from top/bottom
+    surface_area_sq_in: Optional[float] = None  # square inches - surface area
+
     # Time
     time_minutes: float = 0.0
 
