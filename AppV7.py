@@ -1357,6 +1357,12 @@ class AppV7:
                 report.append(f"  Drilling:                        {machine_hours.total_drill_minutes:>10.2f} minutes")
                 report.append(f"  Tapping:                         {machine_hours.total_tap_minutes:>10.2f} minutes")
                 report.append(f"  EDM:                             {machine_hours.total_edm_minutes:>10.2f} minutes")
+                if machine_hours.total_edge_break_minutes > 0:
+                    report.append(f"  Edge break / deburr:             {machine_hours.total_edge_break_minutes:>10.2f} minutes")
+                if machine_hours.total_etch_minutes > 0:
+                    report.append(f"  Etch / marking:                  {machine_hours.total_etch_minutes:>10.2f} minutes")
+                if machine_hours.total_polish_minutes > 0:
+                    report.append(f"  Polish contour:                  {machine_hours.total_polish_minutes:>10.2f} minutes")
                 report.append(f"  Other (chamfer/polish/saw):      {machine_hours.total_other_minutes:>10.2f} minutes")
                 report.append(f"  Inspection:                      {machine_hours.total_cmm_minutes:>10.2f} minutes")
                 report.append("-" * 74)
@@ -1415,6 +1421,12 @@ class AppV7:
                     report.append("-" * 74)
                     report.append(f"  Grinding (square-up/finish):     {machine_hours.total_grinding_minutes:>10.2f} minutes")
                     report.append(f"  EDM (form cutting):              {machine_hours.total_edm_minutes:>10.2f} minutes")
+                    if machine_hours.total_edge_break_minutes > 0:
+                        report.append(f"  Edge break / deburr:             {machine_hours.total_edge_break_minutes:>10.2f} minutes")
+                    if machine_hours.total_etch_minutes > 0:
+                        report.append(f"  Etch / marking:                  {machine_hours.total_etch_minutes:>10.2f} minutes")
+                    if machine_hours.total_polish_minutes > 0:
+                        report.append(f"  Polish contour:                  {machine_hours.total_polish_minutes:>10.2f} minutes")
                     report.append(f"  Other (chamfer/polish):          {machine_hours.total_other_minutes:>10.2f} minutes")
                     report.append(f"  Inspection:                      {machine_hours.total_cmm_minutes:>10.2f} minutes")
                     report.append("-" * 74)
@@ -1461,6 +1473,12 @@ class AppV7:
                         report.append(f"  Milling/Turning:                 {machine_hours.total_milling_minutes:>10.2f} minutes")
                         report.append(f"  Grinding (OD/face/form):         {machine_hours.total_grinding_minutes:>10.2f} minutes")
                         report.append(f"  EDM:                             {machine_hours.total_edm_minutes:>10.2f} minutes")
+                        if machine_hours.total_edge_break_minutes > 0:
+                            report.append(f"  Edge break / deburr:             {machine_hours.total_edge_break_minutes:>10.2f} minutes")
+                        if machine_hours.total_etch_minutes > 0:
+                            report.append(f"  Etch / marking:                  {machine_hours.total_etch_minutes:>10.2f} minutes")
+                        if machine_hours.total_polish_minutes > 0:
+                            report.append(f"  Polish contour:                  {machine_hours.total_polish_minutes:>10.2f} minutes")
                         report.append(f"  Other (chamfer/polish):          {machine_hours.total_other_minutes:>10.2f} minutes")
                         report.append(f"  Inspection:                      {machine_hours.total_cmm_minutes:>10.2f} minutes")
                         report.append("-" * 74)
@@ -1755,6 +1773,12 @@ class AppV7:
                 report.append(f"  Wet grind:                        {machine_hours.total_grinding_minutes:>10.2f} min")
             if machine_hours.total_edm_minutes > 0:
                 report.append(f"  EDM:                              {machine_hours.total_edm_minutes:>10.2f} min")
+            if machine_hours.total_edge_break_minutes > 0:
+                report.append(f"  Edge break / deburr:              {machine_hours.total_edge_break_minutes:>10.2f} min")
+            if machine_hours.total_etch_minutes > 0:
+                report.append(f"  Etch / marking:                   {machine_hours.total_etch_minutes:>10.2f} min")
+            if machine_hours.total_polish_minutes > 0:
+                report.append(f"  Polish contour:                   {machine_hours.total_polish_minutes:>10.2f} min")
             if machine_hours.total_other_minutes > 0:
                 report.append(f"  Other operations:                 {machine_hours.total_other_minutes:>10.2f} min")
             if machine_hours.total_cmm_minutes > 0:
