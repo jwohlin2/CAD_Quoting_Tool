@@ -1989,9 +1989,9 @@ def extract_quote_data_from_cad(
         ]
 
         # Calculate CMM inspection time (split between labor setup and machine checking)
-        # Use inspection_level from plan, or default to "critical_only"
+        # Use inspection_level from plan, or default to "full_inspection"
         from cad_quoter.planning.process_planner import cmm_inspection_minutes
-        inspection_level = plan.get('inspection_level', 'critical_only')
+        inspection_level = plan.get('inspection_level', 'full_inspection')
         cmm_breakdown = cmm_inspection_minutes(holes_total, inspection_level=inspection_level)
         cmm_setup_labor_min = cmm_breakdown['setup_labor_min']
         cmm_checking_machine_min = cmm_breakdown['checking_machine_min']

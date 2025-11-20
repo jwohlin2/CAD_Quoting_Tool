@@ -1746,8 +1746,11 @@ class AppV7:
                 report.append("CMM INSPECTION")
                 report.append("-" * 74)
                 report.append(f"Holes to inspect: {machine_hours.cmm_holes_checked}")
-                report.append(f"Time per hole: 1.0 min (first article)")
-                report.append(f"Total CMM time: {machine_hours.cmm_holes_checked} holes × 1.0 min = {machine_hours.total_cmm_minutes:.2f} min")
+                # Calculate actual minutes per hole from the total
+                minutes_per_hole = machine_hours.total_cmm_minutes / machine_hours.cmm_holes_checked
+                inspection_type = "full inspection" if minutes_per_hole >= 0.9 else ("spot check" if minutes_per_hole < 0.4 else "critical dimensions")
+                report.append(f"Time per hole: {minutes_per_hole:.1f} min ({inspection_type})")
+                report.append(f"Total CMM time: {machine_hours.cmm_holes_checked} holes × {minutes_per_hole:.1f} min = {machine_hours.total_cmm_minutes:.2f} min")
                 report.append("")
                 report.append(f"Note: CMM run time ({machine_hours.total_cmm_minutes:.2f} min) is billed as MACHINE TIME.")
                 report.append(f"      CMM setup (30 min) is included in Labor → Inspection.")

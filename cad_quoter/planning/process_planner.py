@@ -2230,7 +2230,7 @@ class LaborInputs:
     cmm_holes_checked: int = 0  # Number of holes checked by CMM (to avoid double counting)
 
     # Inspection intensity knob
-    inspection_level: str = "critical_only"  # "full_first_article", "critical_only", "spot_check"
+    inspection_level: str = "full_inspection"  # "full_inspection", "critical_only", "spot_check"
 
     # Handling
     part_flips: int = 0
@@ -2419,7 +2419,7 @@ def inspection_minutes(i: LaborInputs) -> Dict[str, float]:
     Calculate Inspection labor minutes with breakdown (base = 6 minutes).
 
     Includes hole-driven and feature-driven checks, plus CMM setup.
-    Scales based on inspection_level: "full_first_article", "critical_only", "spot_check".
+    Scales based on inspection_level: "full_inspection", "critical_only", "spot_check".
 
     Returns a dict with breakdown:
         - insp_base_min: Base inspection time
@@ -2432,8 +2432,8 @@ def inspection_minutes(i: LaborInputs) -> Dict[str, float]:
         - total_min: Total inspection labor minutes
 
     Inspection level scaling:
-        - full_first_article: 1.0x hole time, higher base (8 min)
-        - critical_only: 0.5x hole time, standard base (6 min)  [DEFAULT]
+        - full_inspection: 1.0x hole time, higher base (8 min)  [DEFAULT]
+        - critical_only: 0.5x hole time, standard base (6 min)
         - spot_check: 0.25x hole time, lower base (4 min)
 
     Note: holes_total excludes CMM-inspected holes to avoid double counting.
@@ -2441,7 +2441,7 @@ def inspection_minutes(i: LaborInputs) -> Dict[str, float]:
     """
     # Get inspection level scaling factors
     level = i.inspection_level.lower()
-    if level == "full_first_article":
+    if level == "full_inspection":
         base_min = 8.0
         hole_scale = 1.0
     elif level == "spot_check":
@@ -2553,7 +2553,7 @@ def finishing_minutes(i: LaborInputs) -> float:
     )
 
 
-def cmm_inspection_minutes(holes_total: int, inspection_level: str = "critical_only") -> Dict[str, float]:
+def cmm_inspection_minutes(holes_total: int, inspection_level: str = "full_inspection") -> Dict[str, float]:
     """
     Calculate CMM inspection time split into setup (labor) and checking (machine).
 
@@ -2569,13 +2569,13 @@ def cmm_inspection_minutes(holes_total: int, inspection_level: str = "critical_o
     - Move to position, take 4-6 circle touches, retract, process
 
     Inspection level scaling:
-        - full_first_article: 1.0 min/hole
-        - critical_only: 0.5 min/hole  [DEFAULT]
+        - full_inspection: 1.0 min/hole  [DEFAULT]
+        - critical_only: 0.5 min/hole
         - spot_check: 0.3 min/hole
 
     Args:
         holes_total: Total number of holes to inspect
-        inspection_level: Inspection intensity ("full_first_article", "critical_only", "spot_check")
+        inspection_level: Inspection intensity ("full_inspection", "critical_only", "spot_check")
 
     Returns:
         Dict with 'setup_labor_min', 'checking_machine_min', 'total_min', 'holes_checked'
@@ -2588,8 +2588,8 @@ def cmm_inspection_minutes(holes_total: int, inspection_level: str = "critical_o
 
     # Scale CMM checking time based on inspection level
     level = inspection_level.lower()
-    if level == "full_first_article":
-        minutes_per_hole = 1.0  # Full first article inspection
+    if level == "full_inspection":
+        minutes_per_hole = 1.0  # Full inspection
     elif level == "spot_check":
         minutes_per_hole = 0.3  # Quick spot checks only
     else:  # "critical_only" (default)
@@ -5110,12 +5110,16 @@ def estimate_hole_table_times(
             rough_min_per_in = 1.0 / rough_ipm if rough_ipm > 0 else 0.33
             skim_min_per_in = 1.0 / skim_ipm if skim_ipm > 0 else 0.50
 
+            # Number of passes
+            num_rough_passes = 2
+            num_skim_passes = 2
+
             # rough_time = path_length * min_per_in * material_factor (no thickness in this model)
             # But for wire EDM, we need to account for thickness affecting cut time
-            # So: time = perimeter * thickness * min_per_in * material_factor
-            rough_time_per = estimated_perimeter_per_window * edm_thickness * rough_min_per_in * edm_mat_factor
-            # Add one skim pass for precision
-            skim_time_per = estimated_perimeter_per_window * edm_thickness * skim_min_per_in * edm_mat_factor
+            # So: time = num_passes * perimeter * thickness * min_per_in * material_factor
+            rough_time_per = num_rough_passes * estimated_perimeter_per_window * edm_thickness * rough_min_per_in * edm_mat_factor
+            # Add skim passes for precision
+            skim_time_per = num_skim_passes * estimated_perimeter_per_window * edm_thickness * skim_min_per_in * edm_mat_factor
             setup_time_per = 5.0  # 5 minutes setup per window (threading wire, etc.)
 
             # t_window = edm_path_length_in * edm_min_per_in * edm_material_factor
