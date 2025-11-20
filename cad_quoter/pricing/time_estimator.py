@@ -1079,6 +1079,16 @@ class PunchLaborHours:
 
 
 PUNCH_TIME_CONSTANTS = {
+    # New turning time model for round parts (formula-based)
+    "base_turn_min": 3.0,  # Base turning setup time
+    "per_inch_major_dia_min": 2.5,  # Time per inch of shank/major diameter
+    "per_inch_minor_dia_min": 3.5,  # Time per inch of pilot/minor diameter (slower, more precision)
+    "shoulder_factor": 1.5,  # Additional time per shoulder/diameter transition
+    # New grinding time model for round parts (formula-based)
+    "base_grind_min": 5.0,  # Base grinding setup time
+    "per_inch_grind_min": 3.0,  # Time per inch of OD grinding (pilot + shank)
+    "face_grind_min": 4.0,  # Time per face for perpendicular face grinding
+    # Legacy turning constants (deprecated, use formula above)
     "rough_turning_per_diam": 8.0,
     "finish_turning_per_diam": 5.0,
     "od_grinding_per_inch": 3.0,
@@ -1154,6 +1164,17 @@ def estimate_punch_machine_hours(punch_plan: dict[str, Any], punch_features: dic
     min_dia_tol = punch_features.get("min_dia_tol_in")
     overall_length = punch_features.get("overall_length_in", 0.0)
     max_od = punch_features.get("max_od_or_width_in", 0.0)
+    # New turning time model parameters
+    shank_length = punch_features.get("shank_length", 0.0)
+    pilot_length = punch_features.get("pilot_length", 0.0)
+    shoulder_count = punch_features.get("shoulder_count", 0)
+    flange_thickness = punch_features.get("flange_thickness", 0.0)
+    num_undercuts = punch_features.get("num_undercuts", 0)
+    shape_type = punch_features.get("shape_type", "round")
+    # New grinding time model parameters
+    grind_pilot_len = punch_features.get("grind_pilot_len", 0.0)
+    grind_shank_len = punch_features.get("grind_shank_len", 0.0)
+    grind_head_faces = punch_features.get("grind_head_faces", 0)
 
     tol_mult = 1.0
     if min_dia_tol is not None:
@@ -1164,15 +1185,84 @@ def estimate_punch_machine_hours(punch_plan: dict[str, Any], punch_features: dic
 
     hours.sawing_min = tc["sawing_base"]
 
-    if num_diams > 0:
+    # New turning time model for round parts
+    if num_diams > 0 and shape_type == "round":
+        # Formula: turning_time_min = base_turn_min + per_inch_major_dia_min * shank_length
+        #          + per_inch_minor_dia_min * pilot_length + shoulder_factor * shoulder_count
+        base_turn_min = tc["base_turn_min"]
+        per_inch_major = tc["per_inch_major_dia_min"]
+        per_inch_minor = tc["per_inch_minor_dia_min"]
+        shoulder_factor = tc["shoulder_factor"]
+
+        turning_time_min = (
+            base_turn_min
+            + per_inch_major * shank_length
+            + per_inch_minor * pilot_length
+            + shoulder_factor * shoulder_count
+        )
+
+        # Apply tolerance multiplier for finish turning portion (assume 40% of time is finish)
+        rough_portion = turning_time_min * 0.60
+        finish_portion = turning_time_min * 0.40 * tol_mult
+        total_turning = rough_portion + finish_portion
+
+        hours.rough_turning_min = rough_portion
+        hours.finish_turning_min = finish_portion
+
+        # Print transparency information for turning time model
+        print(f"  DEBUG [Turning time model]:")
+        print(f"    shank_length={shank_length:.3f}\", pilot_length={pilot_length:.3f}\", "
+              f"flange_thickness={flange_thickness:.3f}\", shoulder_count={shoulder_count}")
+        print(f"    base_turn_min={base_turn_min:.2f}, per_inch_major={per_inch_major:.2f}, "
+              f"per_inch_minor={per_inch_minor:.2f}, shoulder_factor={shoulder_factor:.2f}")
+        print(f"    turning_time_min={total_turning:.2f} (rough={rough_portion:.2f}, finish={finish_portion:.2f})")
+
+        # Guard check: flag if simple geometry has high turning time
+        is_simple_geometry = (shoulder_count <= 1 and num_undercuts <= 1)
+        if is_simple_geometry and total_turning > 45.0:
+            warning = (f"CHECK: turning time high for simple round punch "
+                      f"({total_turning:.1f} min for ≤1 shoulder, ≤1 undercut)")
+            print(f"    WARNING: {warning}")
+            punch_features.setdefault("warnings", []).append(warning)
+    elif num_diams > 0:
+        # Fallback to legacy model for non-round parts
         hours.rough_turning_min = num_diams * tc["rough_turning_per_diam"]
         hours.finish_turning_min = num_diams * tc["finish_turning_per_diam"] * tol_mult
 
-    if ground_length > 0:
-        hours.od_grinding_min = ground_length * tc["od_grinding_per_inch"] * tol_mult
+    # New grinding time model for round parts
+    if shape_type == "round" and (grind_pilot_len > 0 or grind_shank_len > 0 or grind_head_faces > 0):
+        # Formula: grind_time_min = base_grind_min + per_inch_grind_min * (grind_pilot_len + grind_shank_len)
+        #                          + face_grind_min * num_faces
+        base_grind_min = tc["base_grind_min"]
+        per_inch_grind = tc["per_inch_grind_min"]
+        face_grind_per_face = tc["face_grind_min"]
 
-    if has_perp_face:
-        hours.face_grinding_min = tc["face_grinding_per_face"] * 2
+        # OD grinding time
+        od_grind_length = grind_pilot_len + grind_shank_len
+        od_grind_time = base_grind_min + per_inch_grind * od_grind_length
+
+        # Apply tolerance multiplier to OD grinding
+        od_grind_time *= tol_mult
+
+        hours.od_grinding_min = od_grind_time
+
+        # Face grinding time
+        if grind_head_faces > 0:
+            hours.face_grinding_min = face_grind_per_face * grind_head_faces
+
+        # Print transparency information for grinding time model
+        print(f"  DEBUG [Grinding time model]:")
+        print(f"    grind_pilot_len={grind_pilot_len:.3f}\", grind_shank_len={grind_shank_len:.3f}\", "
+              f"grind_head_faces={grind_head_faces}")
+        print(f"    base_grind_min={base_grind_min:.2f}, per_inch_grind_min={per_inch_grind:.2f}, "
+              f"face_grind_min={face_grind_per_face:.2f}")
+        print(f"    grind_time_min={od_grind_time + hours.face_grinding_min:.2f} "
+              f"(OD={od_grind_time:.2f}, face={hours.face_grinding_min:.2f})")
+    elif ground_length > 0:
+        # Fallback to legacy model for non-round parts
+        hours.od_grinding_min = ground_length * tc["od_grinding_per_inch"] * tol_mult
+        if has_perp_face:
+            hours.face_grinding_min = tc["face_grinding_per_face"] * 2
 
     if tap_count > 0:
         hours.drilling_min = tap_count * tc["drilling_per_hole"]
