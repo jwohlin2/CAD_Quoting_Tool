@@ -1708,7 +1708,7 @@ class AppV7:
             # TIME PER OP - MILLING (additional milling ops not in square-up block)
             non_square_up_milling = [
                 op for op in (machine_hours.milling_operations or [])
-                if op.op_name not in ('square_up_rough_sides', 'square_up_rough_faces')
+                if op.op_name not in ('square_up_rough_sides', 'square_up_rough_faces', 'full_square_up_mill')
             ]
             if non_square_up_milling:
                 report.append("TIME PER OP - MILLING (Other)")
