@@ -2875,12 +2875,16 @@ def estimate_machine_hours_from_plan(
         'edm': 0,
         'tapping': 0,
         'grinding': 0,
+        'pockets': 0,
+        'slots': 0,
         'other': 0,
     }
 
     # Lists to collect detailed operation breakdowns
     milling_operations_detailed = []
     grinding_operations_detailed = []
+    pocket_operations_detailed = []
+    slot_operations_detailed = []
 
     for op in ops:
         op_type = op.get('op', '').lower()
@@ -3358,10 +3362,146 @@ def estimate_machine_hours_from_plan(
         elif 'assemble' in op_type:
             pass  # No machine time
 
+        # Pocket operations
+        elif 'pocket' in op_type or op_type == 'mill_pocket':
+            from cad_quoter.pricing.time_estimator import calculate_pocket_time
+
+            # Extract pocket geometry from operation
+            pocket_area = op.get('pocket_area', op.get('area', 0.0))
+            pocket_depth = op.get('pocket_depth', op.get('depth', T or 0.5))
+            pocket_length = op.get('pocket_length', op.get('length', L or 0.0))
+            pocket_width = op.get('pocket_width', op.get('width', W or 0.0))
+            tool_diameter = op.get('tool_diameter', 0.5)  # Default 0.5" endmill
+
+            # If area not provided, estimate from dimensions
+            if pocket_area == 0.0 and pocket_length > 0 and pocket_width > 0:
+                pocket_area = pocket_length * pocket_width
+
+            # Get feeds/speeds from material
+            sf = get_speeds_feeds(material, "Endmill_Profile")
+            if sf:
+                fz = sf.get('fz_ipr_0_25in', 0.003)
+                sfm = sf.get('sfm_start', 200)
+                rpm = (sfm * 12) / (3.14159 * tool_diameter) if tool_diameter > 0 else 1000
+                rpm = min(rpm, 8000)
+                feed_ipm = fz * 4 * rpm  # 4 flutes typical
+            else:
+                feed_ipm = 30.0  # Default
+
+            # Calculate pocket time
+            pocket_calc = calculate_pocket_time(
+                pocket_area=pocket_area,
+                pocket_depth=pocket_depth,
+                tool_diameter=tool_diameter,
+                material=material,
+                feed_ipm=feed_ipm
+            )
+
+            pocket_time = pocket_calc['pocket_time_min']
+            time_breakdown['pockets'] += pocket_time
+
+            # Add detailed operation
+            pocket_operations_detailed.append({
+                'op_name': op_type,
+                'op_description': op.get('description', 'Pocket Mill'),
+                'pocket_area': pocket_area,
+                'pocket_depth': pocket_depth,
+                'pocket_width': pocket_width,
+                'pocket_length': pocket_length,
+                'tool_diameter': tool_diameter,
+                'stepover': pocket_calc['stepover'],
+                'stepdown': pocket_calc['stepdown'],
+                'z_passes': pocket_calc['z_passes'],
+                'pocket_path_length_in': pocket_calc['pocket_path_length_in'],
+                'feed_ipm': pocket_calc['feed_ipm'],
+                'pocket_time_min': pocket_time,
+                '_used_override': False,
+                'override_time_minutes': None
+            })
+
+            # Debug output
+            print(f"  DEBUG [Pocket Mill]:")
+            print(f"    pocket_area={pocket_area:.3f} sq in, pocket_depth={pocket_depth:.3f}\"")
+            print(f"    tool_diameter={tool_diameter:.3f}\", feed_ipm={feed_ipm:.1f}")
+            print(f"    stepover={pocket_calc['stepover']:.3f}\", stepdown={pocket_calc['stepdown']:.3f}\"")
+            print(f"    z_passes={pocket_calc['z_passes']}, path_length={pocket_calc['pocket_path_length_in']:.2f}\"")
+            print(f"    pocket_time_min={pocket_time:.2f}")
+
+        # Slot operations
+        elif 'slot' in op_type or op_type == 'mill_slot' or op.get('is_slot', False):
+            from cad_quoter.pricing.time_estimator import calculate_slot_time
+
+            # Extract slot geometry from operation
+            slot_length = op.get('slot_length', op.get('length', 1.0))
+            slot_width = op.get('slot_width', op.get('width', 0.25))
+            slot_depth = op.get('slot_depth', op.get('depth', T or 0.5))
+            tool_diameter = op.get('tool_diameter', slot_width)  # Tool dia = slot width
+
+            # Get feeds/speeds from material
+            sf = get_speeds_feeds(material, "Endmill_Profile")
+            if sf:
+                fz = sf.get('fz_ipr_0_25in', 0.003)
+                sfm = sf.get('sfm_start', 200)
+                rpm = (sfm * 12) / (3.14159 * tool_diameter) if tool_diameter > 0 else 1000
+                rpm = min(rpm, 8000)
+                feed_ipm = fz * 2 * rpm  # 2 flutes typical for slot mills
+            else:
+                feed_ipm = 25.0  # Default
+
+            # Calculate slot time
+            slot_calc = calculate_slot_time(
+                slot_length=slot_length,
+                slot_width=slot_width,
+                slot_depth=slot_depth,
+                material=material,
+                feed_ipm=feed_ipm
+            )
+
+            slot_time = slot_calc['slot_mill_time_min']
+            time_breakdown['slots'] += slot_time
+
+            # Add detailed operation
+            slot_operations_detailed.append({
+                'op_name': op_type,
+                'op_description': op.get('description', 'Slot Mill'),
+                'slot_length': slot_length,
+                'slot_width': slot_width,
+                'slot_depth': slot_depth,
+                'slot_radius': slot_calc['slot_radius'],
+                'tool_diameter': tool_diameter,
+                'stepdown': slot_calc['stepdown'],
+                'z_passes': slot_calc['z_passes'],
+                'slot_path_length_in': slot_calc['slot_path_length_in'],
+                'feed_ipm': slot_calc['feed_ipm'],
+                'base_slot_min': slot_calc['base_slot_min'],
+                'k_len': slot_calc['k_len'],
+                'k_dep': slot_calc['k_dep'],
+                'slot_mill_time_min': slot_time,
+                '_used_override': False,
+                'override_time_minutes': None
+            })
+
+            # Debug output
+            print(f"  DEBUG [Slot Mill]:")
+            print(f"    slot_length={slot_length:.3f}\", slot_width={slot_width:.3f}\", slot_depth={slot_depth:.3f}\"")
+            print(f"    slot_radius={slot_calc['slot_radius']:.3f}\", straight_section={slot_calc['straight_section']:.3f}\"")
+            print(f"    tool_diameter={tool_diameter:.3f}\", feed_ipm={feed_ipm:.1f}")
+            print(f"    stepdown={slot_calc['stepdown']:.3f}\", z_passes={slot_calc['z_passes']}")
+            print(f"    path_length={slot_calc['slot_path_length_in']:.2f}\"")
+            print(f"    Formula: base={slot_calc['base_slot_min']:.2f} + k_len={slot_calc['k_len']:.2f} * {slot_length:.3f} + k_dep={slot_calc['k_dep']:.2f} * {slot_depth:.3f}")
+            print(f"    slot_mill_time_min={slot_time:.2f} (path-based={slot_calc['path_based_time_min']:.2f})")
+
         # Other operations
         else:
-            # Generic estimate
-            time_breakdown['other'] += 5  # 5 minutes
+            # Check if this is a pocket/slot hiding in "other"
+            # Look for keywords in description or operation name
+            op_desc = op.get('description', '').lower()
+            if any(kw in op_desc for kw in ['pocket', 'slot', 'profile', 'nose']):
+                # Reduce generic estimate since we can't model it precisely
+                time_breakdown['other'] += 3  # 3 minutes for unmodeled pocket/slot/profile
+            else:
+                # Generic estimate for truly other operations
+                time_breakdown['other'] += 5  # 5 minutes
 
     # Calculate total
     total_minutes = sum(time_breakdown.values())
@@ -3374,6 +3514,8 @@ def estimate_machine_hours_from_plan(
         'dimensions': {'L': L, 'W': W, 'T': T},
         'milling_operations': milling_operations_detailed,
         'grinding_operations': grinding_operations_detailed,
+        'pocket_operations': pocket_operations_detailed,
+        'slot_operations': slot_operations_detailed,
     }
 
 

@@ -1088,6 +1088,17 @@ PUNCH_TIME_CONSTANTS = {
     "base_grind_min": 5.0,  # Base grinding setup time
     "per_inch_grind_min": 3.0,  # Time per inch of OD grinding (pilot + shank)
     "face_grind_min": 4.0,  # Time per face for perpendicular face grinding
+    # Pocket milling time model
+    "pocket_base_min": 2.0,  # Base pocket setup/approach time
+    "pocket_min_per_sq_in": 1.5,  # Time per square inch of pocket area
+    "pocket_depth_factor": 1.2,  # Multiplier per inch of depth
+    "pocket_stepover_fraction": 0.5,  # Default stepover as fraction of tool diameter
+    "pocket_stepdown_in": 0.1,  # Default stepdown per pass (inches)
+    # Slot milling time model (formula: base + k_len * length + k_dep * depth)
+    "slot_base_min": 1.5,  # Base slot setup/approach time
+    "slot_k_len": 0.8,  # Time coefficient per inch of slot length
+    "slot_k_dep": 2.0,  # Time coefficient per inch of slot depth
+    "slot_stepdown_in": 0.15,  # Default stepdown per pass (inches)
     # Legacy turning constants (deprecated, use formula above)
     "rough_turning_per_diam": 8.0,
     "finish_turning_per_diam": 5.0,
@@ -1465,5 +1476,164 @@ def estimate_punch_times(punch_plan: dict[str, Any], punch_features: dict[str, A
         "labor_hours": convert_punch_to_quote_labor_hours(labor),
         "punch_machine_breakdown": machine,
         "punch_labor_breakdown": labor,
+    }
+
+
+def calculate_pocket_time(
+    pocket_area: float,
+    pocket_depth: float,
+    tool_diameter: float,
+    material: str = "6061",
+    feed_ipm: Optional[float] = None,
+    stepover: Optional[float] = None,
+    stepdown: Optional[float] = None
+) -> dict[str, Any]:
+    """
+    Calculate pocket milling time based on area and depth.
+
+    Args:
+        pocket_area: Pocket area in square inches
+        pocket_depth: Pocket depth in inches
+        tool_diameter: Tool diameter in inches
+        material: Material type (for feed rate lookup)
+        feed_ipm: Feed rate in inches per minute (if None, calculated from material)
+        stepover: Stepover in inches (if None, uses default fraction of tool diameter)
+        stepdown: Stepdown in inches (if None, uses default constant)
+
+    Returns:
+        Dictionary with pocket_path_length_in, feed_ipm, z_passes, pocket_time_min
+    """
+    tc = PUNCH_TIME_CONSTANTS
+
+    # Get default stepover and stepdown if not provided
+    if stepover is None:
+        stepover = tool_diameter * tc["pocket_stepover_fraction"]
+    if stepdown is None:
+        stepdown = tc["pocket_stepdown_in"]
+
+    # Calculate number of depth passes
+    z_passes = max(1, int(pocket_depth / stepdown) + 1) if stepdown > 0 else 1
+
+    # Estimate path length using simplified zigzag pattern
+    # For a pocket, path length ≈ (area / stepover) per pass
+    # This is a rough approximation - actual toolpath depends on geometry
+    if stepover > 0:
+        path_length_per_pass = pocket_area / stepover
+    else:
+        path_length_per_pass = 0.0
+
+    total_path_length = path_length_per_pass * z_passes
+
+    # Get feed rate if not provided
+    # Note: This would typically call get_speeds_feeds from process_planner
+    # For now, use a conservative default
+    if feed_ipm is None:
+        feed_ipm = 30.0  # Conservative default IPM for pocketing
+
+    # Calculate cutting time
+    if feed_ipm > 0:
+        cutting_time = total_path_length / feed_ipm
+    else:
+        cutting_time = 0.0
+
+    # Add base time for setup/approach
+    base_time = tc["pocket_base_min"]
+
+    # Apply depth factor
+    depth_multiplier = 1.0 + (pocket_depth * tc["pocket_depth_factor"])
+
+    # Total time
+    pocket_time_min = base_time + (cutting_time * depth_multiplier)
+
+    # Alternative formula-based approach for validation
+    area_based_time = tc["pocket_base_min"] + (pocket_area * tc["pocket_min_per_sq_in"] * depth_multiplier)
+
+    # Use the higher of the two estimates for safety
+    pocket_time_min = max(pocket_time_min, area_based_time)
+
+    return {
+        "pocket_path_length_in": total_path_length,
+        "feed_ipm": feed_ipm,
+        "stepover": stepover,
+        "stepdown": stepdown,
+        "z_passes": z_passes,
+        "pocket_time_min": pocket_time_min,
+    }
+
+
+def calculate_slot_time(
+    slot_length: float,
+    slot_width: float,
+    slot_depth: float,
+    material: str = "6061",
+    feed_ipm: Optional[float] = None,
+    stepdown: Optional[float] = None
+) -> dict[str, Any]:
+    """
+    Calculate slot milling time using formula: base + k_len * length + k_dep * depth.
+
+    Slot shape: two radii (semicircles) connected by straight sides.
+
+    Args:
+        slot_length: Overall slot length in inches
+        slot_width: Slot width in inches (tool diameter)
+        slot_depth: Slot depth in inches
+        material: Material type (for feed rate lookup)
+        feed_ipm: Feed rate in inches per minute (if None, uses default)
+        stepdown: Stepdown in inches (if None, uses default constant)
+
+    Returns:
+        Dictionary with slot_path_length_in, feed_ipm, z_passes, slot_mill_time_min
+    """
+    tc = PUNCH_TIME_CONSTANTS
+
+    # Get default stepdown if not provided
+    if stepdown is None:
+        stepdown = tc["slot_stepdown_in"]
+
+    # Calculate number of depth passes
+    z_passes = max(1, int(slot_depth / stepdown) + 1) if stepdown > 0 else 1
+
+    # Calculate slot geometry
+    # Slot = two semicircles (radius = width/2) + straight section
+    slot_radius = slot_width / 2.0
+    straight_section = max(0.0, slot_length - 2 * slot_radius)
+
+    # Slot perimeter per pass
+    slot_perimeter = 2 * straight_section + 2 * 3.14159 * slot_radius
+
+    # Total path length
+    total_path_length = slot_perimeter * z_passes
+
+    # Get feed rate if not provided
+    if feed_ipm is None:
+        feed_ipm = 25.0  # Conservative default IPM for slot milling
+
+    # Calculate time using formula-based model
+    base_slot_min = tc["slot_base_min"]
+    k_len = tc["slot_k_len"]
+    k_dep = tc["slot_k_dep"]
+
+    # Formula: slot_mill_time_min = base + k_len * length + k_dep * depth
+    slot_mill_time_min = base_slot_min + k_len * slot_length + k_dep * slot_depth
+
+    # Also calculate path-based time for transparency
+    if feed_ipm > 0:
+        path_based_time = total_path_length / feed_ipm
+    else:
+        path_based_time = 0.0
+
+    return {
+        "slot_path_length_in": total_path_length,
+        "feed_ipm": feed_ipm,
+        "stepdown": stepdown,
+        "z_passes": z_passes,
+        "slot_radius": slot_radius,
+        "straight_section": straight_section,
+        "base_slot_min": base_slot_min,
+        "k_len": k_len,
+        "k_dep": k_dep,
+        "slot_mill_time_min": slot_mill_time_min,
+        "path_based_time_min": path_based_time,
     }
 
