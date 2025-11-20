@@ -751,6 +751,7 @@ def extract_quote_data_from_cad(
     scrap_value_override: Optional[float] = None,
     quantity: int = 1,
     family_override: Optional[str] = None,
+    cmm_inspection_level_override: Optional[str] = None,
     verbose: bool = False
 ) -> QuoteData:
     """
@@ -774,6 +775,7 @@ def extract_quote_data_from_cad(
         scrap_value_override: Optional manual scrap value - skips automatic scrap value calculation
         quantity: Number of parts to quote (affects setup cost amortization and material pricing)
         family_override: Optional part family override (e.g., "Punches" to force punch pipeline)
+        cmm_inspection_level_override: Optional CMM inspection level ("Full Inspection", "Critical Only", or "Spot Check")
         verbose: Print extraction progress
 
     Returns:
@@ -2098,9 +2100,12 @@ def extract_quote_data_from_cad(
         ]
 
         # Calculate CMM inspection time (split between labor setup and machine checking)
-        # Use inspection_level from plan, or default to "full_inspection"
+        # Use override if provided, otherwise use inspection_level from plan, or default to "full_inspection"
         from cad_quoter.planning.process_planner import cmm_inspection_minutes
-        inspection_level = plan.get('inspection_level', 'full_inspection')
+        if cmm_inspection_level_override:
+            inspection_level = cmm_inspection_level_override
+        else:
+            inspection_level = plan.get('inspection_level', 'full_inspection')
         cmm_breakdown = cmm_inspection_minutes(holes_total, inspection_level=inspection_level)
         cmm_setup_labor_min = cmm_breakdown['setup_labor_min']
         cmm_checking_machine_min = cmm_breakdown['checking_machine_min']

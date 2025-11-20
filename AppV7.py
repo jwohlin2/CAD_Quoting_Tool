@@ -461,6 +461,9 @@ class AppV7:
             # Material Override
             ("Material", "", "Select material from dropdown to override auto-detection. Leave blank to use auto-detected material from CAD file."),
 
+            # CMM Inspection Level (dropdown)
+            ("CMM Inspection Level", "Full Inspection", "CMM inspection intensity: Full Inspection (1.0 min/hole), Critical Only (0.5 min/hole), or Spot Check (0.3 min/hole)"),
+
             # Rate Overrides
             ("Machine Rate ($/hr)", "90", "Override machine hourly rate (default: $90/hr)"),
             ("Labor Rate ($/hr)", "90", "Override labor hourly rate (default: $90/hr)"),
@@ -498,6 +501,12 @@ class AppV7:
                 field = ttk.Combobox(quote_frame, width=30, values=material_options, state="readonly")
                 # Leave empty by default (auto-detection)
                 field.set("")
+            # Special handling for CMM Inspection Level dropdown
+            elif label_text == "CMM Inspection Level":
+                # Create combobox with inspection level options
+                inspection_levels = ["Full Inspection", "Critical Only", "Spot Check"]
+                field = ttk.Combobox(quote_frame, width=30, values=inspection_levels, state="readonly")
+                field.set(default_value)  # Default to "Full Inspection"
             # Entry field or dropdown
             elif default_value == "Number":
                 field = ttk.Combobox(quote_frame, width=30, values=["Number"])
@@ -648,6 +657,7 @@ class AppV7:
             dimension_override = self._get_manual_dimensions()
             diameter_overrides = self._get_diameter_overrides()
             material_override = self._get_field_string("Material")
+            cmm_inspection_level_override = self._get_cmm_inspection_level()
 
             # Try to load OCR cache if no manual dimensions provided (saves ~43 seconds!)
             ocr_cache_used = False
@@ -684,6 +694,7 @@ class AppV7:
                     scrap_value_override=scrap_value_override,
                     quantity=quantity,
                     family_override=family_override,
+                    cmm_inspection_level_override=cmm_inspection_level_override,
                     verbose=True
                 )
 
@@ -938,6 +949,35 @@ class AppV7:
 
         except Exception:
             return "Plates"  # Default on error
+
+    def _get_cmm_inspection_level(self) -> Optional[str]:
+        """
+        Get the selected CMM inspection level, converting from display name to internal format.
+
+        Returns:
+            CMM inspection level in lowercase with underscores (e.g., "full_inspection")
+            or None if not set
+        """
+        try:
+            field = self.quote_fields.get("CMM Inspection Level", None)
+            if not field:
+                return None
+
+            display_name = field.get().strip()
+            if not display_name:
+                return None
+
+            # Convert display name to internal format
+            level_mapping = {
+                "Full Inspection": "full_inspection",
+                "Critical Only": "critical_only",
+                "Spot Check": "spot_check"
+            }
+
+            return level_mapping.get(display_name, None)
+
+        except Exception:
+            return None  # Return None on error to use default
 
     def _get_current_quote_inputs(self) -> dict:
         """
