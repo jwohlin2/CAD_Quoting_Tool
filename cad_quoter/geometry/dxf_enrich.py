@@ -1487,7 +1487,9 @@ def extract_punch_dimensions(dxf_path: Path) -> Dict[str, Any]:
 
                 is_diameter = (
                     dimtype == 3 or "%%c" in raw_text.lower() or
-                    "Ø" in raw_text or "Ø" in text_resolved or "DIA" in raw_text.upper()
+                    "Ø" in raw_text or "Ø" in text_resolved or
+                    "⌀" in raw_text or "⌀" in text_resolved or
+                    "DIA" in raw_text.upper()
                 )
 
                 if is_diameter:

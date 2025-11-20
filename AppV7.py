@@ -451,6 +451,10 @@ class AppV7:
             ("Width (in)", "", "Part width in inches (optional - leave blank for OCR auto-detection)"),
             ("Thickness (in)", "", "Part thickness in inches (optional - leave blank for OCR auto-detection)"),
 
+            # Diameter overrides for cylindrical parts (e.g., tapered punches)
+            ("Diameter 1 (in)", "", "Primary diameter for cylindrical parts - detected from ⌀ symbol in CAD (optional override)"),
+            ("Diameter 2 (in)", "", "Secondary diameter for tapered cylindrical parts like punches (optional override)"),
+
             # Quantity
             ("Quantity", "1", "Number of parts to quote - setup costs will be amortized across quantity, and material quantity pricing will be applied"),
 
@@ -642,6 +646,7 @@ class AppV7:
 
             # Read all overrides from Quote Editor
             dimension_override = self._get_manual_dimensions()
+            diameter_overrides = self._get_diameter_overrides()
             material_override = self._get_field_string("Material")
 
             # Try to load OCR cache if no manual dimensions provided (saves ~43 seconds!)
@@ -674,6 +679,7 @@ class AppV7:
                     margin_rate=margin_rate,
                     material_override=material_override,
                     dimension_override=dimension_override,
+                    diameter_overrides=diameter_overrides,
                     mcmaster_price_override=mcmaster_price_override,
                     scrap_value_override=scrap_value_override,
                     quantity=quantity,
@@ -766,6 +772,58 @@ class AppV7:
             messagebox.showerror(
                 "Invalid Dimensions",
                 "Please enter valid numbers for Length, Width, and Thickness."
+            )
+            return None
+        except Exception:
+            # If fields don't exist or other error, just return None
+            return None
+
+    def _get_diameter_overrides(self):
+        """
+        Read diameter overrides from Quote Editor fields for cylindrical parts.
+
+        Returns:
+            tuple of (diameter_1, diameter_2) or None if not provided.
+            Either value can be None if only one is provided.
+        """
+        try:
+            diameter_1_field = self.quote_fields.get("Diameter 1 (in)", None)
+            diameter_2_field = self.quote_fields.get("Diameter 2 (in)", None)
+
+            if not diameter_1_field or not diameter_2_field:
+                return None
+
+            diameter_1_val = diameter_1_field.get().strip()
+            diameter_2_val = diameter_2_field.get().strip()
+
+            # If both are empty, return None
+            if not diameter_1_val and not diameter_2_val:
+                return None
+
+            # Parse values (allow one to be empty/None)
+            diameter_1 = float(diameter_1_val) if diameter_1_val else None
+            diameter_2 = float(diameter_2_val) if diameter_2_val else None
+
+            # Validate positive values
+            if diameter_1 is not None and diameter_1 <= 0:
+                messagebox.showerror(
+                    "Invalid Diameter",
+                    "Diameter 1 must be a positive number."
+                )
+                return None
+            if diameter_2 is not None and diameter_2 <= 0:
+                messagebox.showerror(
+                    "Invalid Diameter",
+                    "Diameter 2 must be a positive number."
+                )
+                return None
+
+            return (diameter_1, diameter_2)
+
+        except ValueError:
+            messagebox.showerror(
+                "Invalid Diameter",
+                "Please enter valid numbers for diameters."
             )
             return None
         except Exception:
@@ -889,6 +947,8 @@ class AppV7:
             'length': self._get_field_string("Length (in)", ""),
             'width': self._get_field_string("Width (in)", ""),
             'thickness': self._get_field_string("Thickness (in)", ""),
+            'diameter_1': self._get_field_string("Diameter 1 (in)", ""),
+            'diameter_2': self._get_field_string("Diameter 2 (in)", ""),
             'machine_rate': self._get_field_string("Machine Rate ($/hr)", "90"),
             'labor_rate': self._get_field_string("Labor Rate ($/hr)", "90"),
             'margin': self._get_field_string("Margin (%)", "15"),
