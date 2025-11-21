@@ -1121,6 +1121,9 @@ def extract_quote_data_from_cad(
                 punch_edm_min = round(mh.get("total_edm_minutes", 0.0), 2)
                 punch_other_min = round(mh.get("total_other_minutes", 0.0), 2)
                 punch_cmm_min = round(mh.get("total_cmm_minutes", 0.0), 2)
+                punch_etch_min = round(mh.get("total_etch_minutes", 0.0), 2)
+                punch_edge_break_min = round(mh.get("total_edge_break_minutes", 0.0), 2)
+                punch_polish_min = round(mh.get("total_polish_minutes", 0.0), 2)
                 punch_total_min = round(mh.get("total_minutes", 0.0), 2)
                 punch_machine_hours = round(punch_total_min / 60.0, 2)
                 # Compute machine cost directly from total minutes for accuracy
@@ -1135,6 +1138,9 @@ def extract_quote_data_from_cad(
                     total_edm_minutes=punch_edm_min,
                     total_other_minutes=punch_other_min,
                     total_cmm_minutes=punch_cmm_min,
+                    total_etch_minutes=punch_etch_min,
+                    total_edge_break_minutes=punch_edge_break_min,
+                    total_polish_minutes=punch_polish_min,
                     total_minutes=punch_total_min,
                     total_hours=punch_machine_hours,
                     machine_cost=punch_machine_cost,
@@ -1854,12 +1860,17 @@ def extract_quote_data_from_cad(
         total_other_min = round(punch_base_other, 2)
         total_cmm_min = round(punch_base_cmm, 2)
 
-        # Calculate updated grand total
+        # Extract special operation times from base punch hours
+        total_etch_min = round(quote_data.machine_hours.total_etch_minutes, 2)
+        total_edge_break_min = round(quote_data.machine_hours.total_edge_break_minutes, 2)
+        total_polish_min = round(quote_data.machine_hours.total_polish_minutes, 2)
+
+        # Calculate updated grand total (include special operations)
         grand_total_minutes = round(
             total_drill_min + total_tap_min + total_cbore_min +
             total_cdrill_min + total_jig_grind_min +
             total_milling_min + total_grinding_min + total_edm_min + total_other_min +
-            total_cmm_min, 2
+            total_cmm_min + total_etch_min + total_edge_break_min + total_polish_min, 2
         )
         grand_total_hours = round(grand_total_minutes / 60.0, 2)
         machine_cost = round(grand_total_minutes * (machine_rate / 60.0), 2)
@@ -1884,6 +1895,9 @@ def extract_quote_data_from_cad(
             total_edm_minutes=total_edm_min,
             total_other_minutes=total_other_min,
             total_cmm_minutes=total_cmm_min,
+            total_etch_minutes=total_etch_min,
+            total_edge_break_minutes=total_edge_break_min,
+            total_polish_minutes=total_polish_min,
             cmm_holes_checked=holes_total,
             holes_total=holes_total,
             hole_entries=hole_entries,

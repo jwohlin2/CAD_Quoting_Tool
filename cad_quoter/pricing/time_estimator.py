@@ -1034,6 +1034,7 @@ class PunchMachineHours:
     polishing_min: float = 0.0
     edm_min: float = 0.0
     sawing_min: float = 0.0
+    etch_marking_min: float = 0.0  # Etching/marking operation time
     inspection_min: float = 0.0
     # Critical OD tracking for tolerance-sensitive operations
     critical_od_grinding_min: float = 0.0  # Extra grinding for tight tolerances
@@ -1048,7 +1049,8 @@ class PunchMachineHours:
             self.rough_turning_min + self.finish_turning_min +
             self.od_grinding_min + self.id_grinding_min + self.face_grinding_min +
             self.drilling_min + self.tapping_min + self.chamfer_min +
-            self.polishing_min + self.edm_min + self.sawing_min + self.inspection_min +
+            self.polishing_min + self.edm_min + self.sawing_min + self.etch_marking_min +
+            self.inspection_min +
             self.critical_od_grinding_min + self.critical_od_inspection_min
         )
         self.total_hours = self.total_minutes / 60.0
@@ -1348,6 +1350,13 @@ def estimate_punch_machine_hours(punch_plan: dict[str, Any], punch_features: dic
         # Extra inspection time for gage-pin checks on critical dimensions
         hours.critical_od_inspection_min = num_diams * tc["critical_od_inspection_adder"]
 
+    # Etch/marking time from plan or features
+    has_etch = punch_plan.get("has_etch", False) or punch_features.get("has_etch", False)
+    if has_etch:
+        # Import calc_etch_minutes from process_planner
+        from cad_quoter.planning.process_planner import calc_etch_minutes
+        hours.etch_marking_min = calc_etch_minutes(has_etch_note=True, qty=1, details_with_etch=1)
+
     hours.calculate_totals()
 
     return hours
@@ -1438,6 +1447,9 @@ def convert_punch_to_quote_machine_hours(machine_hours: PunchMachineHours, labor
         "total_edm_minutes": machine_hours.edm_min,
         "total_other_minutes": machine_hours.sawing_min + machine_hours.chamfer_min + machine_hours.polishing_min,
         "total_cmm_minutes": machine_hours.inspection_min + machine_hours.critical_od_inspection_min,
+        "total_etch_minutes": machine_hours.etch_marking_min,
+        "total_edge_break_minutes": 0.0,  # Edge break is typically in labor for punches
+        "total_polish_minutes": machine_hours.polishing_min,  # Already included in polishing_min
         "total_minutes": machine_hours.total_minutes,
         "total_hours": machine_hours.total_hours,
     }

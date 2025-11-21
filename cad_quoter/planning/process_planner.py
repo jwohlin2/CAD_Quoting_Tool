@@ -4140,12 +4140,18 @@ def estimate_machine_hours_from_plan(
     other_ops_detail.extend(geometry_detail)
     other_ops_minutes += geometry_based_other_min
 
-    # NOTE: edge_break, etch, and polish_contour have been moved to labor operations
+    # NOTE: edge_break and polish_contour have been moved to labor operations
     # They are now calculated in compute_labor_minutes() as finishing labor
     # Initialize these to 0 since they're no longer calculated here
     edge_break_minutes = 0.0
-    etch_minutes = 0.0
     polish_minutes = 0.0
+
+    # Calculate etch time from plan
+    etch_minutes = 0.0
+    if plan.get('has_etch', False):
+        qty = 1  # Default to 1 part unless specified
+        details_with_etch = 1  # Default to 1 mark per part
+        etch_minutes = calc_etch_minutes(has_etch_note=True, qty=qty, details_with_etch=details_with_etch)
 
     # Update time_breakdown['other'] to match the sum of all other_ops_detail entries
     time_breakdown['other'] = other_ops_minutes
