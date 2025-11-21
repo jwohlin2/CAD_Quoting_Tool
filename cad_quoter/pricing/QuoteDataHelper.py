@@ -2082,7 +2082,7 @@ def extract_quote_data_from_cad(
         if overflow_total > 0.01:
             other_ops_detail_raw.append({
                 "type": "overflow_from_milling",
-                "label": "Overflow from mill/grind/pocket/slot",
+                "label": "Other mill/grind/pocket/slot ops",
                 "minutes": round(overflow_total, 1),
                 "source": "overflow"
             })

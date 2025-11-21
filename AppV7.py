@@ -1608,46 +1608,46 @@ class AppV7:
 
             # Format helper functions
             def format_drill_group(op):
-                return (f"Hole {op.hole_id} | Dia {op.diameter:.4f}\" x {op.qty} | "
+                return (f"Hole {op.hole_id} | Ø {op.diameter:.4f}\" x {op.qty:>3} | "
                         f"depth {op.depth:.3f}\" | {op.sfm:.0f} sfm | "
-                        f"{op.ipr:.4f} ipr | t/hole {op.time_per_hole:.2f} min | "
-                        f"group {op.qty}x{op.time_per_hole:.2f} = {op.total_time:.2f} min")
+                        f"{op.ipr:.4f} ipr | {op.time_per_hole:>5.2f} min/h | "
+                        f"tot. {op.qty}x{op.time_per_hole:.2f} = {op.total_time:.2f} min")
 
             def format_jig_grind_group(op):
-                return (f"Hole {op.hole_id} | Dia {op.diameter:.4f}\" x {op.qty} | "
+                return (f"Hole {op.hole_id} | Ø {op.diameter:.4f}\" x {op.qty:>3} | "
                         f"depth {op.depth:.3f}\" | "
-                        f"t/hole {op.time_per_hole:.2f} min | "
-                        f"group {op.qty}x{op.time_per_hole:.2f} = {op.total_time:.2f} min")
+                        f"{op.time_per_hole:>5.2f} min/h | "
+                        f"tot. {op.qty}x{op.time_per_hole:.2f} = {op.total_time:.2f} min")
 
             def format_tap_group(op):
-                return (f"Hole {op.hole_id} | Dia {op.diameter:.4f}\" x {op.qty} | "
+                return (f"Hole {op.hole_id} | Ø {op.diameter:.4f}\" x {op.qty:>3} | "
                         f"depth {op.depth:.3f}\" | {op.tpi} TPI | "
-                        f"t/hole {op.time_per_hole:.2f} min | "
-                        f"group {op.qty}x{op.time_per_hole:.2f} = {op.total_time:.2f} min")
+                        f"{op.time_per_hole:>5.2f} min/h | "
+                        f"tot. {op.qty}x{op.time_per_hole:.2f} = {op.total_time:.2f} min")
 
             def format_cbore_group(op):
                 # Add side indicator if available (front/back)
                 if op.side:
-                    hole_label = f"Hole {op.hole_id} – C'BORE {op.side.upper()}"
+                    hole_label = f"Hole {op.hole_id} – C'BORE {op.side.upper():5}"
                 else:
                     hole_label = f"Hole {op.hole_id}"
-                return (f"{hole_label} | Dia {op.diameter:.4f}\" x {op.qty} | "
+                return (f"{hole_label} | Ø {op.diameter:.4f}\" x {op.qty:>3} | "
                         f"depth {op.depth:.3f}\" | {op.sfm:.0f} sfm | "
-                        f"t/hole {op.time_per_hole:.2f} min | "
-                        f"group {op.qty}x{op.time_per_hole:.2f} = {op.total_time:.2f} min")
+                        f"{op.time_per_hole:>5.2f} min/h | "
+                        f"tot. {op.qty}x{op.time_per_hole:.2f} = {op.total_time:.2f} min")
 
             def format_cdrill_group(op):
-                return (f"Hole {op.hole_id} | Dia {op.diameter:.4f}\" x {op.qty} | "
+                return (f"Hole {op.hole_id} | Ø {op.diameter:.4f}\" x {op.qty:>3} | "
                         f"depth {op.depth:.3f}\" | "
-                        f"t/hole {op.time_per_hole:.2f} min | "
-                        f"group {op.qty}x{op.time_per_hole:.2f} = {op.total_time:.2f} min")
+                        f"{op.time_per_hole:>5.2f} min/h | "
+                        f"tot. {op.qty}x{op.time_per_hole:.2f} = {op.total_time:.2f} min")
 
             def format_edm_group(op):
                 """Format EDM (wire EDM profile) operation."""
-                return (f"Hole {op.hole_id} | Starter Ø{op.diameter:.4f}\" x {op.qty} | "
+                return (f"Hole {op.hole_id} | Starter Ø {op.diameter:.4f}\" x {op.qty:>3} | "
                         f"thickness {op.depth:.3f}\" | "
-                        f"t/window {op.time_per_hole:.2f} min | "
-                        f"total {op.qty}x{op.time_per_hole:.2f} = {op.total_time:.2f} min")
+                        f"{op.time_per_hole:>5.2f} min/window | "
+                        f"tot. {op.qty}x{op.time_per_hole:.2f} = {op.total_time:.2f} min")
 
             MILLING_DESC_WIDTH = 28
             MILLING_SEPARATOR_LENGTH = 106
@@ -1673,7 +1673,7 @@ class AppV7:
 
                 line = (
                     f"{desc} | W {w_str} | L {l_str} | "
-                    f"Tool Dia {tool_str} | Path {path_str} | Time (min) {time_str}"
+                    f"Tool Ø {tool_str} | Path {path_str} | Time (min) {time_str}"
                 )
 
                 return line
