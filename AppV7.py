@@ -264,6 +264,9 @@ class AppV7:
         ttk.Button(button_frame, text="2. Generate Quote",
                    command=self.generate_quote).pack(side=tk.LEFT, padx=5)
 
+        ttk.Button(button_frame, text="Remove Overrides",
+                   command=self.remove_overrides).pack(side=tk.LEFT, padx=5)
+
         ttk.Button(button_frame, text="Drawing Preview",
                    command=self.open_drawing_preview).pack(side=tk.LEFT, padx=5)
 
@@ -635,6 +638,67 @@ class AppV7:
 
         except Exception as e:
             print(f"[AppV7] Failed to save OCR cache: {e}")
+
+    def remove_overrides(self) -> None:
+        """
+        Clear all user overrides and remove the OCR cache file.
+
+        This method:
+        1. Clears all quote field entries (dimensions, material, rates, etc.)
+        2. Deletes the OCR cache file if it exists
+        3. Clears in-memory cached data
+        """
+        try:
+            # Clear all quote field entries
+            cleared_fields = []
+            for label, field in self.quote_fields.items():
+                # Skip Part Family as it should have a default value
+                if label == "Part Family":
+                    continue
+
+                # Clear the field if it has content
+                if isinstance(field, ttk.Entry):
+                    current_value = field.get()
+                    if current_value:
+                        field.delete(0, tk.END)
+                        cleared_fields.append(label)
+                elif isinstance(field, ttk.Combobox):
+                    current_value = field.get()
+                    if current_value:
+                        field.set('')
+                        cleared_fields.append(label)
+
+            # Delete OCR cache file if it exists
+            cache_deleted = False
+            if self.cad_file_path:
+                cache_path = self._get_ocr_cache_path(self.cad_file_path)
+                if cache_path.exists():
+                    cache_path.unlink()
+                    cache_deleted = True
+                    print(f"[AppV7] Deleted OCR cache file: {cache_path.name}")
+
+            # Clear in-memory caches
+            self._clear_cad_cache()
+            self._previous_quote_inputs = None
+
+            # Show success message
+            message_parts = []
+            if cleared_fields:
+                message_parts.append(f"Cleared {len(cleared_fields)} override field(s)")
+            if cache_deleted:
+                message_parts.append("Deleted OCR cache file")
+
+            if message_parts:
+                messagebox.showinfo("Overrides Removed", "\n".join(message_parts))
+            else:
+                messagebox.showinfo("Overrides Removed", "No overrides to clear")
+
+            print("[AppV7] Successfully removed all overrides")
+
+        except Exception as e:
+            error_msg = f"Failed to remove overrides: {str(e)}"
+            print(f"[AppV7] {error_msg}")
+            messagebox.showerror("Error", error_msg)
 
     def _get_or_create_quote_data(self):
         """
