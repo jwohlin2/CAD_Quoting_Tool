@@ -392,6 +392,14 @@ class LaborHoursBreakdown:
     tool_changes: int = 0
     fixturing_complexity: int = 1  # 0=none, 1=light, 2=moderate, 3=complex
 
+    # Detailed breakdown of finishing operations
+    finishing_detail: Optional[List[Dict[str, Any]]] = None
+
+    def __post_init__(self):
+        """Initialize empty lists."""
+        if self.finishing_detail is None:
+            self.finishing_detail = []
+
     def categories_sum(self) -> float:
         """Return sum of all category minutes."""
         return (
@@ -2251,6 +2259,7 @@ def extract_quote_data_from_cad(
 
         # Estimate labor inputs (simplified - could be more sophisticated)
         # Pass machine_time_minutes for simple-part setup guardrail
+        # Pass plan data for finishing labor detail calculation
         labor_inputs = LaborInputs(
             ops_total=len(ops),
             holes_total=holes_total,
@@ -2260,7 +2269,14 @@ def extract_quote_data_from_cad(
             cmm_holes_checked=cmm_holes_checked,  # Holes checked by CMM (avoid double counting)
             inspection_level=inspection_level,  # Inspection intensity knob
             net_weight_lb=quote_data.stock_info.final_part_weight,  # Part weight for handling bump
-            machine_time_minutes=grand_total_minutes  # For simple-part setup guardrail
+            machine_time_minutes=grand_total_minutes,  # For simple-part setup guardrail
+            # Plan data for finishing labor detail
+            plan=plan,
+            ops=ops,
+            part_length=quote_data.part_dimensions.length,
+            part_width=quote_data.part_dimensions.width,
+            part_thickness=quote_data.part_dimensions.thickness,
+            material=material
         )
 
         labor_result = compute_labor_minutes(labor_inputs)
@@ -2273,6 +2289,10 @@ def extract_quote_data_from_cad(
         inspection_min = round(minutes.get('Inspection', 0.0), 2)
         finishing_min = round(minutes.get('Finishing', 0.0), 2)
         labor_total = round(minutes.get('Labor_Total', 0.0), 2)
+
+        # Extract finishing detail breakdown
+        finishing_breakdown = labor_result.get('finishing_breakdown', {})
+        finishing_detail = finishing_breakdown.get('detail', [])
 
         # Calculate visible categories sum
         visible_labor_sum = (
@@ -2304,7 +2324,8 @@ def extract_quote_data_from_cad(
             labor_cost=labor_cost,
             ops_total=len(ops),
             holes_total=holes_total,
-            tool_changes=len(ops) * 2
+            tool_changes=len(ops) * 2,
+            finishing_detail=finishing_detail
         )
 
         if verbose:
