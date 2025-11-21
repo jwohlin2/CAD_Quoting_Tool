@@ -1659,8 +1659,10 @@ def extract_quote_data_from_cad(
     if mcmaster_price:
         tax = round(mcmaster_price * 0.07, 2)
         # Use weight-based shipping estimator instead of percentage
+        # IMPORTANT: Calculate shipping for total weight (all pieces), not per-item weight
         stock_weight = scrap_calc.mcmaster_weight if scrap_calc.mcmaster_weight else 0.0
-        shipping = round(estimate_mcmaster_shipping(stock_weight), 2)
+        total_weight = stock_weight * quantity
+        shipping = round(estimate_mcmaster_shipping(total_weight), 2)
         scrap_credit = round(scrap_value_calc.get('scrap_value', 0.0), 2)
         net_cost = max(0, round(mcmaster_price + tax + shipping - scrap_credit, 2))
     else:
