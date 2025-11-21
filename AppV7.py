@@ -1845,6 +1845,26 @@ class AppV7:
                 report.append(f"Total Wet Grind Time: {machine_hours.total_grinding_minutes:.2f} minutes")
                 report.append("")
 
+            # TIME PER OP - WATERJET (NEW: promoted to first-class operation)
+            if machine_hours.waterjet_operations and len(machine_hours.waterjet_operations) > 0:
+                report.append("TIME PER OP - WATERJET")
+                report.append("-" * 74)
+                for op in machine_hours.waterjet_operations:
+                    desc = op.get('op_description', 'Waterjet operation')
+                    length = op.get('length_in', 0.0)
+                    thickness = op.get('thickness_in', 0.0)
+                    pierce_count = op.get('pierce_count', 0)
+                    time_min = op.get('time_min', 0.0)
+
+                    # Format waterjet operation details
+                    report.append(f"  {desc}")
+                    report.append(f"    Cut length: {length:.1f}\" | Thickness: {thickness:.3f}\" | Pierces: {pierce_count}")
+                    report.append(f"    Time: {time_min:.2f} min")
+                    report.append("")
+
+                report.append(f"Total Waterjet Time: {machine_hours.total_waterjet_minutes:.2f} minutes")
+                report.append("")
+
             # CMM INSPECTION (if applicable)
             if machine_hours.total_cmm_minutes > 0:
                 report.append("CMM INSPECTION")
@@ -1880,14 +1900,29 @@ class AppV7:
                 report.append(f"  Wet grind:                        {machine_hours.total_grinding_minutes:>10.2f} min")
             if machine_hours.total_edm_minutes > 0:
                 report.append(f"  EDM:                              {machine_hours.total_edm_minutes:>10.2f} min")
+            if machine_hours.total_waterjet_minutes > 0:
+                report.append(f"  Waterjet:                         {machine_hours.total_waterjet_minutes:>10.2f} min")
             if machine_hours.total_edge_break_minutes > 0:
                 report.append(f"  Edge break / deburr:              {machine_hours.total_edge_break_minutes:>10.2f} min")
             if machine_hours.total_etch_minutes > 0:
                 report.append(f"  Etch / marking:                   {machine_hours.total_etch_minutes:>10.2f} min")
             if machine_hours.total_polish_minutes > 0:
                 report.append(f"  Polish contour:                   {machine_hours.total_polish_minutes:>10.2f} min")
+
+            # NEW: Detailed "Other Operations" breakdown (if available)
             if machine_hours.total_other_minutes > 0:
-                report.append(f"  Other operations:                 {machine_hours.total_other_minutes:>10.2f} min")
+                # Check if detailed breakdown is available
+                if machine_hours.other_ops_detail and len(machine_hours.other_ops_detail) > 0:
+                    report.append(f"  Other operations (Total):         {machine_hours.total_other_minutes:>10.2f} min")
+                    # Show detail breakdown with indentation
+                    for detail in machine_hours.other_ops_detail:
+                        label = detail.get('label', 'Unknown operation')
+                        minutes = detail.get('minutes', 0.0)
+                        report.append(f"    • {label:<40} {minutes:>6.1f} min")
+                else:
+                    # Fallback to simple total if no detail available (backward compatibility)
+                    report.append(f"  Other operations:                 {machine_hours.total_other_minutes:>10.2f} min")
+
             if machine_hours.total_cmm_minutes > 0:
                 report.append(f"  CMM (machine time):               {machine_hours.total_cmm_minutes:>10.2f} min")
             report.append("-" * 74)

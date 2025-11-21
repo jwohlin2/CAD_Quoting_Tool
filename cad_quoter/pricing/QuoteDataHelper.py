@@ -303,6 +303,7 @@ class MachineHoursBreakdown:
     grinding_operations: Optional[List[GrindingOperation]] = None
     pocket_operations: Optional[List[PocketOperation]] = None
     slot_operations: Optional[List[SlotOperation]] = None
+    waterjet_operations: Optional[List[Dict[str, Any]]] = None  # NEW: Waterjet operations (first-class)
 
     # Time totals by operation type (from hole table)
     total_drill_minutes: float = 0.0
@@ -321,10 +322,14 @@ class MachineHoursBreakdown:
     total_slot_minutes: float = 0.0  # Slot milling operations
     total_edm_minutes: float = 0.0
     total_other_minutes: float = 0.0
+    total_waterjet_minutes: float = 0.0  # NEW: Waterjet operations (promoted to first-class)
     total_cmm_minutes: float = 0.0  # CMM checking time (machine only, setup is in labor)
     cmm_holes_checked: int = 0  # Number of holes inspected by CMM
     holes_total: int = 0  # Total number of holes from hole table (sum of QTY)
     hole_entries: int = 0  # Count of unique hole groups (A, B, C, etc.) from hole table
+
+    # Other operations detail (NEW: detailed breakdown instead of single scalar)
+    other_ops_detail: Optional[List[Dict[str, Any]]] = None  # Detailed "other operations" breakdown
 
     # Overall totals
     total_minutes: float = 0.0
@@ -359,6 +364,10 @@ class MachineHoursBreakdown:
             self.pocket_operations = []
         if self.slot_operations is None:
             self.slot_operations = []
+        if self.waterjet_operations is None:
+            self.waterjet_operations = []
+        if self.other_ops_detail is None:
+            self.other_ops_detail = []
 
 
 @dataclass
@@ -2038,28 +2047,44 @@ def extract_quote_data_from_cad(
         grinding_ops_raw = plan_machine_times.get('grinding_operations', [])
         pocket_ops_raw = plan_machine_times.get('pocket_operations', [])
         slot_ops_raw = plan_machine_times.get('slot_operations', [])
+        waterjet_ops_raw = plan_machine_times.get('waterjet_operations', [])  # NEW: Waterjet ops
 
         # Calculate totals from detailed operations (what's displayed in report)
         total_milling_ops_min = sum(op.get('time_minutes', 0.0) for op in milling_ops_raw)
         total_grinding_ops_min = sum(op.get('time_minutes', 0.0) for op in grinding_ops_raw)
         total_pocket_ops_min = sum(op.get('pocket_time_min', 0.0) for op in pocket_ops_raw)
         total_slot_ops_min = sum(op.get('slot_mill_time_min', 0.0) for op in slot_ops_raw)
+        total_waterjet_ops_min = sum(op.get('time_min', 0.0) for op in waterjet_ops_raw)  # NEW
 
         # Get breakdown totals (may include non-detailed operations)
         breakdown_milling_min = plan_machine_times['breakdown_minutes'].get('milling', 0.0)
         breakdown_grinding_min = plan_machine_times['breakdown_minutes'].get('grinding', 0.0)
         breakdown_pocket_min = plan_machine_times['breakdown_minutes'].get('pockets', 0.0)
         breakdown_slot_min = plan_machine_times['breakdown_minutes'].get('slots', 0.0)
+        breakdown_waterjet_min = plan_machine_times['breakdown_minutes'].get('waterjet', 0.0)  # NEW
         # EDM from plan operations + EDM from hole table "FOR WIRE EDM" entries
         total_edm_min = plan_machine_times['breakdown_minutes'].get('edm', 0.0) + hole_table_edm_min
-        total_other_min = plan_machine_times['breakdown_minutes'].get('other', 0.0)
+
+        # Get other_ops_detail from plan (NEW)
+        other_ops_detail_raw = plan_machine_times.get('other_ops_detail', [])
+        total_other_min = plan_machine_times.get('other_ops_minutes', 0.0)
 
         # Any milling/grinding/pocket/slot time not in detailed ops goes to "other" for transparency
         milling_overhead_min = breakdown_milling_min - total_milling_ops_min
         grinding_overhead_min = breakdown_grinding_min - total_grinding_ops_min
         pocket_overhead_min = breakdown_pocket_min - total_pocket_ops_min
         slot_overhead_min = breakdown_slot_min - total_slot_ops_min
-        total_other_min += milling_overhead_min + grinding_overhead_min + pocket_overhead_min + slot_overhead_min
+
+        # Add overflow to other_ops_detail if non-zero
+        overflow_total = milling_overhead_min + grinding_overhead_min + pocket_overhead_min + slot_overhead_min
+        if overflow_total > 0.01:
+            other_ops_detail_raw.append({
+                "type": "overflow_from_milling",
+                "label": "Overflow from other categories (milling/grinding/pocket/slot)",
+                "minutes": round(overflow_total, 1),
+                "source": "overflow"
+            })
+        total_other_min += overflow_total
 
         # Use detailed ops totals for display (ensures Total Milling Time matches ops sum)
         # Add slot milling time from hole table to milling totals (legacy slot handling)
@@ -2067,6 +2092,7 @@ def extract_quote_data_from_cad(
         total_grinding_min = total_grinding_ops_min
         total_pocket_min = total_pocket_ops_min
         total_slot_min = total_slot_ops_min
+        total_waterjet_min = total_waterjet_ops_min  # NEW
 
         # Sanity check: totals should match (total_milling_min includes slot time + plan ops)
         expected_milling = total_milling_ops_min + slot_milling_min
@@ -2099,6 +2125,9 @@ def extract_quote_data_from_cad(
             for op in slot_ops_raw
         ]
 
+        # Waterjet operations are already in the correct format (no dataclass filtering needed)
+        waterjet_ops = waterjet_ops_raw  # NEW
+
         # Calculate CMM inspection time (split between labor setup and machine checking)
         # Use override if provided, otherwise use inspection_level from plan, or default to "full_inspection"
         from cad_quoter.planning.process_planner import cmm_inspection_minutes
@@ -2125,6 +2154,7 @@ def extract_quote_data_from_cad(
         total_slot_min = round(total_slot_min, 2)
         total_edm_min = round(total_edm_min, 2)
         total_other_min = round(total_other_min, 2)
+        total_waterjet_min = round(total_waterjet_min, 2)  # NEW
         cmm_checking_machine_min = round(cmm_checking_machine_min, 2)
 
         # Extract special operation times (edge break, etch, polish)
@@ -2136,7 +2166,7 @@ def extract_quote_data_from_cad(
             total_drill_min + total_tap_min + total_cbore_min +
             total_cdrill_min + total_jig_grind_min +
             total_milling_min + total_grinding_min + total_pocket_min + total_slot_min +
-            total_edm_min + total_other_min +
+            total_edm_min + total_other_min + total_waterjet_min +  # NEW: Added waterjet
             total_edge_break_min + total_etch_min + total_polish_min +
             cmm_checking_machine_min, 2
         )
@@ -2157,6 +2187,7 @@ def extract_quote_data_from_cad(
             grinding_operations=grinding_ops,
             pocket_operations=pocket_ops,
             slot_operations=slot_ops,
+            waterjet_operations=waterjet_ops,  # NEW
             total_drill_minutes=total_drill_min,
             total_tap_minutes=total_tap_min,
             total_cbore_minutes=total_cbore_min,
@@ -2171,6 +2202,8 @@ def extract_quote_data_from_cad(
             total_slot_minutes=total_slot_min,
             total_edm_minutes=total_edm_min,
             total_other_minutes=total_other_min,
+            total_waterjet_minutes=total_waterjet_min,  # NEW
+            other_ops_detail=other_ops_detail_raw,  # NEW
             total_cmm_minutes=cmm_checking_machine_min,
             cmm_holes_checked=cmm_holes_checked,
             holes_total=holes_total,
