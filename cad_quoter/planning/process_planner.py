@@ -3088,7 +3088,7 @@ def _calculate_other_ops_minutes(
     L: float,
     W: float,
     T: float
-) -> float:
+) -> Tuple[float, List[Dict[str, Any]]]:
     """Calculate other operations time based on actual part geometry and features.
 
     Drives other_ops_min from:
@@ -3104,8 +3104,16 @@ def _calculate_other_ops_minutes(
         L, W, T: Part dimensions in inches
 
     Returns:
-        Estimated other operations time in minutes
+        Tuple of (total_minutes, detail_list) where detail_list contains:
+        {
+            "type": "chamfer_deburr" | "small_radius" | "polish_contour" | "baseline_cleanup",
+            "label": "Chamfer / deburr (8 edges)",
+            "minutes": 4.0,
+            "source": "geometry" | "text",
+        }
     """
+    detail_list = []
+
     # Extract geometry features from plan metadata if available
     meta = plan.get('meta', {})
 
@@ -3171,32 +3179,75 @@ def _calculate_other_ops_minutes(
         part_volume < 5.0  # Small part (< 5 cubic inches)
     )
 
-    # Calculate base time from geometry features
+    # Calculate base time from geometry features and build detail list
     other_time = 0.0
 
     # Chamfer/deburr time: ~0.5 min per edge (reduced from generic 5 min)
-    other_time += num_chamfers * 0.5
+    if num_chamfers > 0:
+        chamfer_time = num_chamfers * 0.5
+        detail_list.append({
+            "type": "chamfer_deburr",
+            "label": f"Chamfer / deburr ({num_chamfers} edge{'s' if num_chamfers != 1 else ''})",
+            "minutes": round(chamfer_time, 1),
+            "source": "geometry"
+        })
+        other_time += chamfer_time
 
     # Small radii/form work: ~1.0 min per feature
-    other_time += num_small_radii * 1.0
+    if num_small_radii > 0:
+        radii_time = num_small_radii * 1.0
+        detail_list.append({
+            "type": "small_radius",
+            "label": f"Small radii / form work ({num_small_radii} feature{'s' if num_small_radii != 1 else ''})",
+            "minutes": round(radii_time, 1),
+            "source": "geometry"
+        })
+        other_time += radii_time
 
     # Polish/contour work: 3-5 min depending on part size
     if has_polish:
-        other_time += 3.0 + size_factor * 2.0
+        polish_time = 3.0 + size_factor * 2.0
+        detail_list.append({
+            "type": "polish_contour",
+            "label": "Polish / contour work",
+            "minutes": round(polish_time, 1),
+            "source": "text" if polish_detected else "geometry"
+        })
+        other_time += polish_time
 
     # Add baseline for general cleanup/deburr (scaled by part size)
     baseline = 1.0 + size_factor * 1.5
-    other_time += baseline
+    if baseline > 0.1:  # Only add if meaningful
+        detail_list.append({
+            "type": "baseline_cleanup",
+            "label": f"Baseline cleanup (part size {L:.1f}\" × {W:.1f}\")",
+            "minutes": round(baseline, 1),
+            "source": "geometry"
+        })
+        other_time += baseline
 
     # For simple parts, cap at 2-3 minutes
-    if is_simple_part:
-        other_time = min(other_time, 2.5)
+    if is_simple_part and other_time > 2.5:
+        # Proportionally reduce all detail times
+        scale_factor = 2.5 / other_time
+        for detail in detail_list:
+            detail["minutes"] = round(detail["minutes"] * scale_factor, 1)
+        other_time = 2.5
 
     # For complex parts with many features, ensure we don't go too low
     if (num_chamfers + num_small_radii) > 10 or has_polish:
-        other_time = max(other_time, 4.0)
+        if other_time < 4.0:
+            # Add a complexity adjustment
+            adjustment = 4.0 - other_time
+            detail_list.append({
+                "type": "baseline_cleanup",
+                "label": "Complexity adjustment",
+                "minutes": round(adjustment, 1),
+                "source": "geometry"
+            })
+            other_time = 4.0
 
-    return round(other_time, 1)
+    return round(other_time, 1), detail_list
 
 
 def estimate_machine_hours_from_plan(
@@ -3953,9 +4004,25 @@ def estimate_machine_hours_from_plan(
                 # Don't add generic time here - we'll calculate based on geometry after the loop
                 pass
 
+    # Initialize other_ops_detail list to track all "other operations" contributors
+    other_ops_detail = []
+    other_ops_minutes = 0.0
+
+    # Track unmodeled operations added in the loop above
+    unmodeled_ops_minutes = time_breakdown['other']
+    if unmodeled_ops_minutes > 0:
+        other_ops_detail.append({
+            "type": "unmodeled_ops",
+            "label": "Unmodeled operations (pockets/slots/profiles)",
+            "minutes": round(unmodeled_ops_minutes, 1),
+            "source": "text"
+        })
+        other_ops_minutes += unmodeled_ops_minutes
+
     # Add geometry-based other operations time (chamfers, radii, polish, etc.)
-    geometry_based_other_min = _calculate_other_ops_minutes(plan, ops, L, W, T)
-    time_breakdown['other'] += geometry_based_other_min
+    geometry_based_other_min, geometry_detail = _calculate_other_ops_minutes(plan, ops, L, W, T)
+    other_ops_detail.extend(geometry_detail)
+    other_ops_minutes += geometry_based_other_min
 
     # Check for edge break operation from text extraction
     edge_break_minutes = 0.0
@@ -3983,7 +4050,13 @@ def estimate_machine_hours_from_plan(
 
         # Calculate edge break time
         edge_break_minutes = calc_edge_break_minutes(perimeter_in, qty, material_group)
-        time_breakdown['other'] += edge_break_minutes
+        other_ops_detail.append({
+            "type": "edge_break",
+            "label": f"Edge break / deburr (perimeter {perimeter_in:.1f}\")",
+            "minutes": round(edge_break_minutes, 1),
+            "source": "text"
+        })
+        other_ops_minutes += edge_break_minutes
 
     # Check for etch operation from text extraction
     etch_minutes = 0.0
@@ -3993,7 +4066,13 @@ def estimate_machine_hours_from_plan(
 
         # Calculate etch time
         etch_minutes = calc_etch_minutes(has_etch_note=True, qty=qty, details_with_etch=details_with_etch)
-        time_breakdown['other'] += etch_minutes
+        other_ops_detail.append({
+            "type": "etch",
+            "label": "Etch / marking",
+            "minutes": round(etch_minutes, 1),
+            "source": "text"
+        })
+        other_ops_minutes += etch_minutes
 
     # Check for polish contour operation from text extraction
     polish_minutes = 0.0
@@ -4010,9 +4089,20 @@ def estimate_machine_hours_from_plan(
             contour_length_in=contour_length_in,
             contour_width_in=contour_width_in
         )
-        time_breakdown['other'] += polish_minutes
+        other_ops_detail.append({
+            "type": "polish_contour",
+            "label": "Polish contour",
+            "minutes": round(polish_minutes, 1),
+            "source": "text"
+        })
+        other_ops_minutes += polish_minutes
 
-    # Check for waterjet operations from text extraction
+    # Update time_breakdown['other'] to match the sum of all other_ops_detail entries
+    time_breakdown['other'] = other_ops_minutes
+
+    # ========== WATERJET OPERATIONS (PROMOTED TO FIRST-CLASS) ==========
+    # Waterjet operations are now treated as first-class machine ops, not "other"
+    waterjet_operations_detailed = []
     waterjet_openings_minutes = 0.0
     waterjet_profile_minutes = 0.0
 
@@ -4035,7 +4125,18 @@ def estimate_machine_hours_from_plan(
             pierce_count=pierce_count,
             qty=qty
         )
-        time_breakdown['other'] += waterjet_openings_minutes
+
+        # Create first-class waterjet operation entry
+        waterjet_operations_detailed.append({
+            "category": "waterjet",
+            "op_description": f"Waterjet openings – {pierce_count} opening{'s' if pierce_count != 1 else ''} (±{tolerance:.3f}\")",
+            "length_in": total_length_in,
+            "thickness_in": thickness_in,
+            "tolerance": tolerance,
+            "pierce_count": pierce_count,
+            "qty": qty,
+            "time_min": waterjet_openings_minutes
+        })
 
     if plan.get('has_waterjet_profile', False):
         qty = 1  # Default to 1 part unless specified
@@ -4056,7 +4157,21 @@ def estimate_machine_hours_from_plan(
             pierce_count=pierce_count,
             qty=qty
         )
-        time_breakdown['other'] += waterjet_profile_minutes
+
+        # Create first-class waterjet operation entry
+        waterjet_operations_detailed.append({
+            "category": "waterjet",
+            "op_description": f"Waterjet profile cut – outline (±{tolerance:.3f}\")",
+            "length_in": total_length_in,
+            "thickness_in": thickness_in,
+            "tolerance": tolerance,
+            "pierce_count": pierce_count,
+            "qty": qty,
+            "time_min": waterjet_profile_minutes
+        })
+
+    # Add waterjet time to breakdown (separate category, not in 'other')
+    time_breakdown['waterjet'] = waterjet_openings_minutes + waterjet_profile_minutes
 
     # Calculate total
     total_minutes = sum(time_breakdown.values())
@@ -4071,11 +4186,14 @@ def estimate_machine_hours_from_plan(
         'grinding_operations': grinding_operations_detailed,
         'pocket_operations': pocket_operations_detailed,
         'slot_operations': slot_operations_detailed,
+        'waterjet_operations': waterjet_operations_detailed,  # NEW: First-class waterjet ops
         'edge_break_minutes': edge_break_minutes,
         'etch_minutes': etch_minutes,
         'polish_minutes': polish_minutes,
         'waterjet_openings_minutes': waterjet_openings_minutes,
         'waterjet_profile_minutes': waterjet_profile_minutes,
+        'other_ops_minutes': other_ops_minutes,  # NEW: Total other ops (excludes waterjet)
+        'other_ops_detail': other_ops_detail,  # NEW: Detailed breakdown of other operations
     }
 
 
