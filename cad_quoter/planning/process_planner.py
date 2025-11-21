@@ -3220,7 +3220,7 @@ def _calculate_other_ops_minutes(
     if baseline > 0.1:  # Only add if meaningful
         detail_list.append({
             "type": "baseline_cleanup",
-            "label": f"Baseline cleanup (part size {L:.1f}\" × {W:.1f}\")",
+            "label": f"Baseline cleanup ({L:.1f}\" × {W:.1f}\")",
             "minutes": round(baseline, 1),
             "source": "geometry"
         })
@@ -4052,7 +4052,7 @@ def estimate_machine_hours_from_plan(
         edge_break_minutes = calc_edge_break_minutes(perimeter_in, qty, material_group)
         other_ops_detail.append({
             "type": "edge_break",
-            "label": f"Edge break / deburr (perimeter {perimeter_in:.1f}\")",
+            "label": f"Edge break / deburr ({perimeter_in:.1f}\" perim)",
             "minutes": round(edge_break_minutes, 1),
             "source": "text"
         })
