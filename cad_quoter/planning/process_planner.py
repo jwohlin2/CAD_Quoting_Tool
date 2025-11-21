@@ -2022,6 +2022,8 @@ def plan_from_cad_file(
     plan["extracted_hole_operations"] = len(hole_operations)
     # Store actual hole operations data for reuse (avoids redundant ODA conversions)
     plan["hole_operations_data"] = hole_operations
+    # Store actual hole table data for waterjet and other calculations
+    plan["hole_table_data"] = hole_table
     # Add text dump for punch detection
     plan["text_dump"] = "\n".join(all_text) if all_text else ""
     # Add extracted part quantity
@@ -4154,11 +4156,17 @@ def estimate_machine_hours_from_plan(
         qty = 1  # Default to 1 part unless specified
         tolerance = plan.get('waterjet_openings_tolerance', 0.005)
 
-        # TODO: Extract actual opening geometry from plan
-        # For now, use reasonable defaults based on typical parts
-        # In full implementation, sum perimeters of all waterjet openings from geometry
-        total_length_in = 10.0  # inches - placeholder, should be calculated from geometry
-        pierce_count = 4  # number of openings - placeholder, should be calculated from geometry
+        # Get hole table from plan and calculate actual metrics
+        hole_table = plan.get('hole_table_data', [])
+        if hole_table:
+            metrics = calc_waterjet_metrics_from_hole_table(hole_table)
+            total_length_in = metrics['total_length_in']
+            pierce_count = int(metrics['pierce_count'])
+        else:
+            # Fallback to defaults if hole table not available
+            total_length_in = 10.0  # inches - fallback default
+            pierce_count = 4  # number of openings - fallback default
+
         thickness_in = T if T > 0 else 0.5  # Use actual thickness or default
 
         # Calculate waterjet openings time
@@ -4662,6 +4670,63 @@ def calc_polish_contour_minutes(
     polish_min_total = max(polish_min_total, MIN_POLISH_TIME_PER_LOT)
 
     return polish_min_total
+
+
+def calc_waterjet_metrics_from_hole_table(hole_table: List[Dict[str, Any]]) -> Dict[str, float]:
+    """Calculate waterjet opening metrics from hole table data.
+
+    For each hole in the table, calculates:
+    - Circumference = π × diameter
+    - Total cut length = Σ(circumference × quantity)
+    - Pierce count = Σ(quantity)
+
+    Args:
+        hole_table: List of hole dicts with keys: HOLE, REF_DIAM, QTY, DESCRIPTION
+
+    Returns:
+        Dict with keys:
+            - total_length_in: Total cut length in inches (sum of all circumferences × quantities)
+            - pierce_count: Total number of pierces (sum of all quantities)
+
+    Example:
+        >>> hole_table = [
+        ...     {'HOLE': 'A', 'REF_DIAM': 'Ø1.5048', 'QTY': 4},
+        ...     {'HOLE': 'B', 'REF_DIAM': 'Ø1/2', 'QTY': 14}
+        ... ]
+        >>> metrics = calc_waterjet_metrics_from_hole_table(hole_table)
+        >>> # metrics['total_length_in'] ≈ 40.89 (4×4.727 + 14×1.571)
+        >>> # metrics['pierce_count'] = 18
+    """
+    import math
+
+    total_length_in = 0.0
+    pierce_count = 0
+
+    for entry in hole_table:
+        ref_diam_str = entry.get('REF_DIAM', '')
+        qty_raw = entry.get('QTY', 0)
+
+        # Parse quantity
+        qty = int(qty_raw) if isinstance(qty_raw, (str, int, float)) and qty_raw else 0
+        if qty <= 0:
+            continue
+
+        # Parse diameter
+        diameter_in = _parse_diameter(ref_diam_str)
+        if diameter_in <= 0:
+            continue
+
+        # Calculate circumference: C = π × d
+        circumference_in = math.pi * diameter_in
+
+        # Add to totals
+        total_length_in += circumference_in * qty
+        pierce_count += qty
+
+    return {
+        'total_length_in': total_length_in,
+        'pierce_count': pierce_count
+    }
 
 
 def calc_waterjet_minutes(
