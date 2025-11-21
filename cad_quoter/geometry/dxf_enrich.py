@@ -1939,7 +1939,7 @@ def detect_waterjet_openings(text_dump: str) -> tuple[bool, float]:
 
     # Extract tolerance from text (e.g., "±.005", "±0.005", "+/-.003")
     tolerance = 0.005  # Default tolerance
-    tol_match = re.search(r'[±+/-]\s*\.?0*\.(\d+)', text_upper)
+    tol_match = re.search(r'[±+/-]\s*0*\.(\d+)', text_upper)
     if tol_match:
         # Convert matched digits to float (e.g., "005" -> 0.005, "003" -> 0.003)
         digits = tol_match.group(1)
@@ -1983,7 +1983,7 @@ def detect_waterjet_profile(text_dump: str) -> tuple[bool, float]:
 
     # Extract tolerance from text (e.g., "±.003", "±0.003", "+/-.005")
     tolerance = 0.003  # Default tolerance for profile (typically tighter)
-    tol_match = re.search(r'[±+/-]\s*\.?0*\.(\d+)', text_upper)
+    tol_match = re.search(r'[±+/-]\s*0*\.(\d+)', text_upper)
     if tol_match:
         # Convert matched digits to float (e.g., "003" -> 0.003, "005" -> 0.005)
         digits = tol_match.group(1)
