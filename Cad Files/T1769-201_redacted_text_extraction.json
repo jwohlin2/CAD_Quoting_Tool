@@ -1,0 +1,3538 @@
+[
+  {
+    "layout": "Model",
+    "layer": "BALLOON",
+    "etype": "PROXYTEXT",
+    "text": "HOLE TABLE HOLE A B C D E F G H J K L M N REF ∅ ∅1.5048 ∅.5313 ∅.3438 ∅.2610 ∅.2500 ∅.2188 ∅.1875 ∅.1875 ∅.1875 ∅.1719 ∅.1360 ∅.1260 ∅.1250 QTY 4 2 14 12 12 1 2 33 4 4 14 12 2 DESCRIPTION",
+    "x": 0.0,
+    "y": 0.0,
+    "height": 0.0,
+    "rotation": 0.0,
+    "in_block": false,
+    "depth": 0,
+    "block_path": []
+  },
+  {
+    "layout": "Model",
+    "layer": "BALLOON",
+    "etype": "PROXYTEXT",
+    "text": "∅1.5048 +.0000/-.0002 THRU (JIG GRIND) 5/8-11 TAP THRU",
+    "x": 0.0,
+    "y": 0.0,
+    "height": 0.0,
+    "rotation": 0.0,
+    "in_block": false,
+    "depth": 0,
+    "block_path": []
+  },
+  {
+    "layout": "Model",
+    "layer": "BALLOON",
+    "etype": "PROXYTEXT",
+    "text": "∅11/32 THRU; ∅1/2 C'BORE X .38 DEEP FROM FRONT 5/16-18 TAP THRU",
+    "x": 0.0,
+    "y": 0.0,
+    "height": 0.0,
+    "rotation": 0.0,
+    "in_block": false,
+    "depth": 0,
+    "block_path": []
+  },
+  {
+    "layout": "Model",
+    "layer": "BALLOON",
+    "etype": "PROXYTEXT",
+    "text": "∅.2500 THRU (JIG GRIND); ∅9/32 C'DRILL X .25 DEEP FROM BACK ∅7/32 THRU ∅3/16 THRU",
+    "x": 0.0,
+    "y": 0.0,
+    "height": 0.0,
+    "rotation": 0.0,
+    "in_block": false,
+    "depth": 0,
+    "block_path": []
+  },
+  {
+    "layout": "Model",
+    "layer": "BALLOON",
+    "etype": "PROXYTEXT",
+    "text": "∅3/16 THRU; ∅5/16 C'BORE X .307 DEEP FROM BACK ∅3/16 X .28 DEEP FROM CHANNEL",
+    "x": 0.0,
+    "y": 0.0,
+    "height": 0.0,
+    "rotation": 0.0,
+    "in_block": false,
+    "depth": 0,
+    "block_path": []
+  },
+  {
+    "layout": "Model",
+    "layer": "BALLOON",
+    "etype": "PROXYTEXT",
+    "text": "Ø11/64 THRU; ∅1/4 C'BORE X .307 DEEP FROM BACK #8-32 TAP X .31 DEEP FROM BACK Ø.1260 +.0005/-.0000 THRU; Ø.25 C'BORE FROM BACK AS SHOWN ∅1/8 THRU",
+    "x": 0.0,
+    "y": 0.0,
+    "height": 0.0,
+    "rotation": 0.0,
+    "in_block": false,
+    "depth": 0,
+    "block_path": []
+  },
+  {
+    "layout": "Model",
+    "layer": "BALLOON",
+    "etype": "PROXYTEXT",
+    "text": "LIST OF COORDINATES HOLE A85 A89 A94 A98 B84 B93 C70 C71 C72 C73 C74 C75 C76 C77 C78 C79 C80 C81 C82 C83 D86 D87 D88 D90 D91 D92 D95 D96 D97 D99 D100 D101 E27 E28 E29 E30 E31 E32 E33 X 3.2500 15.2500 3.5000 15.2500 9.5000 9.5000 17.0000 14.5000 12.0000 9.5000 7.0000 4.5000 2.0000 18.2500 13.7500 12.0000 9.5000 7.0000 4.5000 2.3750 2.3407 3.2500 4.1593 14.3407 15.2500 16.1593 2.5907 3.5000 4.4093 14.3407 15.2500 16.1593 18.2500 17.7500 15.2500 13.7500 12.0000 11.2500 8.3750 Y -10.0000 -10.0000 -1.5000 -1.5000 -10.7500 -.7500 -7.8750 -7.8750 -7.8750 -7.8750 -7.8750 -7.8750 -7.8750 -3.6250 -3.6250 -3.6250 -3.6250 -3.6250 -3.6250 -3.6250 -10.5250 -8.9500 -10.5250 -10.5250 -8.9500 -10.5250 -.9750 -2.5500 -.9750 -.9750 -2.5500 -.9750 -4.7500 -6.7500 -6.7500 -4.7500 -6.7500 -4.7500 -6.7500 HOLE E34 E35 E36 E39 E42 F43 G64 G66 H1 H2 H3 H4 H5 H6 H7 H8 H9 H10 H11 H12 H13 H14 H15 H16 H17 H18 H19 H20 H21 H22 H23 H24 H25 H26 H37 H38 H40 H41 H102 X 9.7500 5.5000 7.0000 3.5000 1.2500 17.0000 .6000 .6000 18.5000 17.2500 17.2500 18.7500 13.0000 14.7500 16.5000 16.5000 14.7500 13.0000 12.2500 10.7500 12.0000 10.7500 10.2500 10.2500 8.0000 8.0000 6.2500 6.2500 7.0000 7.5000 5.0000 5.0000 4.0000 4.0000 .1875 2.2500 .1875 2.2500 8.7500 Y -4.7500 -4.7500 -6.7500 -6.7500 -4.7500 -5.5576 -6.2000 -5.3000 -6.7500 -6.7500 -4.7500 -4.7500 -4.7500 -5.2500 -4.7500 -6.5000 -6.7500 -6.7500 -6.5000 -6.7500 -4.7500 -4.7500 -6.7500 -4.7500 -4.7500 -6.7500 -6.5000 -5.2500 -4.7500 -6.7500 -6.7500 -4.7500 -4.7500 -6.7500 -6.7500 -6.5000 -4.7500 -5.0000 -5.5000 HOLE H109 H110 J62 J63 J65 J67 K103 K104 K107 K108 L45 L47 L49 L51 L53 L55 L57 L60 L61 L69 L106 L112 L114 L116 M44 M46 M48 M50 M52 M54 M56 M68 M105 M111 M113 M115 N58 N59 X 14.0000 15.5000 .4300 .7700 .4300 .7700 11.9250 11.5750 13.4250 13.0750 17.3750 16.2500 8.3750 10.2500 4.6250 3.1250 2.3750 .6004 .6004 7.2500 11.7500 13.2500 14.0000 15.5000 17.3750 16.2500 8.3750 10.2500 4.6250 3.1250 2.3750 7.2500 11.7500 13.2500 14.0000 15.5000 1.6250 1.2500 Y -6.2610 -5.9985 -6.4250 -6.4250 -5.0750 -5.0750 -5.7660 -5.7660 -5.7660 -5.7660 -5.4000 -5.2876 -5.4000 -5.2876 -5.4000 -5.4000 -5.4000 -4.8580 -6.6420 -5.2876 -5.2876 -5.2876 -5.2876 -5.2876 -5.6700 -5.5576 -5.6700 -5.5576 -5.6700 -5.6700 -5.6700 -5.5576 -5.5576 -5.5576 -5.5576 -5.5576 -5.6700 -5.5576",
+    "x": 0.0,
+    "y": 0.0,
+    "height": 0.0,
+    "rotation": 0.0,
+    "in_block": false,
+    "depth": 0,
+    "block_path": []
+  },
+  {
+    "layout": "Model",
+    "layer": "BALLOON",
+    "etype": "PROXYTEXT",
+    "text": "L116",
+    "x": 0.0,
+    "y": 0.0,
+    "height": 0.0,
+    "rotation": 0.0,
+    "in_block": false,
+    "depth": 0,
+    "block_path": []
+  },
+  {
+    "layout": "Model",
+    "layer": "BALLOON",
+    "etype": "PROXYTEXT",
+    "text": "M115",
+    "x": 0.0,
+    "y": 0.0,
+    "height": 0.0,
+    "rotation": 0.0,
+    "in_block": false,
+    "depth": 0,
+    "block_path": []
+  },
+  {
+    "layout": "Model",
+    "layer": "BALLOON",
+    "etype": "PROXYTEXT",
+    "text": "L114",
+    "x": 0.0,
+    "y": 0.0,
+    "height": 0.0,
+    "rotation": 0.0,
+    "in_block": false,
+    "depth": 0,
+    "block_path": []
+  },
+  {
+    "layout": "Model",
+    "layer": "BALLOON",
+    "etype": "PROXYTEXT",
+    "text": "M113",
+    "x": 0.0,
+    "y": 0.0,
+    "height": 0.0,
+    "rotation": 0.0,
+    "in_block": false,
+    "depth": 0,
+    "block_path": []
+  },
+  {
+    "layout": "Model",
+    "layer": "BALLOON",
+    "etype": "PROXYTEXT",
+    "text": "L112",
+    "x": 0.0,
+    "y": 0.0,
+    "height": 0.0,
+    "rotation": 0.0,
+    "in_block": false,
+    "depth": 0,
+    "block_path": []
+  },
+  {
+    "layout": "Model",
+    "layer": "BALLOON",
+    "etype": "PROXYTEXT",
+    "text": "M111",
+    "x": 0.0,
+    "y": 0.0,
+    "height": 0.0,
+    "rotation": 0.0,
+    "in_block": false,
+    "depth": 0,
+    "block_path": []
+  },
+  {
+    "layout": "Model",
+    "layer": "BALLOON",
+    "etype": "PROXYTEXT",
+    "text": "H110",
+    "x": 0.0,
+    "y": 0.0,
+    "height": 0.0,
+    "rotation": 0.0,
+    "in_block": false,
+    "depth": 0,
+    "block_path": []
+  },
+  {
+    "layout": "Model",
+    "layer": "BALLOON",
+    "etype": "PROXYTEXT",
+    "text": "H109",
+    "x": 0.0,
+    "y": 0.0,
+    "height": 0.0,
+    "rotation": 0.0,
+    "in_block": false,
+    "depth": 0,
+    "block_path": []
+  },
+  {
+    "layout": "Model",
+    "layer": "BALLOON",
+    "etype": "PROXYTEXT",
+    "text": "K108",
+    "x": 0.0,
+    "y": 0.0,
+    "height": 0.0,
+    "rotation": 0.0,
+    "in_block": false,
+    "depth": 0,
+    "block_path": []
+  },
+  {
+    "layout": "Model",
+    "layer": "BALLOON",
+    "etype": "PROXYTEXT",
+    "text": "K107",
+    "x": 0.0,
+    "y": 0.0,
+    "height": 0.0,
+    "rotation": 0.0,
+    "in_block": false,
+    "depth": 0,
+    "block_path": []
+  },
+  {
+    "layout": "Model",
+    "layer": "BALLOON",
+    "etype": "PROXYTEXT",
+    "text": "L106",
+    "x": 0.0,
+    "y": 0.0,
+    "height": 0.0,
+    "rotation": 0.0,
+    "in_block": false,
+    "depth": 0,
+    "block_path": []
+  },
+  {
+    "layout": "Model",
+    "layer": "BALLOON",
+    "etype": "PROXYTEXT",
+    "text": "M105",
+    "x": 0.0,
+    "y": 0.0,
+    "height": 0.0,
+    "rotation": 0.0,
+    "in_block": false,
+    "depth": 0,
+    "block_path": []
+  },
+  {
+    "layout": "Model",
+    "layer": "BALLOON",
+    "etype": "PROXYTEXT",
+    "text": "K104",
+    "x": 0.0,
+    "y": 0.0,
+    "height": 0.0,
+    "rotation": 0.0,
+    "in_block": false,
+    "depth": 0,
+    "block_path": []
+  },
+  {
+    "layout": "Model",
+    "layer": "BALLOON",
+    "etype": "PROXYTEXT",
+    "text": "K103",
+    "x": 0.0,
+    "y": 0.0,
+    "height": 0.0,
+    "rotation": 0.0,
+    "in_block": false,
+    "depth": 0,
+    "block_path": []
+  },
+  {
+    "layout": "Model",
+    "layer": "BALLOON",
+    "etype": "PROXYTEXT",
+    "text": "H102",
+    "x": 0.0,
+    "y": 0.0,
+    "height": 0.0,
+    "rotation": 0.0,
+    "in_block": false,
+    "depth": 0,
+    "block_path": []
+  },
+  {
+    "layout": "Model",
+    "layer": "BALLOON",
+    "etype": "PROXYTEXT",
+    "text": "D101",
+    "x": 0.0,
+    "y": 0.0,
+    "height": 0.0,
+    "rotation": 0.0,
+    "in_block": false,
+    "depth": 0,
+    "block_path": []
+  },
+  {
+    "layout": "Model",
+    "layer": "BALLOON",
+    "etype": "PROXYTEXT",
+    "text": "D100",
+    "x": 0.0,
+    "y": 0.0,
+    "height": 0.0,
+    "rotation": 0.0,
+    "in_block": false,
+    "depth": 0,
+    "block_path": []
+  },
+  {
+    "layout": "Model",
+    "layer": "BALLOON",
+    "etype": "PROXYTEXT",
+    "text": "D99",
+    "x": 0.0,
+    "y": 0.0,
+    "height": 0.0,
+    "rotation": 0.0,
+    "in_block": false,
+    "depth": 0,
+    "block_path": []
+  },
+  {
+    "layout": "Model",
+    "layer": "BALLOON",
+    "etype": "PROXYTEXT",
+    "text": "A98",
+    "x": 0.0,
+    "y": 0.0,
+    "height": 0.0,
+    "rotation": 0.0,
+    "in_block": false,
+    "depth": 0,
+    "block_path": []
+  },
+  {
+    "layout": "Model",
+    "layer": "BALLOON",
+    "etype": "PROXYTEXT",
+    "text": "D97",
+    "x": 0.0,
+    "y": 0.0,
+    "height": 0.0,
+    "rotation": 0.0,
+    "in_block": false,
+    "depth": 0,
+    "block_path": []
+  },
+  {
+    "layout": "Model",
+    "layer": "BALLOON",
+    "etype": "PROXYTEXT",
+    "text": "D96",
+    "x": 0.0,
+    "y": 0.0,
+    "height": 0.0,
+    "rotation": 0.0,
+    "in_block": false,
+    "depth": 0,
+    "block_path": []
+  },
+  {
+    "layout": "Model",
+    "layer": "BALLOON",
+    "etype": "PROXYTEXT",
+    "text": "D95",
+    "x": 0.0,
+    "y": 0.0,
+    "height": 0.0,
+    "rotation": 0.0,
+    "in_block": false,
+    "depth": 0,
+    "block_path": []
+  },
+  {
+    "layout": "Model",
+    "layer": "BALLOON",
+    "etype": "PROXYTEXT",
+    "text": "A94",
+    "x": 0.0,
+    "y": 0.0,
+    "height": 0.0,
+    "rotation": 0.0,
+    "in_block": false,
+    "depth": 0,
+    "block_path": []
+  },
+  {
+    "layout": "Model",
+    "layer": "BALLOON",
+    "etype": "PROXYTEXT",
+    "text": "B93",
+    "x": 0.0,
+    "y": 0.0,
+    "height": 0.0,
+    "rotation": 0.0,
+    "in_block": false,
+    "depth": 0,
+    "block_path": []
+  },
+  {
+    "layout": "Model",
+    "layer": "BALLOON",
+    "etype": "PROXYTEXT",
+    "text": "D92",
+    "x": 0.0,
+    "y": 0.0,
+    "height": 0.0,
+    "rotation": 0.0,
+    "in_block": false,
+    "depth": 0,
+    "block_path": []
+  },
+  {
+    "layout": "Model",
+    "layer": "BALLOON",
+    "etype": "PROXYTEXT",
+    "text": "D91",
+    "x": 0.0,
+    "y": 0.0,
+    "height": 0.0,
+    "rotation": 0.0,
+    "in_block": false,
+    "depth": 0,
+    "block_path": []
+  },
+  {
+    "layout": "Model",
+    "layer": "BALLOON",
+    "etype": "PROXYTEXT",
+    "text": "D90",
+    "x": 0.0,
+    "y": 0.0,
+    "height": 0.0,
+    "rotation": 0.0,
+    "in_block": false,
+    "depth": 0,
+    "block_path": []
+  },
+  {
+    "layout": "Model",
+    "layer": "BALLOON",
+    "etype": "PROXYTEXT",
+    "text": "A89",
+    "x": 0.0,
+    "y": 0.0,
+    "height": 0.0,
+    "rotation": 0.0,
+    "in_block": false,
+    "depth": 0,
+    "block_path": []
+  },
+  {
+    "layout": "Model",
+    "layer": "BALLOON",
+    "etype": "PROXYTEXT",
+    "text": "D88",
+    "x": 0.0,
+    "y": 0.0,
+    "height": 0.0,
+    "rotation": 0.0,
+    "in_block": false,
+    "depth": 0,
+    "block_path": []
+  },
+  {
+    "layout": "Model",
+    "layer": "BALLOON",
+    "etype": "PROXYTEXT",
+    "text": "D87",
+    "x": 0.0,
+    "y": 0.0,
+    "height": 0.0,
+    "rotation": 0.0,
+    "in_block": false,
+    "depth": 0,
+    "block_path": []
+  },
+  {
+    "layout": "Model",
+    "layer": "BALLOON",
+    "etype": "PROXYTEXT",
+    "text": "D86",
+    "x": 0.0,
+    "y": 0.0,
+    "height": 0.0,
+    "rotation": 0.0,
+    "in_block": false,
+    "depth": 0,
+    "block_path": []
+  },
+  {
+    "layout": "Model",
+    "layer": "BALLOON",
+    "etype": "PROXYTEXT",
+    "text": "A85",
+    "x": 0.0,
+    "y": 0.0,
+    "height": 0.0,
+    "rotation": 0.0,
+    "in_block": false,
+    "depth": 0,
+    "block_path": []
+  },
+  {
+    "layout": "Model",
+    "layer": "BALLOON",
+    "etype": "PROXYTEXT",
+    "text": "B84",
+    "x": 0.0,
+    "y": 0.0,
+    "height": 0.0,
+    "rotation": 0.0,
+    "in_block": false,
+    "depth": 0,
+    "block_path": []
+  },
+  {
+    "layout": "Model",
+    "layer": "BALLOON",
+    "etype": "PROXYTEXT",
+    "text": "C83",
+    "x": 0.0,
+    "y": 0.0,
+    "height": 0.0,
+    "rotation": 0.0,
+    "in_block": false,
+    "depth": 0,
+    "block_path": []
+  },
+  {
+    "layout": "Model",
+    "layer": "BALLOON",
+    "etype": "PROXYTEXT",
+    "text": "C82",
+    "x": 0.0,
+    "y": 0.0,
+    "height": 0.0,
+    "rotation": 0.0,
+    "in_block": false,
+    "depth": 0,
+    "block_path": []
+  },
+  {
+    "layout": "Model",
+    "layer": "BALLOON",
+    "etype": "PROXYTEXT",
+    "text": "C81",
+    "x": 0.0,
+    "y": 0.0,
+    "height": 0.0,
+    "rotation": 0.0,
+    "in_block": false,
+    "depth": 0,
+    "block_path": []
+  },
+  {
+    "layout": "Model",
+    "layer": "BALLOON",
+    "etype": "PROXYTEXT",
+    "text": "C80",
+    "x": 0.0,
+    "y": 0.0,
+    "height": 0.0,
+    "rotation": 0.0,
+    "in_block": false,
+    "depth": 0,
+    "block_path": []
+  },
+  {
+    "layout": "Model",
+    "layer": "BALLOON",
+    "etype": "PROXYTEXT",
+    "text": "C79",
+    "x": 0.0,
+    "y": 0.0,
+    "height": 0.0,
+    "rotation": 0.0,
+    "in_block": false,
+    "depth": 0,
+    "block_path": []
+  },
+  {
+    "layout": "Model",
+    "layer": "BALLOON",
+    "etype": "PROXYTEXT",
+    "text": "C78",
+    "x": 0.0,
+    "y": 0.0,
+    "height": 0.0,
+    "rotation": 0.0,
+    "in_block": false,
+    "depth": 0,
+    "block_path": []
+  },
+  {
+    "layout": "Model",
+    "layer": "BALLOON",
+    "etype": "PROXYTEXT",
+    "text": "C77",
+    "x": 0.0,
+    "y": 0.0,
+    "height": 0.0,
+    "rotation": 0.0,
+    "in_block": false,
+    "depth": 0,
+    "block_path": []
+  },
+  {
+    "layout": "Model",
+    "layer": "BALLOON",
+    "etype": "PROXYTEXT",
+    "text": "C76",
+    "x": 0.0,
+    "y": 0.0,
+    "height": 0.0,
+    "rotation": 0.0,
+    "in_block": false,
+    "depth": 0,
+    "block_path": []
+  },
+  {
+    "layout": "Model",
+    "layer": "BALLOON",
+    "etype": "PROXYTEXT",
+    "text": "C75",
+    "x": 0.0,
+    "y": 0.0,
+    "height": 0.0,
+    "rotation": 0.0,
+    "in_block": false,
+    "depth": 0,
+    "block_path": []
+  },
+  {
+    "layout": "Model",
+    "layer": "BALLOON",
+    "etype": "PROXYTEXT",
+    "text": "C74",
+    "x": 0.0,
+    "y": 0.0,
+    "height": 0.0,
+    "rotation": 0.0,
+    "in_block": false,
+    "depth": 0,
+    "block_path": []
+  },
+  {
+    "layout": "Model",
+    "layer": "BALLOON",
+    "etype": "PROXYTEXT",
+    "text": "C73",
+    "x": 0.0,
+    "y": 0.0,
+    "height": 0.0,
+    "rotation": 0.0,
+    "in_block": false,
+    "depth": 0,
+    "block_path": []
+  },
+  {
+    "layout": "Model",
+    "layer": "BALLOON",
+    "etype": "PROXYTEXT",
+    "text": "C72",
+    "x": 0.0,
+    "y": 0.0,
+    "height": 0.0,
+    "rotation": 0.0,
+    "in_block": false,
+    "depth": 0,
+    "block_path": []
+  },
+  {
+    "layout": "Model",
+    "layer": "BALLOON",
+    "etype": "PROXYTEXT",
+    "text": "C71",
+    "x": 0.0,
+    "y": 0.0,
+    "height": 0.0,
+    "rotation": 0.0,
+    "in_block": false,
+    "depth": 0,
+    "block_path": []
+  },
+  {
+    "layout": "Model",
+    "layer": "BALLOON",
+    "etype": "PROXYTEXT",
+    "text": "C70",
+    "x": 0.0,
+    "y": 0.0,
+    "height": 0.0,
+    "rotation": 0.0,
+    "in_block": false,
+    "depth": 0,
+    "block_path": []
+  },
+  {
+    "layout": "Model",
+    "layer": "BALLOON",
+    "etype": "PROXYTEXT",
+    "text": "L69",
+    "x": 0.0,
+    "y": 0.0,
+    "height": 0.0,
+    "rotation": 0.0,
+    "in_block": false,
+    "depth": 0,
+    "block_path": []
+  },
+  {
+    "layout": "Model",
+    "layer": "BALLOON",
+    "etype": "PROXYTEXT",
+    "text": "M68",
+    "x": 0.0,
+    "y": 0.0,
+    "height": 0.0,
+    "rotation": 0.0,
+    "in_block": false,
+    "depth": 0,
+    "block_path": []
+  },
+  {
+    "layout": "Model",
+    "layer": "BALLOON",
+    "etype": "PROXYTEXT",
+    "text": "J67",
+    "x": 0.0,
+    "y": 0.0,
+    "height": 0.0,
+    "rotation": 0.0,
+    "in_block": false,
+    "depth": 0,
+    "block_path": []
+  },
+  {
+    "layout": "Model",
+    "layer": "BALLOON",
+    "etype": "PROXYTEXT",
+    "text": "G66",
+    "x": 0.0,
+    "y": 0.0,
+    "height": 0.0,
+    "rotation": 0.0,
+    "in_block": false,
+    "depth": 0,
+    "block_path": []
+  },
+  {
+    "layout": "Model",
+    "layer": "BALLOON",
+    "etype": "PROXYTEXT",
+    "text": "J65",
+    "x": 0.0,
+    "y": 0.0,
+    "height": 0.0,
+    "rotation": 0.0,
+    "in_block": false,
+    "depth": 0,
+    "block_path": []
+  },
+  {
+    "layout": "Model",
+    "layer": "BALLOON",
+    "etype": "PROXYTEXT",
+    "text": "G64",
+    "x": 0.0,
+    "y": 0.0,
+    "height": 0.0,
+    "rotation": 0.0,
+    "in_block": false,
+    "depth": 0,
+    "block_path": []
+  },
+  {
+    "layout": "Model",
+    "layer": "BALLOON",
+    "etype": "PROXYTEXT",
+    "text": "J63",
+    "x": 0.0,
+    "y": 0.0,
+    "height": 0.0,
+    "rotation": 0.0,
+    "in_block": false,
+    "depth": 0,
+    "block_path": []
+  },
+  {
+    "layout": "Model",
+    "layer": "BALLOON",
+    "etype": "PROXYTEXT",
+    "text": "J62",
+    "x": 0.0,
+    "y": 0.0,
+    "height": 0.0,
+    "rotation": 0.0,
+    "in_block": false,
+    "depth": 0,
+    "block_path": []
+  },
+  {
+    "layout": "Model",
+    "layer": "BALLOON",
+    "etype": "PROXYTEXT",
+    "text": "L61",
+    "x": 0.0,
+    "y": 0.0,
+    "height": 0.0,
+    "rotation": 0.0,
+    "in_block": false,
+    "depth": 0,
+    "block_path": []
+  },
+  {
+    "layout": "Model",
+    "layer": "BALLOON",
+    "etype": "PROXYTEXT",
+    "text": "L60",
+    "x": 0.0,
+    "y": 0.0,
+    "height": 0.0,
+    "rotation": 0.0,
+    "in_block": false,
+    "depth": 0,
+    "block_path": []
+  },
+  {
+    "layout": "Model",
+    "layer": "BALLOON",
+    "etype": "PROXYTEXT",
+    "text": "N59",
+    "x": 0.0,
+    "y": 0.0,
+    "height": 0.0,
+    "rotation": 0.0,
+    "in_block": false,
+    "depth": 0,
+    "block_path": []
+  },
+  {
+    "layout": "Model",
+    "layer": "BALLOON",
+    "etype": "PROXYTEXT",
+    "text": "N58",
+    "x": 0.0,
+    "y": 0.0,
+    "height": 0.0,
+    "rotation": 0.0,
+    "in_block": false,
+    "depth": 0,
+    "block_path": []
+  },
+  {
+    "layout": "Model",
+    "layer": "BALLOON",
+    "etype": "PROXYTEXT",
+    "text": "L57",
+    "x": 0.0,
+    "y": 0.0,
+    "height": 0.0,
+    "rotation": 0.0,
+    "in_block": false,
+    "depth": 0,
+    "block_path": []
+  },
+  {
+    "layout": "Model",
+    "layer": "BALLOON",
+    "etype": "PROXYTEXT",
+    "text": "M56",
+    "x": 0.0,
+    "y": 0.0,
+    "height": 0.0,
+    "rotation": 0.0,
+    "in_block": false,
+    "depth": 0,
+    "block_path": []
+  },
+  {
+    "layout": "Model",
+    "layer": "BALLOON",
+    "etype": "PROXYTEXT",
+    "text": "L55",
+    "x": 0.0,
+    "y": 0.0,
+    "height": 0.0,
+    "rotation": 0.0,
+    "in_block": false,
+    "depth": 0,
+    "block_path": []
+  },
+  {
+    "layout": "Model",
+    "layer": "BALLOON",
+    "etype": "PROXYTEXT",
+    "text": "M54",
+    "x": 0.0,
+    "y": 0.0,
+    "height": 0.0,
+    "rotation": 0.0,
+    "in_block": false,
+    "depth": 0,
+    "block_path": []
+  },
+  {
+    "layout": "Model",
+    "layer": "BALLOON",
+    "etype": "PROXYTEXT",
+    "text": "L53",
+    "x": 0.0,
+    "y": 0.0,
+    "height": 0.0,
+    "rotation": 0.0,
+    "in_block": false,
+    "depth": 0,
+    "block_path": []
+  },
+  {
+    "layout": "Model",
+    "layer": "BALLOON",
+    "etype": "PROXYTEXT",
+    "text": "M52",
+    "x": 0.0,
+    "y": 0.0,
+    "height": 0.0,
+    "rotation": 0.0,
+    "in_block": false,
+    "depth": 0,
+    "block_path": []
+  },
+  {
+    "layout": "Model",
+    "layer": "BALLOON",
+    "etype": "PROXYTEXT",
+    "text": "L51",
+    "x": 0.0,
+    "y": 0.0,
+    "height": 0.0,
+    "rotation": 0.0,
+    "in_block": false,
+    "depth": 0,
+    "block_path": []
+  },
+  {
+    "layout": "Model",
+    "layer": "BALLOON",
+    "etype": "PROXYTEXT",
+    "text": "M50",
+    "x": 0.0,
+    "y": 0.0,
+    "height": 0.0,
+    "rotation": 0.0,
+    "in_block": false,
+    "depth": 0,
+    "block_path": []
+  },
+  {
+    "layout": "Model",
+    "layer": "BALLOON",
+    "etype": "PROXYTEXT",
+    "text": "L49",
+    "x": 0.0,
+    "y": 0.0,
+    "height": 0.0,
+    "rotation": 0.0,
+    "in_block": false,
+    "depth": 0,
+    "block_path": []
+  },
+  {
+    "layout": "Model",
+    "layer": "BALLOON",
+    "etype": "PROXYTEXT",
+    "text": "M48",
+    "x": 0.0,
+    "y": 0.0,
+    "height": 0.0,
+    "rotation": 0.0,
+    "in_block": false,
+    "depth": 0,
+    "block_path": []
+  },
+  {
+    "layout": "Model",
+    "layer": "BALLOON",
+    "etype": "PROXYTEXT",
+    "text": "L47",
+    "x": 0.0,
+    "y": 0.0,
+    "height": 0.0,
+    "rotation": 0.0,
+    "in_block": false,
+    "depth": 0,
+    "block_path": []
+  },
+  {
+    "layout": "Model",
+    "layer": "BALLOON",
+    "etype": "PROXYTEXT",
+    "text": "M46",
+    "x": 0.0,
+    "y": 0.0,
+    "height": 0.0,
+    "rotation": 0.0,
+    "in_block": false,
+    "depth": 0,
+    "block_path": []
+  },
+  {
+    "layout": "Model",
+    "layer": "BALLOON",
+    "etype": "PROXYTEXT",
+    "text": "L45",
+    "x": 0.0,
+    "y": 0.0,
+    "height": 0.0,
+    "rotation": 0.0,
+    "in_block": false,
+    "depth": 0,
+    "block_path": []
+  },
+  {
+    "layout": "Model",
+    "layer": "BALLOON",
+    "etype": "PROXYTEXT",
+    "text": "M44",
+    "x": 0.0,
+    "y": 0.0,
+    "height": 0.0,
+    "rotation": 0.0,
+    "in_block": false,
+    "depth": 0,
+    "block_path": []
+  },
+  {
+    "layout": "Model",
+    "layer": "BALLOON",
+    "etype": "PROXYTEXT",
+    "text": "F43",
+    "x": 0.0,
+    "y": 0.0,
+    "height": 0.0,
+    "rotation": 0.0,
+    "in_block": false,
+    "depth": 0,
+    "block_path": []
+  },
+  {
+    "layout": "Model",
+    "layer": "BALLOON",
+    "etype": "PROXYTEXT",
+    "text": "E42",
+    "x": 0.0,
+    "y": 0.0,
+    "height": 0.0,
+    "rotation": 0.0,
+    "in_block": false,
+    "depth": 0,
+    "block_path": []
+  },
+  {
+    "layout": "Model",
+    "layer": "BALLOON",
+    "etype": "PROXYTEXT",
+    "text": "H41",
+    "x": 0.0,
+    "y": 0.0,
+    "height": 0.0,
+    "rotation": 0.0,
+    "in_block": false,
+    "depth": 0,
+    "block_path": []
+  },
+  {
+    "layout": "Model",
+    "layer": "BALLOON",
+    "etype": "PROXYTEXT",
+    "text": "H40",
+    "x": 0.0,
+    "y": 0.0,
+    "height": 0.0,
+    "rotation": 0.0,
+    "in_block": false,
+    "depth": 0,
+    "block_path": []
+  },
+  {
+    "layout": "Model",
+    "layer": "BALLOON",
+    "etype": "PROXYTEXT",
+    "text": "E39",
+    "x": 0.0,
+    "y": 0.0,
+    "height": 0.0,
+    "rotation": 0.0,
+    "in_block": false,
+    "depth": 0,
+    "block_path": []
+  },
+  {
+    "layout": "Model",
+    "layer": "BALLOON",
+    "etype": "PROXYTEXT",
+    "text": "H38",
+    "x": 0.0,
+    "y": 0.0,
+    "height": 0.0,
+    "rotation": 0.0,
+    "in_block": false,
+    "depth": 0,
+    "block_path": []
+  },
+  {
+    "layout": "Model",
+    "layer": "BALLOON",
+    "etype": "PROXYTEXT",
+    "text": "H37",
+    "x": 0.0,
+    "y": 0.0,
+    "height": 0.0,
+    "rotation": 0.0,
+    "in_block": false,
+    "depth": 0,
+    "block_path": []
+  },
+  {
+    "layout": "Model",
+    "layer": "BALLOON",
+    "etype": "PROXYTEXT",
+    "text": "E36",
+    "x": 0.0,
+    "y": 0.0,
+    "height": 0.0,
+    "rotation": 0.0,
+    "in_block": false,
+    "depth": 0,
+    "block_path": []
+  },
+  {
+    "layout": "Model",
+    "layer": "BALLOON",
+    "etype": "PROXYTEXT",
+    "text": "E35",
+    "x": 0.0,
+    "y": 0.0,
+    "height": 0.0,
+    "rotation": 0.0,
+    "in_block": false,
+    "depth": 0,
+    "block_path": []
+  },
+  {
+    "layout": "Model",
+    "layer": "BALLOON",
+    "etype": "PROXYTEXT",
+    "text": "E34",
+    "x": 0.0,
+    "y": 0.0,
+    "height": 0.0,
+    "rotation": 0.0,
+    "in_block": false,
+    "depth": 0,
+    "block_path": []
+  },
+  {
+    "layout": "Model",
+    "layer": "BALLOON",
+    "etype": "PROXYTEXT",
+    "text": "E33",
+    "x": 0.0,
+    "y": 0.0,
+    "height": 0.0,
+    "rotation": 0.0,
+    "in_block": false,
+    "depth": 0,
+    "block_path": []
+  },
+  {
+    "layout": "Model",
+    "layer": "BALLOON",
+    "etype": "PROXYTEXT",
+    "text": "E32",
+    "x": 0.0,
+    "y": 0.0,
+    "height": 0.0,
+    "rotation": 0.0,
+    "in_block": false,
+    "depth": 0,
+    "block_path": []
+  },
+  {
+    "layout": "Model",
+    "layer": "BALLOON",
+    "etype": "PROXYTEXT",
+    "text": "E31",
+    "x": 0.0,
+    "y": 0.0,
+    "height": 0.0,
+    "rotation": 0.0,
+    "in_block": false,
+    "depth": 0,
+    "block_path": []
+  },
+  {
+    "layout": "Model",
+    "layer": "BALLOON",
+    "etype": "PROXYTEXT",
+    "text": "E30",
+    "x": 0.0,
+    "y": 0.0,
+    "height": 0.0,
+    "rotation": 0.0,
+    "in_block": false,
+    "depth": 0,
+    "block_path": []
+  },
+  {
+    "layout": "Model",
+    "layer": "BALLOON",
+    "etype": "PROXYTEXT",
+    "text": "E29",
+    "x": 0.0,
+    "y": 0.0,
+    "height": 0.0,
+    "rotation": 0.0,
+    "in_block": false,
+    "depth": 0,
+    "block_path": []
+  },
+  {
+    "layout": "Model",
+    "layer": "BALLOON",
+    "etype": "PROXYTEXT",
+    "text": "E28",
+    "x": 0.0,
+    "y": 0.0,
+    "height": 0.0,
+    "rotation": 0.0,
+    "in_block": false,
+    "depth": 0,
+    "block_path": []
+  },
+  {
+    "layout": "Model",
+    "layer": "BALLOON",
+    "etype": "PROXYTEXT",
+    "text": "E27",
+    "x": 0.0,
+    "y": 0.0,
+    "height": 0.0,
+    "rotation": 0.0,
+    "in_block": false,
+    "depth": 0,
+    "block_path": []
+  },
+  {
+    "layout": "Model",
+    "layer": "BALLOON",
+    "etype": "PROXYTEXT",
+    "text": "H26",
+    "x": 0.0,
+    "y": 0.0,
+    "height": 0.0,
+    "rotation": 0.0,
+    "in_block": false,
+    "depth": 0,
+    "block_path": []
+  },
+  {
+    "layout": "Model",
+    "layer": "BALLOON",
+    "etype": "PROXYTEXT",
+    "text": "H25",
+    "x": 0.0,
+    "y": 0.0,
+    "height": 0.0,
+    "rotation": 0.0,
+    "in_block": false,
+    "depth": 0,
+    "block_path": []
+  },
+  {
+    "layout": "Model",
+    "layer": "BALLOON",
+    "etype": "PROXYTEXT",
+    "text": "H24",
+    "x": 0.0,
+    "y": 0.0,
+    "height": 0.0,
+    "rotation": 0.0,
+    "in_block": false,
+    "depth": 0,
+    "block_path": []
+  },
+  {
+    "layout": "Model",
+    "layer": "BALLOON",
+    "etype": "PROXYTEXT",
+    "text": "H23",
+    "x": 0.0,
+    "y": 0.0,
+    "height": 0.0,
+    "rotation": 0.0,
+    "in_block": false,
+    "depth": 0,
+    "block_path": []
+  },
+  {
+    "layout": "Model",
+    "layer": "BALLOON",
+    "etype": "PROXYTEXT",
+    "text": "H22",
+    "x": 0.0,
+    "y": 0.0,
+    "height": 0.0,
+    "rotation": 0.0,
+    "in_block": false,
+    "depth": 0,
+    "block_path": []
+  },
+  {
+    "layout": "Model",
+    "layer": "BALLOON",
+    "etype": "PROXYTEXT",
+    "text": "H21",
+    "x": 0.0,
+    "y": 0.0,
+    "height": 0.0,
+    "rotation": 0.0,
+    "in_block": false,
+    "depth": 0,
+    "block_path": []
+  },
+  {
+    "layout": "Model",
+    "layer": "BALLOON",
+    "etype": "PROXYTEXT",
+    "text": "H20",
+    "x": 0.0,
+    "y": 0.0,
+    "height": 0.0,
+    "rotation": 0.0,
+    "in_block": false,
+    "depth": 0,
+    "block_path": []
+  },
+  {
+    "layout": "Model",
+    "layer": "BALLOON",
+    "etype": "PROXYTEXT",
+    "text": "H19",
+    "x": 0.0,
+    "y": 0.0,
+    "height": 0.0,
+    "rotation": 0.0,
+    "in_block": false,
+    "depth": 0,
+    "block_path": []
+  },
+  {
+    "layout": "Model",
+    "layer": "BALLOON",
+    "etype": "PROXYTEXT",
+    "text": "H18",
+    "x": 0.0,
+    "y": 0.0,
+    "height": 0.0,
+    "rotation": 0.0,
+    "in_block": false,
+    "depth": 0,
+    "block_path": []
+  },
+  {
+    "layout": "Model",
+    "layer": "BALLOON",
+    "etype": "PROXYTEXT",
+    "text": "H17",
+    "x": 0.0,
+    "y": 0.0,
+    "height": 0.0,
+    "rotation": 0.0,
+    "in_block": false,
+    "depth": 0,
+    "block_path": []
+  },
+  {
+    "layout": "Model",
+    "layer": "BALLOON",
+    "etype": "PROXYTEXT",
+    "text": "H16",
+    "x": 0.0,
+    "y": 0.0,
+    "height": 0.0,
+    "rotation": 0.0,
+    "in_block": false,
+    "depth": 0,
+    "block_path": []
+  },
+  {
+    "layout": "Model",
+    "layer": "BALLOON",
+    "etype": "PROXYTEXT",
+    "text": "H15",
+    "x": 0.0,
+    "y": 0.0,
+    "height": 0.0,
+    "rotation": 0.0,
+    "in_block": false,
+    "depth": 0,
+    "block_path": []
+  },
+  {
+    "layout": "Model",
+    "layer": "BALLOON",
+    "etype": "PROXYTEXT",
+    "text": "H14",
+    "x": 0.0,
+    "y": 0.0,
+    "height": 0.0,
+    "rotation": 0.0,
+    "in_block": false,
+    "depth": 0,
+    "block_path": []
+  },
+  {
+    "layout": "Model",
+    "layer": "BALLOON",
+    "etype": "PROXYTEXT",
+    "text": "H13",
+    "x": 0.0,
+    "y": 0.0,
+    "height": 0.0,
+    "rotation": 0.0,
+    "in_block": false,
+    "depth": 0,
+    "block_path": []
+  },
+  {
+    "layout": "Model",
+    "layer": "BALLOON",
+    "etype": "PROXYTEXT",
+    "text": "H12",
+    "x": 0.0,
+    "y": 0.0,
+    "height": 0.0,
+    "rotation": 0.0,
+    "in_block": false,
+    "depth": 0,
+    "block_path": []
+  },
+  {
+    "layout": "Model",
+    "layer": "BALLOON",
+    "etype": "PROXYTEXT",
+    "text": "H11",
+    "x": 0.0,
+    "y": 0.0,
+    "height": 0.0,
+    "rotation": 0.0,
+    "in_block": false,
+    "depth": 0,
+    "block_path": []
+  },
+  {
+    "layout": "Model",
+    "layer": "BALLOON",
+    "etype": "PROXYTEXT",
+    "text": "H10",
+    "x": 0.0,
+    "y": 0.0,
+    "height": 0.0,
+    "rotation": 0.0,
+    "in_block": false,
+    "depth": 0,
+    "block_path": []
+  },
+  {
+    "layout": "Model",
+    "layer": "BALLOON",
+    "etype": "PROXYTEXT",
+    "text": "H9",
+    "x": 0.0,
+    "y": 0.0,
+    "height": 0.0,
+    "rotation": 0.0,
+    "in_block": false,
+    "depth": 0,
+    "block_path": []
+  },
+  {
+    "layout": "Model",
+    "layer": "BALLOON",
+    "etype": "PROXYTEXT",
+    "text": "H8",
+    "x": 0.0,
+    "y": 0.0,
+    "height": 0.0,
+    "rotation": 0.0,
+    "in_block": false,
+    "depth": 0,
+    "block_path": []
+  },
+  {
+    "layout": "Model",
+    "layer": "BALLOON",
+    "etype": "PROXYTEXT",
+    "text": "H7",
+    "x": 0.0,
+    "y": 0.0,
+    "height": 0.0,
+    "rotation": 0.0,
+    "in_block": false,
+    "depth": 0,
+    "block_path": []
+  },
+  {
+    "layout": "Model",
+    "layer": "BALLOON",
+    "etype": "PROXYTEXT",
+    "text": "H6",
+    "x": 0.0,
+    "y": 0.0,
+    "height": 0.0,
+    "rotation": 0.0,
+    "in_block": false,
+    "depth": 0,
+    "block_path": []
+  },
+  {
+    "layout": "Model",
+    "layer": "BALLOON",
+    "etype": "PROXYTEXT",
+    "text": "H5",
+    "x": 0.0,
+    "y": 0.0,
+    "height": 0.0,
+    "rotation": 0.0,
+    "in_block": false,
+    "depth": 0,
+    "block_path": []
+  },
+  {
+    "layout": "Model",
+    "layer": "BALLOON",
+    "etype": "PROXYTEXT",
+    "text": "H4",
+    "x": 0.0,
+    "y": 0.0,
+    "height": 0.0,
+    "rotation": 0.0,
+    "in_block": false,
+    "depth": 0,
+    "block_path": []
+  },
+  {
+    "layout": "Model",
+    "layer": "BALLOON",
+    "etype": "PROXYTEXT",
+    "text": "H3",
+    "x": 0.0,
+    "y": 0.0,
+    "height": 0.0,
+    "rotation": 0.0,
+    "in_block": false,
+    "depth": 0,
+    "block_path": []
+  },
+  {
+    "layout": "Model",
+    "layer": "BALLOON",
+    "etype": "PROXYTEXT",
+    "text": "H2",
+    "x": 0.0,
+    "y": 0.0,
+    "height": 0.0,
+    "rotation": 0.0,
+    "in_block": false,
+    "depth": 0,
+    "block_path": []
+  },
+  {
+    "layout": "Model",
+    "layer": "BALLOON",
+    "etype": "PROXYTEXT",
+    "text": "H1",
+    "x": 0.0,
+    "y": 0.0,
+    "height": 0.0,
+    "rotation": 0.0,
+    "in_block": false,
+    "depth": 0,
+    "block_path": []
+  },
+  {
+    "layout": "Model",
+    "layer": "AM_0",
+    "etype": "DIMENSION",
+    "text": "(2) 14.6994",
+    "x": 0.0,
+    "y": 0.0,
+    "height": 0.0,
+    "rotation": 0.0,
+    "in_block": false,
+    "depth": 0,
+    "block_path": []
+  },
+  {
+    "layout": "Model",
+    "layer": "STRIPPER-AM_5",
+    "etype": "DIMENSION",
+    "text": "(4) .03\\XX 45%%D",
+    "x": 0.0,
+    "y": 0.0,
+    "height": 0.0,
+    "rotation": 0.0,
+    "in_block": false,
+    "depth": 0,
+    "block_path": []
+  },
+  {
+    "layout": "Model",
+    "layer": "STRIPPER-AM_5",
+    "etype": "DIMENSION",
+    "text": "(4) .03",
+    "x": 0.0,
+    "y": 0.0,
+    "height": 0.0,
+    "rotation": 0.0,
+    "in_block": false,
+    "depth": 0,
+    "block_path": []
+  },
+  {
+    "layout": "Model",
+    "layer": "STRIPPER-AM_5",
+    "etype": "DIMENSION",
+    "text": ".12 HOLES",
+    "x": 0.0,
+    "y": 0.0,
+    "height": 0.0,
+    "rotation": 0.0,
+    "in_block": false,
+    "depth": 0,
+    "block_path": []
+  },
+  {
+    "layout": "Model",
+    "layer": "AM_0",
+    "etype": "MTEXT",
+    "text": "44,46,48,50,52,54,56, 68,105,111,113 & 115",
+    "x": 21.89939583852512,
+    "y": -6.164362178542067,
+    "height": 0.15,
+    "rotation": 0.0,
+    "in_block": false,
+    "depth": 0,
+    "block_path": []
+  },
+  {
+    "layout": "Model",
+    "layer": "AM_0",
+    "etype": "MTEXT",
+    "text": "BREAK ALL OUTSIDE SHARP CORNERS WITH A R.13",
+    "x": 20.80905703491251,
+    "y": -12.4729161824832,
+    "height": 0.2,
+    "rotation": 0.0,
+    "in_block": false,
+    "depth": 0,
+    "block_path": []
+  },
+  {
+    "layout": "Model",
+    "layer": "AM_0",
+    "etype": "DIMENSION",
+    "text": "(2) .308",
+    "x": 0.0,
+    "y": 0.0,
+    "height": 0.0,
+    "rotation": 0.0,
+    "in_block": false,
+    "depth": 0,
+    "block_path": []
+  },
+  {
+    "layout": "SHEET 1 of 2",
+    "layer": "AM_0",
+    "etype": "MTEXT",
+    "text": "WATERJET ALL OPENINGS ±.005 (EXCEPT AS NOTED) SEE SHEET 2 OF 2 FOR HOLE CHART",
+    "x": 1.076668875763755,
+    "y": 1.194597223264152,
+    "height": 0.1471212475425938,
+    "rotation": 0.0,
+    "in_block": false,
+    "depth": 0,
+    "block_path": []
+  },
+  {
+    "layout": "SHEET 1 of 2",
+    "layer": "0",
+    "etype": "TEXT",
+    "text": "X",
+    "x": 1.014098070847033,
+    "y": 9.73228492422437,
+    "height": 0.095,
+    "rotation": 0.0,
+    "in_block": false,
+    "depth": 0,
+    "block_path": []
+  },
+  {
+    "layout": "SHEET 1 of 2",
+    "layer": "0",
+    "etype": "TEXT",
+    "text": ".7500",
+    "x": 0.5418032947265332,
+    "y": 9.91378492422437,
+    "height": 0.095,
+    "rotation": 0.0,
+    "in_block": false,
+    "depth": 0,
+    "block_path": []
+  },
+  {
+    "layout": "SHEET 1 of 2",
+    "layer": "0",
+    "etype": "TEXT",
+    "text": "Y",
+    "x": 0.526598070847033,
+    "y": 9.24478492422437,
+    "height": 0.095,
+    "rotation": 0.0,
+    "in_block": false,
+    "depth": 0,
+    "block_path": []
+  },
+  {
+    "layout": "SHEET 1 of 2",
+    "layer": "0",
+    "etype": "TEXT",
+    "text": ".0000",
+    "x": 0.419303294726533,
+    "y": 9.39771349565294,
+    "height": 0.095,
+    "rotation": 90.0,
+    "in_block": false,
+    "depth": 0,
+    "block_path": []
+  },
+  {
+    "layout": "SHEET 1 of 2",
+    "layer": "AM_BOR",
+    "etype": "TEXT",
+    "text": "JOB NUMBER",
+    "x": 9.684380972948317,
+    "y": 0.2602349399061774,
+    "height": 0.05905511811024,
+    "rotation": 0.0,
+    "in_block": true,
+    "depth": 1,
+    "block_path": [
+      "ansi_br_revisionlista0"
+    ]
+  },
+  {
+    "layout": "SHEET 1 of 2",
+    "layer": "AM_BOR",
+    "etype": "TEXT",
+    "text": "#",
+    "x": 9.494380972205473,
+    "y": 0.2602349399061774,
+    "height": 0.05905511811024,
+    "rotation": 0.0,
+    "in_block": true,
+    "depth": 1,
+    "block_path": [
+      "ansi_br_revisionlista0"
+    ]
+  },
+  {
+    "layout": "SHEET 1 of 2",
+    "layer": "AM_BOR",
+    "etype": "TEXT",
+    "text": "DESCRIPTION",
+    "x": 10.562013181811416,
+    "y": 0.25070737874398696,
+    "height": 0.05905511811024,
+    "rotation": 0.0,
+    "in_block": true,
+    "depth": 1,
+    "block_path": [
+      "ansi_br_revisionlista0"
+    ]
+  },
+  {
+    "layout": "SHEET 1 of 2",
+    "layer": "AM_BOR",
+    "etype": "TEXT",
+    "text": "DATE",
+    "x": 11.553177563732097,
+    "y": 0.26023493779910534,
+    "height": 0.05905511811024,
+    "rotation": 0.0,
+    "in_block": true,
+    "depth": 1,
+    "block_path": [
+      "ansi_br_revisionlista0"
+    ]
+  },
+  {
+    "layout": "SHEET 1 of 2",
+    "layer": "AM_BOR",
+    "etype": "TEXT",
+    "text": "APPROVED",
+    "x": 11.993177563732125,
+    "y": 0.26023493779910534,
+    "height": 0.05905511811024,
+    "rotation": 0.0,
+    "in_block": true,
+    "depth": 1,
+    "block_path": [
+      "ansi_br_revisionlista0"
+    ]
+  },
+  {
+    "layout": "SHEET 1 of 2",
+    "layer": "AM_0",
+    "etype": "PROXYTEXT",
+    "text": "A 201 1 A2 STRIPPER 46-48 ROCK \"C\" REV DETAIL QTY MATERIAL NAME MAT-CODE MATERIAL HARDNESS STANDARD # COMMENTS",
+    "x": 0.0,
+    "y": 0.0,
+    "height": 0.0,
+    "rotation": 0.0,
+    "in_block": false,
+    "depth": 0,
+    "block_path": []
+  },
+  {
+    "layout": "SHEET 1 of 2",
+    "layer": "0",
+    "etype": "TEXT",
+    "text": "Nov 21, 2025 - 10:43am",
+    "x": 14.774776587705578,
+    "y": 0.15024750900408285,
+    "height": 0.05905511811024,
+    "rotation": 0.0,
+    "in_block": true,
+    "depth": 1,
+    "block_path": [
+      "B_BORDER"
+    ]
+  },
+  {
+    "layout": "SHEET 1 of 2",
+    "layer": "0",
+    "etype": "TEXT",
+    "text": "D:/CAD_Quoting_Tool/Cad Files/T1769-201_redacted.dwg",
+    "x": 10.535316046048946,
+    "y": 0.04132561203740239,
+    "height": 0.05905511811024,
+    "rotation": 0.0,
+    "in_block": true,
+    "depth": 1,
+    "block_path": [
+      "B_BORDER"
+    ]
+  },
+  {
+    "layout": "SHEET 1 of 2",
+    "layer": "AM_BOR",
+    "etype": "TEXT",
+    "text": "!GENTITLE-LL",
+    "x": 0.0,
+    "y": 1.055118110236288e-15,
+    "height": 0.058948863636367387,
+    "rotation": 0.0,
+    "in_block": true,
+    "depth": 1,
+    "block_path": [
+      "B_BORDER"
+    ]
+  },
+  {
+    "layout": "SHEET 1 of 2",
+    "layer": "AM_BOR",
+    "etype": "TEXT",
+    "text": "1",
+    "x": 0.6700079097441834,
+    "y": 0.12526633522728053,
+    "height": 0.058948863636367435,
+    "rotation": 0.0,
+    "in_block": true,
+    "depth": 1,
+    "block_path": [
+      "B_BORDER"
+    ]
+  },
+  {
+    "layout": "SHEET 1 of 2",
+    "layer": "AM_BOR",
+    "etype": "TEXT",
+    "text": "J",
+    "x": 0.0981675038381949,
+    "y": 1.1568714488637102,
+    "height": 0.05894886363636751,
+    "rotation": 0.0,
+    "in_block": true,
+    "depth": 1,
+    "block_path": [
+      "B_BORDER"
+    ]
+  },
+  {
+    "layout": "SHEET 1 of 2",
+    "layer": "AM_BOR",
+    "etype": "TEXT",
+    "text": "I",
+    "x": 0.0981675038381949,
+    "y": 2.100053267045589,
+    "height": 0.05894886363636751,
+    "rotation": 0.0,
+    "in_block": true,
+    "depth": 1,
+    "block_path": [
+      "B_BORDER"
+    ]
+  },
+  {
+    "layout": "SHEET 1 of 2",
+    "layer": "AM_BOR",
+    "etype": "TEXT",
+    "text": "H",
+    "x": 0.0981675038381949,
+    "y": 3.043235085227468,
+    "height": 0.058948863636367234,
+    "rotation": 0.0,
+    "in_block": true,
+    "depth": 1,
+    "block_path": [
+      "B_BORDER"
+    ]
+  },
+  {
+    "layout": "SHEET 1 of 2",
+    "layer": "AM_BOR",
+    "etype": "TEXT",
+    "text": "G",
+    "x": 0.0981675038381949,
+    "y": 3.9864169034093457,
+    "height": 0.05894886363636668,
+    "rotation": 0.0,
+    "in_block": true,
+    "depth": 1,
+    "block_path": [
+      "B_BORDER"
+    ]
+  },
+  {
+    "layout": "SHEET 1 of 2",
+    "layer": "AM_BOR",
+    "etype": "TEXT",
+    "text": "2",
+    "x": 1.633107540743742,
+    "y": 0.12526633522728053,
+    "height": 0.058948863636367435,
+    "rotation": 0.0,
+    "in_block": true,
+    "depth": 1,
+    "block_path": [
+      "B_BORDER"
+    ]
+  },
+  {
+    "layout": "SHEET 1 of 2",
+    "layer": "AM_BOR",
+    "etype": "TEXT",
+    "text": "3",
+    "x": 2.5962071717433015,
+    "y": 0.12526633522728053,
+    "height": 0.058948863636367435,
+    "rotation": 0.0,
+    "in_block": true,
+    "depth": 1,
+    "block_path": [
+      "B_BORDER"
+    ]
+  },
+  {
+    "layout": "SHEET 1 of 2",
+    "layer": "AM_BOR",
+    "etype": "TEXT",
+    "text": "4",
+    "x": 3.559306802742861,
+    "y": 0.12526633522728053,
+    "height": 0.058948863636367435,
+    "rotation": 0.0,
+    "in_block": true,
+    "depth": 1,
+    "block_path": [
+      "B_BORDER"
+    ]
+  },
+  {
+    "layout": "SHEET 1 of 2",
+    "layer": "AM_BOR",
+    "etype": "TEXT",
+    "text": "5",
+    "x": 4.522406433742419,
+    "y": 0.12526633522728053,
+    "height": 0.058948863636367435,
+    "rotation": 0.0,
+    "in_block": true,
+    "depth": 1,
+    "block_path": [
+      "B_BORDER"
+    ]
+  },
+  {
+    "layout": "SHEET 1 of 2",
+    "layer": "AM_BOR",
+    "etype": "TEXT",
+    "text": "6",
+    "x": 5.485506064741981,
+    "y": 0.12526633522728053,
+    "height": 0.058948863636367435,
+    "rotation": 0.0,
+    "in_block": true,
+    "depth": 1,
+    "block_path": [
+      "B_BORDER"
+    ]
+  },
+  {
+    "layout": "SHEET 1 of 2",
+    "layer": "AM_BOR",
+    "etype": "TEXT",
+    "text": "7",
+    "x": 6.448605695741538,
+    "y": 0.12526633522728053,
+    "height": 0.058948863636367435,
+    "rotation": 0.0,
+    "in_block": true,
+    "depth": 1,
+    "block_path": [
+      "B_BORDER"
+    ]
+  },
+  {
+    "layout": "SHEET 1 of 2",
+    "layer": "AM_BOR",
+    "etype": "TEXT",
+    "text": "F",
+    "x": 0.0981675038381949,
+    "y": 4.9295987215912245,
+    "height": 0.05894886363636778,
+    "rotation": 0.0,
+    "in_block": true,
+    "depth": 1,
+    "block_path": [
+      "B_BORDER"
+    ]
+  },
+  {
+    "layout": "SHEET 1 of 2",
+    "layer": "AM_BOR",
+    "etype": "TEXT",
+    "text": "E",
+    "x": 0.0981675038381949,
+    "y": 5.872780539773104,
+    "height": 0.05894886363636834,
+    "rotation": 0.0,
+    "in_block": true,
+    "depth": 1,
+    "block_path": [
+      "B_BORDER"
+    ]
+  },
+  {
+    "layout": "SHEET 1 of 2",
+    "layer": "AM_BOR",
+    "etype": "TEXT",
+    "text": "D",
+    "x": 0.0981675038381949,
+    "y": 6.815962357954983,
+    "height": 0.058948863636367234,
+    "rotation": 0.0,
+    "in_block": true,
+    "depth": 1,
+    "block_path": [
+      "B_BORDER"
+    ]
+  },
+  {
+    "layout": "SHEET 1 of 2",
+    "layer": "AM_BOR",
+    "etype": "TEXT",
+    "text": "C",
+    "x": 0.0981675038381949,
+    "y": 7.759144176136862,
+    "height": 0.058948863636367234,
+    "rotation": 0.0,
+    "in_block": true,
+    "depth": 1,
+    "block_path": [
+      "B_BORDER"
+    ]
+  },
+  {
+    "layout": "SHEET 1 of 2",
+    "layer": "AM_BOR",
+    "etype": "TEXT",
+    "text": "B",
+    "x": 0.0981675038381949,
+    "y": 8.702325994318738,
+    "height": 0.05894886363636834,
+    "rotation": 0.0,
+    "in_block": true,
+    "depth": 1,
+    "block_path": [
+      "B_BORDER"
+    ]
+  },
+  {
+    "layout": "SHEET 1 of 2",
+    "layer": "AM_BOR",
+    "etype": "TEXT",
+    "text": "A",
+    "x": 0.0981675038381949,
+    "y": 9.645507812500616,
+    "height": 0.05894886363636834,
+    "rotation": 0.0,
+    "in_block": true,
+    "depth": 1,
+    "block_path": [
+      "B_BORDER"
+    ]
+  },
+  {
+    "layout": "SHEET 1 of 2",
+    "layer": "AM_BOR",
+    "etype": "TEXT",
+    "text": "1",
+    "x": 0.6700079097441834,
+    "y": 10.20552201704611,
+    "height": 0.058948863636366096,
+    "rotation": 0.0,
+    "in_block": true,
+    "depth": 1,
+    "block_path": [
+      "B_BORDER"
+    ]
+  },
+  {
+    "layout": "SHEET 1 of 2",
+    "layer": "AM_BOR",
+    "etype": "TEXT",
+    "text": "2",
+    "x": 1.633107540743742,
+    "y": 10.20552201704611,
+    "height": 0.058948863636366096,
+    "rotation": 0.0,
+    "in_block": true,
+    "depth": 1,
+    "block_path": [
+      "B_BORDER"
+    ]
+  },
+  {
+    "layout": "SHEET 1 of 2",
+    "layer": "AM_BOR",
+    "etype": "TEXT",
+    "text": "3",
+    "x": 2.5962071717433015,
+    "y": 10.20552201704611,
+    "height": 0.058948863636366096,
+    "rotation": 0.0,
+    "in_block": true,
+    "depth": 1,
+    "block_path": [
+      "B_BORDER"
+    ]
+  },
+  {
+    "layout": "SHEET 1 of 2",
+    "layer": "AM_BOR",
+    "etype": "TEXT",
+    "text": "4",
+    "x": 3.559306802742861,
+    "y": 10.20552201704611,
+    "height": 0.058948863636366096,
+    "rotation": 0.0,
+    "in_block": true,
+    "depth": 1,
+    "block_path": [
+      "B_BORDER"
+    ]
+  },
+  {
+    "layout": "SHEET 1 of 2",
+    "layer": "AM_BOR",
+    "etype": "TEXT",
+    "text": "5",
+    "x": 4.522406433742419,
+    "y": 10.20552201704611,
+    "height": 0.058948863636366096,
+    "rotation": 0.0,
+    "in_block": true,
+    "depth": 1,
+    "block_path": [
+      "B_BORDER"
+    ]
+  },
+  {
+    "layout": "SHEET 1 of 2",
+    "layer": "AM_BOR",
+    "etype": "TEXT",
+    "text": "6",
+    "x": 5.485506064741981,
+    "y": 10.20552201704611,
+    "height": 0.058948863636366096,
+    "rotation": 0.0,
+    "in_block": true,
+    "depth": 1,
+    "block_path": [
+      "B_BORDER"
+    ]
+  },
+  {
+    "layout": "SHEET 1 of 2",
+    "layer": "AM_BOR",
+    "etype": "TEXT",
+    "text": "7",
+    "x": 6.448605695741538,
+    "y": 10.20552201704611,
+    "height": 0.058948863636366096,
+    "rotation": 0.0,
+    "in_block": true,
+    "depth": 1,
+    "block_path": [
+      "B_BORDER"
+    ]
+  },
+  {
+    "layout": "SHEET 1 of 2",
+    "layer": "AM_BOR",
+    "etype": "TEXT",
+    "text": "10",
+    "x": 9.315684638757437,
+    "y": 0.12526633522728053,
+    "height": 0.058948863636367435,
+    "rotation": 0.0,
+    "in_block": true,
+    "depth": 1,
+    "block_path": [
+      "B_BORDER"
+    ]
+  },
+  {
+    "layout": "SHEET 1 of 2",
+    "layer": "AM_BOR",
+    "etype": "TEXT",
+    "text": "8",
+    "x": 7.411705326741096,
+    "y": 0.12526633522728053,
+    "height": 0.058948863636367435,
+    "rotation": 0.0,
+    "in_block": true,
+    "depth": 1,
+    "block_path": [
+      "B_BORDER"
+    ]
+  },
+  {
+    "layout": "SHEET 1 of 2",
+    "layer": "AM_BOR",
+    "etype": "TEXT",
+    "text": "9",
+    "x": 8.374804957740658,
+    "y": 0.12526633522728053,
+    "height": 0.058948863636367435,
+    "rotation": 0.0,
+    "in_block": true,
+    "depth": 1,
+    "block_path": [
+      "B_BORDER"
+    ]
+  },
+  {
+    "layout": "SHEET 1 of 2",
+    "layer": "AM_BOR",
+    "etype": "TEXT",
+    "text": "11",
+    "x": 10.278784269756995,
+    "y": 0.12526633522728053,
+    "height": 0.058948863636367435,
+    "rotation": 0.0,
+    "in_block": true,
+    "depth": 1,
+    "block_path": [
+      "B_BORDER"
+    ]
+  },
+  {
+    "layout": "SHEET 1 of 2",
+    "layer": "AM_BOR",
+    "etype": "TEXT",
+    "text": "12",
+    "x": 11.239062319806362,
+    "y": 0.12526633522728053,
+    "height": 0.058948863636367435,
+    "rotation": 0.0,
+    "in_block": true,
+    "depth": 1,
+    "block_path": [
+      "B_BORDER"
+    ]
+  },
+  {
+    "layout": "SHEET 1 of 2",
+    "layer": "AM_BOR",
+    "etype": "TEXT",
+    "text": "13",
+    "x": 12.202161950805921,
+    "y": 0.12526633522728053,
+    "height": 0.058948863636367435,
+    "rotation": 0.0,
+    "in_block": true,
+    "depth": 1,
+    "block_path": [
+      "B_BORDER"
+    ]
+  },
+  {
+    "layout": "SHEET 1 of 2",
+    "layer": "AM_BOR",
+    "etype": "TEXT",
+    "text": "14",
+    "x": 13.16526158180548,
+    "y": 0.12526633522728053,
+    "height": 0.058948863636367435,
+    "rotation": 0.0,
+    "in_block": true,
+    "depth": 1,
+    "block_path": [
+      "B_BORDER"
+    ]
+  },
+  {
+    "layout": "SHEET 1 of 2",
+    "layer": "AM_BOR",
+    "etype": "TEXT",
+    "text": "15",
+    "x": 14.128361212805041,
+    "y": 0.13388371618637887,
+    "height": 0.058948863636367435,
+    "rotation": 0.0,
+    "in_block": true,
+    "depth": 1,
+    "block_path": [
+      "B_BORDER"
+    ]
+  },
+  {
+    "layout": "SHEET 1 of 2",
+    "layer": "AM_BOR",
+    "etype": "TEXT",
+    "text": "!GENTITLE-INSERT",
+    "x": 16.101821955719906,
+    "y": 0.2357954545454694,
+    "height": 0.058948863636367435,
+    "rotation": 0.0,
+    "in_block": true,
+    "depth": 1,
+    "block_path": [
+      "B_BORDER"
+    ]
+  },
+  {
+    "layout": "SHEET 1 of 2",
+    "layer": "AM_BOR",
+    "etype": "TEXT",
+    "text": "I",
+    "x": 16.16989259614334,
+    "y": 2.100053267045589,
+    "height": 0.05894886363636751,
+    "rotation": 0.0,
+    "in_block": true,
+    "depth": 1,
+    "block_path": [
+      "B_BORDER"
+    ]
+  },
+  {
+    "layout": "SHEET 1 of 2",
+    "layer": "AM_BOR",
+    "etype": "TEXT",
+    "text": "H",
+    "x": 16.16989259614334,
+    "y": 3.043235085227468,
+    "height": 0.058948863636367234,
+    "rotation": 0.0,
+    "in_block": true,
+    "depth": 1,
+    "block_path": [
+      "B_BORDER"
+    ]
+  },
+  {
+    "layout": "SHEET 1 of 2",
+    "layer": "AM_BOR",
+    "etype": "TEXT",
+    "text": "G",
+    "x": 16.16989259614334,
+    "y": 3.9864169034093457,
+    "height": 0.05894886363636668,
+    "rotation": 0.0,
+    "in_block": true,
+    "depth": 1,
+    "block_path": [
+      "B_BORDER"
+    ]
+  },
+  {
+    "layout": "SHEET 1 of 2",
+    "layer": "AM_BOR",
+    "etype": "TEXT",
+    "text": "10",
+    "x": 9.315684638757437,
+    "y": 10.20552201704611,
+    "height": 0.058948863636366096,
+    "rotation": 0.0,
+    "in_block": true,
+    "depth": 1,
+    "block_path": [
+      "B_BORDER"
+    ]
+  },
+  {
+    "layout": "SHEET 1 of 2",
+    "layer": "AM_BOR",
+    "etype": "TEXT",
+    "text": "8",
+    "x": 7.411705326741096,
+    "y": 10.20552201704611,
+    "height": 0.058948863636366096,
+    "rotation": 0.0,
+    "in_block": true,
+    "depth": 1,
+    "block_path": [
+      "B_BORDER"
+    ]
+  },
+  {
+    "layout": "SHEET 1 of 2",
+    "layer": "AM_BOR",
+    "etype": "TEXT",
+    "text": "9",
+    "x": 8.374804957740658,
+    "y": 10.20552201704611,
+    "height": 0.058948863636366096,
+    "rotation": 0.0,
+    "in_block": true,
+    "depth": 1,
+    "block_path": [
+      "B_BORDER"
+    ]
+  },
+  {
+    "layout": "SHEET 1 of 2",
+    "layer": "AM_BOR",
+    "etype": "TEXT",
+    "text": "11",
+    "x": 10.278784269756995,
+    "y": 10.20552201704611,
+    "height": 0.058948863636366096,
+    "rotation": 0.0,
+    "in_block": true,
+    "depth": 1,
+    "block_path": [
+      "B_BORDER"
+    ]
+  },
+  {
+    "layout": "SHEET 1 of 2",
+    "layer": "AM_BOR",
+    "etype": "TEXT",
+    "text": "12",
+    "x": 11.239062319806362,
+    "y": 10.20552201704611,
+    "height": 0.058948863636366096,
+    "rotation": 0.0,
+    "in_block": true,
+    "depth": 1,
+    "block_path": [
+      "B_BORDER"
+    ]
+  },
+  {
+    "layout": "SHEET 1 of 2",
+    "layer": "AM_BOR",
+    "etype": "TEXT",
+    "text": "F",
+    "x": 16.16989259614334,
+    "y": 4.9295987215912245,
+    "height": 0.05894886363636778,
+    "rotation": 0.0,
+    "in_block": true,
+    "depth": 1,
+    "block_path": [
+      "B_BORDER"
+    ]
+  },
+  {
+    "layout": "SHEET 1 of 2",
+    "layer": "AM_BOR",
+    "etype": "TEXT",
+    "text": "E",
+    "x": 16.16989259614334,
+    "y": 5.872780539773104,
+    "height": 0.05894886363636834,
+    "rotation": 0.0,
+    "in_block": true,
+    "depth": 1,
+    "block_path": [
+      "B_BORDER"
+    ]
+  },
+  {
+    "layout": "SHEET 1 of 2",
+    "layer": "AM_BOR",
+    "etype": "TEXT",
+    "text": "D",
+    "x": 16.16989259614334,
+    "y": 6.815962357954983,
+    "height": 0.058948863636367234,
+    "rotation": 0.0,
+    "in_block": true,
+    "depth": 1,
+    "block_path": [
+      "B_BORDER"
+    ]
+  },
+  {
+    "layout": "SHEET 1 of 2",
+    "layer": "AM_BOR",
+    "etype": "TEXT",
+    "text": "13",
+    "x": 12.202161950805921,
+    "y": 10.20552201704611,
+    "height": 0.058948863636366096,
+    "rotation": 0.0,
+    "in_block": true,
+    "depth": 1,
+    "block_path": [
+      "B_BORDER"
+    ]
+  },
+  {
+    "layout": "SHEET 1 of 2",
+    "layer": "AM_BOR",
+    "etype": "TEXT",
+    "text": "14",
+    "x": 13.16526158180548,
+    "y": 10.20552201704611,
+    "height": 0.058948863636366096,
+    "rotation": 0.0,
+    "in_block": true,
+    "depth": 1,
+    "block_path": [
+      "B_BORDER"
+    ]
+  },
+  {
+    "layout": "SHEET 1 of 2",
+    "layer": "AM_BOR",
+    "etype": "TEXT",
+    "text": "15",
+    "x": 14.128361212805041,
+    "y": 10.20552201704611,
+    "height": 0.058948863636366096,
+    "rotation": 0.0,
+    "in_block": true,
+    "depth": 1,
+    "block_path": [
+      "B_BORDER"
+    ]
+  },
+  {
+    "layout": "SHEET 1 of 2",
+    "layer": "AM_BOR",
+    "etype": "TEXT",
+    "text": "C",
+    "x": 16.16989259614334,
+    "y": 7.759144176136862,
+    "height": 0.058948863636367234,
+    "rotation": 0.0,
+    "in_block": true,
+    "depth": 1,
+    "block_path": [
+      "B_BORDER"
+    ]
+  },
+  {
+    "layout": "SHEET 1 of 2",
+    "layer": "AM_BOR",
+    "etype": "TEXT",
+    "text": "B",
+    "x": 16.16989259614334,
+    "y": 8.702325994318738,
+    "height": 0.05894886363636834,
+    "rotation": 0.0,
+    "in_block": true,
+    "depth": 1,
+    "block_path": [
+      "B_BORDER"
+    ]
+  },
+  {
+    "layout": "SHEET 1 of 2",
+    "layer": "AM_BOR",
+    "etype": "TEXT",
+    "text": "!GENTITLE-RU",
+    "x": 16.101821955719906,
+    "y": 10.139204545455192,
+    "height": 0.058948863636366096,
+    "rotation": 0.0,
+    "in_block": true,
+    "depth": 1,
+    "block_path": [
+      "B_BORDER"
+    ]
+  },
+  {
+    "layout": "SHEET 1 of 2",
+    "layer": "AM_BOR",
+    "etype": "TEXT",
+    "text": "A",
+    "x": 16.16989259614334,
+    "y": 9.645507812500616,
+    "height": 0.05894886363636834,
+    "rotation": 0.0,
+    "in_block": true,
+    "depth": 1,
+    "block_path": [
+      "B_BORDER"
+    ]
+  },
+  {
+    "layout": "SHEET 1 of 2",
+    "layer": "AM_BOR",
+    "etype": "TEXT",
+    "text": "16",
+    "x": 15.091460843804603,
+    "y": 10.20552201704611,
+    "height": 0.058948863636366096,
+    "rotation": 0.0,
+    "in_block": true,
+    "depth": 1,
+    "block_path": [
+      "B_BORDER"
+    ]
+  },
+  {
+    "layout": "SHEET 1 of 2",
+    "layer": "AM_BOR",
+    "etype": "TEXT",
+    "text": "!GENTITLE-MAX",
+    "x": 16.31250000000104,
+    "y": 10.375000000000663,
+    "height": 0.058948863636366096,
+    "rotation": 0.0,
+    "in_block": true,
+    "depth": 1,
+    "block_path": [
+      "B_BORDER"
+    ]
+  },
+  {
+    "layout": "SHEET 2 of 2",
+    "layer": "AM_0",
+    "etype": "MTEXT",
+    "text": "SEE SHEET 1 OF 2 FOR DETAIL 201",
+    "x": 11.26646983421473,
+    "y": 2.566785385781159,
+    "height": 0.1471212475425938,
+    "rotation": 0.0,
+    "in_block": false,
+    "depth": 0,
+    "block_path": []
+  },
+  {
+    "layout": "SHEET 2 of 2",
+    "layer": "0",
+    "etype": "TEXT",
+    "text": "Nov 21, 2025 - 10:43am",
+    "x": 14.774776587705578,
+    "y": 0.15024750900408285,
+    "height": 0.05905511811024,
+    "rotation": 0.0,
+    "in_block": true,
+    "depth": 1,
+    "block_path": [
+      "B_BORDER"
+    ]
+  },
+  {
+    "layout": "SHEET 2 of 2",
+    "layer": "0",
+    "etype": "TEXT",
+    "text": "D:/CAD_Quoting_Tool/Cad Files/T1769-201_redacted.dwg",
+    "x": 10.535316046048946,
+    "y": 0.04132561203740239,
+    "height": 0.05905511811024,
+    "rotation": 0.0,
+    "in_block": true,
+    "depth": 1,
+    "block_path": [
+      "B_BORDER"
+    ]
+  },
+  {
+    "layout": "SHEET 2 of 2",
+    "layer": "AM_BOR",
+    "etype": "TEXT",
+    "text": "!GENTITLE-LL",
+    "x": 0.0,
+    "y": 1.055118110236288e-15,
+    "height": 0.058948863636367387,
+    "rotation": 0.0,
+    "in_block": true,
+    "depth": 1,
+    "block_path": [
+      "B_BORDER"
+    ]
+  },
+  {
+    "layout": "SHEET 2 of 2",
+    "layer": "AM_BOR",
+    "etype": "TEXT",
+    "text": "1",
+    "x": 0.6700079097441834,
+    "y": 0.12526633522728053,
+    "height": 0.058948863636367435,
+    "rotation": 0.0,
+    "in_block": true,
+    "depth": 1,
+    "block_path": [
+      "B_BORDER"
+    ]
+  },
+  {
+    "layout": "SHEET 2 of 2",
+    "layer": "AM_BOR",
+    "etype": "TEXT",
+    "text": "J",
+    "x": 0.0981675038381949,
+    "y": 1.1568714488637102,
+    "height": 0.05894886363636751,
+    "rotation": 0.0,
+    "in_block": true,
+    "depth": 1,
+    "block_path": [
+      "B_BORDER"
+    ]
+  },
+  {
+    "layout": "SHEET 2 of 2",
+    "layer": "AM_BOR",
+    "etype": "TEXT",
+    "text": "I",
+    "x": 0.0981675038381949,
+    "y": 2.100053267045589,
+    "height": 0.05894886363636751,
+    "rotation": 0.0,
+    "in_block": true,
+    "depth": 1,
+    "block_path": [
+      "B_BORDER"
+    ]
+  },
+  {
+    "layout": "SHEET 2 of 2",
+    "layer": "AM_BOR",
+    "etype": "TEXT",
+    "text": "H",
+    "x": 0.0981675038381949,
+    "y": 3.043235085227468,
+    "height": 0.058948863636367234,
+    "rotation": 0.0,
+    "in_block": true,
+    "depth": 1,
+    "block_path": [
+      "B_BORDER"
+    ]
+  },
+  {
+    "layout": "SHEET 2 of 2",
+    "layer": "AM_BOR",
+    "etype": "TEXT",
+    "text": "G",
+    "x": 0.0981675038381949,
+    "y": 3.9864169034093457,
+    "height": 0.05894886363636668,
+    "rotation": 0.0,
+    "in_block": true,
+    "depth": 1,
+    "block_path": [
+      "B_BORDER"
+    ]
+  },
+  {
+    "layout": "SHEET 2 of 2",
+    "layer": "AM_BOR",
+    "etype": "TEXT",
+    "text": "2",
+    "x": 1.633107540743742,
+    "y": 0.12526633522728053,
+    "height": 0.058948863636367435,
+    "rotation": 0.0,
+    "in_block": true,
+    "depth": 1,
+    "block_path": [
+      "B_BORDER"
+    ]
+  },
+  {
+    "layout": "SHEET 2 of 2",
+    "layer": "AM_BOR",
+    "etype": "TEXT",
+    "text": "3",
+    "x": 2.5962071717433015,
+    "y": 0.12526633522728053,
+    "height": 0.058948863636367435,
+    "rotation": 0.0,
+    "in_block": true,
+    "depth": 1,
+    "block_path": [
+      "B_BORDER"
+    ]
+  },
+  {
+    "layout": "SHEET 2 of 2",
+    "layer": "AM_BOR",
+    "etype": "TEXT",
+    "text": "4",
+    "x": 3.559306802742861,
+    "y": 0.12526633522728053,
+    "height": 0.058948863636367435,
+    "rotation": 0.0,
+    "in_block": true,
+    "depth": 1,
+    "block_path": [
+      "B_BORDER"
+    ]
+  },
+  {
+    "layout": "SHEET 2 of 2",
+    "layer": "AM_BOR",
+    "etype": "TEXT",
+    "text": "5",
+    "x": 4.522406433742419,
+    "y": 0.12526633522728053,
+    "height": 0.058948863636367435,
+    "rotation": 0.0,
+    "in_block": true,
+    "depth": 1,
+    "block_path": [
+      "B_BORDER"
+    ]
+  },
+  {
+    "layout": "SHEET 2 of 2",
+    "layer": "AM_BOR",
+    "etype": "TEXT",
+    "text": "6",
+    "x": 5.485506064741981,
+    "y": 0.12526633522728053,
+    "height": 0.058948863636367435,
+    "rotation": 0.0,
+    "in_block": true,
+    "depth": 1,
+    "block_path": [
+      "B_BORDER"
+    ]
+  },
+  {
+    "layout": "SHEET 2 of 2",
+    "layer": "AM_BOR",
+    "etype": "TEXT",
+    "text": "7",
+    "x": 6.448605695741538,
+    "y": 0.12526633522728053,
+    "height": 0.058948863636367435,
+    "rotation": 0.0,
+    "in_block": true,
+    "depth": 1,
+    "block_path": [
+      "B_BORDER"
+    ]
+  },
+  {
+    "layout": "SHEET 2 of 2",
+    "layer": "AM_BOR",
+    "etype": "TEXT",
+    "text": "F",
+    "x": 0.0981675038381949,
+    "y": 4.9295987215912245,
+    "height": 0.05894886363636778,
+    "rotation": 0.0,
+    "in_block": true,
+    "depth": 1,
+    "block_path": [
+      "B_BORDER"
+    ]
+  },
+  {
+    "layout": "SHEET 2 of 2",
+    "layer": "AM_BOR",
+    "etype": "TEXT",
+    "text": "E",
+    "x": 0.0981675038381949,
+    "y": 5.872780539773104,
+    "height": 0.05894886363636834,
+    "rotation": 0.0,
+    "in_block": true,
+    "depth": 1,
+    "block_path": [
+      "B_BORDER"
+    ]
+  },
+  {
+    "layout": "SHEET 2 of 2",
+    "layer": "AM_BOR",
+    "etype": "TEXT",
+    "text": "D",
+    "x": 0.0981675038381949,
+    "y": 6.815962357954983,
+    "height": 0.058948863636367234,
+    "rotation": 0.0,
+    "in_block": true,
+    "depth": 1,
+    "block_path": [
+      "B_BORDER"
+    ]
+  },
+  {
+    "layout": "SHEET 2 of 2",
+    "layer": "AM_BOR",
+    "etype": "TEXT",
+    "text": "C",
+    "x": 0.0981675038381949,
+    "y": 7.759144176136862,
+    "height": 0.058948863636367234,
+    "rotation": 0.0,
+    "in_block": true,
+    "depth": 1,
+    "block_path": [
+      "B_BORDER"
+    ]
+  },
+  {
+    "layout": "SHEET 2 of 2",
+    "layer": "AM_BOR",
+    "etype": "TEXT",
+    "text": "B",
+    "x": 0.0981675038381949,
+    "y": 8.702325994318738,
+    "height": 0.05894886363636834,
+    "rotation": 0.0,
+    "in_block": true,
+    "depth": 1,
+    "block_path": [
+      "B_BORDER"
+    ]
+  },
+  {
+    "layout": "SHEET 2 of 2",
+    "layer": "AM_BOR",
+    "etype": "TEXT",
+    "text": "A",
+    "x": 0.0981675038381949,
+    "y": 9.645507812500616,
+    "height": 0.05894886363636834,
+    "rotation": 0.0,
+    "in_block": true,
+    "depth": 1,
+    "block_path": [
+      "B_BORDER"
+    ]
+  },
+  {
+    "layout": "SHEET 2 of 2",
+    "layer": "AM_BOR",
+    "etype": "TEXT",
+    "text": "1",
+    "x": 0.6700079097441834,
+    "y": 10.20552201704611,
+    "height": 0.058948863636366096,
+    "rotation": 0.0,
+    "in_block": true,
+    "depth": 1,
+    "block_path": [
+      "B_BORDER"
+    ]
+  },
+  {
+    "layout": "SHEET 2 of 2",
+    "layer": "AM_BOR",
+    "etype": "TEXT",
+    "text": "2",
+    "x": 1.633107540743742,
+    "y": 10.20552201704611,
+    "height": 0.058948863636366096,
+    "rotation": 0.0,
+    "in_block": true,
+    "depth": 1,
+    "block_path": [
+      "B_BORDER"
+    ]
+  },
+  {
+    "layout": "SHEET 2 of 2",
+    "layer": "AM_BOR",
+    "etype": "TEXT",
+    "text": "3",
+    "x": 2.5962071717433015,
+    "y": 10.20552201704611,
+    "height": 0.058948863636366096,
+    "rotation": 0.0,
+    "in_block": true,
+    "depth": 1,
+    "block_path": [
+      "B_BORDER"
+    ]
+  },
+  {
+    "layout": "SHEET 2 of 2",
+    "layer": "AM_BOR",
+    "etype": "TEXT",
+    "text": "4",
+    "x": 3.559306802742861,
+    "y": 10.20552201704611,
+    "height": 0.058948863636366096,
+    "rotation": 0.0,
+    "in_block": true,
+    "depth": 1,
+    "block_path": [
+      "B_BORDER"
+    ]
+  },
+  {
+    "layout": "SHEET 2 of 2",
+    "layer": "AM_BOR",
+    "etype": "TEXT",
+    "text": "5",
+    "x": 4.522406433742419,
+    "y": 10.20552201704611,
+    "height": 0.058948863636366096,
+    "rotation": 0.0,
+    "in_block": true,
+    "depth": 1,
+    "block_path": [
+      "B_BORDER"
+    ]
+  },
+  {
+    "layout": "SHEET 2 of 2",
+    "layer": "AM_BOR",
+    "etype": "TEXT",
+    "text": "6",
+    "x": 5.485506064741981,
+    "y": 10.20552201704611,
+    "height": 0.058948863636366096,
+    "rotation": 0.0,
+    "in_block": true,
+    "depth": 1,
+    "block_path": [
+      "B_BORDER"
+    ]
+  },
+  {
+    "layout": "SHEET 2 of 2",
+    "layer": "AM_BOR",
+    "etype": "TEXT",
+    "text": "7",
+    "x": 6.448605695741538,
+    "y": 10.20552201704611,
+    "height": 0.058948863636366096,
+    "rotation": 0.0,
+    "in_block": true,
+    "depth": 1,
+    "block_path": [
+      "B_BORDER"
+    ]
+  },
+  {
+    "layout": "SHEET 2 of 2",
+    "layer": "AM_BOR",
+    "etype": "TEXT",
+    "text": "10",
+    "x": 9.315684638757437,
+    "y": 0.12526633522728053,
+    "height": 0.058948863636367435,
+    "rotation": 0.0,
+    "in_block": true,
+    "depth": 1,
+    "block_path": [
+      "B_BORDER"
+    ]
+  },
+  {
+    "layout": "SHEET 2 of 2",
+    "layer": "AM_BOR",
+    "etype": "TEXT",
+    "text": "8",
+    "x": 7.411705326741096,
+    "y": 0.12526633522728053,
+    "height": 0.058948863636367435,
+    "rotation": 0.0,
+    "in_block": true,
+    "depth": 1,
+    "block_path": [
+      "B_BORDER"
+    ]
+  },
+  {
+    "layout": "SHEET 2 of 2",
+    "layer": "AM_BOR",
+    "etype": "TEXT",
+    "text": "9",
+    "x": 8.374804957740658,
+    "y": 0.12526633522728053,
+    "height": 0.058948863636367435,
+    "rotation": 0.0,
+    "in_block": true,
+    "depth": 1,
+    "block_path": [
+      "B_BORDER"
+    ]
+  },
+  {
+    "layout": "SHEET 2 of 2",
+    "layer": "AM_BOR",
+    "etype": "TEXT",
+    "text": "11",
+    "x": 10.278784269756995,
+    "y": 0.12526633522728053,
+    "height": 0.058948863636367435,
+    "rotation": 0.0,
+    "in_block": true,
+    "depth": 1,
+    "block_path": [
+      "B_BORDER"
+    ]
+  },
+  {
+    "layout": "SHEET 2 of 2",
+    "layer": "AM_BOR",
+    "etype": "TEXT",
+    "text": "12",
+    "x": 11.239062319806362,
+    "y": 0.12526633522728053,
+    "height": 0.058948863636367435,
+    "rotation": 0.0,
+    "in_block": true,
+    "depth": 1,
+    "block_path": [
+      "B_BORDER"
+    ]
+  },
+  {
+    "layout": "SHEET 2 of 2",
+    "layer": "AM_BOR",
+    "etype": "TEXT",
+    "text": "13",
+    "x": 12.202161950805921,
+    "y": 0.12526633522728053,
+    "height": 0.058948863636367435,
+    "rotation": 0.0,
+    "in_block": true,
+    "depth": 1,
+    "block_path": [
+      "B_BORDER"
+    ]
+  },
+  {
+    "layout": "SHEET 2 of 2",
+    "layer": "AM_BOR",
+    "etype": "TEXT",
+    "text": "14",
+    "x": 13.16526158180548,
+    "y": 0.12526633522728053,
+    "height": 0.058948863636367435,
+    "rotation": 0.0,
+    "in_block": true,
+    "depth": 1,
+    "block_path": [
+      "B_BORDER"
+    ]
+  },
+  {
+    "layout": "SHEET 2 of 2",
+    "layer": "AM_BOR",
+    "etype": "TEXT",
+    "text": "15",
+    "x": 14.128361212805041,
+    "y": 0.13388371618637887,
+    "height": 0.058948863636367435,
+    "rotation": 0.0,
+    "in_block": true,
+    "depth": 1,
+    "block_path": [
+      "B_BORDER"
+    ]
+  },
+  {
+    "layout": "SHEET 2 of 2",
+    "layer": "AM_BOR",
+    "etype": "TEXT",
+    "text": "!GENTITLE-INSERT",
+    "x": 16.101821955719906,
+    "y": 0.2357954545454694,
+    "height": 0.058948863636367435,
+    "rotation": 0.0,
+    "in_block": true,
+    "depth": 1,
+    "block_path": [
+      "B_BORDER"
+    ]
+  },
+  {
+    "layout": "SHEET 2 of 2",
+    "layer": "AM_BOR",
+    "etype": "TEXT",
+    "text": "I",
+    "x": 16.16989259614334,
+    "y": 2.100053267045589,
+    "height": 0.05894886363636751,
+    "rotation": 0.0,
+    "in_block": true,
+    "depth": 1,
+    "block_path": [
+      "B_BORDER"
+    ]
+  },
+  {
+    "layout": "SHEET 2 of 2",
+    "layer": "AM_BOR",
+    "etype": "TEXT",
+    "text": "H",
+    "x": 16.16989259614334,
+    "y": 3.043235085227468,
+    "height": 0.058948863636367234,
+    "rotation": 0.0,
+    "in_block": true,
+    "depth": 1,
+    "block_path": [
+      "B_BORDER"
+    ]
+  },
+  {
+    "layout": "SHEET 2 of 2",
+    "layer": "AM_BOR",
+    "etype": "TEXT",
+    "text": "G",
+    "x": 16.16989259614334,
+    "y": 3.9864169034093457,
+    "height": 0.05894886363636668,
+    "rotation": 0.0,
+    "in_block": true,
+    "depth": 1,
+    "block_path": [
+      "B_BORDER"
+    ]
+  },
+  {
+    "layout": "SHEET 2 of 2",
+    "layer": "AM_BOR",
+    "etype": "TEXT",
+    "text": "10",
+    "x": 9.315684638757437,
+    "y": 10.20552201704611,
+    "height": 0.058948863636366096,
+    "rotation": 0.0,
+    "in_block": true,
+    "depth": 1,
+    "block_path": [
+      "B_BORDER"
+    ]
+  },
+  {
+    "layout": "SHEET 2 of 2",
+    "layer": "AM_BOR",
+    "etype": "TEXT",
+    "text": "8",
+    "x": 7.411705326741096,
+    "y": 10.20552201704611,
+    "height": 0.058948863636366096,
+    "rotation": 0.0,
+    "in_block": true,
+    "depth": 1,
+    "block_path": [
+      "B_BORDER"
+    ]
+  },
+  {
+    "layout": "SHEET 2 of 2",
+    "layer": "AM_BOR",
+    "etype": "TEXT",
+    "text": "9",
+    "x": 8.374804957740658,
+    "y": 10.20552201704611,
+    "height": 0.058948863636366096,
+    "rotation": 0.0,
+    "in_block": true,
+    "depth": 1,
+    "block_path": [
+      "B_BORDER"
+    ]
+  },
+  {
+    "layout": "SHEET 2 of 2",
+    "layer": "AM_BOR",
+    "etype": "TEXT",
+    "text": "11",
+    "x": 10.278784269756995,
+    "y": 10.20552201704611,
+    "height": 0.058948863636366096,
+    "rotation": 0.0,
+    "in_block": true,
+    "depth": 1,
+    "block_path": [
+      "B_BORDER"
+    ]
+  },
+  {
+    "layout": "SHEET 2 of 2",
+    "layer": "AM_BOR",
+    "etype": "TEXT",
+    "text": "12",
+    "x": 11.239062319806362,
+    "y": 10.20552201704611,
+    "height": 0.058948863636366096,
+    "rotation": 0.0,
+    "in_block": true,
+    "depth": 1,
+    "block_path": [
+      "B_BORDER"
+    ]
+  },
+  {
+    "layout": "SHEET 2 of 2",
+    "layer": "AM_BOR",
+    "etype": "TEXT",
+    "text": "F",
+    "x": 16.16989259614334,
+    "y": 4.9295987215912245,
+    "height": 0.05894886363636778,
+    "rotation": 0.0,
+    "in_block": true,
+    "depth": 1,
+    "block_path": [
+      "B_BORDER"
+    ]
+  },
+  {
+    "layout": "SHEET 2 of 2",
+    "layer": "AM_BOR",
+    "etype": "TEXT",
+    "text": "E",
+    "x": 16.16989259614334,
+    "y": 5.872780539773104,
+    "height": 0.05894886363636834,
+    "rotation": 0.0,
+    "in_block": true,
+    "depth": 1,
+    "block_path": [
+      "B_BORDER"
+    ]
+  },
+  {
+    "layout": "SHEET 2 of 2",
+    "layer": "AM_BOR",
+    "etype": "TEXT",
+    "text": "D",
+    "x": 16.16989259614334,
+    "y": 6.815962357954983,
+    "height": 0.058948863636367234,
+    "rotation": 0.0,
+    "in_block": true,
+    "depth": 1,
+    "block_path": [
+      "B_BORDER"
+    ]
+  },
+  {
+    "layout": "SHEET 2 of 2",
+    "layer": "AM_BOR",
+    "etype": "TEXT",
+    "text": "13",
+    "x": 12.202161950805921,
+    "y": 10.20552201704611,
+    "height": 0.058948863636366096,
+    "rotation": 0.0,
+    "in_block": true,
+    "depth": 1,
+    "block_path": [
+      "B_BORDER"
+    ]
+  },
+  {
+    "layout": "SHEET 2 of 2",
+    "layer": "AM_BOR",
+    "etype": "TEXT",
+    "text": "14",
+    "x": 13.16526158180548,
+    "y": 10.20552201704611,
+    "height": 0.058948863636366096,
+    "rotation": 0.0,
+    "in_block": true,
+    "depth": 1,
+    "block_path": [
+      "B_BORDER"
+    ]
+  },
+  {
+    "layout": "SHEET 2 of 2",
+    "layer": "AM_BOR",
+    "etype": "TEXT",
+    "text": "15",
+    "x": 14.128361212805041,
+    "y": 10.20552201704611,
+    "height": 0.058948863636366096,
+    "rotation": 0.0,
+    "in_block": true,
+    "depth": 1,
+    "block_path": [
+      "B_BORDER"
+    ]
+  },
+  {
+    "layout": "SHEET 2 of 2",
+    "layer": "AM_BOR",
+    "etype": "TEXT",
+    "text": "C",
+    "x": 16.16989259614334,
+    "y": 7.759144176136862,
+    "height": 0.058948863636367234,
+    "rotation": 0.0,
+    "in_block": true,
+    "depth": 1,
+    "block_path": [
+      "B_BORDER"
+    ]
+  },
+  {
+    "layout": "SHEET 2 of 2",
+    "layer": "AM_BOR",
+    "etype": "TEXT",
+    "text": "B",
+    "x": 16.16989259614334,
+    "y": 8.702325994318738,
+    "height": 0.05894886363636834,
+    "rotation": 0.0,
+    "in_block": true,
+    "depth": 1,
+    "block_path": [
+      "B_BORDER"
+    ]
+  },
+  {
+    "layout": "SHEET 2 of 2",
+    "layer": "AM_BOR",
+    "etype": "TEXT",
+    "text": "!GENTITLE-RU",
+    "x": 16.101821955719906,
+    "y": 10.139204545455192,
+    "height": 0.058948863636366096,
+    "rotation": 0.0,
+    "in_block": true,
+    "depth": 1,
+    "block_path": [
+      "B_BORDER"
+    ]
+  },
+  {
+    "layout": "SHEET 2 of 2",
+    "layer": "AM_BOR",
+    "etype": "TEXT",
+    "text": "A",
+    "x": 16.16989259614334,
+    "y": 9.645507812500616,
+    "height": 0.05894886363636834,
+    "rotation": 0.0,
+    "in_block": true,
+    "depth": 1,
+    "block_path": [
+      "B_BORDER"
+    ]
+  },
+  {
+    "layout": "SHEET 2 of 2",
+    "layer": "AM_BOR",
+    "etype": "TEXT",
+    "text": "16",
+    "x": 15.091460843804603,
+    "y": 10.20552201704611,
+    "height": 0.058948863636366096,
+    "rotation": 0.0,
+    "in_block": true,
+    "depth": 1,
+    "block_path": [
+      "B_BORDER"
+    ]
+  },
+  {
+    "layout": "SHEET 2 of 2",
+    "layer": "AM_BOR",
+    "etype": "TEXT",
+    "text": "!GENTITLE-MAX",
+    "x": 16.31250000000104,
+    "y": 10.375000000000663,
+    "height": 0.058948863636366096,
+    "rotation": 0.0,
+    "in_block": true,
+    "depth": 1,
+    "block_path": [
+      "B_BORDER"
+    ]
+  }
+]
