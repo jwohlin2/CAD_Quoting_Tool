@@ -5658,6 +5658,7 @@ class PunchPlannerParams:
     has_3d_surface: bool = False
     has_polish_contour: bool = False
     has_no_step_permitted: bool = False
+    has_etch: bool = False
     min_dia_tol_in: Optional[float] = None
     min_len_tol_in: Optional[float] = None
     material: str = "A2"
@@ -5707,6 +5708,9 @@ def create_punch_plan(params: Dict[str, Any]) -> Dict[str, Any]:
     _add_punch_qa_checks(plan, p)
     _add_punch_fixturing_notes(plan, p)
 
+    # Store etch flag in plan for time estimation
+    plan["has_etch"] = p.has_etch
+
     return plan
 
 
@@ -5728,6 +5732,7 @@ def _extract_punch_params(params: Dict[str, Any]) -> PunchPlannerParams:
         has_3d_surface=bool(params.get("has_3d_surface", False)),
         has_polish_contour=bool(params.get("has_polish_contour", False)),
         has_no_step_permitted=bool(params.get("has_no_step_permitted", False)),
+        has_etch=bool(params.get("has_etch", False)),
         min_dia_tol_in=params.get("min_dia_tol_in"),
         min_len_tol_in=params.get("min_len_tol_in"),
         material=params.get("material", "A2"),
@@ -6075,6 +6080,7 @@ def planner_punches_enhanced(params: Dict[str, Any]) -> Dict[str, Any]:
                 "has_3d_surface": summary.has_3d_surface,
                 "has_polish_contour": summary.has_polish_contour,
                 "has_no_step_permitted": summary.has_no_step_permitted,
+                "has_etch": summary.has_etch,
                 "min_dia_tol_in": summary.min_dia_tol_in,
                 "min_len_tol_in": summary.min_len_tol_in,
                 "material": summary.material_callout or params.get("material", "A2"),
