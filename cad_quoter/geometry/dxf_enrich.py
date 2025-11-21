@@ -1929,8 +1929,10 @@ def detect_waterjet_openings(text_dump: str) -> tuple[bool, float]:
     ]
 
     has_waterjet = False
+    match_obj = None
     for pattern in openings_patterns:
-        if re.search(pattern, text_upper):
+        match_obj = re.search(pattern, text_upper)
+        if match_obj:
             has_waterjet = True
             break
 
@@ -1938,8 +1940,13 @@ def detect_waterjet_openings(text_dump: str) -> tuple[bool, float]:
         return False, 0.0
 
     # Extract tolerance from text (e.g., "±.005", "±0.005", "+/-.003")
+    # Note: Also match � (Unicode replacement char) for when ± gets corrupted during DWG extraction
+    # Search only near the waterjet keyword to avoid matching diameter symbols (∅)
     tolerance = 0.005  # Default tolerance
-    tol_match = re.search(r'[±+/-]\s*0*\.(\d+)', text_upper)
+    search_start = max(0, match_obj.start())
+    search_end = min(len(text_upper), match_obj.end() + 100)
+    nearby_text = text_upper[search_start:search_end]
+    tol_match = re.search(r'(?:^|[^R\d])[±+/-�]\s*0*\.(\d+)', nearby_text)
     if tol_match:
         # Convert matched digits to float (e.g., "005" -> 0.005, "003" -> 0.003)
         digits = tol_match.group(1)
@@ -1973,8 +1980,10 @@ def detect_waterjet_profile(text_dump: str) -> tuple[bool, float]:
     ]
 
     has_waterjet = False
+    match_obj = None
     for pattern in profile_patterns:
-        if re.search(pattern, text_upper):
+        match_obj = re.search(pattern, text_upper)
+        if match_obj:
             has_waterjet = True
             break
 
@@ -1982,8 +1991,13 @@ def detect_waterjet_profile(text_dump: str) -> tuple[bool, float]:
         return False, 0.0
 
     # Extract tolerance from text (e.g., "±.003", "±0.003", "+/-.005")
+    # Note: Also match � (Unicode replacement char) for when ± gets corrupted during DWG extraction
+    # Search only near the waterjet keyword to avoid matching diameter symbols (∅)
     tolerance = 0.003  # Default tolerance for profile (typically tighter)
-    tol_match = re.search(r'[±+/-]\s*0*\.(\d+)', text_upper)
+    search_start = max(0, match_obj.start())
+    search_end = min(len(text_upper), match_obj.end() + 100)
+    nearby_text = text_upper[search_start:search_end]
+    tol_match = re.search(r'(?:^|[^R\d])[±+/-�]\s*0*\.(\d+)', nearby_text)
     if tol_match:
         # Convert matched digits to float (e.g., "003" -> 0.003, "005" -> 0.005)
         digits = tol_match.group(1)
