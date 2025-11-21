@@ -1914,11 +1914,12 @@ class AppV7:
                 # Check if detailed breakdown is available
                 if machine_hours.other_ops_detail and len(machine_hours.other_ops_detail) > 0:
                     report.append(f"  Other operations (Total):         {machine_hours.total_other_minutes:>10.2f} min")
-                    # Show detail breakdown with indentation
+                    # Show detail breakdown with indentation - align minutes with main items
                     for detail in machine_hours.other_ops_detail:
                         label = detail.get('label', 'Unknown operation')
                         minutes = detail.get('minutes', 0.0)
-                        report.append(f"    • {label:<40} {minutes:>6.1f} min")
+                        # Use 36 char width for label to align with main items (2 spaces + bullet + space + label)
+                        report.append(f"    • {label:<36} {minutes:>10.1f} min")
                 else:
                     # Fallback to simple total if no detail available (backward compatibility)
                     report.append(f"  Other operations:                 {machine_hours.total_other_minutes:>10.2f} min")
