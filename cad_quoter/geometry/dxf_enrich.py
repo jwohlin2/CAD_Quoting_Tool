@@ -1380,6 +1380,7 @@ class PunchFeatureSummary:
     has_no_step_permitted: bool = False
     has_sharp_edges: bool = False
     has_gdt: bool = False
+    has_etch: bool = False
     material_callout: Optional[str] = None
     extraction_source: str = "dxf_geometry_and_text"
     confidence_score: float = 1.0
@@ -2201,6 +2202,9 @@ def extract_punch_features_from_dxf(dxf_path: Path, text_dump: str) -> PunchFeat
     summary.has_no_step_permitted = pain_flags["has_no_step_permitted"]
     summary.has_sharp_edges = pain_flags["has_sharp_edges"]
     summary.has_gdt = pain_flags["has_gdt"]
+
+    # Detect etch operation requirement
+    summary.has_etch = detect_etch_operation(text_dump)
 
     hole_data = parse_punch_holes_from_text(text_dump)
     summary.tap_count = hole_data["tap_count"]
