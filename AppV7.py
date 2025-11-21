@@ -1975,7 +1975,19 @@ class AppV7:
             report.append(f"  Programming / Prove-out:         {labor_hours.programming_minutes:>10.2f} minutes")
             report.append(f"  Machining Steps:                 {labor_hours.machining_steps_minutes:>10.2f} minutes")
             report.append(f"  Inspection:                      {labor_hours.inspection_minutes:>10.2f} minutes")
-            report.append(f"  Finishing / Deburr:              {labor_hours.finishing_minutes:>10.2f} minutes")
+
+            # Finishing / Deburr with detailed breakdown
+            if labor_hours.finishing_detail and len(labor_hours.finishing_detail) > 0:
+                report.append(f"  Finishing / Deburr (Total):      {labor_hours.finishing_minutes:>10.2f} minutes")
+                # Show detail breakdown with indentation - align minutes with main items
+                for detail in labor_hours.finishing_detail:
+                    label = detail.get('label', 'Unknown operation')
+                    minutes = detail.get('minutes', 0.0)
+                    # Use 37 char width for label to align with main items (4 spaces + bullet + space + label)
+                    report.append(f"    • {label:<33} {minutes:>10.1f} minutes")
+            else:
+                report.append(f"  Finishing / Deburr:              {labor_hours.finishing_minutes:>10.2f} minutes")
+
             # Show misc overhead if non-zero
             if abs(labor_hours.misc_overhead_minutes) > 0.01:
                 report.append(f"  Misc / Overhead:                 {labor_hours.misc_overhead_minutes:>10.2f} minutes")

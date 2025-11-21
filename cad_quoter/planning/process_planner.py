@@ -2235,6 +2235,14 @@ class LaborInputs:
     # Machine time for setup guardrail comparison
     machine_time_minutes: float = 0.0
 
+    # Plan data for finishing labor detail calculation
+    plan: Optional[Dict[str, Any]] = None
+    ops: Optional[List[Dict[str, Any]]] = None
+    part_length: float = 0.0  # inches
+    part_width: float = 0.0   # inches
+    part_thickness: float = 0.0  # inches
+    material: str = "GENERIC"
+
 
 def setup_minutes(i: LaborInputs) -> float:
     """
@@ -2619,7 +2627,7 @@ def compute_labor_minutes(i: LaborInputs) -> Dict[str, Any]:
       2) Programming
       3) Machining_Steps
       4) Inspection (with breakdown)
-      5) Finishing
+      5) Finishing (with detailed breakdown)
 
     Plus a Labor_Total field.
 
@@ -2627,8 +2635,9 @@ def compute_labor_minutes(i: LaborInputs) -> Dict[str, Any]:
         i: LaborInputs dataclass with all the operation counts
 
     Returns:
-        Dict with 'inputs' (as dict), 'minutes' (breakdown by bucket), and
-        'inspection_breakdown' (detailed inspection components)
+        Dict with 'inputs' (as dict), 'minutes' (breakdown by bucket),
+        'inspection_breakdown' (detailed inspection components), and
+        'finishing_breakdown' (detailed finishing labor operations)
 
     Example:
         >>> from dataclasses import asdict
@@ -2643,14 +2652,76 @@ def compute_labor_minutes(i: LaborInputs) -> Dict[str, Any]:
     machining = machining_minutes(i)
     inspection_result = inspection_minutes(i)  # Now returns a dict
     inspection_total = inspection_result["total_min"]
-    finishing = finishing_minutes(i)
+    finishing_base = finishing_minutes(i)
+
+    # Calculate detailed finishing labor (chamfer/deburr, radii, polish, etc.)
+    finishing_detail_minutes = 0.0
+    finishing_detail = []
+
+    if i.plan is not None and i.ops is not None:
+        L = i.part_length
+        W = i.part_width
+        T = i.part_thickness
+
+        # Get geometry-based finishing operations
+        geom_finishing_min, geom_detail = _calculate_finishing_labor_minutes(
+            i.plan, i.ops, L, W, T
+        )
+        finishing_detail.extend(geom_detail)
+        finishing_detail_minutes += geom_finishing_min
+
+        # Add edge break operation from text extraction
+        if i.plan.get('has_edge_break', False):
+            perimeter_in = 2.0 * (L + W) if L > 0 and W > 0 else 0.0
+            qty = 1  # Default to 1 part unless specified
+
+            # Extract material group from material name
+            material_upper = i.material.upper()
+            if 'ALUMINUM' in material_upper or 'AL' in material_upper:
+                material_group = 'ALUMINUM'
+            elif '52100' in material_upper:
+                material_group = '52100'
+            elif 'STAINLESS' in material_upper or 'SS' in material_upper or '316' in material_upper or '304' in material_upper:
+                material_group = 'STAINLESS'
+            elif 'CARBIDE' in material_upper:
+                material_group = 'CARBIDE'
+            elif 'CERAMIC' in material_upper:
+                material_group = 'CERAMIC'
+            else:
+                material_group = 'TOOL_STEEL'
+
+            edge_break_minutes = calc_edge_break_minutes(perimeter_in, qty, material_group)
+            finishing_detail.append({
+                "type": "edge_break",
+                "label": f"Edge break / deburr ({perimeter_in:.1f}\" perim)",
+                "minutes": round(edge_break_minutes, 1),
+                "source": "text"
+            })
+            finishing_detail_minutes += edge_break_minutes
+
+        # Add etch operation from text extraction
+        if i.plan.get('has_etch', False):
+            qty = 1  # Default to 1 part unless specified
+            details_with_etch = 1  # Default to 1 mark per part
+
+            etch_minutes = calc_etch_minutes(has_etch_note=True, qty=qty, details_with_etch=details_with_etch)
+            finishing_detail.append({
+                "type": "etch",
+                "label": "Etch / marking",
+                "minutes": round(etch_minutes, 1),
+                "source": "text"
+            })
+            finishing_detail_minutes += etch_minutes
+
+    # Total finishing includes base formula-based time plus detailed operations
+    finishing_total = finishing_base + finishing_detail_minutes
 
     buckets = {
         "Setup": setup,
         "Programming": programming,
         "Machining_Steps": machining,
         "Inspection": inspection_total,
-        "Finishing": finishing,
+        "Finishing": finishing_total,
     }
     buckets["Labor_Total"] = sum(buckets.values())
 
@@ -2658,6 +2729,12 @@ def compute_labor_minutes(i: LaborInputs) -> Dict[str, Any]:
         "inputs": asdict(i),
         "minutes": buckets,
         "inspection_breakdown": inspection_result,  # Include detailed breakdown
+        "finishing_breakdown": {
+            "base_min": finishing_base,
+            "detail_min": finishing_detail_minutes,
+            "total_min": finishing_total,
+            "detail": finishing_detail
+        }
     }
 
 
@@ -3082,21 +3159,20 @@ def _requires_grinding(plan: Dict[str, Any], ops: List[Dict[str, Any]]) -> bool:
     return False
 
 
-def _calculate_other_ops_minutes(
+def _calculate_finishing_labor_minutes(
     plan: Dict[str, Any],
     ops: List[Dict[str, Any]],
     L: float,
     W: float,
     T: float
 ) -> Tuple[float, List[Dict[str, Any]]]:
-    """Calculate other operations time based on actual part geometry and features.
+    """Calculate finishing labor time based on actual part geometry and features.
 
-    Drives other_ops_min from:
-    - Number of chamfered edges
-    - Number of small radii / form arcs
-    - Explicit polish/contour notes
-    - Part size
-    - For extremely simple parts: cap at 2-3 min
+    These are manual/labor operations for finishing work:
+    - Chamfer/deburr edges
+    - Small radii / form work
+    - Polish/contour work
+    - Baseline cleanup/deburr
 
     Args:
         plan: Process plan dict that may contain geometry features
@@ -3180,9 +3256,9 @@ def _calculate_other_ops_minutes(
     )
 
     # Calculate base time from geometry features and build detail list
-    other_time = 0.0
+    finishing_time = 0.0
 
-    # Chamfer/deburr time: ~0.5 min per edge (reduced from generic 5 min)
+    # Chamfer/deburr time: ~0.5 min per edge (manual labor)
     if num_chamfers > 0:
         chamfer_time = num_chamfers * 0.5
         detail_list.append({
@@ -3191,9 +3267,9 @@ def _calculate_other_ops_minutes(
             "minutes": round(chamfer_time, 1),
             "source": "geometry"
         })
-        other_time += chamfer_time
+        finishing_time += chamfer_time
 
-    # Small radii/form work: ~1.0 min per feature
+    # Small radii/form work: ~1.0 min per feature (manual labor)
     if num_small_radii > 0:
         radii_time = num_small_radii * 1.0
         detail_list.append({
@@ -3202,9 +3278,9 @@ def _calculate_other_ops_minutes(
             "minutes": round(radii_time, 1),
             "source": "geometry"
         })
-        other_time += radii_time
+        finishing_time += radii_time
 
-    # Polish/contour work: 3-5 min depending on part size
+    # Polish/contour work: 3-5 min depending on part size (manual labor)
     if has_polish:
         polish_time = 3.0 + size_factor * 2.0
         detail_list.append({
@@ -3213,9 +3289,9 @@ def _calculate_other_ops_minutes(
             "minutes": round(polish_time, 1),
             "source": "text" if polish_detected else "geometry"
         })
-        other_time += polish_time
+        finishing_time += polish_time
 
-    # Add baseline for general cleanup/deburr (scaled by part size)
+    # Add baseline for general cleanup/deburr (scaled by part size, manual labor)
     baseline = 1.0 + size_factor * 1.5
     if baseline > 0.1:  # Only add if meaningful
         detail_list.append({
@@ -3224,28 +3300,65 @@ def _calculate_other_ops_minutes(
             "minutes": round(baseline, 1),
             "source": "geometry"
         })
-        other_time += baseline
+        finishing_time += baseline
 
     # For simple parts, cap at 2-3 minutes
-    if is_simple_part and other_time > 2.5:
+    if is_simple_part and finishing_time > 2.5:
         # Proportionally reduce all detail times
-        scale_factor = 2.5 / other_time
+        scale_factor = 2.5 / finishing_time
         for detail in detail_list:
             detail["minutes"] = round(detail["minutes"] * scale_factor, 1)
-        other_time = 2.5
+        finishing_time = 2.5
 
     # For complex parts with many features, ensure we don't go too low
     if (num_chamfers + num_small_radii) > 10 or has_polish:
-        if other_time < 4.0:
+        if finishing_time < 4.0:
             # Add a complexity adjustment
-            adjustment = 4.0 - other_time
+            adjustment = 4.0 - finishing_time
             detail_list.append({
                 "type": "baseline_cleanup",
                 "label": "Complexity adjustment",
                 "minutes": round(adjustment, 1),
                 "source": "geometry"
             })
-            other_time = 4.0
+            finishing_time = 4.0
+
+    return round(finishing_time, 1), detail_list
+
+
+def _calculate_other_ops_minutes(
+    plan: Dict[str, Any],
+    ops: List[Dict[str, Any]],
+    L: float,
+    W: float,
+    T: float
+) -> Tuple[float, List[Dict[str, Any]]]:
+    """Calculate other MACHINE operations time based on actual part geometry and features.
+
+    NOTE: Chamfer/deburr, small radii, polish/contour, and baseline cleanup are now
+    tracked as LABOR operations in _calculate_finishing_labor_minutes().
+
+    This function now primarily returns an empty list since geometry-based operations
+    have been moved to labor. Machine-based "other ops" like edge_break, etch, and
+    unmodeled operations are added elsewhere in estimate_machine_hours_from_plan.
+
+    Args:
+        plan: Process plan dict that may contain geometry features
+        ops: List of operations
+        L, W, T: Part dimensions in inches
+
+    Returns:
+        Tuple of (total_minutes, detail_list) where detail_list is typically empty
+    """
+    detail_list = []
+    other_time = 0.0
+
+    # All geometry-based finishing operations (chamfer, radii, polish, baseline cleanup)
+    # have been moved to _calculate_finishing_labor_minutes() as they are manual labor,
+    # not machine operations.
+
+    # Machine-based "other operations" like edge_break, etch, and unmodeled ops
+    # are added directly in estimate_machine_hours_from_plan() based on text detection.
 
     return round(other_time, 1), detail_list
 
@@ -4020,82 +4133,13 @@ def estimate_machine_hours_from_plan(
         other_ops_minutes += unmodeled_ops_minutes
 
     # Add geometry-based other operations time (chamfers, radii, polish, etc.)
+    # NOTE: This now returns empty since geometry-based operations moved to labor
     geometry_based_other_min, geometry_detail = _calculate_other_ops_minutes(plan, ops, L, W, T)
     other_ops_detail.extend(geometry_detail)
     other_ops_minutes += geometry_based_other_min
 
-    # Check for edge break operation from text extraction
-    edge_break_minutes = 0.0
-    if plan.get('has_edge_break', False):
-        # Calculate perimeter for edge break time estimation
-        perimeter_in = 2.0 * (L + W) if L > 0 and W > 0 else 0.0
-        qty = 1  # Default to 1 part unless specified
-
-        # Extract material group from material name
-        # Common material name patterns -> material groups
-        material_upper = material.upper()
-        if 'ALUMINUM' in material_upper or 'AL' in material_upper:
-            material_group = 'ALUMINUM'
-        elif '52100' in material_upper:
-            material_group = '52100'
-        elif 'STAINLESS' in material_upper or 'SS' in material_upper or '316' in material_upper or '304' in material_upper:
-            material_group = 'STAINLESS'
-        elif 'CARBIDE' in material_upper:
-            material_group = 'CARBIDE'
-        elif 'CERAMIC' in material_upper:
-            material_group = 'CERAMIC'
-        else:
-            # Default to TOOL_STEEL for P20, H13, A2, D2, O1, S7, etc.
-            material_group = 'TOOL_STEEL'
-
-        # Calculate edge break time
-        edge_break_minutes = calc_edge_break_minutes(perimeter_in, qty, material_group)
-        other_ops_detail.append({
-            "type": "edge_break",
-            "label": f"Edge break / deburr ({perimeter_in:.1f}\" perim)",
-            "minutes": round(edge_break_minutes, 1),
-            "source": "text"
-        })
-        other_ops_minutes += edge_break_minutes
-
-    # Check for etch operation from text extraction
-    etch_minutes = 0.0
-    if plan.get('has_etch', False):
-        qty = 1  # Default to 1 part unless specified
-        details_with_etch = 1  # Default to 1 mark per part (vendor & drawing no.)
-
-        # Calculate etch time
-        etch_minutes = calc_etch_minutes(has_etch_note=True, qty=qty, details_with_etch=details_with_etch)
-        other_ops_detail.append({
-            "type": "etch",
-            "label": "Etch / marking",
-            "minutes": round(etch_minutes, 1),
-            "source": "text"
-        })
-        other_ops_minutes += etch_minutes
-
-    # Check for polish contour operation from text extraction
-    polish_minutes = 0.0
-    if plan.get('has_polish_contour', False):
-        qty = 1  # Default to 1 part unless specified
-        # Use default contour dimensions (0.40" × 0.25") unless geometry is available
-        contour_length_in = None  # Will use default 0.40"
-        contour_width_in = None   # Will use default 0.25"
-
-        # Calculate polish contour time
-        polish_minutes = calc_polish_contour_minutes(
-            has_polish_contour=True,
-            qty=qty,
-            contour_length_in=contour_length_in,
-            contour_width_in=contour_width_in
-        )
-        other_ops_detail.append({
-            "type": "polish_contour",
-            "label": "Polish contour",
-            "minutes": round(polish_minutes, 1),
-            "source": "text"
-        })
-        other_ops_minutes += polish_minutes
+    # NOTE: edge_break, etch, and polish_contour have been moved to labor operations
+    # They are now calculated in compute_labor_minutes() as finishing labor
 
     # Update time_breakdown['other'] to match the sum of all other_ops_detail entries
     time_breakdown['other'] = other_ops_minutes
