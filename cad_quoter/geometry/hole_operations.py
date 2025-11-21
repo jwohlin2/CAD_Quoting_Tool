@@ -738,6 +738,8 @@ def parse_mtext_hole_description(mtext: str) -> BackupHoleFeature:
         "(2) <> THRU\\X(JIG GRIND)" -> qty=2, thru=True, ops=[JIG GRIND]
         "\\A1;(3) ∅7/32 THRU; ∅11/32 C'BORE\\PX .100 DEEP FROM FRONT"
             -> qty=3, dia=7/32, thru=True, cbore_dia=11/32, cbore_depth=.100
+        ".1875 THRU" -> qty=1, dia=.1875, thru=True
+        "3/16 THRU" -> qty=1, dia=3/16, thru=True
 
     Args:
         mtext: Raw MTEXT string with formatting codes
@@ -778,6 +780,9 @@ def parse_mtext_hole_description(mtext: str) -> BackupHoleFeature:
         r"[∅Ø]\s*(\d+\.\d+)",       # Decimal with leading: Ø0.375
         r"\)\s*(\.\d+)\s+THRU",     # Plain decimal after qty: (2) .2500 THRU
         r"\)\s*(\d+\.\d+)\s+THRU",  # Plain decimal with leading: (2) 0.2500 THRU
+        r"^\s*(\d+\s*/\s*\d+)\s+THRU",  # Standalone fraction: 3/16 THRU
+        r"^\s*(\.\d+)\s+THRU",      # Standalone decimal: .1875 THRU
+        r"^\s*(\d+\.\d+)\s+THRU",   # Standalone decimal with leading: 0.1875 THRU
     ]
 
     for pattern in dia_patterns:
@@ -901,10 +906,19 @@ def _is_hole_description(text: str) -> bool:
     if has_thread_spec and has_op_keyword:
         return True
 
-    # For other patterns, require qty and (diameter or thread spec)
+    # Check for standalone diameter patterns without quantity marker
+    # Examples: ".1875 THRU", "0.375 THRU", "3/16 THRU", "Ø.375 THRU"
     if not has_qty:
-        return False
+        # Pattern for standalone diameter + hole operation
+        has_standalone_diameter = bool(
+            re.search(r"^\s*\.?\d+\.?\d*\s+(THRU|JIG\s+GRIND)", text, re.IGNORECASE) or
+            re.search(r"^\s*\d+\s*/\s*\d+\s+(THRU|JIG\s+GRIND)", text, re.IGNORECASE) or
+            re.search(r"^[∅Ø]\s*\.?\d+\.?\d*\s+(THRU|JIG\s+GRIND)", text, re.IGNORECASE) or
+            re.search(r"^[∅Ø]\s*\d+\s*/\s*\d+\s+(THRU|JIG\s+GRIND)", text, re.IGNORECASE)
+        )
+        return has_standalone_diameter and has_op_keyword
 
+    # For patterns with qty, require diameter or thread spec
     return (has_diameter or has_thread_spec) and has_op_keyword
 
 
