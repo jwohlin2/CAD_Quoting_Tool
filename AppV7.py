@@ -2611,8 +2611,8 @@ class AppV7:
                     part_total = part.cost_summary.final_price
 
                 # Subtract per-part shipping to get cost without shipping
-                if part.direct_cost_breakdown and part.direct_cost_breakdown.shipping_cost:
-                    part_shipping = part.direct_cost_breakdown.shipping_cost * part.quantity
+                if part.direct_cost_breakdown and part.direct_cost_breakdown.shipping:
+                    part_shipping = part.direct_cost_breakdown.shipping * part.quantity
                     parts_subtotal_no_shipping += (part_total - part_shipping)
                 else:
                     parts_subtotal_no_shipping += part_total
