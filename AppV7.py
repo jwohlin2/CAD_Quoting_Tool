@@ -2500,12 +2500,14 @@ class AppV7:
                 # Set this part as active temporarily
                 old_active_index = self.active_part_index
                 self.active_part_index = part_idx
-                self._cached_quote_data = part
 
                 # Extract quote data for this part if not already extracted
                 if not part.cost_summary or not part.cost_summary.final_price:
                     # Need to extract - set up temporary vars from part data
                     self.cad_file_path = part.cad_file_path
+
+                    # Clear cache to force fresh extraction (critical fix!)
+                    self._cached_quote_data = None
 
                     # Get overrides from part data or use defaults
                     self._temp_machine_rate = self.MACHINE_RATE
@@ -2521,6 +2523,9 @@ class AppV7:
                     # Update the part in the order with the extracted data
                     self.current_order.parts[part_idx] = part_quote
                     part = part_quote
+                else:
+                    # Costs already extracted, use this part as cache
+                    self._cached_quote_data = part
 
                 # Generate the three reports for this part
                 labor_report = self._generate_labor_hours_report()
