@@ -2161,6 +2161,37 @@ class AppV7:
         # Display in output tab
         self.output_text.delete(1.0, tk.END)
 
+        # Add quote header with file name and part family
+        from pathlib import Path
+        cad_filename = Path(self.cad_file_path).name if self.cad_file_path else "Unknown File"
+        part_family = quote_data.get("Part Family", "Unknown")
+        quantity = quote_data.get("Quantity", "1")
+        material = quote_data.get("Material", "")
+
+        header_lines = [
+            "=" * 74,
+            "QUOTE SUMMARY",
+            "=" * 74,
+            f"CAD File: {cad_filename}",
+            f"Part Type: {part_family}",
+        ]
+
+        # Add quantity if > 1
+        if quantity and str(quantity) != "1":
+            header_lines.append(f"Quantity: {quantity} part(s)")
+
+        # Add material if overridden
+        if material:
+            header_lines.append(f"Material: {material}")
+
+        header_lines.extend([
+            "=" * 74,
+            "",
+            ""
+        ])
+
+        self.output_text.insert(tk.END, "\n".join(header_lines))
+
         # CRITICAL: Extract quote data ONCE before parallel report generation
         # This prevents race condition where all 3 threads try to extract simultaneously
         try:

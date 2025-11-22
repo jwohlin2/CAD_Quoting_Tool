@@ -175,12 +175,12 @@ def _plain(s: str) -> str:
     # Handle AutoCAD Mechanical GD&T font character codes
     # Format: {\Famgdt|c0;X} where X is a character code mapping to GD&T symbols
     # Common mappings in amgdt font:
-    #   q = Ø (diameter)
+    #   q = ¢ (chord length - drafting shorthand using cent symbol)
     #   h = ⌭ (perpendicularity)
     #   u = ⏥ (position)
     #   etc.
     gdt_char_map = {
-        'q': 'Ø',  # diameter
+        'q': '¢',  # chord length (cent symbol used as drafting shorthand)
         'h': '⌭',  # perpendicularity
         'u': '⏥',  # position
         'n': '⌖',  # concentricity
@@ -477,12 +477,22 @@ def iter_text_records(
         elif et == "DIMENSION":
             # Get dimension type to detect radial/diameter dimensions
             # dimtype values: 0=linear, 1=aligned, 2=angular, 3=diameter, 4=radius, 6=ordinate
-            dimtype = getattr(ent.dxf, "dimtype", 0) if hasattr(ent, "dxf") else 0
+            dimtype_raw = getattr(ent.dxf, "dimtype", 0) if hasattr(ent, "dxf") else 0
+            # Mask to get just the dimension type (lower 3 bits)
+            # The dimtype field includes flags in higher bits
+            dimtype = dimtype_raw & 0x07
 
             # Always extract the actual measurement value
+            # For ordinate dimensions, get_measurement() returns the ordinate coordinate,
+            # not the dimension value. Use actual_measurement instead.
             meas_in = None
             try:
-                meas = ent.get_measurement()
+                # Try actual_measurement first (more reliable for all dimension types)
+                if hasattr(ent.dxf, "actual_measurement"):
+                    meas = ent.dxf.actual_measurement
+                else:
+                    meas = ent.get_measurement()
+
                 if meas is not None:
                     if hasattr(meas, "magnitude"):
                         meas = meas.magnitude

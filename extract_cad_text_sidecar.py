@@ -111,6 +111,8 @@ def format_human_readable(records):
             y = r.get("y", 0.0)
             in_block = r.get("in_block", False)
             depth = r.get("depth", 0)
+            dimtype = r.get("dimtype")
+            measurement = r.get("measurement")
 
             output.append(f"\n[{i}] {etype} on layer '{layer}'")
             if in_block:
@@ -118,6 +120,14 @@ def format_human_readable(records):
                 output.append(f"    Block: {' -> '.join(block_path)} (depth {depth})")
             output.append(f"    Position: ({x:.2f}, {y:.2f})")
             output.append(f"    Text: {text}")
+
+            # Show dimension-specific fields if present
+            if dimtype is not None:
+                dimtype_names = {0: "linear", 1: "aligned", 2: "angular", 3: "diameter", 4: "radius", 6: "ordinate"}
+                dimtype_name = dimtype_names.get(dimtype, f"unknown({dimtype})")
+                output.append(f"    Dimension Type: {dimtype_name} (dimtype={dimtype})")
+            if measurement is not None:
+                output.append(f"    Measurement: {measurement}")
 
     output.append("\n" + "=" * 80)
     return "\n".join(output)
@@ -136,7 +146,7 @@ def format_csv(records):
     output = io.StringIO()
     writer = csv.DictWriter(
         output,
-        fieldnames=["layout", "layer", "etype", "text", "x", "y", "height", "rotation", "in_block", "depth"],
+        fieldnames=["layout", "layer", "etype", "text", "x", "y", "height", "rotation", "in_block", "depth", "dimtype", "measurement"],
         extrasaction='ignore'
     )
     writer.writeheader()
