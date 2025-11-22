@@ -169,6 +169,31 @@ def _plain(s: str) -> str:
     # Strip MTEXT control codes: \P newlines, %%c diameter symbol, etc.
     s = s.replace("\\P", "\n").replace("\\p", "\n")
     s = s.replace("%%c", "Ø").replace("%%d", "°").replace("%%p", "±")
+
+    # Handle AutoCAD Mechanical GD&T font character codes
+    # Format: {\Famgdt|c0;X} where X is a character code mapping to GD&T symbols
+    # Common mappings in amgdt font:
+    #   q = Ø (diameter)
+    #   h = ⌭ (perpendicularity)
+    #   u = ⏥ (position)
+    #   etc.
+    gdt_char_map = {
+        'q': 'Ø',  # diameter
+        'h': '⌭',  # perpendicularity
+        'u': '⏥',  # position
+        'n': '⌖',  # concentricity
+        'o': '⊕',  # all around
+        'p': '⌯',  # flatness
+        'r': '⏄',  # parallelism
+    }
+
+    # Pattern: {\Famgdt|c0;X} or {\FAMGDT|c0;X}
+    def replace_gdt_char(m):
+        char_code = m.group(1).lower()
+        return gdt_char_map.get(char_code, char_code)
+
+    s = re.sub(r'\{\\[Ff][Aa][Mm][Gg][Dd][Tt]\|c0;(.)\}', replace_gdt_char, s)
+
     return re.sub(r"\s+", " ", s).strip()
 
 
@@ -447,10 +472,15 @@ def iter_text_records(
             if mt is not None:
                 txt = _mtext_to_str(mt)
         elif et == "DIMENSION":
+            # Get dimension type to detect radial/diameter dimensions
+            # dimtype values: 0=linear, 1=aligned, 2=angular, 3=diameter, 4=radius, 6=ordinate
+            dimtype = getattr(ent.dxf, "dimtype", 0) if hasattr(ent, "dxf") else 0
+
             # Some variants carry measurement text at .dxf.text
             txt = getattr(ent.dxf, "text", "") or ""
+
             # Resolve <> placeholder with actual dimension measurement
-            if "<>" in txt:
+            if "<>" in txt or not txt:
                 try:
                     meas = ent.get_measurement()
                     if meas is not None:
@@ -461,7 +491,27 @@ def iter_text_records(
                         meas_str = f"{meas_in:.4f}".rstrip("0").rstrip(".")
                         if meas_str.startswith("0."):
                             meas_str = meas_str[1:]
-                        txt = txt.replace("<>", meas_str)
+
+                        # Add prefix for radial/diameter dimensions if not already present
+                        if dimtype == 4:  # Radial dimension
+                            if not txt or txt == "<>":
+                                meas_str = f"R{meas_str}"
+                            elif "<>" in txt:
+                                # Check if there's already an R prefix in the text
+                                if not re.match(r'^\s*R\s*<>', txt, re.IGNORECASE):
+                                    meas_str = f"R{meas_str}"
+                        elif dimtype == 3:  # Diameter dimension
+                            if not txt or txt == "<>":
+                                meas_str = f"Ø{meas_str}"
+                            elif "<>" in txt:
+                                # Check if there's already a diameter symbol
+                                if not any(c in txt for c in ["Ø", "%%c", "DIA"]):
+                                    meas_str = f"Ø{meas_str}"
+
+                        if "<>" in txt:
+                            txt = txt.replace("<>", meas_str)
+                        elif not txt:
+                            txt = meas_str
                 except Exception:
                     pass
 
