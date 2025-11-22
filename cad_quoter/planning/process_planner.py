@@ -2705,6 +2705,7 @@ def compute_labor_minutes(i: LaborInputs) -> Dict[str, Any]:
             finishing_detail_minutes += edge_break_minutes
 
         # Add etch operation from text extraction
+        # NOTE: Etch/marking is MACHINE TIME ONLY, not labor
         if i.plan.get('has_etch', False):
             qty = 1  # Default to 1 part unless specified
             details_with_etch = 1  # Default to 1 mark per part
@@ -2712,11 +2713,11 @@ def compute_labor_minutes(i: LaborInputs) -> Dict[str, Any]:
             etch_minutes = calc_etch_minutes(has_etch_note=True, qty=qty, details_with_etch=details_with_etch)
             finishing_detail.append({
                 "type": "etch",
-                "label": "Etch / marking",
-                "minutes": round(etch_minutes, 1),
+                "label": "Etch / marking (machine time only)",
+                "minutes": 0.0,  # Not counted in labor - shown in machine time
                 "source": "text"
             })
-            finishing_detail_minutes += etch_minutes
+            # DO NOT add to finishing_detail_minutes - etch is machine time only
 
     # Total finishing includes base formula-based time plus detailed operations
     finishing_total = finishing_base + finishing_detail_minutes
