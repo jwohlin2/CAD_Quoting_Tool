@@ -3735,23 +3735,26 @@ def estimate_machine_hours_from_plan(
 
             # Add detailed operation for renderer
             volume_cuin = op_L * op_W * stock_total
-            from cad_quoter.pricing.time_estimator import _grind_factor
+            from cad_quoter.pricing.time_estimator import _grind_factor, MIN_PER_CUIN_GRIND
             factor = _grind_factor(material, material_group)
             grinding_operations_detailed.append({
                 'op_name': 'grind_faces',
                 'op_description': 'Face Grind - Final Kiss',
                 'length': op_L,
                 'width': op_W,
+                'area': op_L * op_W,
                 'stock_removed_total': stock_total,
                 'faces': 2,
                 'volume_removed': volume_cuin,
+                'min_per_cuin': MIN_PER_CUIN_GRIND,
+                'material_factor': factor,
                 'grind_material_factor': factor,
                 'time_minutes': minutes,
             })
 
         # Grind_reference_faces - Establish datums before profile (punch datum heuristics)
         elif op_type == 'grind_reference_faces':
-            from cad_quoter.pricing.time_estimator import estimate_face_grind_minutes, _grind_factor
+            from cad_quoter.pricing.time_estimator import estimate_face_grind_minutes, _grind_factor, MIN_PER_CUIN_GRIND
             material_group = op.get('material_group', '')
             stock_total = op.get('stock_removed_total', 0.006)
             faces = op.get('faces', 2)
@@ -3768,9 +3771,12 @@ def estimate_machine_hours_from_plan(
                 'op_description': 'Grind Reference Faces (Datum)',
                 'length': op_L,
                 'width': op_W,
+                'area': op_L * op_W,
                 'stock_removed_total': stock_total,
                 'faces': faces,
                 'volume_removed': volume_cuin,
+                'min_per_cuin': MIN_PER_CUIN_GRIND,
+                'material_factor': factor,
                 'grind_material_factor': factor,
                 'time_minutes': minutes,
                 'is_datum': True,  # Flag for renderer
@@ -3778,7 +3784,7 @@ def estimate_machine_hours_from_plan(
 
         # Grind_length - End face grinding for both round and non-round punches
         elif op_type == 'grind_length':
-            from cad_quoter.pricing.time_estimator import estimate_face_grind_minutes, _grind_factor
+            from cad_quoter.pricing.time_estimator import estimate_face_grind_minutes, _grind_factor, MIN_PER_CUIN_GRIND
             material_group = op.get('material_group', '')
             stock_total = op.get('stock_removed_total', 0.006)
             faces = op.get('faces', 2)
@@ -3801,16 +3807,20 @@ def estimate_machine_hours_from_plan(
                 'op_description': 'Grind to Length (End Faces)',
                 'length': op_L,
                 'width': op_W,
+                'area': op_L * op_W,
                 'stock_removed_total': stock_total,
                 'faces': faces,
                 'volume_removed': volume_cuin,
+                'min_per_cuin': MIN_PER_CUIN_GRIND,
+                'material_factor': factor,
                 'grind_material_factor': factor,
                 'time_minutes': minutes,
             })
 
         # OD grinding for round pierce punches (rough and finish)
         elif op_type in ('grind_od', 'od_grind', 'od_grind_rough', 'od_grind_finish'):
-            from cad_quoter.pricing.time_estimator import estimate_od_grind_minutes, _grind_factor
+            from cad_quoter.pricing.time_estimator import estimate_od_grind_minutes, _grind_factor, MIN_PER_CUIN_GRIND
+            from math import pi
             material_group = op.get('material_group', '')
             # Build meta dict from op parameters
             meta = {
@@ -3828,16 +3838,42 @@ def estimate_machine_hours_from_plan(
             minutes = estimate_od_grind_minutes(meta, material, material_group)
             time_breakdown['grinding'] += minutes
 
+            # Calculate the volume used in the time calculation (matching estimate_od_grind_minutes logic)
+            vol = meta.get('od_grind_volume_removed_cuin', 0)
+            if vol <= 0.0:
+                # Calculate from D, T, and radial stock (same as estimate_od_grind_minutes)
+                D = meta.get('diameter', 0)
+                T = meta.get('thickness', 0)
+                stock = meta.get('stock_allow_radial', 0.003)
+                if D > 0 and T > 0 and stock > 0:
+                    r = D / 2.0
+                    vol = pi * (r * r - (r - stock) ** 2) * T
+
             # Add detailed operation
             factor = _grind_factor(material, material_group)
             op_desc = 'OD Grind - Rough' if 'rough' in op_type else 'OD Grind - Finish'
+
+            # For display: OD grinding uses cylindrical geometry
+            # We'll show diameter and thickness as the key dimensions
+            diam = meta.get('diameter', 0)
+            thickness = meta.get('total_length_in', L)
+            stock = meta.get('stock_allow_radial', 0.003)
+
             grinding_operations_detailed.append({
                 'op_name': op_type,
                 'op_description': op_desc,
-                'num_diams': op.get('num_diams', 1),
-                'total_length_in': op.get('total_length_in', L),
+                'length': diam,  # Diameter
+                'width': thickness,  # Length/thickness of punch
+                'area': pi * diam * stock if diam > 0 and stock > 0 else 0,  # Approximate surface area removed
+                'stock_removed_total': stock,
+                'faces': 1,  # OD is a single surface
+                'volume_removed': vol,
+                'min_per_cuin': MIN_PER_CUIN_GRIND,
+                'material_factor': factor,
                 'grind_material_factor': factor,
                 'time_minutes': minutes,
+                'num_diams': op.get('num_diams', 1),
+                'total_length_in': op.get('total_length_in', L),
             })
 
         # Optional: rough milling/turning operations (placeholder)
