@@ -172,6 +172,73 @@ def needs_wedm_for_windows(windows_need_sharp: bool, window_corner_radius_req: O
     return False
 
 
+def determine_profile_process(
+    material_group: str,
+    smallest_inside_radius: Optional[float],
+    has_undercut: bool,
+    min_section_width: Optional[float],
+    overall_height: Optional[float],
+    num_radius_dims: int,
+    num_sc_dims: int,
+    num_chord_dims: int
+) -> str:
+    """
+    Determine whether to use GRIND or WIRE EDM for profile windows.
+
+    Decision tree logic:
+    1. Material/hardness gate: Carbide, Ceramic, or super-hard materials → WIRE EDM
+    2. Small inside radius gate: radius < 0.020" → WIRE EDM
+    3. Undercuts/weird draft → WIRE EDM
+    4. Slender/tiny section gate: min_section_width < 0.10 * overall_height → WIRE EDM
+    5. Complexity score: feature_count > 2 → WIRE EDM
+    Otherwise → GRIND
+
+    Args:
+        material_group: Material group code (e.g., "H1", "C1", "P2", "N2")
+        smallest_inside_radius: Smallest inside radius in inches
+        has_undercut: Whether the profile has undercuts or negative draft
+        min_section_width: Thinnest section width in inches
+        overall_height: Overall height for slenderness check
+        num_radius_dims: Count of radius dimensions
+        num_sc_dims: Count of SC dimensions
+        num_chord_dims: Count of chord dimensions
+
+    Returns:
+        "wire_edm" or "grind"
+    """
+    # Default: assume grinding is allowed
+    process = "grind"
+
+    # Normalize material_group to uppercase for comparison
+    mat_group = (material_group or "").upper()
+
+    # 1) Material / hardness gate
+    # H1 = Carbide, C1 = Ceramic, plus any explicit material names
+    if mat_group in {"H1", "C1", "CARBIDE", "CERAMIC", "SUPER_HARD"}:
+        process = "wire_edm"
+
+    # 2) Small inside radius gate
+    elif smallest_inside_radius is not None and smallest_inside_radius < 0.020:
+        process = "wire_edm"
+
+    # 3) Undercuts / weird draft
+    elif has_undercut:
+        process = "wire_edm"
+
+    # 4) Slender / tiny section gate
+    elif (min_section_width is not None and overall_height is not None
+          and overall_height > 0 and min_section_width < 0.10 * overall_height):
+        process = "wire_edm"
+
+    # 5) Complexity score
+    else:
+        feature_count = num_radius_dims + num_sc_dims + num_chord_dims
+        if feature_count > 2:
+            process = "wire_edm"
+
+    return process
+
+
 # ---------------------------------------------------------------------------
 # Utilities
 # ---------------------------------------------------------------------------
@@ -607,6 +674,92 @@ def planner_sections_blocks(params: Dict[str, Any]) -> Dict[str, Any]:
 # Die Section / Carbide Block Planner
 # ---------------------------------------------------------------------------
 
+def _extract_profile_dimension_stats(params: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    Extract dimension statistics for profile/window EDM decision logic.
+
+    Analyzes dimensions to count:
+    - Radius dimensions (dimtype == 4 or text contains "R")
+    - SC (special callout) dimensions
+    - Chord dimensions (text contains ¢ symbol)
+    - Smallest inside radius
+
+    Also checks text for undercut notes and polish contour notes.
+
+    Args:
+        params: Input parameters dict with 'dimensions' and 'text_entities'
+
+    Returns:
+        Dict with counts and flags
+    """
+    stats = {
+        "num_radius_dims": 0,
+        "num_sc_dims": 0,
+        "num_chord_dims": 0,
+        "smallest_inside_radius": None,
+        "has_undercut": False,
+        "has_polish_contour_note": False,
+    }
+
+    # Count dimension types from dimensions list
+    dimensions = params.get("dimensions", [])
+    for dim in dimensions:
+        dimtype = dim.get("dimtype")
+        text = str(dim.get("text", "")).upper()
+        measurement_in = dim.get("measurement_in") or dim.get("measurement") or dim.get("value_in")
+
+        # Count radius dimensions (dimtype 4 = radius, or text starts with R)
+        if dimtype == 4 or text.startswith("R") or text.startswith(".R"):
+            stats["num_radius_dims"] += 1
+            # Track smallest inside radius (assume inside radii are typically < 1.0")
+            if measurement_in is not None:
+                try:
+                    radius_val = float(measurement_in)
+                    if radius_val > 0 and radius_val < 1.0:  # Filter out large radii
+                        if stats["smallest_inside_radius"] is None:
+                            stats["smallest_inside_radius"] = radius_val
+                        else:
+                            stats["smallest_inside_radius"] = min(stats["smallest_inside_radius"], radius_val)
+                except (ValueError, TypeError):
+                    pass
+
+        # Count SC (special callout) dimensions
+        if " SC" in text or text.endswith("SC"):
+            stats["num_sc_dims"] += 1
+
+        # Count chord dimensions (¢ symbol or CHORD keyword)
+        if "¢" in text or "CHORD" in text:
+            stats["num_chord_dims"] += 1
+
+    # Check all text entities for undercut and polish notes
+    all_text = []
+
+    # Collect from text_entities
+    for txt_entity in params.get("text_entities", []):
+        text_content = txt_entity.get("text", "")
+        if text_content:
+            all_text.append(text_content.upper())
+
+    # Collect from mtext_entities
+    for mtext_entity in params.get("mtext_entities", []):
+        text_content = mtext_entity.get("text", "")
+        if text_content:
+            all_text.append(text_content.upper())
+
+    # Collect from general 'text' field
+    if "text" in params:
+        all_text.append(str(params["text"]).upper())
+
+    # Check for undercut notes
+    for text in all_text:
+        if "UNDERCUT" in text or "NEGATIVE DRAFT" in text or "SMALL UNDERCUT" in text:
+            stats["has_undercut"] = True
+        if "POLISH CONTOUR" in text or "POLISH PROFILE" in text:
+            stats["has_polish_contour_note"] = True
+
+    return stats
+
+
 @dataclass
 class DieSectionParams:
     """Parameters for die section planning."""
@@ -637,6 +790,16 @@ class DieSectionParams:
     num_working_faces: int = 2
     has_land_height: bool = False
 
+    # Profile/Window EDM decision inputs
+    smallest_inside_radius: Optional[float] = None  # Smallest inside radius in inches
+    num_radius_dims: int = 0  # Count of R.xxx dimensions
+    num_sc_dims: int = 0  # Count of xxx sc dimensions
+    num_chord_dims: int = 0  # Count of chord dimensions with ¢ symbol
+    has_undercut: bool = False  # Has undercut or negative draft
+    min_section_width: Optional[float] = None  # Thinnest section width in inches
+    overall_height: Optional[float] = None  # Overall height for slenderness check
+    has_polish_contour_note: bool = False  # Has "POLISH CONTOUR" note
+
     # Hole info (usually none for form die sections)
     hole_count: int = 0
     hole_sets: List[Dict[str, Any]] = field(default_factory=list)
@@ -645,6 +808,7 @@ class DieSectionParams:
     requires_wire_edm: bool = True
     requires_form_grind: bool = False
     requires_polish: bool = False
+    profile_process: str = "grind"  # "grind" or "wire_edm" - decision for profile windows
 
     # Family sub-type
     sub_type: str = "die_section"  # die_section, cam, hemmer, sensor_block
@@ -697,6 +861,14 @@ def _extract_die_section_params(params: Dict[str, Any]) -> DieSectionParams:
                 tight_tols.append(dim)
                 min_tol = min(min_tol, tol)
 
+    # Extract profile dimension statistics for EDM decision logic
+    profile_stats = _extract_profile_dimension_stats(params)
+
+    # Extract min_section_width and overall_height from params
+    # (These would typically come from CAD analysis of the profile geometry)
+    min_section_width = params.get("min_section_width")
+    overall_height = params.get("overall_height") or T  # Default to thickness if not provided
+
     return DieSectionParams(
         length_in=float(L),
         width_in=float(W),
@@ -715,6 +887,16 @@ def _extract_die_section_params(params: Dict[str, Any]) -> DieSectionParams:
         num_reliefs=int(params.get("num_reliefs", 0)),
         num_working_faces=int(params.get("num_working_faces", 2)),
         has_land_height=bool(params.get("has_land_height", False)),
+        # Profile/Window EDM decision inputs
+        smallest_inside_radius=profile_stats.get("smallest_inside_radius"),
+        num_radius_dims=profile_stats.get("num_radius_dims", 0),
+        num_sc_dims=profile_stats.get("num_sc_dims", 0),
+        num_chord_dims=profile_stats.get("num_chord_dims", 0),
+        has_undercut=profile_stats.get("has_undercut", False),
+        min_section_width=min_section_width,
+        overall_height=overall_height,
+        has_polish_contour_note=profile_stats.get("has_polish_contour_note", False),
+        # Other params
         hole_count=int(params.get("hole_count", 0)),
         hole_sets=params.get("hole_sets", []),
         requires_wire_edm=bool(params.get("requires_wire_edm", True)),
@@ -832,6 +1014,22 @@ def create_die_section_plan(params: Dict[str, Any]) -> Dict[str, Any]:
     is_die_section = _is_carbide_die_section(p)
     complexity = _calculate_die_section_complexity(p)
 
+    # Determine profile process (GRIND vs WIRE EDM) using decision tree
+    normalized_mat_group = _normalize_material_group(p.material, p.material_group)
+    profile_process = determine_profile_process(
+        material_group=normalized_mat_group,
+        smallest_inside_radius=p.smallest_inside_radius,
+        has_undercut=p.has_undercut,
+        min_section_width=p.min_section_width,
+        overall_height=p.overall_height,
+        num_radius_dims=p.num_radius_dims,
+        num_sc_dims=p.num_sc_dims,
+        num_chord_dims=p.num_chord_dims
+    )
+    # Update the params with the decision
+    # Note: We can't modify p directly since it's a dataclass, but we can use the value
+    # in subsequent operations. For now, store it in the plan metadata.
+
     plan = {
         "ops": [],
         "fixturing": [],
@@ -849,6 +1047,7 @@ def create_die_section_plan(params: Dict[str, Any]) -> Dict[str, Any]:
             "sub_type": p.sub_type,
             "is_carbide_die_section": is_die_section,
             "complexity": complexity,
+            "profile_process": profile_process,  # GRIND or WIRE EDM decision
         }
     }
 
@@ -862,7 +1061,7 @@ def create_die_section_plan(params: Dict[str, Any]) -> Dict[str, Any]:
     _add_die_section_finish_grind_ops(plan, p, is_carbide)
 
     # 4. Form operations (Wire EDM and/or form grinding)
-    _add_die_section_form_ops(plan, p, is_carbide)
+    _add_die_section_form_ops(plan, p, is_carbide, profile_process)
 
     # 5. Heat treatment (if not carbide)
     if not is_carbide:
@@ -1001,8 +1200,15 @@ def _add_die_section_finish_grind_ops(plan: Dict[str, Any], p: DieSectionParams,
         })
 
 
-def _add_die_section_form_ops(plan: Dict[str, Any], p: DieSectionParams, is_carbide: bool) -> None:
-    """Add form cutting operations (Wire EDM and/or form grinding)."""
+def _add_die_section_form_ops(plan: Dict[str, Any], p: DieSectionParams, is_carbide: bool, profile_process: str = "wire_edm") -> None:
+    """Add form cutting operations (Wire EDM and/or form grinding).
+
+    Args:
+        plan: The plan dict to add operations to
+        p: Die section parameters
+        is_carbide: Whether material is carbide
+        profile_process: "wire_edm" or "grind" - decision from determine_profile_process()
+    """
     if not p.has_internal_form and not p.has_edge_form:
         return
 
@@ -1014,8 +1220,13 @@ def _add_die_section_form_ops(plan: Dict[str, Any], p: DieSectionParams, is_carb
 
     depth = p.form_depth_in if p.form_depth_in > 0 else p.thickness_in * 0.5
 
+    # Use profile_process decision to determine which method to use
+    # Override with legacy flags if they're explicitly set
+    use_wire_edm = profile_process == "wire_edm" or p.requires_wire_edm or p.has_internal_form
+    use_form_grind = profile_process == "grind" or p.requires_form_grind
+
     # Wire EDM for internal/edge forms
-    if p.requires_wire_edm or p.has_internal_form:
+    if use_wire_edm:
         # Wire EDM time: perimeter × minutes_per_inch × material_factor
         # Carbide: ~0.36 min/in (2.8 ipm), Tool steel: ~0.25 min/in (4 ipm)
         wire_mpi = 0.36 if is_carbide else 0.25
@@ -1052,7 +1263,7 @@ def _add_die_section_form_ops(plan: Dict[str, Any], p: DieSectionParams, is_carb
         })
 
     # Form grinding for precision forms
-    if p.requires_form_grind:
+    if use_form_grind:
         # Form grind time: perimeter × depth × rate × material factor
         grind_factor = 2.5 if is_carbide else 1.0
         form_grind_time = (perimeter * depth * 0.5) * grind_factor
@@ -1123,6 +1334,23 @@ def _add_die_section_finishing_ops(plan: Dict[str, Any], p: DieSectionParams,
             "note": "Polish cavity/working surfaces to spec Ra",
         })
         base_time += polish_time
+
+    # Add extra time for contour polishing if specified in drawing notes
+    if p.has_polish_contour_note:
+        # Calculate polish time based on form perimeter
+        # Rule of thumb: k_polish = 2.0 min/inch for contour polishing
+        k_polish = 2.0
+        perimeter = p.form_perimeter_in if p.form_perimeter_in > 0 else 2 * (p.length_in + p.width_in) * 0.6
+        contour_polish_time = k_polish * perimeter
+        contour_polish_time = max(contour_polish_time, 5.0)  # Minimum 5 minutes
+
+        plan["ops"].append({
+            "op": "polish_contour",
+            "perimeter_in": perimeter,
+            "time_minutes": contour_polish_time,
+            "note": f"Polish contour profile per drawing note: {perimeter:.2f}\" perimeter",
+        })
+        base_time += contour_polish_time
 
     # Edge break time
     edge_break_time = max(3.0, p.num_chamfers * 0.5 + 2.0)
@@ -5737,6 +5965,17 @@ class PunchPlannerParams:
     has_wire_profile: bool = False  # Requires wire EDM profiling
     wire_profile_perimeter_in: float = 0.0  # Perimeter for wire EDM
 
+    # Profile/Window EDM decision inputs (similar to DieSectionParams)
+    smallest_inside_radius: Optional[float] = None  # Smallest inside radius in inches
+    num_radius_dims: int = 0  # Count of R.xxx dimensions
+    num_sc_dims: int = 0  # Count of xxx sc dimensions
+    num_chord_dims: int = 0  # Count of chord dimensions with ¢ symbol
+    has_undercut: bool = False  # Has undercut or negative draft
+    min_section_width: Optional[float] = None  # Thinnest section width in inches
+    overall_height: Optional[float] = None  # Overall height for slenderness check
+    has_polish_contour_note: bool = False  # Has "POLISH CONTOUR" note
+    profile_process: str = "grind"  # "grind" or "wire_edm" - decision for profile
+
     def __post_init__(self):
         if self.tap_summary is None:
             self.tap_summary = []
@@ -5749,9 +5988,63 @@ def _is_carbide(material: str, material_group: str) -> bool:
     return "CARBIDE" in mat_upper or "CARBIDE" in group_upper
 
 
+def _normalize_material_group(material: str, material_group: str) -> str:
+    """
+    Normalize material and material_group to a standardized material group code.
+
+    Returns a normalized material group string for use in process decisions.
+    Common codes: H1 (Carbide), C1 (Ceramic), P2 (Tool Steel), N2 (Aluminum), etc.
+
+    Args:
+        material: Material name (e.g., "A2", "CARBIDE", "Aluminum")
+        material_group: Material group code (e.g., "H1", "P2", "N2")
+
+    Returns:
+        Normalized material group string (uppercase)
+    """
+    mat_upper = (material or "").upper()
+    group_upper = (material_group or "").upper()
+
+    # Return material_group if it's already a valid code
+    if group_upper in {"H1", "C1", "P2", "P3", "N2", "M1", "S3"}:
+        return group_upper
+
+    # Map common material names to material groups
+    if "CARBIDE" in mat_upper or "CARBIDE" in group_upper:
+        return "H1"
+    if "CERAMIC" in mat_upper or "CERAMIC" in group_upper:
+        return "C1"
+    if "ALUMINUM" in mat_upper or "ALUMINUM" in group_upper or mat_upper in {"AL", "6061", "7075"}:
+        return "N2"
+    if "STAINLESS" in mat_upper or mat_upper in {"304", "316", "17-4", "420"}:
+        return "M1"
+    if "TITANIUM" in mat_upper or mat_upper.startswith("TI"):
+        return "S3"
+    if mat_upper in {"A2", "D2", "O1", "S7", "H13"}:
+        return "P2"  # Tool steel
+    if mat_upper in {"52100", "BEARING STEEL"}:
+        return "P3"
+
+    # Default: return whatever material_group was provided (or empty string)
+    return group_upper or "P2"  # Default to P2 (tool steel) if unknown
+
+
 def create_punch_plan(params: Dict[str, Any]) -> Dict[str, Any]:
     """Create a detailed manufacturing plan for a punch."""
     p = _extract_punch_params(params)
+
+    # Determine profile process (GRIND vs WIRE EDM) using decision tree
+    normalized_mat_group = _normalize_material_group(p.material, p.material_group)
+    profile_process = determine_profile_process(
+        material_group=normalized_mat_group,
+        smallest_inside_radius=p.smallest_inside_radius,
+        has_undercut=p.has_undercut,
+        min_section_width=p.min_section_width,
+        overall_height=p.overall_height,
+        num_radius_dims=p.num_radius_dims,
+        num_sc_dims=p.num_sc_dims,
+        num_chord_dims=p.num_chord_dims
+    )
 
     plan = {
         "ops": [],
@@ -5764,6 +6057,10 @@ def create_punch_plan(params: Dict[str, Any]) -> Dict[str, Any]:
             "utilities": False,
             "consumables_flat": False,
             "packaging_flat": True,
+        },
+        "meta": {
+            "family": "Punches",
+            "profile_process": profile_process,  # GRIND or WIRE EDM decision
         }
     }
 
@@ -5773,7 +6070,7 @@ def create_punch_plan(params: Dict[str, Any]) -> Dict[str, Any]:
     _add_punch_grinding_ops(plan, p)
     _add_punch_hole_ops(plan, p)
     _add_punch_edge_ops(plan, p)
-    _add_punch_form_ops(plan, p)
+    _add_punch_form_ops(plan, p, profile_process)
     _add_punch_qa_checks(plan, p)
     _add_punch_fixturing_notes(plan, p)
 
@@ -5785,6 +6082,13 @@ def create_punch_plan(params: Dict[str, Any]) -> Dict[str, Any]:
 
 def _extract_punch_params(params: Dict[str, Any]) -> PunchPlannerParams:
     """Extract and normalize parameters from input dict."""
+    # Extract profile dimension statistics for EDM decision logic
+    profile_stats = _extract_profile_dimension_stats(params)
+
+    # Extract min_section_width and overall_height from params
+    min_section_width = params.get("min_section_width")
+    overall_height = params.get("overall_height") or params.get("overall_length_in", 0.0)
+
     return PunchPlannerParams(
         family=params.get("family", "round_punch"),
         shape_type=params.get("shape_type", "round"),
@@ -5809,6 +6113,15 @@ def _extract_punch_params(params: Dict[str, Any]) -> PunchPlannerParams:
         has_flats=bool(params.get("has_flats", False)),
         has_wire_profile=bool(params.get("has_wire_profile", False)),
         wire_profile_perimeter_in=float(params.get("wire_profile_perimeter_in", 0.0)),
+        # Profile/Window EDM decision inputs
+        smallest_inside_radius=profile_stats.get("smallest_inside_radius"),
+        num_radius_dims=profile_stats.get("num_radius_dims", 0),
+        num_sc_dims=profile_stats.get("num_sc_dims", 0),
+        num_chord_dims=profile_stats.get("num_chord_dims", 0),
+        has_undercut=profile_stats.get("has_undercut", False),
+        min_section_width=min_section_width,
+        overall_height=overall_height,
+        has_polish_contour_note=profile_stats.get("has_polish_contour_note", False),
     )
 
 
@@ -6068,19 +6381,71 @@ def _add_punch_edge_ops(plan: Dict[str, Any], p: PunchPlannerParams) -> None:
         })
 
 
-def _add_punch_form_ops(plan: Dict[str, Any], p: PunchPlannerParams) -> None:
-    """Add form/polish operations for contoured punches."""
+def _add_punch_form_ops(plan: Dict[str, Any], p: PunchPlannerParams, profile_process: str = "wire_edm") -> None:
+    """Add form/polish operations for contoured punches.
+
+    Args:
+        plan: The plan dict to add operations to
+        p: Punch parameters
+        profile_process: "wire_edm" or "grind" - decision from determine_profile_process()
+    """
+    # Add wire EDM or grinding operations for profiles based on decision
+    if p.has_wire_profile or p.has_flats:
+        if profile_process == "wire_edm":
+            # Use wire EDM for profile cutting
+            _add_punch_wire_edm_ops(plan, p)
+        else:
+            # Use form grinding for profile cutting
+            perimeter = p.wire_profile_perimeter_in
+            if perimeter <= 0:
+                # Estimate perimeter based on shape
+                if p.shape_type == "round":
+                    perimeter = 3.14159 * p.max_od_or_width_in
+                else:
+                    w = p.body_width_in or p.max_od_or_width_in
+                    t = p.body_thickness_in or w
+                    perimeter = 2 * (w + t)
+
+            is_carbide = _is_carbide(p.material, p.material_group)
+            grind_factor = 2.5 if is_carbide else 1.0
+            depth = p.body_thickness_in or p.max_od_or_width_in or 1.0
+            form_grind_time = (perimeter * depth * 0.5) * grind_factor
+            form_grind_time = max(form_grind_time, 8.0 if is_carbide else 5.0)
+
+            plan["ops"].append({
+                "op": "form_grind_profile",
+                "perimeter_in": perimeter,
+                "depth_in": depth,
+                "material_factor": grind_factor,
+                "time_minutes": form_grind_time,
+                "note": f"Form grind profile: {perimeter:.2f}\" perimeter",
+            })
+
     if p.has_3d_surface:
         plan["ops"].append({
             "op": "3d_mill_form",
             "note": "3D mill contoured nose section"
         })
 
-    if p.has_polish_contour:
-        plan["ops"].append({
-            "op": "polish_contour",
-            "note": "Polish contoured surface to spec"
-        })
+    # Add polish operations
+    if p.has_polish_contour or p.has_polish_contour_note:
+        # Calculate polish time based on perimeter if available
+        k_polish = 2.0  # min/inch for contour polishing
+        perimeter = p.wire_profile_perimeter_in if p.wire_profile_perimeter_in > 0 else 0.0
+        if perimeter > 0:
+            polish_time = k_polish * perimeter
+            polish_time = max(polish_time, 3.0)  # Minimum 3 minutes
+            plan["ops"].append({
+                "op": "polish_contour",
+                "perimeter_in": perimeter,
+                "time_minutes": polish_time,
+                "note": f"Polish contoured surface to spec: {perimeter:.2f}\" perimeter"
+            })
+        else:
+            plan["ops"].append({
+                "op": "polish_contour",
+                "note": "Polish contoured surface to spec"
+            })
 
 
 def _add_punch_qa_checks(plan: Dict[str, Any], p: PunchPlannerParams) -> None:
