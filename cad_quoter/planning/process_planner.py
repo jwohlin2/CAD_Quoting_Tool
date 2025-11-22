@@ -492,11 +492,15 @@ def planner_die_plate(params: Dict[str, Any]) -> Plan:
 
     # DEBUG output for square-up
     overage_tier = "Small blank" if max_dim < 3.0 else "Normal blank"
+    # Calculate overage (clamped to >= 0)
+    overage_L = max(stock_L - L, 0.0)
+    overage_W = max(stock_W - W, 0.0)
+    overage_T = max(stock_T - T, 0.0)
     print(f"DEBUG: Full-Blank Square-up operation (die_plate):")
     print(f"  Finished dimensions: L={L:.3f}\", W={W:.3f}\", T={T:.3f}\"")
     print(f"  Max dimension: {max_dim:.3f}\" → {overage_tier} overage")
     print(f"  Stock dimensions: L={stock_L:.3f}\", W={stock_W:.3f}\", T={stock_T:.3f}\"")
-    print(f"  Stock overage: +{stock_L - L:.3f}\" L, +{stock_W - W:.3f}\" W, +{stock_T - T:.3f}\" T")
+    print(f"  Stock overage: +{overage_L:.3f}\" L, +{overage_W:.3f}\" W, +{overage_T:.3f}\" T")
     print(f"  Volume breakdown:")
     print(f"    - Thickness (both faces): {volume_thickness:.4f} in³")
     print(f"    - Length trim (both ends): {volume_length_trim:.4f} in³")
@@ -4137,10 +4141,14 @@ def estimate_machine_hours_from_plan(
             })
 
             # DEBUG: Print all full square-up parameters and price drivers
+            # Calculate overage (clamped to >= 0)
+            debug_overage_L = max(stock_L - op_length, 0.0)
+            debug_overage_W = max(stock_W - op_width, 0.0)
+            debug_overage_T = max(stock_T - op_thickness, 0.0)
             print(f"\nDEBUG: FULL SQUARE-UP MILL (Price Drivers):")
             print(f"  Finished: L={op_length:.3f}\", W={op_width:.3f}\", T={op_thickness:.3f}\"")
             print(f"  Stock: L={stock_L:.3f}\", W={stock_W:.3f}\", T={stock_T:.3f}\"")
-            print(f"  Stock overage: +{stock_L - op_length:.3f}\" L, +{stock_W - op_width:.3f}\" W, +{stock_T - op_thickness:.3f}\" T")
+            print(f"  Stock overage: +{debug_overage_L:.3f}\" L, +{debug_overage_W:.3f}\" W, +{debug_overage_T:.3f}\" T")
             print(f"  Volume breakdown:")
             print(f"    - Thickness (faces): {volume_thickness:.4f} in³")
             print(f"    - Length trim: {volume_length_trim:.4f} in³")
@@ -4730,7 +4738,12 @@ def render_square_up_block(
         D = full_square_up_op.get('tool_diameter', 0)
         mat_factor = full_square_up_op.get('material_factor', 1.0)
 
-        ctx1 = f"Method: Mill | ToolØ = W/3 ({D:.3f}\") | Stock overage: {stock_L - fin_L:+.2f}\" L, {stock_W - fin_W:+.2f}\" W, {stock_T - fin_T:+.3f}\" T"
+        # Calculate stock overage (clamped to >= 0)
+        overage_L = max(stock_L - fin_L, 0.0)
+        overage_W = max(stock_W - fin_W, 0.0)
+        overage_T = max(stock_T - fin_T, 0.0)
+
+        ctx1 = f"Method: Mill | ToolØ = W/3 ({D:.3f}\") | Stock overage: +{overage_L:.2f}\" L, +{overage_W:.2f}\" W, +{overage_T:.3f}\" T"
         ctx2 = f"Strategy: Volume-based | Material factor: {mat_factor:.2f} | Includes facing + trimming all sides"
         lines.append(ctx1)
         lines.append(ctx2)
@@ -4771,18 +4784,20 @@ def render_square_up_block(
 
         ovr_badge = " (ovr)" if used_ovr else ""
 
-        # Calculate removed thickness for display
-        thickness_removed = max(stock_T - fin_T, 0.0)
+        # Calculate removed thickness and volume for display
+        stock_removed_T = max(stock_T - fin_T, 0.0)
+        # Calculate volume as stock_removed_T * finish_L * finish_W
+        volume_cuin = stock_removed_T * fin_L * fin_W
 
         # Build line with finished dimensions and removed thickness/volume - stay ≤106 chars
-        line = (f"Face Mill - Full Square-Up | W {fin_W:.3f}\" | L {fin_L:.3f}\" | T {thickness_removed:.3f}\" | "
-                f"Vol {volume_removed:.1f} in³ | Time {time_min:.2f} min{ovr_badge}")
+        line = (f"Face Mill - Full Square-Up | W {fin_W:.3f}\" | L {fin_L:.3f}\" | T {stock_removed_T:.3f}\" | "
+                f"Vol {volume_cuin:.1f} in³ | Time {time_min:.2f} min{ovr_badge}")
 
         lines.append(line[:106])
         total_time += time_min
 
         # Add volume breakdown line showing the calculation
-        breakdown_line = (f"  Volume: T {thickness_removed:.3f}\" × L {fin_L:.3f}\" × W {fin_W:.3f}\" = {volume_removed:.1f} in³ "
+        breakdown_line = (f"  Volume: T {stock_removed_T:.3f}\" × L {fin_L:.3f}\" × W {fin_W:.3f}\" = {volume_cuin:.1f} in³ "
                           f"| Factor {mat_factor:.2f}")
         lines.append(breakdown_line[:106])
 
