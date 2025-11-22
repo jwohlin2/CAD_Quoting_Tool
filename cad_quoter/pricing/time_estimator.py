@@ -1476,7 +1476,7 @@ def convert_punch_to_quote_machine_hours(machine_hours: PunchMachineHours, labor
         "total_grinding_minutes": machine_hours.od_grinding_min + machine_hours.id_grinding_min + machine_hours.face_grinding_min,
         "total_edm_minutes": machine_hours.edm_min,
         "total_other_minutes": machine_hours.sawing_min + machine_hours.chamfer_min + machine_hours.polishing_min,
-        "total_cmm_minutes": machine_hours.inspection_min + machine_hours.critical_od_inspection_min,
+        "total_inspection_minutes": machine_hours.inspection_min + machine_hours.critical_od_inspection_min,
         "total_etch_minutes": machine_hours.etch_marking_min,
         "total_edge_break_minutes": 0.0,  # Edge break is typically in labor for punches
         "total_polish_minutes": machine_hours.polishing_min,  # Already included in polishing_min
