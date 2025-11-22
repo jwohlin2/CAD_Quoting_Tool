@@ -1251,6 +1251,8 @@ def _add_die_section_form_ops(plan: Dict[str, Any], p: DieSectionParams, is_carb
             "wire_profile_perimeter_in": perimeter,
             "thickness_in": depth,
             "skims": skims,
+            "material": p.material,
+            "material_group": p.material_group,
             "material_factor": edm_mat_factor,
             "time_minutes": wire_time,
             "note": f"Wire EDM form profile: {perimeter:.2f}\" perimeter × {depth:.3f}\" deep",
@@ -1273,6 +1275,8 @@ def _add_die_section_form_ops(plan: Dict[str, Any], p: DieSectionParams, is_carb
             "op": "form_grind",
             "perimeter_in": perimeter,
             "depth_in": depth,
+            "material": p.material,
+            "material_group": p.material_group,
             "material_factor": grind_factor,
             "time_minutes": form_grind_time,
             "note": f"Form grind to final profile and tolerance",
@@ -3810,6 +3814,78 @@ def estimate_machine_hours_from_plan(
             perimeter = 2 * ((L or 4) + (W or 3))
             time_breakdown['milling'] += calculate_milling_time(perimeter, 0.1, T or 0.5, material, "Endmill_Profile")
 
+        # Die section form operations (from EDM decision logic)
+        elif op_type == 'wire_edm_form':
+            # Wire EDM for die section internal/edge forms
+            from cad_quoter.pricing.time_estimator import estimate_wire_edm_minutes, _edm_material_factor, _wire_mins_per_in
+            perimeter = op.get('wire_profile_perimeter_in', 0.0)
+            thickness = op.get('thickness_in', T or 0.5)
+            skims = op.get('skims', 1)
+            material_group = op.get('material_group', '')
+
+            # Calculate EDM time
+            material_factor = op.get('edm_material_factor') or op.get('material_factor') or _edm_material_factor(material, material_group)
+            mpi = op.get('edm_min_per_in') or _wire_mins_per_in(material, material_group, thickness)
+
+            # Base time: path_length × min_per_in × material_factor
+            edm_time = perimeter * mpi * material_factor
+
+            # Add skim passes
+            skim_mpi = mpi * 0.5  # Skims are typically faster
+            edm_time += perimeter * skim_mpi * material_factor * skims
+
+            # Use the time_minutes from the operation if provided
+            if 'time_minutes' in op:
+                edm_time = op['time_minutes']
+
+            time_breakdown['edm'] += edm_time
+
+            # EDM debug output
+            t_window = perimeter * mpi * material_factor
+            print(f"  DEBUG [EDM wire_edm_form]: path_length={perimeter:.3f}\", min_per_in={mpi:.3f}, "
+                  f"material_factor={material_factor:.2f}, part_thickness={thickness:.3f}\", "
+                  f"skims={skims}, t_window={t_window:.2f} min, total_time={edm_time:.2f} min")
+
+        elif op_type == 'form_grind':
+            # Form grinding for die section profiles
+            from cad_quoter.pricing.time_estimator import _grind_factor
+            perimeter = op.get('perimeter_in', 0.0)
+            depth = op.get('depth_in', T or 0.5)
+            material_group = op.get('material_group', '')
+            material_factor = op.get('material_factor') or _grind_factor(material, material_group)
+
+            # Calculate grinding time
+            grind_time = (perimeter * depth * 0.5) * material_factor
+
+            # Use the time_minutes from the operation if provided
+            if 'time_minutes' in op:
+                grind_time = op['time_minutes']
+
+            time_breakdown['grinding'] += grind_time
+
+            print(f"  DEBUG [GRIND form_grind]: perimeter={perimeter:.3f}\", depth={depth:.3f}\", "
+                  f"material_factor={material_factor:.2f}, time={grind_time:.2f} min")
+
+        elif op_type == 'form_grind_profile':
+            # Form grinding for punch profiles
+            from cad_quoter.pricing.time_estimator import _grind_factor
+            perimeter = op.get('perimeter_in', 0.0)
+            depth = op.get('depth_in', 1.0)
+            material_group = op.get('material_group', '')
+            material_factor = op.get('material_factor') or _grind_factor(material, material_group)
+
+            # Calculate grinding time
+            grind_time = (perimeter * depth * 0.5) * material_factor
+
+            # Use the time_minutes from the operation if provided
+            if 'time_minutes' in op:
+                grind_time = op['time_minutes']
+
+            time_breakdown['grinding'] += grind_time
+
+            print(f"  DEBUG [GRIND form_grind_profile]: perimeter={perimeter:.3f}\", depth={depth:.3f}\", "
+                  f"material_factor={material_factor:.2f}, time={grind_time:.2f} min")
+
         # EDM operations (general handler - must come after specific punch handlers)
         elif ('wedm' in op_type or 'wire_edm' in op_type) and op_type != 'wire_edm_form':
             num_windows = op.get('windows', 1)
@@ -4387,7 +4463,7 @@ def estimate_machine_hours_from_plan(
                   f"material_factor={mat_factor:.2f}, part_thickness={thk:.3f}\", t_window={t_window:.2f} min, total_time={edm_time:.2f} min")
 
         # Die section finishing operations (chamfer, polish, edge break, deburr)
-        elif op_type in ('chamfer_edges', 'machine_reliefs', 'polish_cavity', 'edge_break', 'deburr_and_clean'):
+        elif op_type in ('chamfer_edges', 'machine_reliefs', 'polish_cavity', 'polish_contour', 'edge_break', 'deburr_and_clean'):
             # These are "other" operations - minor finishing work
             other_time = op.get('time_minutes', 0.0)
             time_breakdown['other'] += other_time
@@ -6416,6 +6492,8 @@ def _add_punch_form_ops(plan: Dict[str, Any], p: PunchPlannerParams, profile_pro
                 "op": "form_grind_profile",
                 "perimeter_in": perimeter,
                 "depth_in": depth,
+                "material": p.material,
+                "material_group": p.material_group,
                 "material_factor": grind_factor,
                 "time_minutes": form_grind_time,
                 "note": f"Form grind profile: {perimeter:.2f}\" perimeter",
