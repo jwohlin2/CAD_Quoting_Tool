@@ -694,7 +694,7 @@ class OrderData:
 
                 # Subtract the per-part shipping cost
                 if part.direct_cost_breakdown:
-                    part_shipping = part.direct_cost_breakdown.shipping_cost
+                    part_shipping = part.direct_cost_breakdown.shipping
                     parts_subtotal_no_shipping += (part_total - part_shipping * part.quantity)
                 else:
                     parts_subtotal_no_shipping += part_total
