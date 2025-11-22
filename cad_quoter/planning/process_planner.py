@@ -449,6 +449,9 @@ def planner_die_plate(params: Dict[str, Any]) -> Plan:
           stock_width=stock_W,
           stock_thickness=stock_T,
           volume_removed=volume_cuin_squareup,
+          volume_thickness=volume_thickness,
+          volume_length_trim=volume_length_trim,
+          volume_width_trim=volume_width_trim,
           tool_diameter_in=D,
           material_factor=material_factor,
           override_time_minutes=time_min_squareup)
@@ -4331,7 +4334,7 @@ def render_square_up_block(
         D = full_square_up_op.get('tool_diameter', 0)
         mat_factor = full_square_up_op.get('material_factor', 1.0)
 
-        ctx1 = f"Method: Mill | ToolØ = W/3 ({D:.3f}\") | Stock overage: +{stock_L - fin_L:.2f}\" L, +{stock_W - fin_W:.2f}\" W, +{stock_T - fin_T:.2f}\" T"
+        ctx1 = f"Method: Mill | ToolØ = W/3 ({D:.3f}\") | Stock overage: {stock_L - fin_L:+.2f}\" L, {stock_W - fin_W:+.2f}\" W, {stock_T - fin_T:+.3f}\" T"
         ctx2 = f"Strategy: Volume-based | Material factor: {mat_factor:.2f} | Includes facing + trimming all sides"
         lines.append(ctx1)
         lines.append(ctx2)
@@ -4358,6 +4361,9 @@ def render_square_up_block(
         fin_L = full_square_up_op.get('length', 0)
         fin_W = full_square_up_op.get('width', 0)
         fin_T = full_square_up_op.get('thickness', 0)
+        stock_L = full_square_up_op.get('stock_length', 0)
+        stock_W = full_square_up_op.get('stock_width', 0)
+        stock_T = full_square_up_op.get('stock_thickness', 0)
         volume_removed = full_square_up_op.get('volume_removed_cuin', 0)
         volume_thickness = full_square_up_op.get('volume_thickness', 0)
         volume_length = full_square_up_op.get('volume_length_trim', 0)
@@ -4369,16 +4375,19 @@ def render_square_up_block(
 
         ovr_badge = " (ovr)" if used_ovr else ""
 
-        # Build line with finished dimensions and volume - stay ≤106 chars
-        line = (f"Face Mill - Full Square-Up | W {fin_W:.3f}\" | L {fin_L:.3f}\" | T {fin_T:.3f}\" | "
-                f"Vol {volume_removed:.3f} in³ | Time {time_min:.2f} min{ovr_badge}")
+        # Calculate removed thickness for display
+        thickness_removed = max(stock_T - fin_T, 0.0)
+
+        # Build line with finished dimensions and removed thickness/volume - stay ≤106 chars
+        line = (f"Face Mill - Full Square-Up | W {fin_W:.3f}\" | L {fin_L:.3f}\" | T {thickness_removed:.3f}\" | "
+                f"Vol {volume_removed:.1f} in³ | Time {time_min:.2f} min{ovr_badge}")
 
         lines.append(line[:106])
         total_time += time_min
 
-        # Add volume breakdown line for clarity
-        breakdown_line = (f"  Volume: Thickness {volume_thickness:.3f} + Length {volume_length:.3f} + "
-                          f"Width {volume_width:.3f} in³ | Factor {mat_factor:.2f}")
+        # Add volume breakdown line showing the calculation
+        breakdown_line = (f"  Volume: T {thickness_removed:.3f}\" × L {fin_L:.3f}\" × W {fin_W:.3f}\" = {volume_removed:.1f} in³ "
+                          f"| Factor {mat_factor:.2f}")
         lines.append(breakdown_line[:106])
 
     # Mill route op lines
