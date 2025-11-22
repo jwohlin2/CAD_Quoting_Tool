@@ -2933,9 +2933,18 @@ def compute_labor_minutes(i: LaborInputs) -> Dict[str, Any]:
     inspection_total = inspection_result["total_min"]
     finishing_base = finishing_minutes(i)
 
-    # Calculate detailed finishing labor (chamfer/deburr, radii, polish, etc.)
-    finishing_detail_minutes = 0.0
+    # Build finishing operations as a list of (label, minutes)
+    # This ensures the total always matches the sum of visible bullets
     finishing_detail = []
+
+    # Add base finishing time as a visible bullet point
+    if finishing_base > 0:
+        finishing_detail.append({
+            "type": "base_finishing",
+            "label": "Base deburr / cleanup",
+            "minutes": round(finishing_base, 1),
+            "source": "formula"
+        })
 
     if i.plan is not None and i.ops is not None:
         L = i.part_length
@@ -2947,7 +2956,6 @@ def compute_labor_minutes(i: LaborInputs) -> Dict[str, Any]:
             i.plan, i.ops, L, W, T
         )
         finishing_detail.extend(geom_detail)
-        finishing_detail_minutes += geom_finishing_min
 
         # Add edge break operation from text extraction
         if i.plan.get('has_edge_break', False):
@@ -2976,7 +2984,6 @@ def compute_labor_minutes(i: LaborInputs) -> Dict[str, Any]:
                 "minutes": round(edge_break_minutes, 1),
                 "source": "text"
             })
-            finishing_detail_minutes += edge_break_minutes
 
         # Add etch operation from text extraction
         if i.plan.get('has_etch', False):
@@ -2990,10 +2997,10 @@ def compute_labor_minutes(i: LaborInputs) -> Dict[str, Any]:
                 "minutes": round(etch_minutes, 1),
                 "source": "text"
             })
-            finishing_detail_minutes += etch_minutes
 
-    # Total finishing includes base formula-based time plus detailed operations
-    finishing_total = finishing_base + finishing_detail_minutes
+    # Calculate total from sum of all detail items to ensure text and math stay in sync
+    finishing_total = sum(item["minutes"] for item in finishing_detail)
+    finishing_detail_minutes = finishing_total - finishing_base
 
     buckets = {
         "Setup": setup,
