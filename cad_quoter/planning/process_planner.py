@@ -3583,7 +3583,7 @@ def estimate_machine_hours_from_plan(
             time_breakdown['milling'] += calculate_milling_time(perimeter, 0.1, T or 0.5, material, "Endmill_Profile")
 
         # EDM operations (general handler - must come after specific punch handlers)
-        elif 'wedm' in op_type or 'wire_edm' in op_type:
+        elif ('wedm' in op_type or 'wire_edm' in op_type) and op_type != 'wire_edm_form':
             num_windows = op.get('windows', 1)
             skims = op.get('skims', 0)
             # Estimate perimeter
@@ -3967,8 +3967,8 @@ def estimate_machine_hours_from_plan(
             print(f"  NOTE: Square/finish milling time driven by stock_removed_total, tool diameter, passes and feed.")
 
         # Grinding operations (general handler - punch-specific handlers are earlier)
-        elif 'grind' in op_type or 'jig_grind' in op_type:
-            # Grinding is slow and precise
+        elif ('grind' in op_type or 'jig_grind' in op_type) and op_type not in ('rough_grind_all_faces', 'finish_grind_thickness', 'finish_grind_working_faces', 'form_grind'):
+            # Grinding is slow and precise (excludes die_section specific operations)
             if 'bore' in op_type:
                 time_breakdown['grinding'] += 15  # 15 min per bore
             elif 'face' in op_type:
@@ -4109,6 +4109,60 @@ def estimate_machine_hours_from_plan(
             print(f"    path_length={slot_calc['slot_path_length_in']:.2f}\"")
             print(f"    Formula: base={slot_calc['base_slot_min']:.2f} + k_len={slot_calc['k_len']:.2f} * {slot_length:.3f} + k_dep={slot_calc['k_dep']:.2f} * {slot_depth:.3f}")
             print(f"    slot_mill_time_min={slot_time:.2f} (path-based={slot_calc['path_based_time_min']:.2f})")
+
+        # ========== DIE SECTION / FORM BLOCK OPERATIONS ==========
+        # Grinding operations - rough and finish grinding for die sections
+        elif op_type in ('rough_grind_all_faces', 'finish_grind_thickness', 'finish_grind_working_faces'):
+            # Extract time from operation
+            grind_time = op.get('time_minutes', 0.0)
+            time_breakdown['grinding'] += grind_time
+
+            # Add detailed operation for grinding
+            grinding_operations_detailed.append({
+                'op_name': op_type,
+                'op_description': op.get('note', f'Die section {op_type}'),
+                'faces': op.get('faces', 0),
+                'stock_removed_total': op.get('stock_removed_cuin', 0.0),
+                'grind_material_factor': op.get('material_factor', 1.0),
+                'time_minutes': grind_time,
+            })
+
+        # Form grinding operations
+        elif op_type == 'form_grind':
+            # Extract time from operation
+            grind_time = op.get('time_minutes', 0.0)
+            time_breakdown['grinding'] += grind_time
+
+            # Add detailed operation for form grinding
+            grinding_operations_detailed.append({
+                'op_name': 'form_grind',
+                'op_description': 'Form Grind to Final Profile',
+                'perimeter_in': op.get('perimeter_in', 0.0),
+                'depth_in': op.get('depth_in', 0.0),
+                'grind_material_factor': op.get('material_factor', 1.0),
+                'time_minutes': grind_time,
+            })
+
+        # Wire EDM form cutting operations
+        elif op_type == 'wire_edm_form':
+            # Extract time from operation
+            edm_time = op.get('time_minutes', 0.0)
+            time_breakdown['edm'] += edm_time
+
+            # Debug output for EDM form
+            perim = op.get('wire_profile_perimeter_in', 0.0)
+            thk = op.get('thickness_in', 0.0)
+            mpi = op.get('edm_min_per_in', 0.33)
+            mat_factor = op.get('material_factor', 1.0)
+            t_window = op.get('t_window', perim * mpi * mat_factor)
+            print(f"  DEBUG [EDM wire_edm_form]: path_length={perim:.3f}\", min_per_in={mpi:.3f}, "
+                  f"material_factor={mat_factor:.2f}, part_thickness={thk:.3f}\", t_window={t_window:.2f} min, total_time={edm_time:.2f} min")
+
+        # Die section finishing operations (chamfer, polish, edge break, deburr)
+        elif op_type in ('chamfer_edges', 'machine_reliefs', 'polish_cavity', 'edge_break', 'deburr_and_clean'):
+            # These are "other" operations - minor finishing work
+            other_time = op.get('time_minutes', 0.0)
+            time_breakdown['other'] += other_time
 
         # Other operations
         else:
