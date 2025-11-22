@@ -2322,6 +2322,8 @@ class AppV7:
 
             if machine_hours.total_cmm_minutes > 0:
                 report.append(f"  CMM (machine time):               {machine_hours.total_cmm_minutes:>10.2f} min")
+            if machine_hours.total_inspection_minutes > 0:
+                report.append(f"  Inspection (machine time):        {machine_hours.total_inspection_minutes:>10.2f} min")
             report.append("-" * 74)
 
             # Summary (read from temp variable set in main thread to avoid Tkinter widget access)

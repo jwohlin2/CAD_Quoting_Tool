@@ -324,6 +324,7 @@ class MachineHoursBreakdown:
     total_other_minutes: float = 0.0
     total_waterjet_minutes: float = 0.0  # NEW: Waterjet operations (promoted to first-class)
     total_cmm_minutes: float = 0.0  # CMM checking time (machine only, setup is in labor)
+    total_inspection_minutes: float = 0.0  # Non-CMM inspection time (e.g., in-process checks for punch parts)
     cmm_holes_checked: int = 0  # Number of holes inspected by CMM
     holes_total: int = 0  # Total number of holes from hole table (sum of QTY)
     hole_entries: int = 0  # Count of unique hole groups (A, B, C, etc.) from hole table
@@ -1331,6 +1332,7 @@ def extract_quote_data_from_cad(
                 punch_edm_min = round(mh.get("total_edm_minutes", 0.0), 2)
                 punch_other_min = round(mh.get("total_other_minutes", 0.0), 2)
                 punch_cmm_min = round(mh.get("total_cmm_minutes", 0.0), 2)
+                punch_inspection_min = round(mh.get("total_inspection_minutes", 0.0), 2)
                 punch_etch_min = round(mh.get("total_etch_minutes", 0.0), 2)
                 punch_edge_break_min = round(mh.get("total_edge_break_minutes", 0.0), 2)
                 punch_polish_min = round(mh.get("total_polish_minutes", 0.0), 2)
@@ -1348,6 +1350,7 @@ def extract_quote_data_from_cad(
                     total_edm_minutes=punch_edm_min,
                     total_other_minutes=punch_other_min,
                     total_cmm_minutes=punch_cmm_min,
+                    total_inspection_minutes=punch_inspection_min,
                     total_etch_minutes=punch_etch_min,
                     total_edge_break_minutes=punch_edge_break_min,
                     total_polish_minutes=punch_polish_min,
@@ -1942,6 +1945,7 @@ def extract_quote_data_from_cad(
         punch_base_edm = quote_data.machine_hours.total_edm_minutes
         punch_base_other = quote_data.machine_hours.total_other_minutes
         punch_base_cmm = quote_data.machine_hours.total_cmm_minutes
+        punch_base_inspection = quote_data.machine_hours.total_inspection_minutes
 
         # Process hole table for punch parts
         hole_entries = len(hole_table) if hole_table else 0
@@ -2069,6 +2073,7 @@ def extract_quote_data_from_cad(
         total_edm_min = round(punch_base_edm + hole_edm_min, 2)
         total_other_min = round(punch_base_other, 2)
         total_cmm_min = round(punch_base_cmm, 2)
+        total_inspection_min = round(punch_base_inspection, 2)
 
         # Extract special operation times from base punch hours
         total_etch_min = round(quote_data.machine_hours.total_etch_minutes, 2)
@@ -2080,7 +2085,7 @@ def extract_quote_data_from_cad(
             total_drill_min + total_tap_min + total_cbore_min +
             total_cdrill_min + total_jig_grind_min +
             total_milling_min + total_grinding_min + total_edm_min + total_other_min +
-            total_cmm_min + total_etch_min + total_edge_break_min + total_polish_min, 2
+            total_cmm_min + total_inspection_min + total_etch_min + total_edge_break_min + total_polish_min, 2
         )
         grand_total_hours = round(grand_total_minutes / 60.0, 2)
         machine_cost = round(grand_total_minutes * (machine_rate / 60.0), 2)
@@ -2105,6 +2110,7 @@ def extract_quote_data_from_cad(
             total_edm_minutes=total_edm_min,
             total_other_minutes=total_other_min,
             total_cmm_minutes=total_cmm_min,
+            total_inspection_minutes=total_inspection_min,
             total_etch_minutes=total_etch_min,
             total_edge_break_minutes=total_edge_break_min,
             total_polish_minutes=total_polish_min,
