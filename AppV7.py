@@ -1392,6 +1392,9 @@ class AppV7:
             scrap_info = quote_data.scrap_info
             cost_breakdown = quote_data.direct_cost_breakdown
 
+            # Get quantity for total cost calculation (from temp variable set in main thread)
+            quantity = getattr(self, '_temp_quantity', 1)
+
             # Check if overrides were used (read from temp variables set in main thread)
             material_override = getattr(self, '_temp_material_override', None)
             mcmaster_price_override = getattr(self, '_temp_mcmaster_override', None)
@@ -1452,11 +1455,20 @@ class AppV7:
                 stock_label = f"  Stock Piece (McMaster part {stock_info.mcmaster_part_number})"
             else:
                 stock_label = "  Stock Piece (no McMaster match)"
-            report.append(f"{stock_label}".ljust(50) + f"{formatted_price:>24}")
+
+            # Show per-unit or total costs based on quantity
+            if quantity > 1:
+                report.append(f"{stock_label} × {quantity}".ljust(50) + f"{formatted_price:>24}")
+            else:
+                report.append(f"{stock_label}".ljust(50) + f"{formatted_price:>24}")
 
             if stock_info.mcmaster_price is not None:
-                report.append(f"  Tax".ljust(50) + f"+${cost_breakdown.tax:>22.2f}")
-                report.append(f"  Shipping".ljust(50) + f"+${cost_breakdown.shipping:>22.2f}")
+                if quantity > 1:
+                    report.append(f"  Tax (${cost_breakdown.tax:.2f} × {quantity})".ljust(50) + f"+${cost_breakdown.tax * quantity:>22.2f}")
+                    report.append(f"  Shipping".ljust(50) + f"+${cost_breakdown.shipping:>22.2f}")
+                else:
+                    report.append(f"  Tax".ljust(50) + f"+${cost_breakdown.tax:>22.2f}")
+                    report.append(f"  Shipping".ljust(50) + f"+${cost_breakdown.shipping:>22.2f}")
 
             if cost_breakdown.scrap_credit > 0:
                 # Use the scrap price source from scrap_info (could be Wieland, ScrapMetalBuyers, or house_rate)
@@ -1467,13 +1479,22 @@ class AppV7:
                 scrap_credit_line = f"  Scrap Credit @ {source_label} ${scrap_info.scrap_price_per_lb:.2f}/lb × {scrap_weight_formatted}"
                 if scrap_value_override is not None:
                     scrap_credit_line += " (MANUAL)"
-                report.append(f"{scrap_credit_line.ljust(50)}-${cost_breakdown.scrap_credit:>22.2f}")
+
+                if quantity > 1:
+                    scrap_credit_line += f" × {quantity}"
+                    report.append(f"{scrap_credit_line.ljust(50)}-${cost_breakdown.scrap_credit * quantity:>22.2f}")
+                else:
+                    report.append(f"{scrap_credit_line.ljust(50)}-${cost_breakdown.scrap_credit:>22.2f}")
 
             report.append(" " * 50 + "-" * 24)
 
             if stock_info.mcmaster_price is not None:
                 self.direct_cost_total = cost_breakdown.net_material_cost
-                report.append(f"  Total Material Cost :".ljust(50) + f"${cost_breakdown.net_material_cost:>23.2f}")
+                if quantity > 1:
+                    report.append(f"  Total Material Cost (per unit):".ljust(50) + f"${cost_breakdown.net_material_cost:>23.2f}")
+                    report.append(f"  Total Material Cost ({quantity} units):".ljust(50) + f"${cost_breakdown.net_material_cost * quantity:>23.2f}")
+                else:
+                    report.append(f"  Total Material Cost :".ljust(50) + f"${cost_breakdown.net_material_cost:>23.2f}")
             else:
                 self.direct_cost_total = None
                 report.append(f"  Total Material Cost :".ljust(50) + "Price N/A".rjust(24))
@@ -2157,6 +2178,7 @@ class AppV7:
         self._temp_material_override = self._get_field_string("Material")
         self._temp_mcmaster_override = self._get_field_float("McMaster Price Override ($)")
         self._temp_scrap_override = self._get_field_float("Scrap Value Override ($)")
+        self._temp_quantity = self._get_quantity()
 
         # Display in output tab
         self.output_text.delete(1.0, tk.END)
@@ -2229,6 +2251,7 @@ class AppV7:
         del self._temp_material_override
         del self._temp_mcmaster_override
         del self._temp_scrap_override
+        del self._temp_quantity
 
         # Insert reports in the correct order
         self.output_text.insert(tk.END, labor_hours_report)
