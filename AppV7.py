@@ -463,8 +463,8 @@ class AppV7:
 
         # Material
         if hasattr(self, 'material_var') and part.material_info:
-            if part.material_info.name:
-                self.material_var.set(part.material_info.name)
+            if part.material_info.material_name:
+                self.material_var.set(part.material_info.material_name)
 
         # CMM level
         # (Note: This might need to be stored in QuoteData if not already)
@@ -2510,7 +2510,7 @@ class AppV7:
                     # Get overrides from part data or use defaults
                     self._temp_machine_rate = self.MACHINE_RATE
                     self._temp_labor_rate = self.LABOR_RATE
-                    self._temp_material_override = part.material_info.name if part.material_info else ""
+                    self._temp_material_override = part.material_info.material_name if part.material_info else ""
                     self._temp_mcmaster_override = None
                     self._temp_scrap_override = None
 
