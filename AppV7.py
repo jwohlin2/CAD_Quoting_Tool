@@ -203,6 +203,11 @@ class AppV7:
         self.quote_vars = {}
         self.cad_file_path: Optional[str] = None
 
+        # Multi-part order support
+        from cad_quoter.pricing.QuoteDataHelper import OrderData
+        self.current_order = OrderData()  # Current order (can hold multiple parts)
+        self.active_part_index: Optional[int] = None  # Index of currently selected part
+
         # Cached totals for summary display
         self.direct_cost_total: Optional[float] = None
         self.machine_cost_total: Optional[float] = None
@@ -239,6 +244,8 @@ class AppV7:
         file_menu = tk.Menu(menubar, tearoff=0)
         menubar.add_cascade(label="File", menu=file_menu)
         file_menu.add_command(label="Open CAD File...", command=self.load_cad)
+        file_menu.add_command(label="Load Order...", command=self.load_order)
+        file_menu.add_separator()
         file_menu.add_command(label="Save Quote...", command=self.save_quote)
         file_menu.add_separator()
         file_menu.add_command(label="Exit", command=self.root.quit)
@@ -271,9 +278,20 @@ class AppV7:
                    command=self.open_drawing_preview).pack(side=tk.LEFT, padx=5)
 
     def _create_tabs(self) -> None:
-        """Create the tabbed interface."""
-        self.notebook = ttk.Notebook(self.root)
-        self.notebook.pack(fill=tk.BOTH, expand=True, padx=2, pady=2)
+        """Create the tabbed interface with parts list sidebar."""
+        # Create main container with grid layout
+        main_container = ttk.Frame(self.root)
+        main_container.pack(fill=tk.BOTH, expand=True, padx=2, pady=2)
+        main_container.grid_rowconfigure(0, weight=1)
+        main_container.grid_columnconfigure(0, weight=0)  # Parts list (fixed width)
+        main_container.grid_columnconfigure(1, weight=1)  # Notebook (expandable)
+
+        # Create parts list panel on the left
+        self._create_parts_list_panel(main_container)
+
+        # Create notebook on the right
+        self.notebook = ttk.Notebook(main_container)
+        self.notebook.grid(row=0, column=1, sticky="nsew")
 
         # GEO tab
         self.geo_tab = tk.Frame(self.notebook)
@@ -289,6 +307,267 @@ class AppV7:
         self.output_tab = tk.Frame(self.notebook)
         self.notebook.add(self.output_tab, text="Output")
         self._create_output_tab()
+
+    def _create_parts_list_panel(self, parent) -> None:
+        """Create the parts list sidebar panel."""
+        parts_frame = ttk.LabelFrame(parent, text="Order Parts", padding=5)
+        parts_frame.grid(row=0, column=0, sticky="ns", padx=(0, 5))
+
+        # Parts listbox with scrollbar
+        listbox_frame = ttk.Frame(parts_frame)
+        listbox_frame.pack(fill=tk.BOTH, expand=True)
+
+        scrollbar = ttk.Scrollbar(listbox_frame)
+        scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+
+        self.parts_listbox = tk.Listbox(
+            listbox_frame,
+            width=25,
+            height=15,
+            yscrollcommand=scrollbar.set,
+            selectmode=tk.SINGLE
+        )
+        self.parts_listbox.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        scrollbar.config(command=self.parts_listbox.yview)
+
+        # Bind selection event
+        self.parts_listbox.bind('<<ListboxSelect>>', self._on_part_selected)
+
+        # Buttons for managing parts
+        btn_frame = ttk.Frame(parts_frame)
+        btn_frame.pack(fill=tk.X, pady=(5, 0))
+
+        ttk.Button(
+            btn_frame,
+            text="Add Part(s)...",
+            command=self.add_parts_to_order
+        ).pack(fill=tk.X, pady=2)
+
+        ttk.Button(
+            btn_frame,
+            text="Remove Part",
+            command=self.remove_part_from_order
+        ).pack(fill=tk.X, pady=2)
+
+        # Info label showing current selection
+        self.part_info_label = ttk.Label(
+            parts_frame,
+            text="No parts in order",
+            relief=tk.SUNKEN,
+            anchor=tk.W
+        )
+        self.part_info_label.pack(fill=tk.X, pady=(5, 0))
+
+    def _refresh_parts_list(self) -> None:
+        """Refresh the parts listbox to reflect current order."""
+        self.parts_listbox.delete(0, tk.END)
+
+        if not self.current_order.parts:
+            self.part_info_label.config(text="No parts in order")
+            return
+
+        for i, part in enumerate(self.current_order.parts):
+            # Format: "[1] filename.dwg · Qty: 5"
+            display_text = f"[{i+1}] {part.cad_file_name} · Qty: {part.quantity}"
+            self.parts_listbox.insert(tk.END, display_text)
+
+        # Update info label
+        total_parts = len(self.current_order.parts)
+        self.part_info_label.config(text=f"{total_parts} part(s) in order")
+
+    def _on_part_selected(self, event) -> None:
+        """Handle part selection from the listbox."""
+        selection = self.parts_listbox.curselection()
+        if not selection:
+            return
+
+        part_index = selection[0]
+        if part_index != self.active_part_index:
+            self.active_part_index = part_index
+            self._load_active_part_to_ui()
+
+    def _load_active_part_to_ui(self) -> None:
+        """Load the active part's data into the UI (Quote Editor, GEO tab, etc.)."""
+        if self.active_part_index is None:
+            return
+
+        part = self.current_order.get_part(self.active_part_index)
+        if not part:
+            return
+
+        # Update the cached quote data to match the active part
+        self._cached_quote_data = part
+
+        # Update the CAD file path
+        self.cad_file_path = part.cad_file_path
+
+        # Populate Quote Editor fields from the active part's data
+        self._populate_quote_fields_from_part(part)
+
+        # Update info label
+        self.part_info_label.config(
+            text=f"Active: Part {self.active_part_index + 1} - {part.cad_file_name}"
+        )
+
+        # Update Quote Editor active part label
+        if hasattr(self, 'active_part_label'):
+            total_parts = len(self.current_order.parts)
+            self.active_part_label.config(
+                text=f"Editing Overrides for: PART {self.active_part_index + 1} of {total_parts} – {part.cad_file_name}"
+            )
+
+        # Update status bar
+        self.status_bar.config(
+            text=f"Viewing Part {self.active_part_index + 1}: {part.cad_file_name}"
+        )
+
+    def _populate_quote_fields_from_part(self, part) -> None:
+        """Populate Quote Editor fields from a QuoteData object."""
+        # Family
+        if hasattr(self, 'family_var'):
+            family_value = getattr(part, 'part_family', '')
+            if family_value:
+                self.family_var.set(family_value)
+
+        # Dimensions
+        if part.part_dimensions:
+            if hasattr(self, 'quote_fields'):
+                if 'length' in self.quote_fields:
+                    self.quote_fields['length'].delete(0, tk.END)
+                    if part.part_dimensions.length:
+                        self.quote_fields['length'].insert(0, str(part.part_dimensions.length))
+
+                if 'width' in self.quote_fields:
+                    self.quote_fields['width'].delete(0, tk.END)
+                    if part.part_dimensions.width:
+                        self.quote_fields['width'].insert(0, str(part.part_dimensions.width))
+
+                if 'thickness' in self.quote_fields:
+                    self.quote_fields['thickness'].delete(0, tk.END)
+                    if part.part_dimensions.thickness:
+                        self.quote_fields['thickness'].insert(0, str(part.part_dimensions.thickness))
+
+                if 'diameter1' in self.quote_fields:
+                    self.quote_fields['diameter1'].delete(0, tk.END)
+                    if part.part_dimensions.diameter_major:
+                        self.quote_fields['diameter1'].insert(0, str(part.part_dimensions.diameter_major))
+
+                if 'diameter2' in self.quote_fields:
+                    self.quote_fields['diameter2'].delete(0, tk.END)
+                    if part.part_dimensions.diameter_minor:
+                        self.quote_fields['diameter2'].insert(0, str(part.part_dimensions.diameter_minor))
+
+        # Quantity
+        if hasattr(self, 'qty_var'):
+            self.qty_var.set(str(part.quantity))
+
+        # Material
+        if hasattr(self, 'material_var') and part.material_info:
+            if part.material_info.name:
+                self.material_var.set(part.material_info.name)
+
+        # CMM level
+        # (Note: This might need to be stored in QuoteData if not already)
+
+        # Margin
+        if hasattr(self, 'margin_var') and part.cost_summary:
+            margin_pct = part.cost_summary.margin_rate * 100
+            self.margin_var.set(str(margin_pct))
+
+    def add_parts_to_order(self) -> None:
+        """Add one or more CAD files as parts to the current order."""
+        filenames = filedialog.askopenfilenames(
+            title="Select CAD File(s) to Add",
+            filetypes=[
+                ("All CAD Files", "*.dwg *.dxf *.step *.stp *.iges *.igs"),
+                ("DWG Files", "*.dwg"),
+                ("DXF Files", "*.dxf"),
+                ("All Files", "*.*")
+            ]
+        )
+
+        if not filenames:
+            return
+
+        self.status_bar.config(text=f"Adding {len(filenames)} part(s) to order...")
+        self.root.update_idletasks()
+
+        added_count = 0
+        for filename in filenames:
+            try:
+                # Load this file as a part (lightweight - just store the path initially)
+                # Full extraction happens when user generates the quote
+                from cad_quoter.pricing.QuoteDataHelper import QuoteData
+                part = QuoteData()
+                part.cad_file_path = filename
+                part.cad_file_name = Path(filename).name
+                from datetime import datetime
+                part.extraction_timestamp = datetime.now().isoformat()
+
+                # Add to order
+                part_index = self.current_order.add_part(part)
+                added_count += 1
+
+                print(f"[AppV7] Added part {part_index + 1}: {part.cad_file_name}")
+
+            except Exception as e:
+                messagebox.showerror(
+                    "Error Adding Part",
+                    f"Failed to add {Path(filename).name}:\n{str(e)}"
+                )
+                continue
+
+        # Refresh the parts list
+        self._refresh_parts_list()
+
+        # Auto-select the first part if nothing was selected before
+        if self.active_part_index is None and self.current_order.parts:
+            self.parts_listbox.selection_set(0)
+            self.active_part_index = 0
+            self._load_active_part_to_ui()
+
+        self.status_bar.config(text=f"Added {added_count} part(s) to order. Total: {len(self.current_order.parts)} parts.")
+
+    def remove_part_from_order(self) -> None:
+        """Remove the selected part from the order."""
+        if self.active_part_index is None:
+            messagebox.showinfo("No Selection", "Please select a part to remove.")
+            return
+
+        part = self.current_order.get_part(self.active_part_index)
+        if not part:
+            return
+
+        # Confirm removal
+        result = messagebox.askyesno(
+            "Confirm Removal",
+            f"Remove part {self.active_part_index + 1} ({part.cad_file_name})?"
+        )
+
+        if not result:
+            return
+
+        # Remove the part
+        self.current_order.remove_part(self.active_part_index)
+
+        # Refresh the list
+        self._refresh_parts_list()
+
+        # Update active part index
+        if not self.current_order.parts:
+            # No parts left
+            self.active_part_index = None
+            self.cad_file_path = None
+            self._cached_quote_data = None
+            self.part_info_label.config(text="No parts in order")
+            self.status_bar.config(text="Order is now empty")
+        else:
+            # Select the previous part, or the first part if we removed index 0
+            if self.active_part_index >= len(self.current_order.parts):
+                self.active_part_index = len(self.current_order.parts) - 1
+
+            self.parts_listbox.selection_set(self.active_part_index)
+            self._load_active_part_to_ui()
 
     def open_drawing_preview(self) -> None:
         """Open the drawing preview image file with the system default viewer.
@@ -429,9 +708,20 @@ class AppV7:
         editor_scroll = ScrollableFrame(self.quote_editor_tab)
         editor_scroll.pack(fill="both", expand=True)
 
+        # Active part indicator label
+        self.active_part_label = ttk.Label(
+            editor_scroll.inner,
+            text="No part selected - Add part(s) using the 'Add Part(s)...' button",
+            font=("TkDefaultFont", 10, "bold"),
+            background="#e8f4f8",
+            padding=10,
+            relief=tk.RAISED
+        )
+        self.active_part_label.grid(row=0, column=0, sticky="ew", padx=10, pady=(5, 10))
+
         # Quote-Specific Variables section with Labelframe (like appV5)
         quote_frame = ttk.Labelframe(editor_scroll.inner, text="Quote-Specific Variables", padding=(10, 5))
-        quote_frame.grid(row=0, column=0, sticky="ew", padx=10, pady=5)
+        quote_frame.grid(row=1, column=0, sticky="ew", padx=10, pady=5)
 
         # Define all the quote variables from the screenshot
         self.quote_fields = {}
@@ -1274,6 +1564,27 @@ class AppV7:
                     status_msg = "CAD file loaded. Review the Quote Editor and generate the quote. (Drawing preview generating in background...)"
                 else:
                     status_msg = "CAD file loaded. Review the Quote Editor and generate the quote. (Drawing preview available)"
+
+                # Add this file as a part to the order (for backward compatibility)
+                # Clear existing order if there's only one old part
+                if len(self.current_order.parts) <= 1:
+                    from cad_quoter.pricing.QuoteDataHelper import QuoteData, OrderData
+                    self.current_order = OrderData()  # Reset order
+
+                    # Create a new part
+                    part = QuoteData()
+                    part.cad_file_path = filename
+                    part.cad_file_name = Path(filename).name
+                    from datetime import datetime
+                    part.extraction_timestamp = datetime.now().isoformat()
+
+                    # Add to order
+                    self.current_order.add_part(part)
+                    self.active_part_index = 0
+
+                    # Refresh parts list
+                    self._refresh_parts_list()
+                    self.parts_listbox.selection_set(0)
 
                 self.status_bar.config(text=status_msg)
                 self.notebook.select(self.geo_tab)
@@ -2154,8 +2465,209 @@ class AppV7:
         lines.append("")
         return lines
 
+    def _generate_multi_part_order_report(self) -> None:
+        """Generate a report for a multi-part order."""
+        self.output_text.delete(1.0, tk.END)
+
+        # Order header
+        header_lines = [
+            "=" * 74,
+            "MULTI-PART ORDER QUOTE",
+            "=" * 74,
+            f"Order ID: {self.current_order.order_id}",
+            f"Total Parts: {len(self.current_order.parts)}",
+            f"Generated: {self.current_order.order_timestamp}",
+            "=" * 74,
+            "",
+            ""
+        ]
+        self.output_text.insert(tk.END, "\n".join(header_lines))
+
+        # Generate report for each part
+        all_parts_data = []
+        for part_idx, part in enumerate(self.current_order.parts):
+            try:
+                # Part header
+                part_header = [
+                    "",
+                    "█" * 74,
+                    f"PART {part_idx + 1} OF {len(self.current_order.parts)} – {part.cad_file_name}",
+                    "█" * 74,
+                    ""
+                ]
+                self.output_text.insert(tk.END, "\n".join(part_header))
+
+                # Set this part as active temporarily
+                old_active_index = self.active_part_index
+                self.active_part_index = part_idx
+                self._cached_quote_data = part
+
+                # Extract quote data for this part if not already extracted
+                if not part.cost_summary or not part.cost_summary.final_price:
+                    # Need to extract - set up temporary vars from part data
+                    self.cad_file_path = part.cad_file_path
+
+                    # Get overrides from part data or use defaults
+                    self._temp_machine_rate = self.MACHINE_RATE
+                    self._temp_labor_rate = self.LABOR_RATE
+                    self._temp_material_override = part.material_info.name if part.material_info else ""
+                    self._temp_mcmaster_override = None
+                    self._temp_scrap_override = None
+
+                    # Extract quote data
+                    from cad_quoter.pricing.QuoteDataHelper import extract_quote_data_from_cad
+                    part_quote = self._get_or_create_quote_data()
+
+                    # Update the part in the order with the extracted data
+                    self.current_order.parts[part_idx] = part_quote
+                    part = part_quote
+
+                # Generate the three reports for this part
+                labor_report = self._generate_labor_hours_report()
+                machine_report = self._generate_machine_hours_report()
+                direct_report = self._generate_direct_costs_report()
+
+                # Insert part reports
+                self.output_text.insert(tk.END, labor_report)
+                self.output_text.insert(tk.END, "\n\n" + "=" * 74 + "\n\n")
+                self.output_text.insert(tk.END, machine_report)
+                self.output_text.insert(tk.END, "\n\n" + "=" * 74 + "\n\n")
+                self.output_text.insert(tk.END, direct_report)
+
+                # Part cost summary
+                if part.cost_summary:
+                    part_summary = [
+                        "",
+                        "",
+                        "=" * 74,
+                        f"PART {part_idx + 1} COST SUMMARY",
+                        "=" * 74,
+                        self._format_cost_summary_line("Direct Cost (per unit)", part.cost_summary.direct_cost or 0),
+                        self._format_cost_summary_line("Machine Cost (per unit)", part.cost_summary.machine_cost or 0),
+                        self._format_cost_summary_line("Labor Cost (per unit)", part.cost_summary.labor_cost or 0),
+                        "-" * 74,
+                        self._format_cost_summary_line("Total Cost (per unit)", part.cost_summary.total_cost or 0),
+                        self._format_cost_summary_line(f"Margin ({part.cost_summary.margin_rate:.0%})", part.cost_summary.margin_amount or 0),
+                        self._format_cost_summary_line("Final Price (per unit)", part.cost_summary.final_price or 0),
+                    ]
+
+                    if part.quantity > 1:
+                        part_summary.extend([
+                            "",
+                            f"Quantity: {part.quantity} units",
+                            "-" * 74,
+                            self._format_cost_summary_line("Total Part Cost", part.cost_summary.total_total_cost or 0),
+                            self._format_cost_summary_line("Total Part Price", part.cost_summary.total_final_price or 0),
+                        ])
+
+                    part_summary.append("")
+                    self.output_text.insert(tk.END, "\n".join(part_summary))
+
+                # Store part data for order summary
+                all_parts_data.append(part)
+
+                # Restore active index
+                self.active_part_index = old_active_index
+
+            except Exception as e:
+                error_msg = f"\n\nERROR generating quote for Part {part_idx + 1}: {str(e)}\n\n"
+                self.output_text.insert(tk.END, error_msg)
+                print(f"[AppV7] Error generating part {part_idx + 1}: {e}")
+                import traceback
+                traceback.print_exc()
+                continue
+
+        # Generate order-level summary
+        self._generate_order_level_summary(all_parts_data)
+
+        # Show output and update status
+        self.notebook.select(self.output_tab)
+        self.status_bar.config(text=f"Multi-part order quote generated ({len(all_parts_data)} parts)!")
+
+    def _generate_order_level_summary(self, parts_data) -> None:
+        """Generate the order-level summary section."""
+        summary_lines = [
+            "",
+            "",
+            "█" * 74,
+            "█" * 74,
+            "TOTAL ORDER COSTS",
+            "█" * 74,
+            "█" * 74,
+            ""
+        ]
+
+        # Calculate order totals
+        parts_subtotal_no_shipping = 0.0
+        total_parts_cost = 0.0
+        total_weight_lb = 0.0
+
+        for part in parts_data:
+            if part.cost_summary:
+                # Get part total (excluding shipping)
+                if part.quantity > 1:
+                    part_total = part.cost_summary.total_final_price
+                else:
+                    part_total = part.cost_summary.final_price
+
+                # Subtract per-part shipping to get cost without shipping
+                if part.direct_cost_breakdown and part.direct_cost_breakdown.shipping_cost:
+                    part_shipping = part.direct_cost_breakdown.shipping_cost * part.quantity
+                    parts_subtotal_no_shipping += (part_total - part_shipping)
+                else:
+                    parts_subtotal_no_shipping += part_total
+
+                # Also track total with per-part shipping for comparison
+                total_parts_cost += part_total
+
+            # Calculate weight
+            if part.stock_info and part.stock_info.mcmaster_weight:
+                total_weight_lb += part.stock_info.mcmaster_weight * part.quantity
+
+        # Calculate order-level shipping
+        from cad_quoter.pricing.mcmaster_helpers import estimate_mcmaster_shipping
+        order_shipping = estimate_mcmaster_shipping(total_weight_lb)
+
+        # Calculate grand total
+        order_total = parts_subtotal_no_shipping + order_shipping
+
+        # Build summary
+        summary_lines.append(f"Number of parts: {len(parts_data)}")
+        summary_lines.append("")
+        summary_lines.append("-" * 74)
+        summary_lines.append(self._format_cost_summary_line("Parts Subtotal (excl. shipping)", parts_subtotal_no_shipping))
+        summary_lines.append("")
+        summary_lines.append(f"Total Order Weight: {total_weight_lb:.2f} lb")
+        summary_lines.append(self._format_cost_summary_line("Order Shipping Cost", order_shipping))
+        summary_lines.append("")
+        summary_lines.append("=" * 74)
+        summary_lines.append(self._format_cost_summary_line("ORDER TOTAL", order_total))
+        summary_lines.append("=" * 74)
+        summary_lines.append("")
+
+        # Add note about shipping
+        summary_lines.extend([
+            "Note: Order-level shipping is calculated based on total weight of all parts.",
+            "Per-part shipping costs shown in individual part sections are for reference only.",
+            ""
+        ])
+
+        self.output_text.insert(tk.END, "\n".join(summary_lines))
+
     def generate_quote(self) -> None:
         """Generate the quote."""
+        # Check if we have a multi-part order
+        if len(self.current_order.parts) > 1:
+            self._generate_multi_part_order_report()
+            return
+        elif len(self.current_order.parts) == 0:
+            messagebox.showinfo(
+                "No Parts",
+                "Please add at least one part using 'Add Part(s)...' button before generating a quote."
+            )
+            return
+
+        # Single-part flow (backward compatible with original behavior)
         # Smart cache invalidation - only clear if inputs changed
         # This saves 40+ seconds by avoiding redundant ODA/OCR extraction
         if self._quote_inputs_changed():
@@ -2362,18 +2874,25 @@ class AppV7:
         self.status_bar.config(text="Quote generated successfully!")
 
     def save_quote(self) -> None:
-        """Save the quote to JSON file."""
-        if not self.cad_file_path:
-            messagebox.showwarning("No Quote", "Please load a CAD file and generate a quote first.")
+        """Save the quote or order to JSON file."""
+        # Check if we have a multi-part order
+        if len(self.current_order.parts) > 1:
+            # Save as multi-part order
+            self._save_order()
             return
+        elif len(self.current_order.parts) == 0:
+            # Fallback to old behavior for backward compatibility
+            if not self.cad_file_path:
+                messagebox.showwarning("No Quote", "Please load a CAD file and generate a quote first.")
+                return
 
-        if self._cached_quote_data is None:
-            messagebox.showwarning("No Quote", "Please generate a quote first before saving.")
-            return
+            if self._cached_quote_data is None:
+                messagebox.showwarning("No Quote", "Please generate a quote first before saving.")
+                return
 
-        # Suggest filename based on CAD file
+        # Single-part save (backward compatible)
         from pathlib import Path
-        suggested_name = Path(self.cad_file_path).stem + "_quote.json"
+        suggested_name = Path(self.cad_file_path).stem + "_quote.json" if self.cad_file_path else "quote.json"
 
         filename = filedialog.asksaveasfilename(
             title="Save Quote",
@@ -2391,6 +2910,66 @@ class AppV7:
             except Exception as e:
                 messagebox.showerror("Save Error", f"Failed to save quote:\n{str(e)}")
                 self.status_bar.config(text="Error saving quote")
+
+    def _save_order(self) -> None:
+        """Save a multi-part order to JSON file."""
+        suggested_name = f"order_{self.current_order.order_id}.json"
+
+        filename = filedialog.asksaveasfilename(
+            title="Save Order",
+            defaultextension=".json",
+            initialfile=suggested_name,
+            filetypes=[("JSON Files", "*.json"), ("All Files", "*.*")]
+        )
+
+        if filename:
+            try:
+                # Save using OrderData's to_json method
+                self.current_order.to_json(filepath=filename)
+                self.status_bar.config(text=f"Order saved to: {filename}")
+                messagebox.showinfo("Success", f"Order with {len(self.current_order.parts)} parts saved successfully to:\n{filename}")
+            except Exception as e:
+                messagebox.showerror("Save Error", f"Failed to save order:\n{str(e)}")
+                self.status_bar.config(text="Error saving order")
+
+    def load_order(self) -> None:
+        """Load a multi-part order from JSON file."""
+        filename = filedialog.askopenfilename(
+            title="Load Order",
+            filetypes=[("JSON Files", "*.json"), ("All Files", "*.*")]
+        )
+
+        if not filename:
+            return
+
+        try:
+            from cad_quoter.pricing.QuoteDataHelper import OrderData
+
+            # Load the order
+            self.current_order = OrderData.from_json(filename)
+
+            # Refresh the parts list UI
+            self._refresh_parts_list()
+
+            # Auto-select the first part if available
+            if self.current_order.parts:
+                self.parts_listbox.selection_set(0)
+                self.active_part_index = 0
+                self._load_active_part_to_ui()
+
+            self.status_bar.config(text=f"Order loaded: {len(self.current_order.parts)} parts")
+            messagebox.showinfo(
+                "Success",
+                f"Order loaded successfully!\n\n"
+                f"Order ID: {self.current_order.order_id}\n"
+                f"Parts: {len(self.current_order.parts)}"
+            )
+
+        except Exception as e:
+            messagebox.showerror("Load Error", f"Failed to load order:\n{str(e)}")
+            self.status_bar.config(text="Error loading order")
+            import traceback
+            traceback.print_exc()
 
     def show_llm_inspector(self) -> None:
         """Show LLM inspector window."""
