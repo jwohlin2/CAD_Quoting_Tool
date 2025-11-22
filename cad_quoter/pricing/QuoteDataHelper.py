@@ -558,6 +558,216 @@ class QuoteData:
         return cls.from_dict(data)
 
 
+@dataclass
+class OrderData:
+    """
+    Order data structure that can hold multiple parts/files.
+
+    Enables multi-file orders where each part has its own quote data,
+    but shipping and totals are calculated at the order level.
+    """
+    # Order metadata
+    order_id: str = ""
+    order_name: str = ""
+    order_timestamp: str = ""
+
+    # Parts in this order (list of QuoteData objects)
+    parts: List[QuoteData] = None
+
+    # Order-level overrides (if any)
+    notes: str = ""
+
+    def __post_init__(self):
+        """Initialize parts list if None."""
+        if self.parts is None:
+            self.parts = []
+        if not self.order_timestamp:
+            from datetime import datetime
+            self.order_timestamp = datetime.now().isoformat()
+        if not self.order_id:
+            # Generate a simple order ID based on timestamp
+            self.order_id = f"ORD_{self.order_timestamp.replace(':', '').replace('-', '').replace('.', '')[:14]}"
+
+    def add_part(self, quote_data: QuoteData) -> int:
+        """
+        Add a part to the order.
+
+        Args:
+            quote_data: QuoteData for the part to add
+
+        Returns:
+            Index of the added part
+        """
+        self.parts.append(quote_data)
+        return len(self.parts) - 1
+
+    def remove_part(self, index: int) -> None:
+        """
+        Remove a part from the order.
+
+        Args:
+            index: Index of the part to remove
+        """
+        if 0 <= index < len(self.parts):
+            del self.parts[index]
+
+    def get_part(self, index: int) -> Optional[QuoteData]:
+        """
+        Get a part by index.
+
+        Args:
+            index: Index of the part
+
+        Returns:
+            QuoteData or None if index is invalid
+        """
+        if 0 <= index < len(self.parts):
+            return self.parts[index]
+        return None
+
+    def get_total_weight_lb(self) -> float:
+        """
+        Calculate total order weight (for shipping).
+
+        Returns sum of (part_weight * quantity) for all parts.
+        """
+        total = 0.0
+        for part in self.parts:
+            if part.stock_info and part.stock_info.mcmaster_weight:
+                # Stock weight per piece * quantity for this part
+                total += part.stock_info.mcmaster_weight * part.quantity
+        return total
+
+    def get_parts_subtotal(self) -> float:
+        """
+        Calculate total cost of all parts (before order-level shipping).
+
+        Returns sum of final_price for all parts.
+        Note: Each part's final_price already includes per-part shipping.
+        For order-level shipping, we'll need to subtract per-part shipping
+        and add order-level shipping instead.
+        """
+        subtotal = 0.0
+        for part in self.parts:
+            if part.cost_summary:
+                # Use total_final_price if quantity > 1
+                if part.quantity > 1:
+                    subtotal += part.cost_summary.total_final_price
+                else:
+                    subtotal += part.cost_summary.final_price
+        return subtotal
+
+    def get_order_shipping_cost(self) -> float:
+        """
+        Calculate order-level shipping based on total weight.
+
+        Uses the existing shipping estimator but applies it to total order weight.
+        """
+        from cad_quoter.pricing.mcmaster_helpers import estimate_mcmaster_shipping
+        total_weight = self.get_total_weight_lb()
+        return estimate_mcmaster_shipping(total_weight)
+
+    def get_order_total(self) -> float:
+        """
+        Calculate final order total.
+
+        This is the grand total the customer pays:
+        - Sum of all part costs (excluding per-part shipping)
+        - Plus order-level shipping
+
+        Note: Current implementation has shipping embedded in each part.
+        For true order-level shipping, we need to:
+        1. Sum parts without their individual shipping
+        2. Add single order shipping based on total weight
+        """
+        # For now, return parts subtotal + order shipping
+        # (This will be refined when we update the cost calculation)
+        parts_subtotal_no_shipping = 0.0
+        for part in self.parts:
+            if part.cost_summary:
+                # Get the total cost without shipping
+                # Each part's final price includes shipping, so we subtract it
+                if part.quantity > 1:
+                    part_total = part.cost_summary.total_final_price
+                else:
+                    part_total = part.cost_summary.final_price
+
+                # Subtract the per-part shipping cost
+                if part.direct_cost_breakdown:
+                    part_shipping = part.direct_cost_breakdown.shipping_cost
+                    parts_subtotal_no_shipping += (part_total - part_shipping * part.quantity)
+                else:
+                    parts_subtotal_no_shipping += part_total
+
+        order_shipping = self.get_order_shipping_cost()
+        return parts_subtotal_no_shipping + order_shipping
+
+    def to_dict(self) -> Dict[str, Any]:
+        """Convert to dictionary (for JSON serialization)."""
+        return {
+            'order_id': self.order_id,
+            'order_name': self.order_name,
+            'order_timestamp': self.order_timestamp,
+            'notes': self.notes,
+            'parts': [part.to_dict() for part in self.parts]
+        }
+
+    def to_json(self, filepath: Optional[str | Path] = None, indent: int = 2) -> str:
+        """
+        Convert to JSON string.
+
+        Args:
+            filepath: Optional path to save JSON file
+            indent: JSON indentation level
+
+        Returns:
+            JSON string
+        """
+        data = self.to_dict()
+        json_str = json.dumps(data, indent=indent)
+
+        if filepath:
+            Path(filepath).write_text(json_str)
+
+        return json_str
+
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any]) -> 'OrderData':
+        """Create OrderData from dictionary."""
+        # Convert parts list
+        if 'parts' in data and isinstance(data['parts'], list):
+            data['parts'] = [
+                QuoteData.from_dict(part) if isinstance(part, dict) else part
+                for part in data['parts']
+            ]
+
+        return cls(**data)
+
+    @classmethod
+    def from_json(cls, json_str_or_path: str | Path) -> 'OrderData':
+        """
+        Load OrderData from JSON string or file.
+
+        Args:
+            json_str_or_path: JSON string or path to JSON file
+
+        Returns:
+            OrderData instance
+        """
+        # Check if it's a file path
+        try:
+            path = Path(json_str_or_path)
+            if path.exists():
+                json_str = path.read_text()
+            else:
+                json_str = json_str_or_path
+        except:
+            json_str = json_str_or_path
+
+        data = json.loads(json_str)
+        return cls.from_dict(data)
+
+
 # ============================================================================
 # EXTRACTION FUNCTIONS
 # ============================================================================
