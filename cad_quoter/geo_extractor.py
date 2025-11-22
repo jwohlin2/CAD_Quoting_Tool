@@ -66,6 +66,8 @@ class TextRecord:
     in_block: bool
     depth: int
     block_path: Tuple[str, ...]
+    dimtype: Optional[int] = None  # For DIMENSION entities: 0=linear, 1=aligned, 2=angular, 3=diameter, 4=radius, 6=ordinate
+    measurement: Optional[float] = None  # For DIMENSION entities: actual measured value in inches
 
 
 # --------------------------- open + layout helpers ---------------------------
@@ -448,6 +450,7 @@ def iter_text_records(
             continue
 
         txt, h, x, y = None, 0.0, 0.0, 0.0
+        dimtype, meas_in = None, None  # For DIMENSION entities
         if et == "TEXT":
             txt = getattr(ent.dxf, "text", "") or ""
             h = float(getattr(ent.dxf, "height", 0.0) or 0.0)
@@ -476,44 +479,42 @@ def iter_text_records(
             # dimtype values: 0=linear, 1=aligned, 2=angular, 3=diameter, 4=radius, 6=ordinate
             dimtype = getattr(ent.dxf, "dimtype", 0) if hasattr(ent, "dxf") else 0
 
-            # Some variants carry measurement text at .dxf.text
+            # Always extract the actual measurement value
+            meas_in = None
+            try:
+                meas = ent.get_measurement()
+                if meas is not None:
+                    if hasattr(meas, "magnitude"):
+                        meas = meas.magnitude
+                    # Assume drawing units are inches
+                    meas_in = float(meas)
+            except Exception:
+                pass
+
+            # Get dimension text override (if any)
             txt = getattr(ent.dxf, "text", "") or ""
 
-            # Resolve <> placeholder with actual dimension measurement
-            if "<>" in txt or not txt:
-                try:
-                    meas = ent.get_measurement()
-                    if meas is not None:
-                        if hasattr(meas, "magnitude"):
-                            meas = meas.magnitude
-                        # Assume drawing units are inches
-                        meas_in = float(meas)
-                        meas_str = f"{meas_in:.4f}".rstrip("0").rstrip(".")
-                        if meas_str.startswith("0."):
-                            meas_str = meas_str[1:]
+            # For dimensions, prefer actual measurement over text override
+            # This ensures we get the real dimension value, not arbitrary text
+            if meas_in is not None:
+                meas_str = f"{meas_in:.4f}".rstrip("0").rstrip(".")
+                if meas_str.startswith("0."):
+                    meas_str = meas_str[1:]
 
-                        # Add prefix for radial/diameter dimensions if not already present
-                        if dimtype == 4:  # Radial dimension
-                            if not txt or txt == "<>":
-                                meas_str = f"R{meas_str}"
-                            elif "<>" in txt:
-                                # Check if there's already an R prefix in the text
-                                if not re.match(r'^\s*R\s*<>', txt, re.IGNORECASE):
-                                    meas_str = f"R{meas_str}"
-                        elif dimtype == 3:  # Diameter dimension
-                            if not txt or txt == "<>":
-                                meas_str = f"Ø{meas_str}"
-                            elif "<>" in txt:
-                                # Check if there's already a diameter symbol
-                                if not any(c in txt for c in ["Ø", "%%c", "DIA"]):
-                                    meas_str = f"Ø{meas_str}"
+                # Add prefix for radial/diameter dimensions
+                if dimtype == 4:  # Radial dimension
+                    meas_str = f"R{meas_str}"
+                elif dimtype == 3:  # Diameter dimension
+                    meas_str = f"Ø{meas_str}"
 
-                        if "<>" in txt:
-                            txt = txt.replace("<>", meas_str)
-                        elif not txt:
-                            txt = meas_str
-                except Exception:
-                    pass
+                # Use the formatted measurement as the text
+                # If there's a text override with <>, replace it; otherwise use measurement
+                if "<>" in txt:
+                    txt = txt.replace("<>", meas_str)
+                else:
+                    # No placeholder - use the actual measurement
+                    # (Text override might be arbitrary/wrong, prefer measurement)
+                    txt = meas_str
 
         if txt:
             txt = _decode_uplus(_plain(str(txt)))
@@ -530,6 +531,8 @@ def iter_text_records(
                     from_block,
                     depth,
                     block_path,
+                    dimtype,
+                    meas_in,
                 )
 
 
@@ -572,21 +575,25 @@ def collect_all_text(
             exclude_layers=exclude_layers,
             min_height=min_height,
         ):
-            rows.append(
-                {
-                    "layout": rec.layout,
-                    "layer": rec.layer,
-                    "etype": rec.etype,
-                    "text": rec.text,
-                    "x": rec.x,
-                    "y": rec.y,
-                    "height": rec.height,
-                    "rotation": rec.rotation,
-                    "in_block": rec.in_block,
-                    "depth": rec.depth,
-                    "block_path": list(rec.block_path),
-                }
-            )
+            row_dict = {
+                "layout": rec.layout,
+                "layer": rec.layer,
+                "etype": rec.etype,
+                "text": rec.text,
+                "x": rec.x,
+                "y": rec.y,
+                "height": rec.height,
+                "rotation": rec.rotation,
+                "in_block": rec.in_block,
+                "depth": rec.depth,
+                "block_path": list(rec.block_path),
+            }
+            # Add dimension-specific fields if present
+            if rec.dimtype is not None:
+                row_dict["dimtype"] = rec.dimtype
+            if rec.measurement is not None:
+                row_dict["measurement"] = rec.measurement
+            rows.append(row_dict)
     return rows
 
 
