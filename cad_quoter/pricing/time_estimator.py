@@ -1357,6 +1357,36 @@ def estimate_punch_machine_hours(punch_plan: dict[str, Any], punch_features: dic
         from cad_quoter.planning.process_planner import calc_etch_minutes
         hours.etch_marking_min = calc_etch_minutes(has_etch_note=True, qty=1, details_with_etch=1)
 
+    # Check for wire_edm operations in punch_plan (e.g., wire_edm_form for carbide punches)
+    ops = punch_plan.get("ops", [])
+    for op in ops:
+        op_type = op.get("op", "").lower()
+
+        # Wire EDM form operations for carbide form punches
+        if op_type == "wire_edm_form" or op_type == "wire_edm_profile":
+            from cad_quoter.pricing.time_estimator import _edm_material_factor, _wire_mins_per_in
+            perimeter = op.get("wire_profile_perimeter_in", 0.0)
+            thickness = op.get("thickness_in", 0.0)
+
+            # Get material from operation or features
+            material = op.get("material") or punch_features.get("material_callout", "A2")
+            material_group = op.get("material_group", "")
+
+            # Calculate EDM time
+            material_factor = _edm_material_factor(material, material_group)
+            mpi = _wire_mins_per_in(material, material_group, thickness)
+
+            edm_time = perimeter * mpi * material_factor
+
+            # Use time_minutes from operation if provided
+            if "time_minutes" in op:
+                edm_time = op["time_minutes"]
+
+            hours.edm_min += edm_time
+
+            print(f"  DEBUG [Punch EDM {op_type}]: path_length={perimeter:.3f}\", min_per_in={mpi:.3f}, "
+                  f"material_factor={material_factor:.2f}, thickness={thickness:.3f}\", time={edm_time:.2f} min")
+
     hours.calculate_totals()
 
     return hours

@@ -870,7 +870,7 @@ def extract_quote_data_from_cad(
     if not use_ocr and verbose:
         print("  Skipping OCR dimension extraction (manual dimensions provided)")
 
-    plan = plan_from_cad_file(cad_file_path, use_paddle_ocr=use_ocr, verbose=False)
+    plan = plan_from_cad_file(cad_file_path, use_paddle_ocr=use_ocr, verbose=verbose)
     quote_data.raw_plan = plan if verbose else None  # Only store if verbose
 
     # Use extracted quantity from plan if available and user didn't specify a quantity
@@ -2087,7 +2087,10 @@ def extract_quote_data_from_cad(
         breakdown_slot_min = plan_machine_times['breakdown_minutes'].get('slots', 0.0)
         breakdown_waterjet_min = plan_machine_times['breakdown_minutes'].get('waterjet', 0.0)  # NEW
         # EDM from plan operations + EDM from hole table "FOR WIRE EDM" entries
-        total_edm_min = plan_machine_times['breakdown_minutes'].get('edm', 0.0) + hole_table_edm_min
+        plan_edm_min = plan_machine_times['breakdown_minutes'].get('edm', 0.0)
+        total_edm_min = plan_edm_min + hole_table_edm_min
+        if verbose:
+            print(f"[DEBUG EDM] plan_edm_min={plan_edm_min:.2f}, hole_table_edm_min={hole_table_edm_min:.2f}, total_edm_min={total_edm_min:.2f}")
 
         # Get other_ops_detail from plan (NEW)
         other_ops_detail_raw = plan_machine_times.get('other_ops_detail', [])

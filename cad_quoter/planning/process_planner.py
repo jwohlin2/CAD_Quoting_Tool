@@ -2220,6 +2220,36 @@ def plan_from_cad_file(
         if verbose:
             print(f"[PLANNER] Could not extract part quantity: {e}")
 
+    # 3b. Extract part name/description from text
+    # This is used for die section detection and other part-specific logic
+    part_name = ""
+    text_joined = " ".join(all_text).upper()
+    # Look for common part description patterns
+    if "DIE SECTION" in text_joined:
+        part_name = "die section"
+        if verbose:
+            print("[PLANNER] Detected 'DIE SECTION' in part description")
+    elif "FORM DIE" in text_joined:
+        part_name = "form die"
+        if verbose:
+            print("[PLANNER] Detected 'FORM DIE' in part description")
+    elif "CARBIDE INSERT" in text_joined:
+        part_name = "carbide insert"
+        if verbose:
+            print("[PLANNER] Detected 'CARBIDE INSERT' in part description")
+
+    # 3c. Detect material from CAD text
+    # This is critical for carbide die section detection and EDM decision logic
+    detected_material = None
+    try:
+        from cad_quoter.pricing.KeywordDetector import detect_material_in_cad
+        detected_material = detect_material_in_cad(cad_path_for_extraction, text_list=all_text)
+        if verbose and detected_material:
+            print(f"[PLANNER] Detected material: {detected_material}")
+    except Exception as e:
+        if verbose:
+            print(f"[PLANNER] Could not detect material: {e}")
+
     # 4. Convert hole table to hole_sets format
     hole_sets = _convert_hole_table_to_hole_sets(hole_table)
 
@@ -2236,6 +2266,14 @@ def plan_from_cad_file(
         # Provide defaults if dimensions not extracted
         params["plate_LxW"] = (0.0, 0.0)
         params["T"] = 0.0
+
+    # Add part name if detected
+    if part_name:
+        params["part_name"] = part_name
+
+    # Add detected material to params (critical for carbide die section detection)
+    if detected_material:
+        params["material"] = detected_material
 
     # Optional: Set reasonable defaults for other params
     params.setdefault("profile_tol", 0.001)
@@ -6061,7 +6099,23 @@ def _is_carbide(material: str, material_group: str) -> bool:
     """Check if material is carbide (disallow milling for datum faces)."""
     mat_upper = (material or "").upper()
     group_upper = (material_group or "").upper()
-    return "CARBIDE" in mat_upper or "CARBIDE" in group_upper
+
+    # Check for "CARBIDE" keyword
+    if "CARBIDE" in mat_upper or "CARBIDE" in group_upper:
+        return True
+
+    # Check for specific carbide grade designations
+    # VM-15M, VM-30, etc. are carbide grades
+    carbide_grades = [
+        "VM-15M", "VM-15", "VM-30", "VM-50",  # VM series carbide
+        "H-13", "H13",  # Often carbide/high-hardness tool steel
+    ]
+
+    for grade in carbide_grades:
+        if grade in mat_upper:
+            return True
+
+    return False
 
 
 def _normalize_material_group(material: str, material_group: str) -> str:
@@ -6184,7 +6238,7 @@ def _extract_punch_params(params: Dict[str, Any]) -> PunchPlannerParams:
         has_etch=bool(params.get("has_etch", False)),
         min_dia_tol_in=params.get("min_dia_tol_in"),
         min_len_tol_in=params.get("min_len_tol_in"),
-        material=params.get("material", "A2"),
+        material=params.get("material") or params.get("material_callout", "A2"),
         material_group=params.get("material_group", ""),
         has_flats=bool(params.get("has_flats", False)),
         has_wire_profile=bool(params.get("has_wire_profile", False)),
@@ -6500,10 +6554,38 @@ def _add_punch_form_ops(plan: Dict[str, Any], p: PunchPlannerParams, profile_pro
             })
 
     if p.has_3d_surface:
-        plan["ops"].append({
-            "op": "3d_mill_form",
-            "note": "3D mill contoured nose section"
-        })
+        # For carbide punches with 3D surfaces, use Wire EDM instead of milling
+        is_carbide = _is_carbide(p.material, p.material_group)
+        print(f"[DEBUG has_3d_surface] material={p.material}, material_group={p.material_group}, is_carbide={is_carbide}")
+
+        if is_carbide:
+            # Use wire EDM for carbide form punches
+            print(f"[DEBUG] Using Wire EDM for carbide punch with 3D surface")
+            # Estimate perimeter from shape if not available
+            perimeter = p.wire_profile_perimeter_in
+            if perimeter <= 0:
+                if p.shape_type == "round":
+                    perimeter = 3.14159 * p.max_od_or_width_in
+                else:
+                    w = p.body_width_in or p.max_od_or_width_in
+                    t = p.body_thickness_in or w
+                    perimeter = 2 * (w + t)
+
+            # Add wire EDM form operation directly (don't call _add_punch_wire_edm_ops
+            # since it requires has_wire_profile or has_flats to be True)
+            plan["ops"].append({
+                "op": "wire_edm_form",
+                "wire_profile_perimeter_in": perimeter,
+                "thickness_in": p.body_thickness_in or p.max_od_or_width_in,
+                "note": f"Wire EDM form profile, perimeter {perimeter:.2f}\""
+            })
+        else:
+            # Use 3D milling for non-carbide materials
+            print(f"[DEBUG] Using 3D milling for non-carbide punch")
+            plan["ops"].append({
+                "op": "3d_mill_form",
+                "note": "3D mill contoured nose section"
+            })
 
     # Add polish operations
     if p.has_polish_contour or p.has_polish_contour_note:
