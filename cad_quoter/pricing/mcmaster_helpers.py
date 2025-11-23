@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import csv
 import os
-from functools import lru_cache
 from fractions import Fraction
 from typing import Any, Mapping, Sequence
 
@@ -13,7 +12,6 @@ from cad_quoter.vendors.mcmaster_stock import parse_inches as _parse_inches
 from cad_quoter.pricing.MaterialMapper import material_mapper
 
 
-@lru_cache(maxsize=1)
 def load_mcmaster_catalog_rows(path: str | None = None) -> list[dict[str, Any]]:
     """Return rows from the McMaster stock catalog CSV."""
 
@@ -34,7 +32,6 @@ def load_mcmaster_catalog_rows(path: str | None = None) -> list[dict[str, Any]]:
         return []
 
 
-@lru_cache(maxsize=1)
 def _load_catalog_indexed_by_material() -> dict[str, list[dict[str, Any]]]:
     """Load catalog and pre-index by material for O(1) lookups.
 

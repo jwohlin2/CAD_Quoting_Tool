@@ -887,7 +887,7 @@ def extract_punch_quote_data(
         cad_file_path: Path to DXF/DWG file
         quote_data: QuoteData object to populate
         verbose: Print progress messages
-        plan: Optional plan dict with cached text_dump and cached_dxf_path
+        plan: Optional plan dict with process planning data
 
     Returns:
         Dict with punch features, plan, and time estimates
@@ -896,38 +896,19 @@ def extract_punch_quote_data(
         return {"error": "Punch extraction modules not available"}
 
     try:
-        # Use cached text from plan if available (avoids ODA conversion)
-        if plan and plan.get('text_dump'):
-            text_dump = plan['text_dump']
-            text_lines = text_dump.split('\n')
-            if verbose:
-                print(f"  Using cached text ({len(text_lines)} lines) from plan")
-        else:
-            # Extract text from DXF - use cached DXF path if available
-            from cad_quoter.geo_extractor import open_doc, collect_all_text
+        # Extract text from DXF
+        from cad_quoter.geo_extractor import open_doc, collect_all_text
 
-            # Use cached DXF to avoid ODA conversion
-            doc_path = cad_file_path
-            if plan and plan.get('cached_dxf_path'):
-                doc_path = Path(plan['cached_dxf_path'])
-                if verbose:
-                    print(f"  Using cached DXF for text extraction: {doc_path.name}")
+        doc = open_doc(cad_file_path)
+        text_records = list(collect_all_text(doc))
+        text_lines = [rec["text"] for rec in text_records if rec.get("text")]
+        text_dump = "\n".join(text_lines)
 
-            doc = open_doc(doc_path)
-            text_records = list(collect_all_text(doc))
-            text_lines = [rec["text"] for rec in text_records if rec.get("text")]
-            text_dump = "\n".join(text_lines)
+        if verbose:
+            print(f"  Extracted {len(text_lines)} text lines from drawing")
 
-            if verbose:
-                print(f"  Extracted {len(text_lines)} text lines from drawing")
-
-        # Extract punch features - use cached DXF path if available
-        dxf_path_for_punch = cad_file_path
-        if plan and plan.get('cached_dxf_path'):
-            dxf_path_for_punch = Path(plan['cached_dxf_path'])
-            if verbose:
-                print(f"  Using cached DXF for punch extraction: {dxf_path_for_punch.name}")
-        punch_features = extract_punch_features_from_dxf(dxf_path_for_punch, text_dump)
+        # Extract punch features
+        punch_features = extract_punch_features_from_dxf(cad_file_path, text_dump)
 
         if verbose:
             print(f"  Punch features extracted:")
@@ -1210,41 +1191,21 @@ def extract_quote_data_from_cad(
                     if verbose:
                         print("  [PUNCH] Punch dimensions are zero, falling back to DimensionFinder...")
 
-                    # Use cached dimensions from plan if available (avoids ODA conversion)
-                    if 'extracted_dims' in plan and plan['extracted_dims']:
-                        dims_data = plan['extracted_dims']
-                        L = dims_data.get('L', 0.0)
-                        W = dims_data.get('W', 0.0)
-                        T = dims_data.get('T', 0.0)
-                        if L > 0 and W > 0:
-                            quote_data.part_dimensions = PartDimensions(
-                                length=L,
-                                width=W,
-                                thickness=T,
-                            )
-                            if verbose:
-                                print(f"  [PUNCH] Using cached dimensions: {L:.3f} x {W:.3f} x {T:.3f}")
-                        else:
-                            if verbose:
-                                print("  [PUNCH] Cached dimensions are zero, DimensionFinder also failed")
+                    # Extract dimensions from CAD file
+                    from cad_quoter.planning.process_planner import extract_dimensions_from_cad
+                    dims = extract_dimensions_from_cad(cad_file_path)
+                    if dims:
+                        L, W, T = dims
+                        quote_data.part_dimensions = PartDimensions(
+                            length=L,
+                            width=W,
+                            thickness=T,
+                        )
+                        if verbose:
+                            print(f"  [PUNCH] DimensionFinder found: {L:.3f} x {W:.3f} x {T:.3f}")
                     else:
-                        # No cached dims, fall back to extraction - use cached DXF if available
-                        from cad_quoter.planning.process_planner import extract_dimensions_from_cad
-                        # Use cached DXF path to avoid ODA conversion
-                        dim_path = plan.get('cached_dxf_path', cad_file_path) if plan else cad_file_path
-                        dims = extract_dimensions_from_cad(dim_path)
-                        if dims:
-                            L, W, T = dims
-                            quote_data.part_dimensions = PartDimensions(
-                                length=L,
-                                width=W,
-                                thickness=T,
-                            )
-                            if verbose:
-                                print(f"  [PUNCH] DimensionFinder found: {L:.3f} x {W:.3f} x {T:.3f}")
-                        else:
-                            if verbose:
-                                print("  [PUNCH] DimensionFinder also failed to extract dimensions")
+                        if verbose:
+                            print("  [PUNCH] DimensionFinder also failed to extract dimensions")
 
                 # Apply dimension override for punch parts
                 if dimension_override:
@@ -1535,11 +1496,8 @@ def extract_quote_data_from_cad(
             material = material_override
             detected_from_cad = False
         else:
-            # Use cached text from plan if available (avoids ODA conversion)
-            cached_text = None
-            if 'text_dump' in plan and plan['text_dump']:
-                cached_text = plan['text_dump'].split('\n')
-            material = detect_material_in_cad(cad_file_path, text_list=cached_text)
+            # Detect material from CAD file
+            material = detect_material_in_cad(cad_file_path)
             detected_from_cad = True
             if material == "GENERIC":
                 material = DEFAULT_MATERIAL
@@ -1994,13 +1952,8 @@ def extract_quote_data_from_cad(
         print("[4/5] Calculating machine hours...")
 
     # Always process hole operations - both punch and non-punch parts need hole times
-    # Use cached hole operations from plan if available (avoids redundant ODA conversion)
-    if 'hole_operations_data' in plan and plan['hole_operations_data']:
-        hole_table = plan['hole_operations_data']
-        if verbose:
-            print("  Using cached hole operations from plan")
-    else:
-        hole_table = extract_hole_operations_from_cad(cad_file_path)
+    # Extract hole operations from CAD file
+    hole_table = extract_hole_operations_from_cad(cad_file_path)
 
     # For punch parts, process holes and add times to punch base times
     if is_punch and punch_data and "error" not in punch_data:
