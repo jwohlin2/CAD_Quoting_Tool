@@ -1902,10 +1902,24 @@ class AppV7:
             def format_grinding_op(op):
                 """Format grinding operation with all details"""
                 lines = []
-                lines.append(f"{op.op_description} | L={op.length:.3f}\" | W={op.width:.3f}\" | Area={op.area:.2f} sq in")
-                lines.append(f"  stock_removed={op.stock_removed_total:.3f}\" | faces={op.faces} | volume={op.volume_removed:.3f} cu in")
-                lines.append(f"  min_per_cuin={op.min_per_cuin:.1f} | material_factor={op.material_factor:.2f}")
-                lines.append(f"  time = {op.volume_removed:.3f} × {op.min_per_cuin:.1f} × {op.material_factor:.2f} = {op.time_minutes:.2f} min")
+
+                # Check if this is a volume-based or non-volume-based operation
+                # Non-volume operations have volume_removed near 0 but non-zero time
+                is_volume_based = op.volume_removed > 0.001
+
+                if is_volume_based:
+                    # Volume-based grinding: show geometry and volume calculation
+                    lines.append(f"{op.op_description} | L={op.length:.3f}\" | W={op.width:.3f}\" | Area={op.area:.2f} sq in")
+                    lines.append(f"  stock_removed={op.stock_removed_total:.3f}\" | faces={op.faces} | volume={op.volume_removed:.3f} cu in")
+                    lines.append(f"  min_per_cuin={op.min_per_cuin:.1f} | material_factor={op.material_factor:.2f}")
+                    lines.append(f"  time = {op.volume_removed:.3f} × {op.min_per_cuin:.1f} × {op.material_factor:.2f} = {op.time_minutes:.2f} min")
+                else:
+                    # Non-volume-based grinding: show simplified format
+                    lines.append(f"{op.op_description} | faces={op.faces}")
+                    if op.material_factor != 1.0:
+                        lines.append(f"  material_factor={op.material_factor:.2f}")
+                    lines.append(f"  time = {op.time_minutes:.2f} min")
+
                 return "\n".join(lines)
 
             # Build the report
