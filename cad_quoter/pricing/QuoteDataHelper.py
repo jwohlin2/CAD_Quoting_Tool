@@ -873,6 +873,49 @@ def extract_quote_data_from_cad(
     plan = plan_from_cad_file(cad_file_path, use_paddle_ocr=use_ocr, verbose=False)
     quote_data.raw_plan = plan if verbose else None  # Only store if verbose
 
+    # FALLBACK: If dimensions weren't extracted (use_ocr=False), force extraction for die sections
+    # This ensures form operations have proper perimeter calculations
+    extracted_dims = plan.get('extracted_dims', {})
+    dims_missing = not extracted_dims or all(extracted_dims.get(k, 0.0) == 0.0 for k in ['L', 'W', 'T'])
+
+    if dims_missing and not dimension_override:
+        if verbose:
+            print("  [FALLBACK] Dimensions missing - extracting with DimensionFinder...")
+
+        from cad_quoter.planning import extract_dimensions_from_cad
+        dims_tuple = extract_dimensions_from_cad(cad_file_path)
+
+        if dims_tuple:
+            L, W, T = dims_tuple
+            if verbose:
+                print(f"  [FALLBACK] Extracted dimensions: L={L:.3f}\", W={W:.3f}\", T={T:.3f}\"")
+
+            # Update plan with extracted dimensions
+            plan['extracted_dims'] = {'L': L, 'W': W, 'T': T}
+
+            # For die sections, regenerate the plan with proper dimensions
+            # This ensures form operations calculate correct perimeter
+            planner_family = plan.get('planner', '')
+            if 'Sections' in planner_family or 'die_section' in str(plan.get('meta', {}).get('sub_type', '')):
+                if verbose:
+                    print(f"  [FALLBACK] Regenerating die section plan with dimensions...")
+
+                from cad_quoter.planning.process_planner import plan_job
+                params = {
+                    'plate_LxW': (L, W),
+                    'T': T,
+                    'material': plan.get('material', 'A2'),
+                    'has_internal_form': True,  # Preserve form detection
+                    'hole_sets': plan.get('hole_sets', []),
+                }
+                regenerated_plan = plan_job(planner_family, params)
+                regenerated_plan['extracted_dims'] = {'L': L, 'W': W, 'T': T}
+                regenerated_plan['source_file'] = plan.get('source_file')
+                plan = regenerated_plan
+
+                if verbose:
+                    print(f"  [FALLBACK] Plan regenerated with dimensions")
+
     # Use extracted quantity from plan if available and user didn't specify a quantity
     extracted_qty = plan.get("extracted_part_quantity", 1)
     if quantity == 1 and extracted_qty > 1:
