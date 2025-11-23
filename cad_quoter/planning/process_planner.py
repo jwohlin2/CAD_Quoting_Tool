@@ -2196,16 +2196,15 @@ def plan_from_cad_file(
     # 1. Extract dimensions (L, W, T)
     dims = None
     if use_paddle_ocr:
-        if verbose:
-            print("[PLANNER] Extracting dimensions with DimensionFinder...")
+        print("[PLANNER DEBUG] Attempting dimension extraction...")
         dims = extract_dimensions_from_cad(cad_path_for_extraction)
         if dims:
             L, W, T = dims
-            if verbose:
-                print(f"[PLANNER] Dimensions: L={L:.3f}\", W={W:.3f}\", T={T:.3f}\"")
+            print(f"[PLANNER DEBUG] ✓ Dimensions extracted: L={L:.3f}\", W={W:.3f}\", T={T:.3f}\"")
         else:
-            if verbose:
-                print("[PLANNER] Could not extract dimensions")
+            print("[PLANNER DEBUG] ✗ Dimension extraction returned None")
+    else:
+        print("[PLANNER DEBUG] use_paddle_ocr=False, skipping dimension extraction")
 
     # 2. Extract hole table and operations
     if verbose:
@@ -2275,10 +2274,12 @@ def plan_from_cad_file(
         L, W, T = dims
         params["plate_LxW"] = (L, W)
         params["T"] = T
+        print(f"[PLANNER DEBUG] Setting params: plate_LxW=({L:.3f}, {W:.3f}), T={T:.3f}")
     else:
         # Provide defaults if dimensions not extracted
         params["plate_LxW"] = (0.0, 0.0)
         params["T"] = 0.0
+        print(f"[PLANNER DEBUG] No dims - using defaults: plate_LxW=(0.000, 0.000), T=0.000")
 
     # Add part name if detected
     if part_name:
