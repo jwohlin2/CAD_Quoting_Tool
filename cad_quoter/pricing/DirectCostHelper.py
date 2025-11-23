@@ -1040,31 +1040,42 @@ def calculate_total_scrap(
 
         # Use cylindrical lookup for round bar stock
         if is_cylindrical and part_diameter is not None and part_length is not None:
+            # Add machining allowances for cylindrical parts (similar to plate stock)
+            # - Diameter needs extra material for turning/grinding (like thickness allowance)
+            # - Length needs extra material for facing and holding (like length allowance)
+            DIAMETER_ALLOWANCE = 0.25  # +0.25" for turning/grinding (matches thickness allowance)
+            LENGTH_ALLOWANCE = 0.50    # +0.50" for facing/holding (matches length allowance)
+
+            desired_diameter = part_diameter + DIAMETER_ALLOWANCE
+            desired_cylindrical_length = part_length + LENGTH_ALLOWANCE
+
             if verbose:
-                print(f"  [CYLINDRICAL] Using round bar stock lookup (diam={part_diameter:.3f}\", length={part_length:.3f}\")")
-                print(f"  [CYLINDRICAL] DEBUG: part_length={part_length}, desired_length={desired_length}")
+                print(f"  [CYLINDRICAL] Using round bar stock lookup")
+                print(f"  [CYLINDRICAL]   Diameter: {part_diameter:.3f}\" → {desired_diameter:.3f}\" (with {DIAMETER_ALLOWANCE}\" allowance)")
+                print(f"  [CYLINDRICAL]   Length: {part_length:.3f}\" → {desired_cylindrical_length:.3f}\" (with {LENGTH_ALLOWANCE}\" allowance)")
 
             result = pick_mcmaster_cylindrical_sku(
-                need_diam_in=part_diameter,
-                need_length_in=part_length,
+                need_diam_in=desired_diameter,
+                need_length_in=desired_cylindrical_length,
                 material_key=material,
                 catalog_rows=catalog_rows,
                 verbose=verbose
             )
 
             if result:
-                mcmaster_length = result.get('stock_L_in', part_length)
-                mcmaster_width = result.get('stock_diam_in', part_diameter)
-                mcmaster_thickness = result.get('stock_diam_in', part_diameter)
+                mcmaster_length = result.get('stock_L_in', desired_cylindrical_length)
+                mcmaster_width = result.get('stock_diam_in', desired_diameter)
+                mcmaster_thickness = result.get('stock_diam_in', desired_diameter)
                 if verbose:
                     print(f"Found McMaster cylindrical stock: diam={mcmaster_width}\" x length={mcmaster_length}\"")
             else:
-                # Fallback: use part dimensions for cylindrical
-                mcmaster_length = part_length
-                mcmaster_width = part_diameter
-                mcmaster_thickness = part_diameter
+                # Fallback: use desired dimensions (with allowances) for cylindrical
+                mcmaster_length = desired_cylindrical_length
+                mcmaster_width = desired_diameter
+                mcmaster_thickness = desired_diameter
                 if verbose:
-                    print(f"No McMaster cylindrical stock found, using part dimensions")
+                    print(f"No McMaster cylindrical stock found, using desired dimensions with allowances")
+                    print(f"  Stock dimensions: diam={mcmaster_width:.3f}\" x length={mcmaster_length:.3f}\"")
         else:
             # Use standard plate lookup
             result = pick_mcmaster_plate_sku(

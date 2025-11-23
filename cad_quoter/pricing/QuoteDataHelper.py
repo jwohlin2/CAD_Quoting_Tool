@@ -1622,21 +1622,36 @@ def extract_quote_data_from_cad(
     part_diameter_2 = quote_data.part_dimensions.diameter_2 if quote_data.part_dimensions else 0.0
     part_length = quote_data.part_dimensions.length if quote_data.part_dimensions else 0.0
 
+    # Initialize desired_diameter (will be calculated for cylindrical parts)
+    desired_diameter_with_allowance = 0.0
+
     if is_cylindrical and part_diameter > 0 and part_length > 0:
         # For tapered parts, use the larger diameter for stock selection
         stock_diameter = max(part_diameter, part_diameter_2) if part_diameter_2 > 0 else part_diameter
+
+        # Add machining allowances for cylindrical parts (similar to plate stock)
+        # - Diameter needs extra material for turning/grinding (like thickness allowance)
+        # - Length needs extra material for facing and holding (like length allowance)
+        DIAMETER_ALLOWANCE = 0.25  # +0.25" for turning/grinding (matches thickness allowance)
+        LENGTH_ALLOWANCE = 0.50    # +0.50" for facing/holding (matches length allowance)
+
+        desired_diameter_with_allowance = stock_diameter + DIAMETER_ALLOWANCE
+        desired_cylindrical_length = part_length + LENGTH_ALLOWANCE
 
         # Use cylindrical lookup for guide posts, spring pins, etc.
         if verbose:
             if part_diameter_2 > 0:
                 print(f"  [CYLINDRICAL] Tapered part detected (diam1={part_diameter:.3f}\", diam2={part_diameter_2:.3f}\")")
-                print(f"  [CYLINDRICAL] Using larger diameter for stock lookup (diam={stock_diameter:.3f}\", length={part_length:.3f}\")")
+                print(f"  [CYLINDRICAL] Using larger diameter for stock lookup: {stock_diameter:.3f}\" → {desired_diameter_with_allowance:.3f}\" (with {DIAMETER_ALLOWANCE}\" allowance)")
+                print(f"  [CYLINDRICAL] Length for stock lookup: {part_length:.3f}\" → {desired_cylindrical_length:.3f}\" (with {LENGTH_ALLOWANCE}\" allowance)")
             else:
-                print(f"  [CYLINDRICAL] Using cylindrical stock lookup (diam={stock_diameter:.3f}\", length={part_length:.3f}\")")
+                print(f"  [CYLINDRICAL] Using cylindrical stock lookup")
+                print(f"  [CYLINDRICAL]   Diameter: {stock_diameter:.3f}\" → {desired_diameter_with_allowance:.3f}\" (with {DIAMETER_ALLOWANCE}\" allowance)")
+                print(f"  [CYLINDRICAL]   Length: {part_length:.3f}\" → {desired_cylindrical_length:.3f}\" (with {LENGTH_ALLOWANCE}\" allowance)")
 
         mcmaster_result = pick_mcmaster_cylindrical_sku(
-            need_diam_in=stock_diameter,
-            need_length_in=part_length,
+            need_diam_in=desired_diameter_with_allowance,
+            need_length_in=desired_cylindrical_length,
             material_key=material,
             catalog_rows=catalog_rows,
             verbose=verbose
@@ -1826,8 +1841,8 @@ def extract_quote_data_from_cad(
     # Use McMaster dimensions from scrap_calc (which already did the catalog lookup)
     # For cylindrical parts, also include diameter
     if is_cylindrical:
-        # For tapered parts, use the larger diameter that was used for stock selection
-        desired_diameter = stock_diameter if part_diameter_2 > 0 else part_diameter
+        # Use the desired diameter with allowance (calculated earlier)
+        desired_diameter = desired_diameter_with_allowance
         mcmaster_diameter = mcmaster_result.get('stock_diam_in', 0.0) if mcmaster_result else 0.0
     else:
         desired_diameter = 0.0
