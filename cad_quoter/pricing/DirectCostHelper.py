@@ -1066,6 +1066,21 @@ def calculate_total_scrap(
                 mcmaster_length = result.get('stock_L_in', desired_cylindrical_length)
                 mcmaster_width = result.get('stock_diam_in', desired_diameter)
                 mcmaster_thickness = result.get('stock_diam_in', desired_diameter)
+
+                # CRITICAL: Ensure stock dimensions never shrink below required dimensions
+                # (T1769-219 & T1769-134 bug fix: catalog rounding must never make stock smaller than needed)
+                if mcmaster_length < desired_cylindrical_length or mcmaster_width < desired_diameter:
+                    if verbose:
+                        print(f"WARNING: Catalog returned cylindrical stock smaller than required!")
+                        print(f"  Catalog: diam={mcmaster_width:.3f}\" × length={mcmaster_length:.3f}\"")
+                        print(f"  Required: diam={desired_diameter:.3f}\" × length={desired_cylindrical_length:.3f}\"")
+                        print(f"  Adjusting stock to meet minimum requirements...")
+
+                    # Ensure each dimension is at least as large as required
+                    mcmaster_length = max(mcmaster_length, desired_cylindrical_length)
+                    mcmaster_width = max(mcmaster_width, desired_diameter)
+                    mcmaster_thickness = max(mcmaster_thickness, desired_diameter)
+
                 if verbose:
                     print(f"Found McMaster cylindrical stock: diam={mcmaster_width}\" x length={mcmaster_length}\"")
             else:
@@ -1091,6 +1106,21 @@ def calculate_total_scrap(
                 mcmaster_length = result.get('stock_L_in', desired_length)
                 mcmaster_width = result.get('stock_W_in', desired_width)
                 mcmaster_thickness = result.get('stock_T_in', desired_thickness)
+
+                # CRITICAL: Ensure stock dimensions never shrink below required dimensions
+                # (T1769-219 & T1769-134 bug fix: catalog rounding must never make stock smaller than needed)
+                if mcmaster_length < desired_length or mcmaster_width < desired_width or mcmaster_thickness < desired_thickness:
+                    if verbose:
+                        print(f"WARNING: Catalog returned stock smaller than required!")
+                        print(f"  Catalog: {mcmaster_length:.3f}\" × {mcmaster_width:.3f}\" × {mcmaster_thickness:.3f}\"")
+                        print(f"  Required: {desired_length:.3f}\" × {desired_width:.3f}\" × {desired_thickness:.3f}\"")
+                        print(f"  Adjusting stock to meet minimum requirements...")
+
+                    # Ensure each dimension is at least as large as required
+                    mcmaster_length = max(mcmaster_length, desired_length)
+                    mcmaster_width = max(mcmaster_width, desired_width)
+                    mcmaster_thickness = max(mcmaster_thickness, desired_thickness)
+
                 if verbose:
                     print(f"Found McMaster stock: {mcmaster_length}\" x {mcmaster_width}\" x {mcmaster_thickness}\"")
             else:
