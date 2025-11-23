@@ -835,6 +835,9 @@ def _extract_die_section_params(params: Dict[str, Any]) -> DieSectionParams:
         W = float(params.get("W") or params.get("width") or params.get("width_in") or 0.0)
     T = float(params.get("T") or params.get("thickness") or params.get("thickness_in") or 0.0)
 
+    print(f"[DIE SECTION DEBUG] Extracted dimensions: L={L:.3f}\", W={W:.3f}\", T={T:.3f}\"")
+    print(f"[DIE SECTION DEBUG] params keys: {list(params.keys())}")
+
     # Material detection
     material = params.get("material", "A2")
     material_group = params.get("material_group", "")
