@@ -2216,6 +2216,10 @@ class AppV7:
                     'op_description': op.op_description,
                     'length': op.length,
                     'width': op.width,
+                    'thickness': op.thickness,
+                    'stock_length': op.stock_length,
+                    'stock_width': op.stock_width,
+                    'stock_thickness': op.stock_thickness,
                     'perimeter': op.perimeter,
                     'tool_diameter': op.tool_diameter,
                     'passes': op.passes,
@@ -2229,6 +2233,11 @@ class AppV7:
                     'time_minutes': op.time_minutes,
                     '_used_override': op._used_override,
                     'override_time_minutes': op.override_time_minutes,
+                    'material_factor': op.material_factor,
+                    'volume_removed_cuin': op.volume_removed_cuin,
+                    'volume_thickness': op.volume_thickness,
+                    'volume_length_trim': op.volume_length_trim,
+                    'volume_width_trim': op.volume_width_trim,
                 })
 
             grinding_ops_dicts = []

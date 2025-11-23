@@ -160,7 +160,13 @@ class MillingOperation:
     # Geometry
     length: float = 0.0  # inches
     width: float = 0.0  # inches
+    thickness: float = 0.0  # inches (finished thickness)
     perimeter: float = 0.0  # inches (for side ops)
+
+    # Stock dimensions (for square-up operations)
+    stock_length: float = 0.0  # inches
+    stock_width: float = 0.0  # inches
+    stock_thickness: float = 0.0  # inches
 
     # Tool parameters
     tool_diameter: float = 0.0  # inches
@@ -179,6 +185,12 @@ class MillingOperation:
 
     # Volume removal (for grinding operations)
     volume_removed_cuin: float = 0.0  # cubic inches
+    volume_thickness: float = 0.0  # cubic inches (volume from thickness removal)
+    volume_length_trim: float = 0.0  # cubic inches (volume from length trimming)
+    volume_width_trim: float = 0.0  # cubic inches (volume from width trimming)
+
+    # Material factor (for square-up operations)
+    material_factor: float = 1.0
 
     # Additional debug fields for square-up operations
     sq_top_bottom_stock: Optional[float] = None  # inches - stock removed from top/bottom
