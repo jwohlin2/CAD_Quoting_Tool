@@ -2241,6 +2241,39 @@ def plan_from_cad_file(
     params.setdefault("profile_tol", 0.001)
     params.setdefault("windows_need_sharp", False)
 
+    # Detect form die sections from text
+    # If text contains form die keywords, set has_internal_form=True
+    text_blob = " ".join(all_text).lower()
+    form_die_keywords = {"die section", "form die", "carbide insert", "form insert", "die insert", "carbide section"}
+    cam_hemmer_keywords = {"cam", "hemmer", "sensor block"}
+
+    if any(kw in text_blob for kw in form_die_keywords):
+        params.setdefault("has_internal_form", True)
+        if verbose:
+            print("[PLANNER] Detected form die section - setting has_internal_form=True")
+    elif any(kw in text_blob for kw in cam_hemmer_keywords):
+        params.setdefault("has_edge_form", True)
+        if verbose:
+            print("[PLANNER] Detected cam/hemmer - setting has_edge_form=True")
+
+    # Add text entities to params for profile decision logic
+    params["text_entities"] = [{"text": t} for t in all_text]
+
+    # Extract dimensions from CAD for profile decision logic
+    # This will be used by _extract_profile_dimension_stats
+    try:
+        from cad_quoter.geo_dump import extract_all_text_from_file
+        text_records = extract_all_text_from_file(cad_path_for_extraction)
+        # Filter for dimension records (those with dimtype)
+        dimensions = [r for r in text_records if r.get("dimtype") is not None]
+        if dimensions:
+            params["dimensions"] = dimensions
+            if verbose:
+                print(f"[PLANNER] Extracted {len(dimensions)} dimensions for profile decision logic")
+    except Exception as e:
+        if verbose:
+            print(f"[PLANNER] Could not extract dimensions for profile logic: {e}")
+
     # 6. Generate plan with auto family detection
     if verbose:
         print("[PLANNER] Generating process plan...")
