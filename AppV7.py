@@ -283,15 +283,16 @@ class AppV7:
         main_container = ttk.Frame(self.root)
         main_container.pack(fill=tk.BOTH, expand=True, padx=2, pady=2)
         main_container.grid_rowconfigure(0, weight=1)
-        main_container.grid_columnconfigure(0, weight=0)  # Parts list (fixed width)
-        main_container.grid_columnconfigure(1, weight=1)  # Notebook (expandable)
+        main_container.grid_columnconfigure(0, weight=1)  # Notebook (expandable)
 
-        # Create parts list panel on the left
-        self._create_parts_list_panel(main_container)
-
-        # Create notebook on the right
+        # Create notebook
         self.notebook = ttk.Notebook(main_container)
-        self.notebook.grid(row=0, column=1, sticky="nsew")
+        self.notebook.grid(row=0, column=0, sticky="nsew")
+
+        # Order Parts tab (new)
+        self.order_parts_tab = tk.Frame(self.notebook)
+        self.notebook.add(self.order_parts_tab, text="Order Parts")
+        self._create_order_parts_tab()
 
         # GEO tab
         self.geo_tab = tk.Frame(self.notebook)
@@ -308,24 +309,24 @@ class AppV7:
         self.notebook.add(self.output_tab, text="Output")
         self._create_output_tab()
 
-    def _create_parts_list_panel(self, parent) -> None:
-        """Create the parts list sidebar panel."""
-        parts_frame = ttk.LabelFrame(parent, text="Order Parts", padding=5)
-        parts_frame.grid(row=0, column=0, sticky="ns", padx=(0, 5))
+    def _create_order_parts_tab(self) -> None:
+        """Create the Order Parts tab with parts list and management buttons."""
+        # Main container for the tab
+        parts_container = ttk.Frame(self.order_parts_tab, padding=10)
+        parts_container.pack(fill=tk.BOTH, expand=True)
 
         # Parts listbox with scrollbar
-        listbox_frame = ttk.Frame(parts_frame)
-        listbox_frame.pack(fill=tk.BOTH, expand=True)
+        listbox_frame = ttk.Frame(parts_container)
+        listbox_frame.pack(fill=tk.BOTH, expand=True, pady=(0, 10))
 
         scrollbar = ttk.Scrollbar(listbox_frame)
         scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
 
         self.parts_listbox = tk.Listbox(
             listbox_frame,
-            width=25,
-            height=15,
             yscrollcommand=scrollbar.set,
-            selectmode=tk.SINGLE
+            selectmode=tk.SINGLE,
+            font=("TkDefaultFont", 10)
         )
         self.parts_listbox.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
         scrollbar.config(command=self.parts_listbox.yview)
@@ -334,42 +335,57 @@ class AppV7:
         self.parts_listbox.bind('<<ListboxSelect>>', self._on_part_selected)
 
         # Buttons for managing parts
-        btn_frame = ttk.Frame(parts_frame)
-        btn_frame.pack(fill=tk.X, pady=(5, 0))
+        btn_frame = ttk.Frame(parts_container)
+        btn_frame.pack(fill=tk.X, pady=(0, 10))
 
         ttk.Button(
             btn_frame,
             text="Add Part(s)...",
             command=self.add_parts_to_order
-        ).pack(fill=tk.X, pady=2)
+        ).pack(side=tk.LEFT, padx=5)
 
         ttk.Button(
             btn_frame,
             text="Remove Part",
             command=self.remove_part_from_order
-        ).pack(fill=tk.X, pady=2)
+        ).pack(side=tk.LEFT, padx=5)
 
         # Info label showing current selection
         self.part_info_label = ttk.Label(
-            parts_frame,
+            parts_container,
             text="No parts in order",
             relief=tk.SUNKEN,
-            anchor=tk.W
+            anchor=tk.W,
+            padding=5
         )
-        self.part_info_label.pack(fill=tk.X, pady=(5, 0))
+        self.part_info_label.pack(fill=tk.X)
 
     def _refresh_parts_list(self) -> None:
-        """Refresh the parts listbox to reflect current order."""
+        """Refresh the parts listbox and dropdown to reflect current order."""
         self.parts_listbox.delete(0, tk.END)
 
         if not self.current_order.parts:
             self.part_info_label.config(text="No parts in order")
+            # Clear the dropdown
+            if hasattr(self, 'part_selector'):
+                self.part_selector['values'] = []
+                self.part_selector_var.set("")
             return
 
+        # Populate both listbox and dropdown with the same format
+        part_options = []
         for i, part in enumerate(self.current_order.parts):
             # Format: "[1] filename.dwg · Qty: 5"
             display_text = f"[{i+1}] {part.cad_file_name} · Qty: {part.quantity}"
             self.parts_listbox.insert(tk.END, display_text)
+            part_options.append(display_text)
+
+        # Update dropdown with all parts
+        if hasattr(self, 'part_selector'):
+            self.part_selector['values'] = part_options
+            # Set current selection if there's an active part
+            if self.active_part_index is not None and 0 <= self.active_part_index < len(part_options):
+                self.part_selector_var.set(part_options[self.active_part_index])
 
         # Update info label
         total_parts = len(self.current_order.parts)
@@ -385,6 +401,27 @@ class AppV7:
         if part_index != self.active_part_index:
             self.active_part_index = part_index
             self._load_active_part_to_ui()
+
+    def _on_part_selector_changed(self, event) -> None:
+        """Handle part selection from the dropdown in Quote Editor tab."""
+        if not hasattr(self, 'part_selector') or not self.part_selector_var.get():
+            return
+
+        # Extract the part index from the dropdown selection
+        # Format: "[1] filename.dwg · Qty: 5"
+        selected_text = self.part_selector_var.get()
+        if selected_text.startswith("["):
+            try:
+                part_index = int(selected_text.split("]")[0][1:]) - 1
+                if part_index != self.active_part_index and 0 <= part_index < len(self.current_order.parts):
+                    self.active_part_index = part_index
+                    self._load_active_part_to_ui()
+                    # Update the listbox selection to match
+                    self.parts_listbox.selection_clear(0, tk.END)
+                    self.parts_listbox.selection_set(part_index)
+                    self.parts_listbox.see(part_index)
+            except (ValueError, IndexError):
+                pass
 
     def _load_active_part_to_ui(self) -> None:
         """Load the active part's data into the UI (Quote Editor, GEO tab, etc.)."""
@@ -415,6 +452,12 @@ class AppV7:
             self.active_part_label.config(
                 text=f"Editing Overrides for: PART {self.active_part_index + 1} of {total_parts} – {part.cad_file_name}"
             )
+
+        # Update the part selector dropdown
+        if hasattr(self, 'part_selector') and hasattr(self, 'part_selector_var'):
+            part_options = self.part_selector['values']
+            if part_options and 0 <= self.active_part_index < len(part_options):
+                self.part_selector_var.set(part_options[self.active_part_index])
 
         # Update status bar
         self.status_bar.config(
@@ -708,20 +751,36 @@ class AppV7:
         editor_scroll = ScrollableFrame(self.quote_editor_tab)
         editor_scroll.pack(fill="both", expand=True)
 
+        # Part selector dropdown
+        selector_frame = ttk.Frame(editor_scroll.inner)
+        selector_frame.grid(row=0, column=0, sticky="ew", padx=10, pady=(5, 5))
+
+        ttk.Label(selector_frame, text="Select Part to Edit:", font=("TkDefaultFont", 10, "bold")).pack(side=tk.LEFT, padx=(0, 10))
+
+        self.part_selector_var = tk.StringVar()
+        self.part_selector = ttk.Combobox(
+            selector_frame,
+            textvariable=self.part_selector_var,
+            state="readonly",
+            width=60
+        )
+        self.part_selector.pack(side=tk.LEFT, fill=tk.X, expand=True)
+        self.part_selector.bind('<<ComboboxSelected>>', self._on_part_selector_changed)
+
         # Active part indicator label
         self.active_part_label = ttk.Label(
             editor_scroll.inner,
-            text="No part selected - Add part(s) using the 'Add Part(s)...' button",
+            text="No part selected - Add part(s) using the 'Add Part(s)...' button in the Order Parts tab",
             font=("TkDefaultFont", 10, "bold"),
             background="#e8f4f8",
             padding=10,
             relief=tk.RAISED
         )
-        self.active_part_label.grid(row=0, column=0, sticky="ew", padx=10, pady=(5, 10))
+        self.active_part_label.grid(row=1, column=0, sticky="ew", padx=10, pady=(5, 10))
 
         # Quote-Specific Variables section with Labelframe (like appV5)
         quote_frame = ttk.Labelframe(editor_scroll.inner, text="Quote-Specific Variables", padding=(10, 5))
-        quote_frame.grid(row=1, column=0, sticky="ew", padx=10, pady=5)
+        quote_frame.grid(row=2, column=0, sticky="ew", padx=10, pady=5)
 
         # Define all the quote variables from the screenshot
         self.quote_fields = {}
@@ -2651,13 +2710,6 @@ class AppV7:
         summary_lines.append(self._format_cost_summary_line("ORDER TOTAL", order_total))
         summary_lines.append("=" * 74)
         summary_lines.append("")
-
-        # Add note about shipping
-        summary_lines.extend([
-            "Note: Order-level shipping is calculated based on total weight of all parts.",
-            "Per-part shipping costs shown in individual part sections are for reference only.",
-            ""
-        ])
 
         self.output_text.insert(tk.END, "\n".join(summary_lines))
 
