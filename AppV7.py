@@ -446,13 +446,6 @@ class AppV7:
             text=f"Active: Part {self.active_part_index + 1} - {part.cad_file_name}"
         )
 
-        # Update Quote Editor active part label
-        if hasattr(self, 'active_part_label'):
-            total_parts = len(self.current_order.parts)
-            self.active_part_label.config(
-                text=f"Editing Overrides for: PART {self.active_part_index + 1} of {total_parts} – {part.cad_file_name}"
-            )
-
         # Update the part selector dropdown
         if hasattr(self, 'part_selector') and hasattr(self, 'part_selector_var'):
             part_options = self.part_selector['values']
@@ -767,20 +760,9 @@ class AppV7:
         self.part_selector.pack(side=tk.LEFT, fill=tk.X, expand=True)
         self.part_selector.bind('<<ComboboxSelected>>', self._on_part_selector_changed)
 
-        # Active part indicator label
-        self.active_part_label = ttk.Label(
-            editor_scroll.inner,
-            text="No part selected - Add part(s) using the 'Add Part(s)...' button in the Order Parts tab",
-            font=("TkDefaultFont", 10, "bold"),
-            background="#e8f4f8",
-            padding=10,
-            relief=tk.RAISED
-        )
-        self.active_part_label.grid(row=1, column=0, sticky="ew", padx=10, pady=(5, 10))
-
         # Quote-Specific Variables section with Labelframe (like appV5)
         quote_frame = ttk.Labelframe(editor_scroll.inner, text="Quote-Specific Variables", padding=(10, 5))
-        quote_frame.grid(row=2, column=0, sticky="ew", padx=10, pady=5)
+        quote_frame.grid(row=1, column=0, sticky="ew", padx=10, pady=5)
 
         # Define all the quote variables from the screenshot
         self.quote_fields = {}
