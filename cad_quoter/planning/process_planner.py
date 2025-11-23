@@ -1213,7 +1213,9 @@ def _add_die_section_form_ops(plan: Dict[str, Any], p: DieSectionParams, is_carb
         is_carbide: Whether material is carbide
         profile_process: "wire_edm" or "grind" - decision from determine_profile_process()
     """
+    print(f"[FORM OPS DEBUG] Called with: has_internal_form={p.has_internal_form}, has_edge_form={p.has_edge_form}, profile_process={profile_process}")
     if not p.has_internal_form and not p.has_edge_form:
+        print(f"[FORM OPS DEBUG] Early exit - no forms detected")
         return
 
     # Calculate form perimeter if not provided
@@ -1224,10 +1226,14 @@ def _add_die_section_form_ops(plan: Dict[str, Any], p: DieSectionParams, is_carb
 
     depth = p.form_depth_in if p.form_depth_in > 0 else p.thickness_in * 0.5
 
+    print(f"[FORM OPS DEBUG] Calculated: perimeter={perimeter:.3f}\", depth={depth:.3f}\", L={p.length_in:.3f}\", W={p.width_in:.3f}\"")
+
     # Use profile_process decision to determine which method to use
     # Override with legacy flags if they're explicitly set
     use_wire_edm = profile_process == "wire_edm" or p.requires_wire_edm or p.has_internal_form
     use_form_grind = profile_process == "grind" or p.requires_form_grind
+
+    print(f"[FORM OPS DEBUG] use_wire_edm={use_wire_edm}, use_form_grind={use_form_grind}, is_carbide={is_carbide}")
 
     # Wire EDM for internal/edge forms
     if use_wire_edm:
@@ -2291,12 +2297,13 @@ def plan_from_cad_file(
 
     if any(kw in text_blob for kw in form_die_keywords):
         params.setdefault("has_internal_form", True)
-        if verbose:
-            print("[PLANNER] Detected form die section - setting has_internal_form=True")
+        print(f"[PLANNER DEBUG] Detected form die section - setting has_internal_form=True")
+        print(f"[PLANNER DEBUG] Matched keywords: {[kw for kw in form_die_keywords if kw in text_blob]}")
     elif any(kw in text_blob for kw in cam_hemmer_keywords):
         params.setdefault("has_edge_form", True)
-        if verbose:
-            print("[PLANNER] Detected cam/hemmer - setting has_edge_form=True")
+        print(f"[PLANNER DEBUG] Detected cam/hemmer - setting has_edge_form=True")
+    else:
+        print(f"[PLANNER DEBUG] No form keywords found. has_internal_form={params.get('has_internal_form', False)}")
 
     # Add text entities to params for profile decision logic
     params["text_entities"] = [{"text": t} for t in all_text]
