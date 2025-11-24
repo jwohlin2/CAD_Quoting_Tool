@@ -786,42 +786,54 @@ class OrderData:
 # ============================================================================
 
 
-def detect_punch_drawing(cad_file_path: Path, text_dump: str = None) -> bool:
+def detect_punch_drawing(cad_file_path: Path, text_dump: str = None, plan: dict = None) -> bool:
     """
     Detect if a CAD file is a punch drawing (individual punch component).
 
-    Detection is based on:
-    1. Filename containing 'punch', 'pilot', 'pin', etc.
-    2. Text content containing PUNCH, PILOT PIN, etc.
+    Detection uses multiple heuristics with confidence scoring:
+    1. Text-based: Filename and drawing text containing punch keywords
+    2. Geometry-based: Cylindrical shape with high aspect ratio (L/D > 2.5)
+    3. Feature-based: Turned/ground operations, few holes, no windows
 
     Excludes die shoes, holders, and other tooling that references punches.
 
     Args:
         cad_file_path: Path to CAD file
         text_dump: Optional text dump from drawing (if already extracted)
+        plan: Optional process plan dict with extracted_dims and ops
 
     Returns:
-        True if file appears to be a punch drawing
+        True if file appears to be a punch drawing (confidence score >= 3)
     """
+    import re
+
+    confidence_score = 0
+    debug_signals = []
+
+    # ========================================================================
+    # 1. TEXT-BASED DETECTION (existing logic + enhancements)
+    # ========================================================================
+
     # Check filename
     filename = cad_file_path.stem.upper()
 
     # Exclusion patterns - these are NOT punches even if they reference punches
     exclusion_patterns = ["SHOE", "HOLDER", "BASE", "PLATE", "DIE SET", "BLOCK", "INSERT", "SPACER"]
     if any(excl in filename for excl in exclusion_patterns):
+        debug_signals.append(f"EXCLUSION in filename: {filename}")
         return False
 
     # Punch indicators in filename
     filename_indicators = ["PUNCH", "PILOT", "PIN", "FORM", "GUIDE POST"]
     if any(ind in filename for ind in filename_indicators):
-        return True
+        confidence_score += 5  # Strong signal from filename
+        debug_signals.append(f"Filename match (+5): {filename}")
 
     # Check text content if provided
     if text_dump:
         text_upper = text_dump.upper()
 
         # Check for exclusions first - die shoes, holders, etc.
-        # These parts reference punches but are not themselves punches
         exclusion_indicators = [
             "DIE SHOE",
             "PUNCH SHOE",
@@ -838,6 +850,7 @@ def detect_punch_drawing(cad_file_path: Path, text_dump: str = None) -> bool:
             "PUNCH SPACER",
         ]
         if any(excl in text_upper for excl in exclusion_indicators):
+            debug_signals.append(f"EXCLUSION in text: found {[e for e in exclusion_indicators if e in text_upper]}")
             return False
 
         # Punch indicators in text
@@ -850,28 +863,126 @@ def detect_punch_drawing(cad_file_path: Path, text_dump: str = None) -> bool:
             "PUNCH TIP",
             "GUIDE POST",
         ]
-        # Only trigger on specific punch phrases, not just "PUNCH" alone
-        # (since die shoes often reference punches in their title blocks)
-        if any(ind in text_upper for ind in text_indicators):
-            return True
+        found_indicators = [ind for ind in text_indicators if ind in text_upper]
+        if found_indicators:
+            confidence_score += 4  # Strong signal from text
+            debug_signals.append(f"Text indicators (+4): {found_indicators}")
 
-        # Check for standalone "PUNCH" - but only if no exclusion words are nearby
-        # This catches drawings titled just "PUNCH" without SHOE/HOLDER/etc.
-        if "PUNCH" in text_upper:
-            # Make sure PUNCH isn't followed by exclusion words
-            # e.g., "PUNCH CLEARANCE" or "PUNCH LOCATION" in notes
+        # Check for standalone "PUNCH" - but only if no exclusion words nearby
+        if "PUNCH" in text_upper and not found_indicators:
             punch_exclusion_suffixes = ["SHOE", "HOLDER", "PLATE", "POCKET", "CLEARANCE", "LOCATION", "BLOCK"]
-            # Find all occurrences of PUNCH
-            import re
             punch_pattern = r'\bPUNCH\b'
             for match in re.finditer(punch_pattern, text_upper):
-                # Get text after this PUNCH occurrence
-                after_punch = text_upper[match.end():match.end()+15]  # Check next 15 chars
-                # If PUNCH is not followed by an exclusion suffix, it's likely a punch drawing
+                after_punch = text_upper[match.end():match.end()+15]
                 if not any(suffix in after_punch for suffix in punch_exclusion_suffixes):
-                    return True
+                    confidence_score += 3  # Moderate signal
+                    debug_signals.append("Standalone PUNCH (+3)")
+                    break
 
-    return False
+        # NEW: Check for part number callouts (e.g., "PART 2", "PART 6", "DETAIL 14")
+        # Individual component callouts suggest punch parts in assembly drawings
+        part_number_patterns = [
+            r'\bPART\s*[#:]?\s*([0-9]{1,2})\b',
+            r'\bDETAIL\s*[#:]?\s*([0-9]{1,2})\b',
+            r'\bITEM\s*[#:]?\s*([0-9]{1,2})\b',
+        ]
+        for pattern in part_number_patterns:
+            matches = re.findall(pattern, text_upper)
+            if matches:
+                # Part numbers 1-20 are typically individual components (punches/pins)
+                # Part numbers > 100 are typically assemblies/plates
+                part_nums = [int(m) for m in matches if m.isdigit()]
+                small_part_nums = [n for n in part_nums if 1 <= n <= 20]
+                if small_part_nums:
+                    confidence_score += 3  # Strong signal for individual components
+                    debug_signals.append(f"Small part numbers (+3): {small_part_nums[:5]}")
+                    break
+
+    # ========================================================================
+    # 2. GEOMETRY-BASED DETECTION (NEW)
+    # ========================================================================
+
+    if plan and 'extracted_dims' in plan:
+        dims = plan['extracted_dims']
+        L = dims.get('L', 0.0)
+        W = dims.get('W', 0.0)
+        T = dims.get('T', 0.0)
+
+        if L > 0 and W > 0 and T > 0:
+            # Check if part is cylindrical (two dimensions similar, one much larger)
+            # Sort dimensions to get smallest, middle, largest
+            sorted_dims = sorted([L, W, T])
+            smallest = sorted_dims[0]
+            middle = sorted_dims[1]
+            largest = sorted_dims[2]
+
+            # Cylindrical check: smallest ≈ middle (diameter) and largest >> diameter
+            diameter_similarity_ratio = middle / smallest if smallest > 0 else 0
+            aspect_ratio = largest / middle if middle > 0 else 0
+            max_cross_section = max(W, T)
+
+            # Signal 1: Two dimensions are similar (within 30%) → suggests round part
+            if 0.7 <= diameter_similarity_ratio <= 1.3:
+                confidence_score += 2
+                debug_signals.append(f"Round geometry (+2): {smallest:.2f}\" ≈ {middle:.2f}\"")
+
+            # Signal 2: High aspect ratio (L/D > 2.5) → suggests punch/pin shape
+            if aspect_ratio > 2.5:
+                confidence_score += 2
+                debug_signals.append(f"High aspect ratio (+2): L/D = {aspect_ratio:.1f}")
+
+            # Signal 3: Small cross-section (< 3") → punches are typically small
+            if max_cross_section < 3.0:
+                confidence_score += 1
+                debug_signals.append(f"Small diameter (+1): {max_cross_section:.2f}\"")
+
+    # ========================================================================
+    # 3. FEATURE-BASED DETECTION (NEW)
+    # ========================================================================
+
+    if plan and 'ops' in plan:
+        ops = plan.get('ops', [])
+        op_types = [op.get('op', '') for op in ops]
+
+        # Signal 1: Has wire EDM windows → NOT a punch (plates have windows)
+        windows = plan.get('windows', [])
+        if len(windows) > 0:
+            confidence_score -= 3  # Strong negative signal
+            debug_signals.append(f"EDM windows (-3): {len(windows)} windows")
+
+        # Signal 2: Has grinding operations → suggests turned part
+        grind_ops = [op for op in op_types if 'grind' in op.lower()]
+        if grind_ops:
+            confidence_score += 1
+            debug_signals.append(f"Grinding ops (+1): {len(grind_ops)}")
+
+        # Signal 3: Few holes (< 3) → punches typically have 0-2 holes
+        hole_sets = plan.get('hole_sets', [])
+        total_holes = sum(h.get('qty', 0) for h in hole_sets)
+        if total_holes < 3:
+            confidence_score += 1
+            debug_signals.append(f"Few holes (+1): {total_holes} holes")
+
+        # Signal 4: Many holes (> 10) → likely a plate
+        if total_holes > 10:
+            confidence_score -= 2
+            debug_signals.append(f"Many holes (-2): {total_holes} holes")
+
+    # ========================================================================
+    # DECISION: Threshold-based classification
+    # ========================================================================
+
+    is_punch = confidence_score >= 3
+
+    # Debug output (can be enabled with verbose flag in future)
+    if False:  # Set to True to enable debug output
+        print(f"\n=== PUNCH DETECTION: {cad_file_path.name} ===")
+        for signal in debug_signals:
+            print(f"  {signal}")
+        print(f"  TOTAL SCORE: {confidence_score}")
+        print(f"  DECISION: {'PUNCH' if is_punch else 'PLATE'}")
+
+    return is_punch
 
 
 def extract_punch_quote_data(
@@ -1140,12 +1251,9 @@ def extract_quote_data_from_cad(
             if verbose:
                 print(f"[PUNCH] Using family override: {family_override}")
         else:
-            # Auto-detect: First check by filename
-            is_punch = detect_punch_drawing(cad_file_path)
-
-            # If not detected by filename, check text content
-            if not is_punch and plan.get('text_dump'):
-                is_punch = detect_punch_drawing(cad_file_path, plan.get('text_dump'))
+            # Auto-detect using enhanced heuristics (text + geometry + features)
+            # Pass plan to enable geometry-based and feature-based detection
+            is_punch = detect_punch_drawing(cad_file_path, plan.get('text_dump'), plan)
 
         if is_punch:
             if verbose:
