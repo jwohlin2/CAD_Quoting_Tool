@@ -1240,24 +1240,23 @@ def _add_die_section_form_ops(plan: Dict[str, Any], p: DieSectionParams, is_carb
 
     # Wire EDM for internal/edge forms
     if use_wire_edm:
-        # Wire EDM time: perimeter × minutes_per_inch × material_factor
+        # Wire EDM time: perimeter × minutes_per_inch (linear cut rate only, no material factor)
         # Carbide: ~0.36 min/in (2.8 ipm), Tool steel: ~0.25 min/in (4 ipm)
         wire_mpi = 0.36 if is_carbide else 0.25
-        edm_mat_factor = 1.3 if is_carbide else 1.0
 
-        # Base time: path_length × min_per_in × material_factor
-        wire_time = perimeter * wire_mpi * edm_mat_factor
+        # Base time: path_length × min_per_in
+        wire_time = perimeter * wire_mpi
 
         # Add skim passes for tight tolerances
         skims = 2 if p.min_tolerance_in <= 0.0005 else 1
         skim_mpi = 0.2  # Skims are faster
-        wire_time += perimeter * skim_mpi * edm_mat_factor * skims
+        wire_time += perimeter * skim_mpi * skims
 
         # Minimum wire EDM time for carbide die sections
         wire_time = max(wire_time, 20.0 if is_carbide else 10.0)
 
-        # t_window = edm_path_length_in * edm_min_per_in * edm_material_factor
-        t_window = perimeter * wire_mpi * edm_mat_factor
+        # t_window = edm_path_length_in * edm_min_per_in
+        t_window = perimeter * wire_mpi
 
         plan["ops"].append({
             "op": "wire_edm_form",
@@ -1266,13 +1265,11 @@ def _add_die_section_form_ops(plan: Dict[str, Any], p: DieSectionParams, is_carb
             "skims": skims,
             "material": p.material,
             "material_group": p.material_group,
-            "material_factor": edm_mat_factor,
             "time_minutes": wire_time,
             "note": f"Wire EDM form profile: {perimeter:.2f}\" perimeter × {depth:.3f}\" deep",
             # EDM time model transparency fields
             "edm_path_length_in": perimeter,
             "edm_min_per_in": wire_mpi,
-            "edm_material_factor": edm_mat_factor,
             "part_thickness": depth,
             "t_window": t_window,
         })
@@ -3812,7 +3809,7 @@ def estimate_machine_hours_from_plan(
         # ---------- Punch Planner Operations (MUST be before general handlers) ----------
         # Wire EDM profile for punch outline (before 'profile' check at line 1477)
         elif op_type == 'wire_edm_profile':
-            from cad_quoter.pricing.time_estimator import estimate_wire_edm_minutes, _edm_material_factor
+            from cad_quoter.pricing.time_estimator import estimate_wire_edm_minutes
             material_group = op.get('material_group', '')
             minutes = estimate_wire_edm_minutes(op, material, material_group)
             time_breakdown['edm'] += minutes
@@ -3822,10 +3819,9 @@ def estimate_machine_hours_from_plan(
             thk = op.get("thickness_in", 0.0)
             from cad_quoter.pricing.time_estimator import _wire_mins_per_in
             mpi = _wire_mins_per_in(material, material_group, thk)
-            mat_factor = _edm_material_factor(material, material_group)
-            t_window = perim * mpi * mat_factor
+            t_window = perim * mpi
             print(f"  DEBUG [EDM wire_edm_profile]: path_length={perim:.3f}\", min_per_in={mpi:.3f}, "
-                  f"material_factor={mat_factor:.2f}, part_thickness={thk:.3f}\", t_window={t_window:.2f} min")
+                  f"part_thickness={thk:.3f}\", t_window={t_window:.2f} min")
 
         # Face grinding (top/bottom surfaces)
         elif op_type == 'grind_faces':
@@ -3999,22 +3995,21 @@ def estimate_machine_hours_from_plan(
         # Die section form operations (from EDM decision logic)
         elif op_type == 'wire_edm_form':
             # Wire EDM for die section internal/edge forms
-            from cad_quoter.pricing.time_estimator import estimate_wire_edm_minutes, _edm_material_factor, _wire_mins_per_in
+            from cad_quoter.pricing.time_estimator import estimate_wire_edm_minutes, _wire_mins_per_in
             perimeter = op.get('wire_profile_perimeter_in', 0.0)
             thickness = op.get('thickness_in', T or 0.5)
             skims = op.get('skims', 1)
             material_group = op.get('material_group', '')
 
-            # Calculate EDM time
-            material_factor = op.get('edm_material_factor') or op.get('material_factor') or _edm_material_factor(material, material_group)
+            # Calculate EDM time (linear cut rate only, no material factor)
             mpi = op.get('edm_min_per_in') or _wire_mins_per_in(material, material_group, thickness)
 
-            # Base time: path_length × min_per_in × material_factor
-            edm_time = perimeter * mpi * material_factor
+            # Base time: path_length × min_per_in
+            edm_time = perimeter * mpi
 
             # Add skim passes
             skim_mpi = mpi * 0.5  # Skims are typically faster
-            edm_time += perimeter * skim_mpi * material_factor * skims
+            edm_time += perimeter * skim_mpi * skims
 
             # Use the time_minutes from the operation if provided
             if 'time_minutes' in op:
@@ -4023,9 +4018,9 @@ def estimate_machine_hours_from_plan(
             time_breakdown['edm'] += edm_time
 
             # EDM debug output
-            t_window = perimeter * mpi * material_factor
+            t_window = perimeter * mpi
             print(f"  DEBUG [EDM wire_edm_form]: path_length={perimeter:.3f}\", min_per_in={mpi:.3f}, "
-                  f"material_factor={material_factor:.2f}, part_thickness={thickness:.3f}\", "
+                  f"part_thickness={thickness:.3f}\", "
                   f"skims={skims}, t_window={t_window:.2f} min, total_time={edm_time:.2f} min")
 
         elif op_type == 'form_grind':
@@ -4079,12 +4074,10 @@ def estimate_machine_hours_from_plan(
             time_breakdown['edm'] += edm_time
 
             # EDM debug output
-            from cad_quoter.pricing.time_estimator import _edm_material_factor
-            mat_factor = op.get('edm_material_factor') or op.get('material_factor') or _edm_material_factor(material, "")
             mpi = op.get('edm_min_per_in', 0.33)  # Default estimate
-            t_window = perimeter * mpi * mat_factor
+            t_window = perimeter * mpi
             print(f"  DEBUG [EDM {op_type}]: path_length={perimeter:.3f}\", min_per_in={mpi:.3f}, "
-                  f"material_factor={mat_factor:.2f}, part_thickness={thickness:.3f}\", "
+                  f"part_thickness={thickness:.3f}\", "
                   f"edm_windows_qty={num_windows}, t_window={t_window:.2f} min, total_time={edm_time:.2f} min")
 
         # Tapping operations
@@ -4643,10 +4636,9 @@ def estimate_machine_hours_from_plan(
             perim = op.get('wire_profile_perimeter_in', 0.0)
             thk = op.get('thickness_in', 0.0)
             mpi = op.get('edm_min_per_in', 0.33)
-            mat_factor = op.get('material_factor', 1.0)
-            t_window = op.get('t_window', perim * mpi * mat_factor)
+            t_window = op.get('t_window', perim * mpi)
             print(f"  DEBUG [EDM wire_edm_form]: path_length={perim:.3f}\", min_per_in={mpi:.3f}, "
-                  f"material_factor={mat_factor:.2f}, part_thickness={thk:.3f}\", t_window={t_window:.2f} min, total_time={edm_time:.2f} min")
+                  f"part_thickness={thk:.3f}\", t_window={t_window:.2f} min, total_time={edm_time:.2f} min")
 
         # Die section finishing operations (chamfer, polish, edge break, deburr)
         elif op_type in ('chamfer_edges', 'machine_reliefs', 'polish_cavity', 'polish_contour', 'edge_break', 'deburr_and_clean'):
@@ -6018,12 +6010,7 @@ def estimate_hole_table_times(
             sf_skim = get_speeds_feeds(material, "Wire_EDM_Skim")
             skim_ipm = sf_skim.get('linear_cut_rate_ipm', 2.0) if sf_skim else 2.0
 
-            # Get EDM material factor
-            from cad_quoter.pricing.time_estimator import _edm_material_factor
-            material_group = ""  # Would need to be passed in
-            edm_mat_factor = _edm_material_factor(material, material_group)
-
-            # Calculate time per window with material factor
+            # Calculate time per window (linear cut rate only, no material factor)
             # Convert IPM to min/in for rough and skim passes
             rough_min_per_in = 1.0 / rough_ipm if rough_ipm > 0 else 0.33
             skim_min_per_in = 1.0 / skim_ipm if skim_ipm > 0 else 0.50
@@ -6032,18 +6019,18 @@ def estimate_hole_table_times(
             num_rough_passes = 2
             num_skim_passes = 2
 
-            # rough_time = path_length * min_per_in * material_factor (no thickness in this model)
-            # But for wire EDM, we need to account for thickness affecting cut time
-            # So: time = num_passes * perimeter * thickness * min_per_in * material_factor
-            rough_time_per = num_rough_passes * estimated_perimeter_per_window * edm_thickness * rough_min_per_in * edm_mat_factor
+            # rough_time = path_length * min_per_in (linear cut rate already accounts for material)
+            # For wire EDM, we need to account for thickness affecting cut time
+            # So: time = num_passes * perimeter * thickness * min_per_in
+            rough_time_per = num_rough_passes * estimated_perimeter_per_window * edm_thickness * rough_min_per_in
             # Add skim passes for precision
-            skim_time_per = num_skim_passes * estimated_perimeter_per_window * edm_thickness * skim_min_per_in * edm_mat_factor
+            skim_time_per = num_skim_passes * estimated_perimeter_per_window * edm_thickness * skim_min_per_in
             setup_time_per = 5.0  # 5 minutes setup per window (threading wire, etc.)
 
-            # t_window = edm_path_length_in * edm_min_per_in * edm_material_factor
+            # t_window = edm_path_length_in * edm_min_per_in
             # (for rough pass, combining perimeter and thickness as path length × thickness)
-            t_window_rough = estimated_perimeter_per_window * rough_min_per_in * edm_mat_factor
-            t_window_skim = estimated_perimeter_per_window * skim_min_per_in * edm_mat_factor
+            t_window_rough = estimated_perimeter_per_window * rough_min_per_in
+            t_window_skim = estimated_perimeter_per_window * skim_min_per_in
 
             time_per_hole = round(rough_time_per + skim_time_per + setup_time_per, 2)
             total_time = round(time_per_hole * qty, 2)
@@ -6063,7 +6050,6 @@ def estimate_hole_table_times(
                 'edm_path_length_in': estimated_perimeter_per_window,
                 'edm_min_per_in_rough': rough_min_per_in,
                 'edm_min_per_in_skim': skim_min_per_in,
-                'edm_material_factor': edm_mat_factor,
                 'part_thickness': edm_thickness,
                 't_window_rough': t_window_rough,
                 't_window_skim': t_window_skim,
@@ -6164,7 +6150,6 @@ def estimate_hole_table_times(
                   f"path_length={g.get('edm_path_length_in', 0.0):.3f}\", "
                   f"min_per_in_rough={g.get('edm_min_per_in_rough', 0.0):.3f}, "
                   f"min_per_in_skim={g.get('edm_min_per_in_skim', 0.0):.3f}, "
-                  f"material_factor={g.get('edm_material_factor', 1.0):.2f}, "
                   f"part_thickness={g.get('part_thickness', 0.0):.3f}\", "
                   f"t_window_rough={g.get('t_window_rough', 0.0):.2f} min, "
                   f"t_window_skim={g.get('t_window_skim', 0.0):.2f} min, "

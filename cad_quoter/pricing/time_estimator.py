@@ -548,16 +548,19 @@ def _csv_row(
 def _wire_mins_per_in(material: str, material_group: str, thickness_in: float) -> float:
     """Calculate wire EDM minutes per inch based on material and thickness.
 
-    Uses banded thickness approach with fallback to conservative defaults.
+    Uses banded thickness approach with fallback to converting from linear_cut_rate_ipm.
     """
-    row = _csv_row(material, material_group, operation_hint="Wire_EDM")
+    # Try Wire_EDM_Rough first, then Wire_EDM, then Generic
+    row = _csv_row(material, material_group, operation_hint="Wire_EDM_Rough")
+    if not row:
+        row = _csv_row(material, material_group, operation_hint="Wire_EDM")
 
     # Try generic wire_mins_per_in column first
     base = _try_float(row.get("wire_mins_per_in"), default=None)
     if base is not None and base > 0:
         return max(0.01, base)
 
-    # Use thickness-based banding
+    # Use thickness-based banding if available
     if thickness_in <= 0.125:
         band = "wire_mpi_thin"
     elif thickness_in <= 0.500:
@@ -565,7 +568,17 @@ def _wire_mins_per_in(material: str, material_group: str, thickness_in: float) -
     else:
         band = "wire_mpi_thick"
 
-    return max(0.01, _try_float(row.get(band), default=0.9))
+    banded_value = _try_float(row.get(band), default=None)
+    if banded_value is not None and banded_value > 0:
+        return max(0.01, banded_value)
+
+    # Fall back to converting from linear_cut_rate_ipm
+    ipm = _try_float(row.get("linear_cut_rate_ipm"), default=None)
+    if ipm is not None and ipm > 0:
+        return 1.0 / ipm
+
+    # Final fallback to conservative default
+    return 0.9
 
 
 def estimate_wire_edm_minutes(
@@ -1364,7 +1377,7 @@ def estimate_punch_machine_hours(punch_plan: dict[str, Any], punch_features: dic
 
         # Wire EDM form operations for carbide form punches
         if op_type == "wire_edm_form" or op_type == "wire_edm_profile":
-            from cad_quoter.pricing.time_estimator import _edm_material_factor, _wire_mins_per_in
+            from cad_quoter.pricing.time_estimator import _wire_mins_per_in
             perimeter = op.get("wire_profile_perimeter_in", 0.0)
             thickness = op.get("thickness_in", 0.0)
 
@@ -1372,11 +1385,10 @@ def estimate_punch_machine_hours(punch_plan: dict[str, Any], punch_features: dic
             material = op.get("material") or punch_features.get("material_callout", "A2")
             material_group = op.get("material_group", "")
 
-            # Calculate EDM time
-            material_factor = _edm_material_factor(material, material_group)
+            # Calculate EDM time (linear cut rate only, no material factor)
             mpi = _wire_mins_per_in(material, material_group, thickness)
 
-            edm_time = perimeter * mpi * material_factor
+            edm_time = perimeter * mpi
 
             # Use time_minutes from operation if provided
             if "time_minutes" in op:
@@ -1385,7 +1397,7 @@ def estimate_punch_machine_hours(punch_plan: dict[str, Any], punch_features: dic
             hours.edm_min += edm_time
 
             print(f"  DEBUG [Punch EDM {op_type}]: path_length={perimeter:.3f}\", min_per_in={mpi:.3f}, "
-                  f"material_factor={material_factor:.2f}, thickness={thickness:.3f}\", time={edm_time:.2f} min")
+                  f"thickness={thickness:.3f}\", time={edm_time:.2f} min")
 
     hours.calculate_totals()
 

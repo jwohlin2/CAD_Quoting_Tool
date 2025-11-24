@@ -2511,14 +2511,6 @@ class AppV7:
             return
 
         # Single-part flow (backward compatible with original behavior)
-        # Smart cache invalidation - only clear if inputs changed
-        # This saves 40+ seconds by avoiding redundant ODA/OCR extraction
-        if self._quote_inputs_changed():
-            self._clear_cad_cache()
-            print("[AppV7] Cache cleared - quote inputs changed")
-        else:
-            print("[AppV7] Reusing cached quote data - inputs unchanged (saves ~40+ seconds)")
-
         # Collect values from quote editor
         quote_data = {}
         for label, field in self.quote_fields.items():
@@ -2574,6 +2566,8 @@ class AppV7:
         try:
             # Extract quote data before starting parallel threads
             quote_data = self._extract_quote_data()
+            # Store for use in summary and save functionality
+            self._last_quote_data = quote_data
         except Exception as e:
             # If extraction fails, show error and abort
             error_msg = f"Error extracting quote data:\n{str(e)}"
@@ -2583,15 +2577,15 @@ class AppV7:
 
         # Generate all three reports in parallel for 10-20 second speedup
         # The reports are independent and can run concurrently
-        # NOTE: Quote data is already cached, so no race conditions
+        # NOTE: Quote data extracted once and passed to all threads to avoid redundant extraction
         # NOTE: All widget values read above, so threads don't access Tkinter widgets
         print("[AppV7] Generating reports in parallel...")
 
         with ThreadPoolExecutor(max_workers=3, thread_name_prefix="ReportGen") as executor:
             # Submit all three report generation tasks concurrently
-            future_labor = executor.submit(self._generate_labor_hours_report)
-            future_machine = executor.submit(self._generate_machine_hours_report)
-            future_direct = executor.submit(self._generate_direct_costs_report)
+            future_labor = executor.submit(self._generate_labor_hours_report, quote_data)
+            future_machine = executor.submit(self._generate_machine_hours_report, quote_data)
+            future_direct = executor.submit(self._generate_direct_costs_report, quote_data)
 
             # Wait for all reports to complete and collect results
             labor_hours_report = future_labor.result()
@@ -2675,7 +2669,7 @@ class AppV7:
             margin_amount = total_cost * margin_rate
             final_cost = total_cost + margin_amount
 
-            quote_data = self._cached_quote_data
+            # Use extracted quote data for cost summary
             if quote_data and quote_data.cost_summary:
                 total_cost = quote_data.cost_summary.total_cost
                 margin_amount = quote_data.cost_summary.margin_amount
@@ -2729,7 +2723,7 @@ class AppV7:
                 messagebox.showwarning("No Quote", "Please load a CAD file and generate a quote first.")
                 return
 
-            if self._cached_quote_data is None:
+            if not hasattr(self, '_last_quote_data') or self._last_quote_data is None:
                 messagebox.showwarning("No Quote", "Please generate a quote first before saving.")
                 return
 
@@ -2747,7 +2741,7 @@ class AppV7:
         if filename:
             try:
                 from cad_quoter.pricing.QuoteDataHelper import save_quote_data
-                save_quote_data(self._cached_quote_data, filename)
+                save_quote_data(self._last_quote_data, filename)
                 self.status_bar.config(text=f"Quote saved to: {filename}")
                 messagebox.showinfo("Success", f"Quote saved successfully to:\n{filename}")
             except Exception as e:
