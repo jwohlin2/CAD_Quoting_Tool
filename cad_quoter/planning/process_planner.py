@@ -3238,7 +3238,7 @@ def get_grind_factor(material: str) -> float:
     """
     Look up grind material factor for wet grinding time calculations.
 
-    Searches for grind_material_factor, grind_factor, or material_factor columns.
+    Searches for grinding_time_factor, grind_material_factor, grind_factor, or material_factor columns.
     Falls back to 1.0 if not found.
 
     Args:
@@ -3252,8 +3252,8 @@ def get_grind_factor(material: str) -> float:
     # Try to find factor for this material
     for row in data:
         if row.get('material') == material:
-            # Try different column names
-            for col_name in ['grind_material_factor', 'grind_factor', 'material_factor']:
+            # Try different column names (grinding_time_factor is the actual CSV column)
+            for col_name in ['grinding_time_factor', 'grind_material_factor', 'grind_factor', 'material_factor']:
                 if col_name in row and row[col_name]:
                     try:
                         return float(row[col_name])
@@ -3263,7 +3263,7 @@ def get_grind_factor(material: str) -> float:
     # Fall back to GENERIC material
     for row in data:
         if row.get('material_group') == 'GENERIC':
-            for col_name in ['grind_material_factor', 'grind_factor', 'material_factor']:
+            for col_name in ['grinding_time_factor', 'grind_material_factor', 'grind_factor', 'material_factor']:
                 if col_name in row and row[col_name]:
                     try:
                         return float(row[col_name])

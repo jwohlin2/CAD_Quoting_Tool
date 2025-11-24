@@ -2082,7 +2082,7 @@ def plan_stock_blank(
         round_tol_in = 0.05
     std_sides = getattr(cfg, "std_stock_sides_in", None)
     if not isinstance(std_sides, Sequence) or not std_sides:
-        std_sides = [6, 8, 10, 12, 18, 24, 36, 48, 72]
+        std_sides = [1, 1.25, 1.5, 2, 3, 4, 6, 8, 10, 12, 18, 24, 36, 48, 72]
     std_sides = [float(side) for side in std_sides]
     stock_thicknesses = [
         0.125,
