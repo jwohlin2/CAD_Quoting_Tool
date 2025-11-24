@@ -677,6 +677,7 @@ class ScrapInfo:
     material: str = ""
     density: float = 0.0
     mcmaster_weight: float = 0.0
+    desired_stock_weight: float = 0.0  # Weight after stock prep, before machining
     final_part_weight: float = 0.0
     total_scrap_weight: float = 0.0
 
@@ -1146,15 +1147,24 @@ def calculate_total_scrap(
         verbose=False
     )
 
-    # Calculate stock prep scrap
-    stock_prep_scrap = calculate_stock_prep_scrap(
-        mcmaster_length, mcmaster_width, mcmaster_thickness,
-        desired_length, desired_width, desired_thickness
-    )
-
-    # Calculate total scrap
-    mcmaster_volume = mcmaster_length * mcmaster_width * mcmaster_thickness
-    desired_volume = desired_length * desired_width * desired_thickness
+    # Calculate volumes and stock prep scrap
+    # For cylindrical parts, use π×r²×L formula instead of L×W×T
+    import math
+    if is_cylindrical:
+        # For cylindrical parts, width and thickness are both set to diameter
+        mcmaster_diameter = mcmaster_width  # or mcmaster_thickness, they're the same
+        desired_diameter = desired_width    # or desired_thickness, they're the same
+        mcmaster_volume = math.pi * (mcmaster_diameter / 2.0) ** 2 * mcmaster_length
+        desired_volume = math.pi * (desired_diameter / 2.0) ** 2 * desired_length
+        stock_prep_scrap = mcmaster_volume - desired_volume
+    else:
+        # For plate parts, use L×W×T
+        mcmaster_volume = mcmaster_length * mcmaster_width * mcmaster_thickness
+        desired_volume = desired_length * desired_width * desired_thickness
+        stock_prep_scrap = calculate_stock_prep_scrap(
+            mcmaster_length, mcmaster_width, mcmaster_thickness,
+            desired_length, desired_width, desired_thickness
+        )
 
     total_scrap_volume = (
         stock_prep_scrap +
@@ -1172,6 +1182,7 @@ def calculate_total_scrap(
     # displayed values and calculations (e.g., scrap credit = weight × price)
     density = get_material_density(material)
     mcmaster_weight = round(mcmaster_volume * density, 2)
+    desired_stock_weight = round(desired_volume * density, 2)  # Weight after stock prep, before machining
     final_part_weight = round(final_part_volume * density, 2)
     total_scrap_weight = round(total_scrap_volume * density, 2)
 
@@ -1213,6 +1224,7 @@ def calculate_total_scrap(
         material=material,
         density=density,
         mcmaster_weight=mcmaster_weight,
+        desired_stock_weight=desired_stock_weight,
         final_part_weight=final_part_weight,
         total_scrap_weight=total_scrap_weight,
         scrap_percentage=scrap_percentage,
