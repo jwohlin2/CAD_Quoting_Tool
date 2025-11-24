@@ -369,7 +369,9 @@ def pick_mcmaster_cylindrical_sku(
     candidates: list[dict[str, Any]] = []
 
     # Tolerance for diameter matching (allow rounding up to next standard size)
-    diam_tolerance = 0.125  # Allow up to 1/8" larger diameter
+    # For small diameters (<2"), use 0.5" tolerance to reach next standard size
+    # For larger diameters (>=2"), use 0.25" tolerance
+    diam_tolerance = 0.5 if need_diam_in < 2.0 else 0.25
     length_tolerance = 12.0  # Allow up to 12" longer stock (round bar comes in standard lengths like 12", 36")
 
     for row in material_rows:
