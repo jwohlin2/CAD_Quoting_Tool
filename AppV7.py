@@ -1554,8 +1554,18 @@ class AppV7:
             if material_override:
                 material_label += " (OVERRIDDEN)"
             report.append(material_label)
-            report.append(f"  Required Stock: {stock_info.desired_length:.2f} × {stock_info.desired_width:.2f} × {stock_info.desired_thickness:.2f} in")
-            report.append(f"  Rounded to catalog: {stock_info.mcmaster_length:.2f} × {stock_info.mcmaster_width:.2f} × {stock_info.mcmaster_thickness:.3f}")
+
+            # Check if part is cylindrical (guide posts, round punches, etc.)
+            is_cylindrical = getattr(part_dims, 'is_cylindrical', False)
+
+            if is_cylindrical:
+                # For cylindrical parts, show Length × Diameter
+                report.append(f"  Required Stock: {stock_info.desired_length:.2f} × Ø{stock_info.desired_diameter:.2f} in")
+                report.append(f"  Rounded to catalog: {stock_info.mcmaster_length:.2f} × Ø{stock_info.mcmaster_diameter:.3f}")
+            else:
+                # For plate parts, show Length × Width × Thickness
+                report.append(f"  Required Stock: {stock_info.desired_length:.2f} × {stock_info.desired_width:.2f} × {stock_info.desired_thickness:.2f} in")
+                report.append(f"  Rounded to catalog: {stock_info.mcmaster_length:.2f} × {stock_info.mcmaster_width:.2f} × {stock_info.mcmaster_thickness:.3f}")
             report.append(f"  Starting Weight: {self._format_weight(stock_info.mcmaster_weight)}")
             report.append(f"  Net Weight: {self._format_weight(stock_info.final_part_weight)}")
             report.append(f"  Scrap Percentage: {scrap_info.scrap_percentage:.1f}%")
