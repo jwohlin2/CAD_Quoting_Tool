@@ -2800,6 +2800,10 @@ def machining_minutes(i: LaborInputs) -> float:
       + 0.5·edm_skim_passes
       + 1·grind_face_pairs
       + 5 if net_weight_lb > 40  # heavy-part handling
+
+    Minimum floor: 2.0 min per operation for load/unload/jog cycle.
+    This ensures operations with very low machine time (e.g., tiny plate square-up at 0.13 min)
+    still get realistic labor time for handling.
     """
     raw_machining = (
         0.5 * i.ops_total
@@ -2811,6 +2815,11 @@ def machining_minutes(i: LaborInputs) -> float:
         + 0.5 * i.edm_skim_passes
         + 1 * i.grind_face_pairs
     )
+
+    # Apply minimum floor: 2 min per operation for load/unload/jog cycle
+    MIN_MACHINING_PER_OP = 2.0  # minutes
+    min_machining = MIN_MACHINING_PER_OP * i.ops_total
+    raw_machining = max(raw_machining, min_machining)
 
     # Heavy-part handling bump (>40 lbs)
     if i.net_weight_lb > 40:
@@ -3115,7 +3124,7 @@ def compute_labor_minutes(i: LaborInputs) -> Dict[str, Any]:
             etch_minutes = calc_etch_minutes(has_etch_note=True, qty=qty, details_with_etch=details_with_etch)
             finishing_detail.append({
                 "type": "etch",
-                "label": "Etch / marking",
+                "label": "Etch / marking setup:",
                 "minutes": round(etch_minutes, 1),
                 "source": "text"
             })
