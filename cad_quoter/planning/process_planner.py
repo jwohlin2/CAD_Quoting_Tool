@@ -3560,8 +3560,22 @@ def _calculate_finishing_labor_minutes(
     has_polish = has_polish or polish_detected
 
     # Calculate part size factor (larger parts = more deburr/cleanup time)
-    part_volume = L * W * T if (L > 0 and W > 0 and T > 0) else 0
-    size_factor = min(part_volume / 10.0, 1.0)  # Normalize to 0-1, max at 10 cu.in.
+    # Use area and perimeter instead of just volume for better scaling on large flat plates
+    import math
+    surface_area = L * W if (L > 0 and W > 0) else 0
+    perimeter = 2 * (L + W) if (L > 0 and W > 0) else 0
+
+    # For large flat plates, area is a better indicator than volume
+    # Use sqrt(area) for more gradual scaling: sqrt(100)=10, sqrt(400)=20, sqrt(729)=27
+    area_sqrt = math.sqrt(surface_area) if surface_area > 0 else 0
+
+    # Calculate area-based and perimeter-based factors
+    # Reference: 10"×10" part has area_sqrt=10, perimeter=40
+    area_factor = min(area_sqrt / 10.0, 5.0)  # Cap at 5x for massive plates (50"×50"+)
+    perim_factor = min(perimeter / 40.0, 5.0)  # Cap at 5x for huge perimeters (200"+)
+
+    # Use the larger factor (handles both square and rectangular plates well)
+    size_factor = max(area_factor, perim_factor)
 
     # Check if this is an extremely simple part
     # Criteria: 1 tapped hole, tiny profile, no EDM/grind, minimal features
@@ -3622,11 +3636,20 @@ def _calculate_finishing_labor_minutes(
         finishing_time += polish_time
 
     # Add baseline for general cleanup/deburr (scaled by part size, manual labor)
-    baseline = 1.0 + size_factor * 1.5
+    # Scales with area/perimeter: small parts ~1.5-3 min, medium ~3-5 min, large plates ~5-9 min
+    baseline = 1.5 + size_factor * 1.5
     if baseline > 0.1:  # Only add if meaningful
+        # Choose descriptive label based on part size
+        if surface_area < 25:  # < 5"×5"
+            cleanup_type = "Small part cleanup"
+        elif surface_area < 150:  # < ~12"×12"
+            cleanup_type = "Part cleanup / deburr"
+        else:  # Large plates
+            cleanup_type = "Large plate washdown / deburr"
+
         detail_list.append({
             "type": "baseline_cleanup",
-            "label": f"Baseline cleanup ({L:.1f}\" × {W:.1f}\")",
+            "label": f"{cleanup_type} ({L:.1f}\" × {W:.1f}\")",
             "minutes": round(baseline, 1),
             "source": "geometry"
         })
