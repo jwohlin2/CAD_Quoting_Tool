@@ -2598,33 +2598,36 @@ def extract_quote_data_from_cad(
     # Use the same formula as labor_hours.labor_cost to ensure consistency
     setup_labor = round(quote_data.labor_hours.setup_minutes * (labor_rate / 60.0), 2)
     programming_labor = round(quote_data.labor_hours.programming_minutes * (labor_rate / 60.0), 2)
-    amortized_setup_cost = round((setup_labor + programming_labor) / quantity, 2)
+    inspection_labor = round(quote_data.labor_hours.inspection_minutes * (labor_rate / 60.0), 2)
 
-    # Calculate variable costs per unit (material, machining, inspection, finishing)
+    # Job-level costs (setup, programming, first-article inspection) - amortized across quantity
+    job_level_labor = setup_labor + programming_labor + inspection_labor
+    amortized_job_level_cost = round(job_level_labor / quantity, 2)
+
+    # Calculate variable costs per unit (material, machining, finishing)
     material_cost_per_unit = quote_data.direct_cost_breakdown.net_material_cost
     machine_cost_per_unit = quote_data.machine_hours.machine_cost
 
-    # Variable labor costs per unit (machining, inspection, finishing)
+    # Variable labor costs per unit (machining, finishing only - inspection is job-level)
     # Round each component before summing for display consistency
     machining_labor = round(quote_data.labor_hours.machining_steps_minutes * (labor_rate / 60.0), 2)
-    inspection_labor = round(quote_data.labor_hours.inspection_minutes * (labor_rate / 60.0), 2)
     finishing_labor = round(quote_data.labor_hours.finishing_minutes * (labor_rate / 60.0), 2)
     misc_overhead_labor = round(quote_data.labor_hours.misc_overhead_minutes * (labor_rate / 60.0), 2)
-    variable_labor_per_unit = machining_labor + inspection_labor + finishing_labor + misc_overhead_labor
+    variable_labor_per_unit = machining_labor + finishing_labor + misc_overhead_labor
 
     # Per-unit costs
     # Round each component to 2 decimal places before summing to ensure the total
     # matches the sum of the displayed line items exactly.
     per_unit_direct_cost = round(material_cost_per_unit, 2)
     per_unit_machine_cost = round(machine_cost_per_unit, 2)
-    per_unit_labor_cost = round(amortized_setup_cost + variable_labor_per_unit, 2)
+    per_unit_labor_cost = round(amortized_job_level_cost + variable_labor_per_unit, 2)
     per_unit_total_cost = round(per_unit_direct_cost + per_unit_machine_cost + per_unit_labor_cost, 2)
 
     # Total costs for all units
     # Use displayed (rounded) components to ensure total = sum of displayed parts
     total_direct_cost = round(per_unit_direct_cost * quantity, 2)
     total_machine_cost = round(per_unit_machine_cost * quantity, 2)
-    total_labor_cost = round((setup_labor + programming_labor) + (variable_labor_per_unit * quantity), 2)
+    total_labor_cost = round(job_level_labor + (variable_labor_per_unit * quantity), 2)
     total_total_cost = total_direct_cost + total_machine_cost + total_labor_cost
 
     # Margin and pricing
