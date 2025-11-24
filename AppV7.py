@@ -1566,8 +1566,9 @@ class AppV7:
                 # For plate parts, show Length × Width × Thickness
                 report.append(f"  Required Stock: {stock_info.desired_length:.2f} × {stock_info.desired_width:.2f} × {stock_info.desired_thickness:.2f} in")
                 report.append(f"  Rounded to catalog: {stock_info.mcmaster_length:.2f} × {stock_info.mcmaster_width:.2f} × {stock_info.mcmaster_thickness:.3f}")
-            report.append(f"  Starting Weight: {self._format_weight(stock_info.mcmaster_weight)}")
-            report.append(f"  Net Weight: {self._format_weight(stock_info.final_part_weight)}")
+            report.append(f"  Starting Weight (catalog): {self._format_weight(stock_info.mcmaster_weight)}")
+            report.append(f"  Required Stock Weight: {self._format_weight(scrap_info.desired_stock_weight)}")
+            report.append(f"  Net Weight (final part): {self._format_weight(stock_info.final_part_weight)}")
             report.append(f"  Scrap Percentage: {scrap_info.scrap_percentage:.1f}%")
             report.append(f"  Scrap Weight: {self._format_weight(scrap_info.total_scrap_weight)}")
 
