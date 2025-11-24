@@ -1304,13 +1304,34 @@ def extract_quote_data_from_cad(
                     dims = extract_dimensions_from_cad(cad_file_path)
                     if dims:
                         L, W, T = dims
+
+                        # For cylindrical parts, infer diameter from dimensions
+                        # (DimensionFinder returns L×W×T for bounding box, but W≈T for round parts)
+                        if is_cylindrical:
+                            # Use the smaller of W/T as diameter (more conservative)
+                            # Or average if they're close (within 10%)
+                            if abs(W - T) / max(W, T) < 0.10:
+                                inferred_diameter = (W + T) / 2.0
+                            else:
+                                inferred_diameter = min(W, T)
+
+                            if verbose:
+                                print(f"  [PUNCH] Cylindrical part - inferring diameter from W×T: {inferred_diameter:.3f}\"")
+                        else:
+                            inferred_diameter = 0.0
+
+                        # Preserve is_cylindrical flag when creating new PartDimensions
                         quote_data.part_dimensions = PartDimensions(
                             length=L,
                             width=W,
                             thickness=T,
+                            diameter=inferred_diameter,
+                            is_cylindrical=is_cylindrical,
                         )
                         if verbose:
                             print(f"  [PUNCH] DimensionFinder found: {L:.3f} x {W:.3f} x {T:.3f}")
+                            if is_cylindrical:
+                                print(f"  [PUNCH] Part is cylindrical (family={family}), diameter={inferred_diameter:.3f}\"")
                     else:
                         if verbose:
                             print("  [PUNCH] DimensionFinder also failed to extract dimensions")
@@ -1333,14 +1354,19 @@ def extract_quote_data_from_cad(
                     if verbose:
                         print(f"  [PUNCH] Reordered to: length={length}, width={width}, thickness={thickness}")
 
-                    # For cylindrical parts, preserve the original detected diameter
-                    # Dimension overrides (L×W×T) are intended for rectangular plates,
-                    # not for overriding the diameter of round parts
+                    # For cylindrical parts, infer diameter from dimension override if needed
+                    # Dimension overrides (L×W×T) can update the diameter if W and T are similar
                     if is_cylindrical:
-                        # Keep original diameter from punch features (already set at line 912)
-                        diameter = quote_data.part_dimensions.diameter
+                        # If W ≈ T (within 10%), this suggests a round part with diameter ≈ W ≈ T
+                        # Use the average or infer from dimensions
+                        if abs(width - thickness) / max(width, thickness) < 0.10:
+                            diameter = (width + thickness) / 2.0
+                        else:
+                            # Use the smaller value as diameter (more conservative)
+                            diameter = min(width, thickness)
+
                         if verbose:
-                            print(f"  [PUNCH] Cylindrical part - preserving detected diameter: {diameter:.3f}\" (use Diameter 1/2 fields to override)")
+                            print(f"  [PUNCH] Cylindrical part - inferring diameter from dimension override: {diameter:.3f}\"")
                             print(f"  [PUNCH] DEBUG: quote_data.part_dimensions before update = diameter:{quote_data.part_dimensions.diameter}, is_cyl:{quote_data.part_dimensions.is_cylindrical}")
                     else:
                         diameter = 0.0
@@ -1767,6 +1793,15 @@ def extract_quote_data_from_cad(
         )
     else:
         # Use standard plate lookup
+        if verbose:
+            print(f"  [PLATE STOCK] Using plate stock lookup")
+            if is_cylindrical:
+                print(f"  [WARNING] Part is marked as cylindrical but missing dimensions:")
+                print(f"    - is_cylindrical: {is_cylindrical}")
+                print(f"    - part_diameter: {part_diameter}")
+                print(f"    - part_length: {part_length}")
+                print(f"  [WARNING] Falling back to plate stock (L×W×T)")
+
         mcmaster_result = pick_mcmaster_plate_sku(
             need_L_in=desired_L,
             need_W_in=desired_W,

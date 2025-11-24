@@ -817,6 +817,9 @@ class DieSectionParams:
     # Family sub-type
     sub_type: str = "die_section"  # die_section, cam, hemmer, sensor_block
 
+    # Weight for heavy-part handling
+    net_weight_lb: float = 0.0  # Part weight for handling bump calculation
+
     def __post_init__(self):
         if self.tight_tolerances is None:
             self.tight_tolerances = []
@@ -876,6 +879,30 @@ def _extract_die_section_params(params: Dict[str, Any]) -> DieSectionParams:
     min_section_width = params.get("min_section_width")
     overall_height = params.get("overall_height") or T  # Default to thickness if not provided
 
+    # Calculate weight for heavy-part handling
+    # If weight is provided in params, use it; otherwise calculate from dimensions
+    net_weight_lb = float(params.get("net_weight_lb", 0.0))
+    if net_weight_lb <= 0 and L > 0 and W > 0 and T > 0:
+        # Calculate volume in cubic inches
+        volume_cuin = L * W * T
+        # Convert to cubic centimeters (1 in³ = 16.387 cm³)
+        volume_cc = volume_cuin * 16.387
+
+        # Determine material density (g/cc)
+        # Carbide: ~15.6 g/cc, Tool steel: ~7.8 g/cc, Aluminum: ~2.7 g/cc
+        material_upper = material.upper()
+        if "CARBIDE" in material_upper or "WC" in material_upper:
+            density_g_cc = 15.6
+        elif "ALUMINUM" in material_upper or "AL" in material_upper:
+            density_g_cc = 2.7
+        else:
+            # Default to tool steel density
+            density_g_cc = 7.8
+
+        # Calculate weight: volume × density = grams, then convert to pounds
+        weight_g = volume_cc * density_g_cc
+        net_weight_lb = weight_g / 453.592  # grams to pounds
+
     return DieSectionParams(
         length_in=float(L),
         width_in=float(W),
@@ -910,6 +937,7 @@ def _extract_die_section_params(params: Dict[str, Any]) -> DieSectionParams:
         requires_form_grind=bool(params.get("requires_form_grind", False)),
         requires_polish=bool(params.get("requires_polish", False)),
         sub_type=sub_type,
+        net_weight_lb=net_weight_lb,
     )
 
 
@@ -1012,7 +1040,6 @@ def create_die_section_plan(params: Dict[str, Any]) -> Dict[str, Any]:
 
     Ensures:
     - Programming time is never 0
-    - Machining time has minimum floors for carbide
     - Inspection scales with complexity
     - Machine costs are populated
     """
@@ -1337,6 +1364,7 @@ def _add_die_section_finishing_ops(plan: Dict[str, Any], p: DieSectionParams,
 
     Ensures minimum finishing time for carbide die sections.
     Uses text-based edge break detection (same as plates) when available.
+    Applies 0.2 min per hole for cleanup (consistent with plate finishing).
     """
     # Base finishing time
     base_time = 10.0 if is_carbide else 5.0
@@ -1412,8 +1440,18 @@ def _add_die_section_finishing_ops(plan: Dict[str, Any], p: DieSectionParams,
         "note": "Deburr, clean, and inspect surfaces",
     })
 
+    # Hole cleanup time (align with plate logic: 0.2 min per hole)
+    hole_cleanup_time = 0.0
+    if p.hole_count > 0:
+        hole_cleanup_time = 0.2 * p.hole_count
+        plan["ops"].append({
+            "op": "hole_cleanup",
+            "time_minutes": hole_cleanup_time,
+            "note": f"Deburr and clean {p.hole_count} holes (0.2 min each)",
+        })
+
     # Total finishing time floor
-    total_finishing = base_time + edge_break_time + deburr_time
+    total_finishing = base_time + edge_break_time + deburr_time + hole_cleanup_time
     min_finishing = 10.0 if is_carbide else 5.0
 
     if total_finishing < min_finishing:
@@ -1481,7 +1519,6 @@ def _apply_die_section_guardrails(plan: Dict[str, Any], p: DieSectionParams,
 
     Implements:
     - Minimum programming time (never 0)
-    - Minimum machining time floors
     - Machine cost verification
     - High material cost warnings
     """
@@ -1519,17 +1556,18 @@ def _apply_die_section_guardrails(plan: Dict[str, Any], p: DieSectionParams,
     plan["meta"]["programming_time_min"] = prog_time
     plan["meta"]["num_unique_operations"] = num_unique_ops
 
-    # --- Task 3: Minimum machining time floors ---
-    min_machine_time = 30.0 if is_carbide else 15.0
-    if total_machine_time < min_machine_time:
-        warnings.append(
-            f"Machining time ({total_machine_time:.1f} min) below minimum for "
-            f"{'carbide ' if is_carbide else ''}die section; floor is {min_machine_time} min"
-        )
-        plan["meta"]["machining_time_adjusted"] = True
-        plan["meta"]["machining_time_floor"] = min_machine_time
+    # --- Task 3: Heavy-part handling bump ---
+    # Heavy-part handling bump (>40 lbs) - consistent with Plates
+    heavy_part_machining_bump = 0.0
+    if p.net_weight_lb > 40:
+        heavy_part_machining_bump = 5.0
+        import logging
+        logging.debug(f"[BLOCKS] Heavy-part handling bump applied for {p.net_weight_lb:.1f} lb part (+5 min machining)")
 
-    plan["meta"]["total_machine_time_min"] = max(total_machine_time, min_machine_time)
+    # Apply heavy-part bump to total machine time
+    adjusted_machine_time = total_machine_time + heavy_part_machining_bump
+
+    plan["meta"]["total_machine_time_min"] = adjusted_machine_time
 
     # --- Task 4: Inspection time scaling ---
     base_insp_time = 10.0  # Higher base for die sections
@@ -1549,6 +1587,12 @@ def _apply_die_section_guardrails(plan: Dict[str, Any], p: DieSectionParams,
         insp_time += 5.0
     if p.has_land_height:
         insp_time += 3.0
+
+    # Heavy-part handling bump (>40 lbs) - consistent with Plates
+    if p.net_weight_lb > 40:
+        insp_time += 5.0
+        import logging
+        logging.debug(f"[BLOCKS] Heavy-part handling bump applied for {p.net_weight_lb:.1f} lb part (+5 min inspection)")
 
     plan["meta"]["inspection_time_min"] = insp_time
 
@@ -1617,6 +1661,13 @@ def _apply_die_section_guardrails(plan: Dict[str, Any], p: DieSectionParams,
     setup_max = 120.0  # Maximum reasonable setup
 
     calculated_setup = 15 + num_unique_ops * 3 + (5 if is_carbide else 0)
+
+    # Heavy-part handling bump (>40 lbs) - consistent with Plates
+    if p.net_weight_lb > 40:
+        calculated_setup += 10
+        import logging
+        logging.debug(f"[BLOCKS] Heavy-part handling bump applied for {p.net_weight_lb:.1f} lb part (+10 min setup)")
+
     bounded_setup = max(setup_min, min(setup_max, calculated_setup))
 
     plan["meta"]["setup_time_min"] = bounded_setup
@@ -6230,6 +6281,9 @@ class PunchPlannerParams:
     has_polish_contour_note: bool = False  # Has "POLISH CONTOUR" note
     profile_process: str = "grind"  # "grind" or "wire_edm" - decision for profile
 
+    # Weight for heavy-part handling
+    net_weight_lb: float = 0.0  # Part weight for handling bump calculation
+
     def __post_init__(self):
         if self.tap_summary is None:
             self.tap_summary = []
@@ -6359,13 +6413,54 @@ def _extract_punch_params(params: Dict[str, Any]) -> PunchPlannerParams:
     min_section_width = params.get("min_section_width")
     overall_height = params.get("overall_height") or params.get("overall_length_in", 0.0)
 
+    # Extract dimensions for weight calculation
+    material = params.get("material") or params.get("material_callout", "A2")
+    overall_length_in = float(params.get("overall_length_in", 0.0))
+    max_od_or_width_in = float(params.get("max_od_or_width_in", 0.0))
+    body_width_in = params.get("body_width_in")
+    body_thickness_in = params.get("body_thickness_in")
+    shape_type = params.get("shape_type", "round")
+
+    # Calculate weight for heavy-part handling
+    # If weight is provided in params, use it; otherwise calculate from dimensions
+    net_weight_lb = float(params.get("net_weight_lb", 0.0))
+    if net_weight_lb <= 0 and overall_length_in > 0 and max_od_or_width_in > 0:
+        # Calculate volume based on shape
+        if shape_type == "round":
+            # Cylinder: π × r² × L
+            radius_in = max_od_or_width_in / 2.0
+            volume_cuin = 3.14159 * radius_in * radius_in * overall_length_in
+        else:
+            # Rectangular: W × T × L
+            width = body_width_in or max_od_or_width_in
+            thickness = body_thickness_in or max_od_or_width_in
+            volume_cuin = width * thickness * overall_length_in
+
+        # Convert to cubic centimeters (1 in³ = 16.387 cm³)
+        volume_cc = volume_cuin * 16.387
+
+        # Determine material density (g/cc)
+        # Carbide: ~15.6 g/cc, Tool steel: ~7.8 g/cc, Aluminum: ~2.7 g/cc
+        material_upper = material.upper()
+        if "CARBIDE" in material_upper or "WC" in material_upper:
+            density_g_cc = 15.6
+        elif "ALUMINUM" in material_upper or "AL" in material_upper:
+            density_g_cc = 2.7
+        else:
+            # Default to tool steel density
+            density_g_cc = 7.8
+
+        # Calculate weight: volume × density = grams, then convert to pounds
+        weight_g = volume_cc * density_g_cc
+        net_weight_lb = weight_g / 453.592  # grams to pounds
+
     return PunchPlannerParams(
         family=params.get("family", "round_punch"),
-        shape_type=params.get("shape_type", "round"),
-        overall_length_in=float(params.get("overall_length_in", 0.0)),
-        max_od_or_width_in=float(params.get("max_od_or_width_in", 0.0)),
-        body_width_in=params.get("body_width_in"),
-        body_thickness_in=params.get("body_thickness_in"),
+        shape_type=shape_type,
+        overall_length_in=overall_length_in,
+        max_od_or_width_in=max_od_or_width_in,
+        body_width_in=body_width_in,
+        body_thickness_in=body_thickness_in,
         num_ground_diams=int(params.get("num_ground_diams", 0)),
         total_ground_length_in=float(params.get("total_ground_length_in", 0.0)),
         tap_count=int(params.get("tap_count", 0)),
@@ -6378,7 +6473,7 @@ def _extract_punch_params(params: Dict[str, Any]) -> PunchPlannerParams:
         has_etch=bool(params.get("has_etch", False)),
         min_dia_tol_in=params.get("min_dia_tol_in"),
         min_len_tol_in=params.get("min_len_tol_in"),
-        material=params.get("material") or params.get("material_callout", "A2"),
+        material=material,
         material_group=params.get("material_group", ""),
         has_flats=bool(params.get("has_flats", False)),
         has_wire_profile=bool(params.get("has_wire_profile", False)),
@@ -6392,6 +6487,7 @@ def _extract_punch_params(params: Dict[str, Any]) -> PunchPlannerParams:
         min_section_width=min_section_width,
         overall_height=overall_height,
         has_polish_contour_note=profile_stats.get("has_polish_contour_note", False),
+        net_weight_lb=net_weight_lb,
     )
 
 
