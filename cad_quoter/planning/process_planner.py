@@ -1078,7 +1078,7 @@ def create_die_section_plan(params: Dict[str, Any]) -> Dict[str, Any]:
     _add_die_section_edge_ops(plan, p)
 
     # 7. Polish and finishing
-    _add_die_section_finishing_ops(plan, p, is_carbide, complexity)
+    _add_die_section_finishing_ops(plan, p, is_carbide, complexity, params)
 
     # 8. QA checks
     _add_die_section_qa_checks(plan, p, complexity)
@@ -1334,10 +1334,12 @@ def _add_die_section_edge_ops(plan: Dict[str, Any], p: DieSectionParams) -> None
 
 
 def _add_die_section_finishing_ops(plan: Dict[str, Any], p: DieSectionParams,
-                                    is_carbide: bool, complexity: Dict[str, Any]) -> None:
+                                    is_carbide: bool, complexity: Dict[str, Any],
+                                    params: Dict[str, Any] = None) -> None:
     """Add polish and finishing operations based on complexity.
 
     Ensures minimum finishing time for carbide die sections.
+    Uses text-based edge break detection (same as plates) when available.
     """
     # Base finishing time
     base_time = 10.0 if is_carbide else 5.0
@@ -1369,12 +1371,40 @@ def _add_die_section_finishing_ops(plan: Dict[str, Any], p: DieSectionParams,
         })
         base_time += contour_polish_time
 
-    # Edge break time
-    edge_break_time = max(3.0, p.num_chamfers * 0.5 + 2.0)
+    # Edge break time - use text-based detection if available (align with plates)
+    has_edge_break = params.get('has_edge_break', False) if params else False
+
+    if has_edge_break:
+        # Use same perimeter-based calculation as plates with material factor
+        perimeter_in = 2.0 * (p.length_in + p.width_in) if p.length_in > 0 and p.width_in > 0 else 0.0
+        qty = 1  # Default to 1 part unless specified
+
+        # Extract material group from material name (same logic as plates)
+        material_upper = p.material.upper()
+        if 'ALUMINUM' in material_upper or 'AL' in material_upper:
+            material_group = 'ALUMINUM'
+        elif '52100' in material_upper:
+            material_group = '52100'
+        elif 'STAINLESS' in material_upper or 'SS' in material_upper or '316' in material_upper or '304' in material_upper:
+            material_group = 'STAINLESS'
+        elif 'CARBIDE' in material_upper:
+            material_group = 'CARBIDE'
+        elif 'CERAMIC' in material_upper:
+            material_group = 'CERAMIC'
+        else:
+            material_group = 'TOOL_STEEL'
+
+        edge_break_time = calc_edge_break_minutes(perimeter_in, qty, material_group)
+        note = f"Edge break / deburr ({perimeter_in:.1f}\" perim, {material_group})"
+    else:
+        # Fallback to simple chamfer-based calculation
+        edge_break_time = max(3.0, p.num_chamfers * 0.5 + 2.0)
+        note = "Edge break all entry/exit edges and corners"
+
     plan["ops"].append({
         "op": "edge_break",
         "time_minutes": edge_break_time,
-        "note": "Edge break all entry/exit edges and corners",
+        "note": note,
     })
 
     # Deburr based on complexity
