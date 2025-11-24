@@ -1609,12 +1609,21 @@ class AppV7:
                 report.append(f"{stock_label}".ljust(50) + f"{formatted_price:>24}")
 
             if stock_info.mcmaster_price is not None:
+                # Check if we're in a multi-part order context
+                in_multi_part_order = len(self.current_order.parts) > 1
+
                 if quantity > 1:
                     report.append(f"  Tax (${cost_breakdown.tax:.2f} × {quantity})".ljust(50) + f"+${cost_breakdown.tax * quantity:>22.2f}")
-                    report.append(f"  Shipping".ljust(50) + f"+${cost_breakdown.shipping:>22.2f}")
+                    if in_multi_part_order:
+                        report.append(f"  Shipping (if standalone)".ljust(50) + f"+${cost_breakdown.shipping:>22.2f}")
+                    else:
+                        report.append(f"  Shipping".ljust(50) + f"+${cost_breakdown.shipping:>22.2f}")
                 else:
                     report.append(f"  Tax".ljust(50) + f"+${cost_breakdown.tax:>22.2f}")
-                    report.append(f"  Shipping".ljust(50) + f"+${cost_breakdown.shipping:>22.2f}")
+                    if in_multi_part_order:
+                        report.append(f"  Shipping (if standalone)".ljust(50) + f"+${cost_breakdown.shipping:>22.2f}")
+                    else:
+                        report.append(f"  Shipping".ljust(50) + f"+${cost_breakdown.shipping:>22.2f}")
 
             if cost_breakdown.scrap_credit > 0:
                 # Use the scrap price source from scrap_info (could be Wieland, ScrapMetalBuyers, or house_rate)
@@ -2219,6 +2228,7 @@ class AppV7:
                 quote_data = self._extract_quote_data()
 
             labor_hours = quote_data.labor_hours
+            quantity = quote_data.quantity
 
             # Format the report
             report = []
@@ -2229,14 +2239,33 @@ class AppV7:
             # Summary table
             report.append("LABOR BREAKDOWN BY CATEGORY")
             report.append("-" * 74)
-            report.append(f"  Setup / Prep:                    {labor_hours.setup_minutes:>10.2f} minutes")
-            report.append(f"  Programming / Prove-out:         {labor_hours.programming_minutes:>10.2f} minutes")
-            report.append(f"  Machining Steps:                 {labor_hours.machining_steps_minutes:>10.2f} minutes")
-            report.append(f"  Inspection:                      {labor_hours.inspection_minutes:>10.2f} minutes")
 
-            # Finishing / Deburr with detailed breakdown
+            # Job-level costs (amortized across quantity)
+            if quantity > 1:
+                report.append(f"  Setup / Prep:                    {labor_hours.setup_minutes:>10.2f} minutes  (JOB-LEVEL)")
+                report.append(f"  Programming / Prove-out:         {labor_hours.programming_minutes:>10.2f} minutes  (JOB-LEVEL)")
+            else:
+                report.append(f"  Setup / Prep:                    {labor_hours.setup_minutes:>10.2f} minutes")
+                report.append(f"  Programming / Prove-out:         {labor_hours.programming_minutes:>10.2f} minutes")
+
+            # Variable costs (per-unit)
+            if quantity > 1:
+                report.append(f"  Machining Steps:                 {labor_hours.machining_steps_minutes:>10.2f} minutes  (PER UNIT)")
+            else:
+                report.append(f"  Machining Steps:                 {labor_hours.machining_steps_minutes:>10.2f} minutes")
+
+            # Inspection (job-level, includes CMM setup if present)
+            if quantity > 1:
+                report.append(f"  Inspection:                      {labor_hours.inspection_minutes:>10.2f} minutes  (JOB-LEVEL)")
+            else:
+                report.append(f"  Inspection:                      {labor_hours.inspection_minutes:>10.2f} minutes")
+
+            # Finishing / Deburr with detailed breakdown (per-unit cost)
             if labor_hours.finishing_detail and len(labor_hours.finishing_detail) > 0:
-                report.append(f"  Finishing / Deburr (Total):      {labor_hours.finishing_minutes:>10.2f} minutes")
+                if quantity > 1:
+                    report.append(f"  Finishing / Deburr (Total):      {labor_hours.finishing_minutes:>10.2f} minutes  (PER UNIT)")
+                else:
+                    report.append(f"  Finishing / Deburr (Total):      {labor_hours.finishing_minutes:>10.2f} minutes")
                 # Show detail breakdown with indentation - align minutes with main items
                 for detail in labor_hours.finishing_detail:
                     label = detail.get('label', 'Unknown operation')
@@ -2244,7 +2273,10 @@ class AppV7:
                     # Use 37 char width for label to align with main items (4 spaces + bullet + space + label)
                     report.append(f"    • {label:<33} {minutes:>10.1f} minutes")
             else:
-                report.append(f"  Finishing / Deburr:              {labor_hours.finishing_minutes:>10.2f} minutes")
+                if quantity > 1:
+                    report.append(f"  Finishing / Deburr:              {labor_hours.finishing_minutes:>10.2f} minutes  (PER UNIT)")
+                else:
+                    report.append(f"  Finishing / Deburr:              {labor_hours.finishing_minutes:>10.2f} minutes")
 
             # Show misc overhead if non-zero
             if abs(labor_hours.misc_overhead_minutes) > 0.01:
@@ -2499,7 +2531,7 @@ class AppV7:
         summary_lines.append(self._format_cost_summary_line("Parts Subtotal (excl. shipping)", parts_subtotal_no_shipping))
         summary_lines.append("")
         summary_lines.append(f"Total Order Weight: {total_weight_lb:.2f} lb")
-        summary_lines.append(self._format_cost_summary_line("Order Shipping Cost", order_shipping))
+        summary_lines.append(self._format_cost_summary_line("Total Order Shipping Cost", order_shipping))
         summary_lines.append("")
         summary_lines.append("=" * 74)
         summary_lines.append(self._format_cost_summary_line("ORDER TOTAL", order_total))
