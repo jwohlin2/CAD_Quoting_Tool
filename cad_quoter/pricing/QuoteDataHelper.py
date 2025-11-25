@@ -122,6 +122,9 @@ class ScrapInfo:
     # High scrap warning
     high_scrap_warning: bool = False  # True if scrap_percentage > HIGH_SCRAP_THRESHOLD
 
+    # Approximate scrap flag (when volume math doesn't add up and fallback is used)
+    is_approximate_scrap: bool = False
+
 
 @dataclass
 class DirectCostBreakdown:
@@ -2212,7 +2215,8 @@ def extract_quote_data_from_cad(
         scrap_price_per_lb=scrap_value_calc.get('scrap_price_per_lb'),
         scrap_value=scrap_value_calc.get('scrap_value', 0.0),
         scrap_price_source=scrap_value_calc.get('price_source', ''),
-        high_scrap_warning=scrap_pct > HIGH_SCRAP_THRESHOLD
+        high_scrap_warning=scrap_pct > HIGH_SCRAP_THRESHOLD,
+        is_approximate_scrap=scrap_calc.is_approximate_scrap
     )
 
     # Calculate direct cost breakdown
