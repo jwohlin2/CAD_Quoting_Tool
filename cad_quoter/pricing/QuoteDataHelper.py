@@ -1069,6 +1069,158 @@ def extract_punch_quote_data(
         }
 
 
+def estimate_tool_changes_from_ops(ops, hole_table=None, part_type=None):
+    """
+    Estimate tool changes based on operation-specific logic and hole table analysis.
+
+    This replaces the crude "len(ops) * 2" estimator with intelligent detection of
+    actual tools implied by operations and hole features.
+
+    Args:
+        ops: List of operation dictionaries from the process plan
+        hole_table: List of hole table entries (optional)
+        part_type: Type of part (e.g., "die_plate", "punch") for specific clamping (optional)
+
+    Returns:
+        int: Estimated number of unique tool changes
+
+    Example:
+        >>> ops = [{"op_desc": "SQ UP PLATE"}, {"op_desc": "FINISH MILL"}]
+        >>> hole_table = [{"OPERATION": "DRILL", "REF_DIAM": "0.201", "QTY": 4}]
+        >>> estimate_tool_changes_from_ops(ops, hole_table, "die_plate")
+        5  # spot drill, drill 0.201", square-up mill, finish mill, (clamped to min 4)
+    """
+    import re
+
+    # Use a set of tuples to track unique tools
+    tools = set()
+
+    # ========================================================================
+    # 1. Process milling operations from ops
+    # ========================================================================
+    for op in ops:
+        op_desc = op.get('op_desc', '').upper()
+
+        # 1.1 Square-up / facing / side mill
+        if any(keyword in op_desc for keyword in ['SQ UP', 'SQUARE', 'FACE MILL', 'SIDE MILL']):
+            tools.add(("mill", "face_mill_std"))
+
+        # 1.2 Finish mill
+        if 'FINISH' in op_desc and 'MILL' in op_desc:
+            tools.add(("mill", "finish_endmill_std"))
+
+        # 1.3 Grinding operations
+        if 'SURFACE GRIND' in op_desc or 'GRIND' in op_desc:
+            tools.add(("grind", "surface_plate_wheel"))
+
+        if 'JIG GRIND' in op_desc:
+            tools.add(("grind", "jig_bore_wheel"))
+
+        # 1.4 Deburr / chamfer / edge break
+        if any(keyword in op_desc for keyword in ['CHAMFER', 'EDGE BREAK', 'BREAK ALL CORNERS']):
+            tools.add(("deburr", "chamfer_mill"))
+
+        # 1.5 Engraving / etching
+        if 'ETCH' in op_desc or 'ENGRAVE' in op_desc:
+            tools.add(("engrave", "engrave_cutter"))
+
+        # 1.6 EDM / waterjet / laser operations don't add milling tools
+        # (no action needed - we simply don't add tools for these ops)
+
+    # ========================================================================
+    # 2. Process hole table for drilling/tapping/counterboring tools
+    # ========================================================================
+    if hole_table:
+        # Track if any holes need drilling (to add universal spot drill)
+        has_any_drilled_holes = False
+
+        for hole in hole_table:
+            # Get operation type and description
+            operation = hole.get('OPERATION', '').upper()
+            description = hole.get('DESCRIPTION', '').upper()
+            combined_text = f"{operation} {description}".upper()
+
+            # Parse diameter from REF_DIAM field
+            ref_diam_str = hole.get('REF_DIAM', '')
+
+            # Match decimal after ∅ symbol or standalone
+            dia_match = re.search(r'[∅Ø]\s*(\d*\.\d+)', ref_diam_str)
+            if not dia_match:
+                # Try fractional format like 11/32
+                frac_match = re.search(r'(\d+)/(\d+)', ref_diam_str)
+                if frac_match:
+                    ref_dia = float(frac_match.group(1)) / float(frac_match.group(2))
+                else:
+                    dia_match = re.search(r'(\d+\.\d+)', ref_diam_str)
+                    ref_dia = float(dia_match.group(1)) if dia_match else 0.5
+            else:
+                ref_dia = float(dia_match.group(1))
+
+            # Detect operation types
+            is_tap = 'TAP' in combined_text
+            is_cbore = any(keyword in combined_text for keyword in ["C'BORE", "C\u2019BORE", 'CBORE', 'COUNTERBORE'])
+            is_ream = 'REAM' in combined_text
+            is_jig_grind = 'JIG GRIND' in combined_text
+            is_edm = 'EDM' in combined_text
+
+            # Determine if this is a drilled hole (not EDM or jig grind only)
+            is_drilled = not (is_edm or (is_jig_grind and not is_tap))
+
+            # 2.1 Add spot drill if any holes are drilled or tapped
+            if is_drilled or is_tap:
+                has_any_drilled_holes = True
+
+            # 2.2 Add drill tool for unique drill diameter
+            if is_drilled and ref_dia > 0:
+                tools.add(("drill", round(ref_dia, 4)))
+
+            # 2.3 Add tap tool for unique thread size
+            if is_tap:
+                # Extract thread size from description (e.g., "1/4-20", "M6x1.0")
+                thread_match = re.search(r'(\d+/\d+[-\s]*\d+|M\d+[xX][\d.]+|\d+[-\s]*\d+\s*UNC|\d+[-\s]*\d+\s*UNF)', combined_text)
+                if thread_match:
+                    thread_size = thread_match.group(1).strip()
+                    tools.add(("tap", thread_size))
+                else:
+                    # Fallback to diameter if no specific thread size found
+                    tools.add(("tap", f"tap_{round(ref_dia, 4)}"))
+
+            # 2.4 Add reamer tool for unique ream diameter
+            if is_ream and ref_dia > 0:
+                tools.add(("ream", round(ref_dia, 4)))
+
+            # 2.5 Add counterbore tool for unique cbore diameter
+            if is_cbore:
+                # Try to extract counterbore diameter from description
+                cbore_match = re.search(r'[∅Ø]\s*(\d*\.\d+)', description)
+                if cbore_match:
+                    cbore_dia = float(cbore_match.group(1))
+                    tools.add(("cbore", round(cbore_dia, 4)))
+                else:
+                    # Fallback to a standard counterbore size
+                    tools.add(("cbore", round(ref_dia * 1.5, 4)))
+
+        # Add universal spot drill if any holes need drilling
+        if has_any_drilled_holes:
+            tools.add(("drill", "spot_drill_std"))
+
+    # ========================================================================
+    # 3. Calculate final tool count
+    # ========================================================================
+    tool_count = len(tools)
+
+    # ========================================================================
+    # 4. Apply floor/ceiling for die plates
+    # ========================================================================
+    if part_type == "die_plate":
+        # Typical lower bound - most die plates need at least face mill, finish mill, spot drill, drill
+        tool_count = max(4, tool_count)
+        # Hard upper bound for sanity - prevent overcounting
+        tool_count = min(12, tool_count)
+
+    return tool_count
+
+
 def extract_quote_data_from_cad(
     cad_file_path: str | Path,
     machine_rate: float = 45.0,
@@ -2658,13 +2810,21 @@ def extract_quote_data_from_cad(
         ops = plan.get('ops', [])
         # Note: holes_total is already calculated earlier in STEP 4
 
+        # Estimate tool changes using operation-specific logic
+        part_type = plan.get('planner', 'die_plate')  # 'die_plate', 'punch', etc.
+        tool_changes = estimate_tool_changes_from_ops(
+            ops=ops,
+            hole_table=hole_table,
+            part_type=part_type
+        )
+
         # Estimate labor inputs (simplified - could be more sophisticated)
         # Pass machine_time_minutes for simple-part setup guardrail
         # Pass plan data for finishing labor detail calculation
         labor_inputs = LaborInputs(
             ops_total=len(ops),
             holes_total=holes_total,
-            tool_changes=len(ops) * 2,  # Rough estimate
+            tool_changes=tool_changes,
             fixturing_complexity=1,
             cmm_setup_min=cmm_setup_labor_min,  # Add CMM setup to inspection labor
             cmm_holes_checked=cmm_holes_checked,  # Holes checked by CMM (avoid double counting)
