@@ -498,7 +498,7 @@ def planner_die_plate(params: Dict[str, Any]) -> Plan:
     overage_T = max(stock_T - T, 0.0)
     print(f"DEBUG: Full-Blank Square-up operation (die_plate):")
     print(f"  Finished dimensions: L={L:.3f}\", W={W:.3f}\", T={T:.3f}\"")
-    print(f"  Max dimension: {max_dim:.3f}\" → {overage_tier} overage")
+    print(f"  Max dimension: {max_dim:.3f}\" -> {overage_tier} overage")
     print(f"  Stock dimensions: L={stock_L:.3f}\", W={stock_W:.3f}\", T={stock_T:.3f}\"")
     print(f"  Stock overage: +{overage_L:.3f}\" L, +{overage_W:.3f}\" W, +{overage_T:.3f}\" T")
     print(f"  Volume breakdown:")
@@ -2278,9 +2278,9 @@ def plan_from_cad_file(
         dims = extract_dimensions_from_cad(cad_path_for_extraction)
         if dims:
             L, W, T = dims
-            print(f"[PLANNER DEBUG] ✓ Dimensions extracted: L={L:.3f}\", W={W:.3f}\", T={T:.3f}\"")
+            print(f"[PLANNER DEBUG] OK Dimensions extracted: L={L:.3f}\", W={W:.3f}\", T={T:.3f}\"")
         else:
-            print("[PLANNER DEBUG] ✗ Dimension extraction returned None")
+            print("[PLANNER DEBUG] FAIL Dimension extraction returned None")
     else:
         print("[PLANNER DEBUG] use_paddle_ocr=False, skipping dimension extraction")
 
