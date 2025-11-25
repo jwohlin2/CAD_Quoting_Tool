@@ -466,6 +466,7 @@ class QuoteData:
     cad_file_name: str = ""
     extraction_timestamp: str = ""
     quantity: int = 1  # Number of parts to quote
+    part_family: str = ""  # Part family/type that determined the planner routing
 
     # Core data
     part_dimensions: PartDimensions = None
@@ -1861,6 +1862,35 @@ def extract_quote_data_from_cad(
             'volume': quote_data.part_dimensions.volume,
             'area': quote_data.part_dimensions.area,
         })()
+
+    # ========================================================================
+    # Set part family based on the planner that was used
+    # ========================================================================
+    # Extract planner/family from the plan (set by plan_job or punch extraction)
+    if is_punch and punch_data and "error" not in punch_data:
+        # For punch parts, get family from punch_features
+        features = punch_data.get("punch_features", {})
+        detected_family = features.get("family", "")
+        if detected_family:
+            # Map punch families to display names
+            family_map = {
+                "guide_post": "Guide Post",
+                "round_punch": "Punch",
+                "pilot_pin": "Pilot Pin",
+                "bushing": "Bushing",
+                "form_punch": "Form Punch",
+                "spring_punch": "Spring Punch",
+            }
+            quote_data.part_family = family_map.get(detected_family, "Punches")
+        else:
+            quote_data.part_family = "Punches"
+    else:
+        # For plate/die/section parts, get from plan planner field
+        planner = plan.get("planner", "Plates")
+        quote_data.part_family = planner
+
+    if verbose:
+        print(f"  Part family: {quote_data.part_family}")
 
     # ========================================================================
     # STEP 3: Calculate direct costs (McMaster stock, scrap, pricing)
