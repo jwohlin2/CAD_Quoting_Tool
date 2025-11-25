@@ -1085,6 +1085,32 @@ def create_die_section_plan(params: Dict[str, Any]) -> Dict[str, Any]:
         }
     }
 
+    # Detect waterjet operations from text
+    from cad_quoter.geometry.dxf_enrich import detect_waterjet_openings, detect_waterjet_profile
+
+    # Collect text from params
+    all_text = []
+    for txt_entity in params.get("text_entities", []):
+        text_content = txt_entity.get("text", "")
+        if text_content:
+            all_text.append(text_content.upper())
+    for mtext_entity in params.get("mtext_entities", []):
+        text_content = mtext_entity.get("text", "")
+        if text_content:
+            all_text.append(text_content.upper())
+    if "text" in params:
+        all_text.append(str(params["text"]).upper())
+
+    text_dump = "\n".join(all_text)
+
+    # Waterjet detection
+    has_waterjet_openings, waterjet_openings_tol = detect_waterjet_openings(text_dump)
+    has_waterjet_profile, waterjet_profile_tol = detect_waterjet_profile(text_dump)
+    plan["has_waterjet_openings"] = has_waterjet_openings
+    plan["has_waterjet_profile"] = has_waterjet_profile
+    plan["waterjet_openings_tolerance"] = waterjet_openings_tol
+    plan["waterjet_profile_tolerance"] = waterjet_profile_tol
+
     # 1. Stock procurement
     _add_die_section_stock_ops(plan, p)
 
@@ -1142,14 +1168,42 @@ def _add_die_section_stock_ops(plan: Dict[str, Any], p: DieSectionParams) -> Non
 
 
 def _add_die_section_squaring_ops(plan: Dict[str, Any], p: DieSectionParams, is_carbide: bool) -> None:
-    """Add square-up and rough grinding operations."""
+    """Add square-up and rough grinding operations.
+
+    When waterjet profiling is present, we scale down the grind volume to avoid
+    double-counting bulk stock removal, unless it's a precision grind-all-over job.
+    """
     # Calculate volume for time estimation
     volume_cuin = p.length_in * p.width_in * p.thickness_in
 
+    # Check if waterjet profile exists
+    has_waterjet_profile = plan.get("has_waterjet_profile", False)
+
+    # Determine if this is a "precision grind all over" job
+    # Criteria: very tight tolerances (≤0.0005") OR 6+ working faces
+    require_all_faces_precision = (
+        p.min_tolerance_in <= 0.0005 or
+        p.num_working_faces >= 6
+    )
+
     # Stock removal (0.125" L/W, 0.100" T total)
-    stock_removed = (0.125 * p.width_in * p.thickness_in * 2 +  # sides
-                     0.125 * p.length_in * p.thickness_in * 2 +  # ends
-                     0.100 * p.length_in * p.width_in)  # faces
+    # If waterjet profile exists and NOT precision grind-all-over, scale down to top/bottom cleanup only
+    if has_waterjet_profile and not require_all_faces_precision:
+        # Waterjet already does the heavy L/W profiling, so only grind top/bottom cleanup
+        cleanup_stock_T = 0.100  # 0.050" per face (top/bottom)
+        stock_removed = p.length_in * p.width_in * cleanup_stock_T  # faces only
+        grind_mode = "top_bottom_cleanup"
+        print(f"DEBUG: Waterjet profile detected - scaling grind to top/bottom cleanup only")
+        print(f"  stock_removed={stock_removed:.3f} in³ (faces only, no L/W side grinding)")
+    else:
+        # Full 6-face grinding
+        stock_removed = (0.125 * p.width_in * p.thickness_in * 2 +  # sides
+                         0.125 * p.length_in * p.thickness_in * 2 +  # ends
+                         0.100 * p.length_in * p.width_in)  # faces
+        grind_mode = "full_6_faces"
+        if require_all_faces_precision:
+            print(f"DEBUG: Precision grind all over required (min_tol={p.min_tolerance_in:.4f}\", working_faces={p.num_working_faces})")
+        print(f"  stock_removed={stock_removed:.3f} in³ (full 6 faces)")
 
     # Thickness-specific calculations
     stock_thk = p.thickness_in + 0.100  # Total stock on thickness (0.050" per face)
@@ -1187,13 +1241,22 @@ def _add_die_section_squaring_ops(plan: Dict[str, Any], p: DieSectionParams, is_
     # Minimum time for die sections (at least 15 minutes for squaring)
     rough_grind_time = max(rough_grind_time, 15.0 if is_carbide else 8.0)
 
+    # Set operation details based on grind mode
+    if grind_mode == "top_bottom_cleanup":
+        faces_count = 2
+        op_note = f"Rough grind top/bottom faces (waterjet does L/W profiling) ({stock_removed:.3f} in³ removed)"
+    else:
+        faces_count = 6
+        op_note = f"Rough grind all 6 faces to establish datums ({stock_removed:.3f} in³ removed)"
+
     plan["ops"].append({
         "op": "rough_grind_all_faces",
-        "faces": 6,
+        "faces": faces_count,
         "stock_removed_cuin": stock_removed,
         "material_factor": grind_factor,
         "time_minutes": rough_grind_time,
-        "note": f"Rough grind all 6 faces to establish datums ({stock_removed:.3f} in³ removed)",
+        "note": op_note,
+        "grind_mode": grind_mode,  # Track for debugging/auditing
     })
 
 

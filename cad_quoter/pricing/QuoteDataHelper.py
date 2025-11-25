@@ -1693,6 +1693,23 @@ def extract_quote_data_from_cad(
                 misc_overhead_min = round(misc_overhead_min, 2)
                 punch_labor_hours = round(punch_labor_hours, 2)
 
+                # For multi-quantity jobs, amortize job-level labor across quantity
+                # Job-level: setup, programming, inspection (one-time costs)
+                # Per-unit: machining, finishing, misc_overhead (scales with quantity)
+                if quantity > 1:
+                    # Amortize job-level minutes
+                    setup_min = round(setup_min / quantity, 2)
+                    programming_min = round(programming_min / quantity, 2)
+                    inspection_min = round(inspection_min / quantity, 2)
+
+                    # Recalculate total per-unit labor
+                    labor_total = round(
+                        setup_min + programming_min + machining_min +
+                        inspection_min + finishing_min + misc_overhead_min,
+                        2
+                    )
+                    punch_labor_hours = round(labor_total / 60.0, 2)
+
                 # Compute labor cost directly from total minutes for accuracy
                 # (avoids rounding errors from hours conversion)
                 punch_labor_cost = round(labor_total * (labor_rate / 60.0), 2)
@@ -2875,6 +2892,26 @@ def extract_quote_data_from_cad(
         # Sanity check: total should equal sum of categories + overhead
         assert abs(labor_total - (visible_labor_sum + misc_overhead_min)) < 0.01, \
             f"Labor time mismatch: total={labor_total:.2f}, sum={visible_labor_sum:.2f}, overhead={misc_overhead_min:.2f}"
+
+        # NOTE: For multi-quantity jobs, we do NOT amortize the minutes here.
+        # The labor_hours breakdown stores FULL job-level minutes (setup, programming, inspection).
+        # Amortization happens in the cost calculation (lines 2943-2949) where job-level
+        # costs are amortized across quantity. This ensures:
+        # - Display shows actual job-level minutes with (JOB-LEVEL) labels
+        # - Per-unit costs are correctly calculated as: (job_level_cost / qty) + variable_cost
+
+        # For multi-quantity jobs, calculate per-unit labor total
+        # Job-level: setup, programming, inspection (one-time costs, amortized across qty)
+        # Per-unit: machining, finishing, misc_overhead (scales with quantity)
+        if quantity > 1:
+            # Job-level minutes (full, not amortized)
+            job_level_min = setup_min + programming_min + inspection_min
+            # Per-unit variable minutes
+            per_unit_min = machining_min + finishing_min + misc_overhead_min
+            # Total labor for the entire job
+            total_labor_min_for_job = job_level_min + (per_unit_min * quantity)
+            # Per-unit labor (amortized)
+            labor_total = round(total_labor_min_for_job / quantity, 2)
 
         labor_total_hours = round(labor_total / 60.0, 2)
         # Compute labor cost directly from total minutes for accuracy

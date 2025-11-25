@@ -1212,6 +1212,15 @@ def calculate_total_scrap(
         # This is more tolerant and handles edge cases where volume math breaks down
         total_scrap_weight = round(mcmaster_weight - final_part_weight, 2)
 
+        # Clamp scrap weight to be non-negative
+        if total_scrap_weight < 0:
+            logger.warning(
+                f"Negative scrap weight detected ({total_scrap_weight:.2f} lbs). "
+                f"McMaster weight ({mcmaster_weight:.2f} lbs) < Part weight ({final_part_weight:.2f} lbs). "
+                f"Clamping to 0."
+            )
+            total_scrap_weight = 0.0
+
         # Recalculate scrap volume from weight (for display consistency)
         if density > 0:
             total_scrap_volume = total_scrap_weight / density
@@ -1224,9 +1233,20 @@ def calculate_total_scrap(
         # Normal mode - volumes add up within tolerance
         total_scrap_weight = round(total_scrap_volume * density, 2)
 
+        # Clamp scrap weight to be non-negative (shouldn't happen in normal mode, but just in case)
+        if total_scrap_weight < 0:
+            logger.warning(
+                f"Negative scrap weight in normal mode ({total_scrap_weight:.2f} lbs). Clamping to 0."
+            )
+            total_scrap_weight = 0.0
+
     # Calculate percentages
     scrap_percentage = (total_scrap_volume / mcmaster_volume * 100) if mcmaster_volume > 0 else 0
     utilization_percentage = (final_part_volume / mcmaster_volume * 100) if mcmaster_volume > 0 else 0
+
+    # Clamp scrap percentage to [0, 100] to prevent display issues
+    scrap_percentage = max(0.0, min(100.0, scrap_percentage))
+    utilization_percentage = max(0.0, min(100.0, utilization_percentage))
 
     # Check for high scrap warning
     high_scrap_warning = scrap_percentage > HIGH_SCRAP_THRESHOLD

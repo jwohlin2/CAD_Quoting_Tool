@@ -1560,8 +1560,9 @@ class AppV7:
 
             if is_cylindrical:
                 # For cylindrical parts, show Length × Diameter
-                report.append(f"  Required Stock: {stock_info.desired_length:.2f} × Ø{stock_info.desired_diameter:.2f} in")
-                report.append(f"  Rounded to catalog: {stock_info.mcmaster_length:.2f} × Ø{stock_info.mcmaster_diameter:.3f}")
+                # For cylindrical parts, diameter is stored in width field
+                report.append(f"  Required Stock: {stock_info.desired_length:.2f} × Ø{stock_info.desired_width:.2f} in")
+                report.append(f"  Rounded to catalog: {stock_info.mcmaster_length:.2f} × Ø{stock_info.mcmaster_width:.3f}")
             else:
                 # For plate parts, show Length × Width × Thickness
                 report.append(f"  Required Stock: {stock_info.desired_length:.2f} × {stock_info.desired_width:.2f} × {stock_info.desired_thickness:.2f} in")
