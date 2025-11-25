@@ -1061,7 +1061,7 @@ class PunchMachineHours:
         # Helper to ensure all values are floats
         def safe_val(value, name="unknown"):
             if isinstance(value, dict):
-                print(f"[WARNING] PunchMachineHours.{name} is a dict: {value}. Using 0.0.")
+                print(f"WARNING: PunchMachineHours.{name} is a dict: {value}. Using 0.0.")
                 return 0.0
             return float(value) if value is not None else 0.0
 
@@ -1095,7 +1095,7 @@ class PunchLaborHours:
         # Helper to ensure all values are floats
         def safe_val(value, name="unknown"):
             if isinstance(value, dict):
-                print(f"[WARNING] PunchLaborHours.{name} is a dict: {value}. Using 0.0.")
+                print(f"WARNING: PunchLaborHours.{name} is a dict: {value}. Using 0.0.")
                 return 0.0
             return float(value) if value is not None else 0.0
 
@@ -1495,11 +1495,11 @@ def convert_punch_to_quote_machine_hours(machine_hours: PunchMachineHours, labor
     # Helper function to ensure all values are floats, not dicts
     def ensure_float(value, field_name="unknown"):
         if isinstance(value, dict):
-            print(f"[WARNING] PunchMachineHours field '{field_name}' is a dict: {value}. Using 0.0 instead.")
+            print(f"WARNING: Field '{field_name}' is a dict: {value}. Using 0.0 instead.")
             return 0.0
         return float(value) if value is not None else 0.0
 
-    # Convert each value to float FIRST, then perform additions
+    # Perform additions AFTER converting each value to float
     total_milling = ensure_float(machine_hours.rough_turning_min, "rough_turning_min") + ensure_float(machine_hours.finish_turning_min, "finish_turning_min")
     total_grinding = ensure_float(machine_hours.od_grinding_min, "od_grinding_min") + ensure_float(machine_hours.id_grinding_min, "id_grinding_min") + ensure_float(machine_hours.face_grinding_min, "face_grinding_min")
     total_other = ensure_float(machine_hours.sawing_min, "sawing_min") + ensure_float(machine_hours.chamfer_min, "chamfer_min") + ensure_float(machine_hours.polishing_min, "polishing_min")
@@ -1541,11 +1541,11 @@ def convert_punch_to_quote_labor_hours(labor_hours: PunchLaborHours) -> dict[str
     # Helper function to ensure all values are floats
     def ensure_float(value, field_name="unknown"):
         if isinstance(value, dict):
-            print(f"[WARNING] PunchLaborHours field '{field_name}' is a dict: {value}. Using 0.0 instead.")
+            print(f"WARNING: Labor field '{field_name}' is a dict: {value}. Using 0.0 instead.")
             return 0.0
         return float(value) if value is not None else 0.0
 
-    # Convert each value to float FIRST, then perform additions
+    # Perform additions AFTER converting each value to float
     total_setup = ensure_float(labor_hours.lathe_setup_min, "lathe_setup_min") + ensure_float(labor_hours.grinder_setup_min, "grinder_setup_min") + ensure_float(labor_hours.edm_setup_min, "edm_setup_min")
     total_inspection = ensure_float(labor_hours.inspection_setup_min, "inspection_setup_min") + ensure_float(labor_hours.first_article_min, "first_article_min")
 

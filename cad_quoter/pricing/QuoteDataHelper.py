@@ -2297,6 +2297,16 @@ def extract_quote_data_from_cad(
             print(f"  [PUNCH] Base punch times: {quote_data.machine_hours.total_hours:.2f} hr")
 
         # Get base punch times - ensure all values are floats
+        def safe_float(value, name="unknown"):
+            """Convert value to float, handling dict or other non-numeric types."""
+            if isinstance(value, dict):
+                print(f"WARNING: {name} is a dict: {value}. Using 0.0.")
+                return 0.0
+            try:
+                return float(value) if value is not None else 0.0
+            except (TypeError, ValueError) as e:
+                print(f"WARNING: Cannot convert {name} value {value} to float: {e}. Using 0.0.")
+                return 0.0
         punch_base_milling = safe_float(quote_data.machine_hours.total_milling_minutes, "total_milling_minutes")
         punch_base_grinding = safe_float(quote_data.machine_hours.total_grinding_minutes, "total_grinding_minutes")
         punch_base_drill = safe_float(quote_data.machine_hours.total_drill_minutes, "total_drill_minutes")
@@ -2638,16 +2648,29 @@ def extract_quote_data_from_cad(
             # NOTE: For non-punch parts, we'll check for plan-based EDM after
             # calculating plan_edm_min (see fix around line 2668)
 
-            # Accumulate hole operation times - ensure all values are floats
-            total_drill_min = safe_float(times.get('total_drill_minutes', 0.0), "total_drill_minutes")
-            total_tap_min = safe_float(times.get('total_tap_minutes', 0.0), "total_tap_minutes")
-            total_cbore_min = safe_float(times.get('total_cbore_minutes', 0.0), "total_cbore_minutes")
-            total_cdrill_min = safe_float(times.get('total_cdrill_minutes', 0.0), "total_cdrill_minutes")
-            total_jig_grind_min = safe_float(times.get('total_jig_grind_minutes', 0.0), "total_jig_grind_minutes")
+            # Helper function to safely get float values
+            def safe_get_float_from_times(key, default=0.0):
+                """Safely get a float value from times dict, handling dicts and non-numeric values."""
+                val = times.get(key, default)
+                if isinstance(val, dict):
+                    print(f"WARNING: times['{key}'] is a dict: {val}. Using {default}.")
+                    return default
+                try:
+                    return float(val) if val is not None else default
+                except (TypeError, ValueError) as e:
+                    print(f"WARNING: Cannot convert times['{key}'] value {val} to float: {e}. Using {default}.")
+                    return default
+
+            # Accumulate hole operation times
+            total_drill_min = safe_get_float_from_times('total_drill_minutes', 0.0)
+            total_tap_min = safe_get_float_from_times('total_tap_minutes', 0.0)
+            total_cbore_min = safe_get_float_from_times('total_cbore_minutes', 0.0)
+            total_cdrill_min = safe_get_float_from_times('total_cdrill_minutes', 0.0)
+            total_jig_grind_min = safe_get_float_from_times('total_jig_grind_minutes', 0.0)
             # EDM time from "FOR WIRE EDM" holes (starter holes for wire EDM operations)
-            hole_table_edm_min = safe_float(times.get('total_edm_minutes', 0.0), "total_edm_minutes")
+            hole_table_edm_min = safe_get_float_from_times('total_edm_minutes', 0.0)
             # Slot milling time (obround features)
-            slot_milling_min = safe_float(times.get('total_slot_minutes', 0.0), "total_slot_minutes")
+            slot_milling_min = safe_get_float_from_times('total_slot_minutes', 0.0)
         else:
             hole_table_edm_min = 0.0
             slot_milling_min = 0.0
@@ -2670,23 +2693,40 @@ def extract_quote_data_from_cad(
         slot_ops_raw = plan_machine_times.get('slot_operations', [])
         waterjet_ops_raw = plan_machine_times.get('waterjet_operations', [])  # NEW: Waterjet ops
 
-        # Calculate totals from detailed operations (what's displayed in report)
-        # Ensure each operation dict value is a float
-        total_milling_ops_min = sum(safe_float(op.get('time_minutes', 0.0), f"milling_op_{i}_time_minutes") for i, op in enumerate(milling_ops_raw))
-        total_grinding_ops_min = sum(safe_float(op.get('time_minutes', 0.0), f"grinding_op_{i}_time_minutes") for i, op in enumerate(grinding_ops_raw))
-        total_pocket_ops_min = sum(safe_float(op.get('pocket_time_min', 0.0), f"pocket_op_{i}_time_min") for i, op in enumerate(pocket_ops_raw))
-        total_slot_ops_min = sum(safe_float(op.get('slot_mill_time_min', 0.0), f"slot_op_{i}_time_min") for i, op in enumerate(slot_ops_raw))
-        total_waterjet_ops_min = sum(safe_float(op.get('time_min', 0.0), f"waterjet_op_{i}_time_min") for i, op in enumerate(waterjet_ops_raw))  # NEW
+        # Helper function to safely get float values
+        def safe_get_float(op_dict, key, default=0.0):
+            """Safely get a float value from operation dict, handling dicts and non-numeric values."""
+            val = op_dict.get(key, default)
+            if isinstance(val, dict):
+                print(f"WARNING: Operation '{key}' is a dict: {val}. Using {default}.")
+                return default
+            try:
+                return float(val) if val is not None else default
+            except (TypeError, ValueError) as e:
+                print(f"WARNING: Cannot convert '{key}' value {val} to float: {e}. Using {default}.")
+                return default
 
-        # Get breakdown totals (may include non-detailed operations) - ensure all values are floats
-        breakdown_milling_min = safe_float(plan_machine_times['breakdown_minutes'].get('milling', 0.0), "breakdown_milling")
-        breakdown_grinding_min = safe_float(plan_machine_times['breakdown_minutes'].get('grinding', 0.0), "breakdown_grinding")
-        breakdown_pocket_min = safe_float(plan_machine_times['breakdown_minutes'].get('pockets', 0.0), "breakdown_pockets")
-        breakdown_slot_min = safe_float(plan_machine_times['breakdown_minutes'].get('slots', 0.0), "breakdown_slots")
-        breakdown_waterjet_min = safe_float(plan_machine_times['breakdown_minutes'].get('waterjet', 0.0), "breakdown_waterjet")  # NEW
+        # Calculate totals from detailed operations (what's displayed in report)
+        total_milling_ops_min = sum(safe_get_float(op, 'time_minutes') for op in milling_ops_raw)
+        total_grinding_ops_min = sum(safe_get_float(op, 'time_minutes') for op in grinding_ops_raw)
+        total_pocket_ops_min = sum(safe_get_float(op, 'pocket_time_min') for op in pocket_ops_raw)
+        total_slot_ops_min = sum(safe_get_float(op, 'slot_mill_time_min') for op in slot_ops_raw)
+        total_waterjet_ops_min = sum(safe_get_float(op, 'time_min') for op in waterjet_ops_raw)  # NEW
+
+        # Get breakdown totals (may include non-detailed operations)
+        # Use safe_get_float to handle any dict values in breakdown_minutes
+        breakdown_milling_min = safe_get_float(plan_machine_times.get('breakdown_minutes', {}), 'milling', 0.0)
+        breakdown_grinding_min = safe_get_float(plan_machine_times.get('breakdown_minutes', {}), 'grinding', 0.0)
+        breakdown_pocket_min = safe_get_float(plan_machine_times.get('breakdown_minutes', {}), 'pockets', 0.0)
+        breakdown_slot_min = safe_get_float(plan_machine_times.get('breakdown_minutes', {}), 'slots', 0.0)
+        breakdown_waterjet_min = safe_get_float(plan_machine_times.get('breakdown_minutes', {}), 'waterjet', 0.0)  # NEW
         # EDM from plan operations + EDM from hole table "FOR WIRE EDM" entries
-        plan_edm_min = safe_float(plan_machine_times['breakdown_minutes'].get('edm', 0.0), "breakdown_edm")
-        total_edm_min = plan_edm_min + hole_table_edm_min  # Both already converted to float
+        plan_edm_min = safe_get_float(plan_machine_times.get('breakdown_minutes', {}), 'edm', 0.0)
+        # Ensure both values are floats before addition
+        if isinstance(hole_table_edm_min, dict):
+            print(f"WARNING: hole_table_edm_min is a dict: {hole_table_edm_min}. Using 0.0.")
+            hole_table_edm_min = 0.0
+        total_edm_min = plan_edm_min + float(hole_table_edm_min)
         if verbose:
             print(f"[DEBUG EDM] plan_edm_min={plan_edm_min:.2f}, hole_table_edm_min={hole_table_edm_min:.2f}, total_edm_min={total_edm_min:.2f}")
 
@@ -2711,13 +2751,14 @@ def extract_quote_data_from_cad(
 
         # Get other_ops_detail from plan (NEW)
         other_ops_detail_raw = plan_machine_times.get('other_ops_detail', [])
-        total_other_min = safe_float(plan_machine_times.get('other_ops_minutes', 0.0), "other_ops_minutes")
+        total_other_min = safe_get_float(plan_machine_times, 'other_ops_minutes', 0.0)
 
         # Any milling/grinding/pocket/slot time not in detailed ops goes to "other" for transparency
-        milling_overhead_min = breakdown_milling_min - total_milling_ops_min
-        grinding_overhead_min = breakdown_grinding_min - total_grinding_ops_min
-        pocket_overhead_min = breakdown_pocket_min - total_pocket_ops_min
-        slot_overhead_min = breakdown_slot_min - total_slot_ops_min
+        # Ensure all values are floats before subtraction
+        milling_overhead_min = float(breakdown_milling_min) - float(total_milling_ops_min)
+        grinding_overhead_min = float(breakdown_grinding_min) - float(total_grinding_ops_min)
+        pocket_overhead_min = float(breakdown_pocket_min) - float(total_pocket_ops_min)
+        slot_overhead_min = float(breakdown_slot_min) - float(total_slot_ops_min)
 
         # Add overflow to other_ops_detail if non-zero
         overflow_total = milling_overhead_min + grinding_overhead_min + pocket_overhead_min + slot_overhead_min
@@ -2732,7 +2773,11 @@ def extract_quote_data_from_cad(
 
         # Use detailed ops totals for display (ensures Total Milling Time matches ops sum)
         # Add slot milling time from hole table to milling totals (legacy slot handling)
-        total_milling_min = total_milling_ops_min + slot_milling_min
+        # Ensure both values are floats before addition
+        if isinstance(slot_milling_min, dict):
+            print(f"WARNING: slot_milling_min is a dict: {slot_milling_min}. Using 0.0.")
+            slot_milling_min = 0.0
+        total_milling_min = float(total_milling_ops_min) + float(slot_milling_min)
         total_grinding_min = total_grinding_ops_min
         total_pocket_min = total_pocket_ops_min
         total_slot_min = total_slot_ops_min
@@ -2801,18 +2846,19 @@ def extract_quote_data_from_cad(
         total_waterjet_min = round(total_waterjet_min, 2)  # NEW
         cmm_checking_machine_min = round(cmm_checking_machine_min, 2)
 
-        # Extract special operation times (edge break, etch, polish) - ensure all values are floats
-        total_edge_break_min = round(safe_float(plan_machine_times.get('edge_break_minutes', 0.0), "edge_break_minutes"), 2)
-        total_etch_min = round(safe_float(plan_machine_times.get('etch_minutes', 0.0), "etch_minutes"), 2)
-        total_polish_min = round(safe_float(plan_machine_times.get('polish_minutes', 0.0), "polish_minutes"), 2)
+        # Extract special operation times (edge break, etch, polish)
+        total_edge_break_min = round(safe_get_float(plan_machine_times, 'edge_break_minutes', 0.0), 2)
+        total_etch_min = round(safe_get_float(plan_machine_times, 'etch_minutes', 0.0), 2)
+        total_polish_min = round(safe_get_float(plan_machine_times, 'polish_minutes', 0.0), 2)
 
+        # Ensure all values are floats before final summation
         grand_total_minutes = round(
-            total_drill_min + total_tap_min + total_cbore_min +
-            total_cdrill_min + total_jig_grind_min +
-            total_milling_min + total_grinding_min + total_pocket_min + total_slot_min +
-            total_edm_min + total_other_min + total_waterjet_min +  # NEW: Added waterjet
-            total_edge_break_min + total_etch_min + total_polish_min +
-            cmm_checking_machine_min, 2
+            float(total_drill_min) + float(total_tap_min) + float(total_cbore_min) +
+            float(total_cdrill_min) + float(total_jig_grind_min) +
+            float(total_milling_min) + float(total_grinding_min) + float(total_pocket_min) + float(total_slot_min) +
+            float(total_edm_min) + float(total_other_min) + float(total_waterjet_min) +  # NEW: Added waterjet
+            float(total_edge_break_min) + float(total_etch_min) + float(total_polish_min) +
+            float(cmm_checking_machine_min), 2
         )
         grand_total_hours = round(grand_total_minutes / 60.0, 2)
 
@@ -2926,13 +2972,26 @@ def extract_quote_data_from_cad(
         labor_result = compute_labor_minutes(labor_inputs)
         minutes = labor_result['minutes']
 
-        # Extract individual category minutes with rounding for consistent display - ensure all values are floats
-        setup_min = round(safe_float(minutes.get('Setup', 0.0), "labor_setup"), 2)
-        programming_min = round(safe_float(minutes.get('Programming', 0.0), "labor_programming"), 2)
-        machining_min = round(safe_float(minutes.get('Machining_Steps', 0.0), "labor_machining_steps"), 2)
-        inspection_min = round(safe_float(minutes.get('Inspection', 0.0), "labor_inspection"), 2)
-        finishing_min = round(safe_float(minutes.get('Finishing', 0.0), "labor_finishing"), 2)
-        labor_total = round(safe_float(minutes.get('Labor_Total', 0.0), "labor_total"), 2)
+        # Helper function to safely get float values from labor minutes
+        def safe_labor_float(key, default=0.0):
+            """Safely get a float value from minutes dict."""
+            val = minutes.get(key, default)
+            if isinstance(val, dict):
+                print(f"WARNING: Labor minutes['{key}'] is a dict: {val}. Using {default}.")
+                return default
+            try:
+                return float(val) if val is not None else default
+            except (TypeError, ValueError) as e:
+                print(f"WARNING: Cannot convert labor minutes['{key}'] value {val} to float: {e}. Using {default}.")
+                return default
+
+        # Extract individual category minutes with rounding for consistent display
+        setup_min = round(safe_labor_float('Setup', 0.0), 2)
+        programming_min = round(safe_labor_float('Programming', 0.0), 2)
+        machining_min = round(safe_labor_float('Machining_Steps', 0.0), 2)
+        inspection_min = round(safe_labor_float('Inspection', 0.0), 2)
+        finishing_min = round(safe_labor_float('Finishing', 0.0), 2)
+        labor_total = round(safe_labor_float('Labor_Total', 0.0), 2)
 
         # Extract finishing detail breakdown
         finishing_breakdown = labor_result.get('finishing_breakdown', {})
