@@ -1682,6 +1682,7 @@ def detect_punch_material(text_dump: str) -> Optional[str]:
         (r'\bH-?13\b', 'H13'), (r'\bCARBIDE\b', 'CARBIDE'),
         (r'\b440-?C\b', '440C'), (r'\b17-4\b', '17-4'),
         (r'\b4140\b', '4140'), (r'\b4340\b', '4340'),
+        (r'\bVM\s?-?\s?15\s?-?\s?M?\b', 'VM-15M'),  # VM-15M, VM15M, VM-15, VM15, VM 15M, VM 15
     ]
 
     for pattern, normalized in materials:

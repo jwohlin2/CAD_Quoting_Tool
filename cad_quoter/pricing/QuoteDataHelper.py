@@ -107,6 +107,9 @@ class ScrapInfo:
     total_scrap_volume: float = 0.0  # Total material removed (in³)
     total_scrap_weight: float = 0.0  # lbs
 
+    # Weight calculations
+    desired_stock_weight: float = 0.0  # Weight after stock prep, before machining (lbs)
+
     # Scrap percentages
     scrap_percentage: float = 0.0  # Scrap as % of McMaster stock
     utilization_percentage: float = 0.0  # Final part as % of McMaster stock
@@ -2203,6 +2206,7 @@ def extract_quote_data_from_cad(
         hole_drilling_scrap=scrap_calc.hole_drilling_scrap,
         total_scrap_volume=scrap_calc.total_scrap_volume,
         total_scrap_weight=scrap_calc.total_scrap_weight,
+        desired_stock_weight=scrap_calc.desired_stock_weight,
         scrap_percentage=scrap_pct,
         utilization_percentage=scrap_calc.utilization_percentage,
         scrap_price_per_lb=scrap_value_calc.get('scrap_price_per_lb'),
