@@ -688,6 +688,9 @@ class ScrapInfo:
     # High scrap warning
     high_scrap_warning: bool = False  # True if scrap_percentage > HIGH_SCRAP_THRESHOLD
 
+    # Approximate scrap flag (when volume math doesn't add up and fallback is used)
+    is_approximate_scrap: bool = False
+
 
 def calculate_stock_prep_scrap(
     mcmaster_length: float,
@@ -1172,19 +1175,54 @@ def calculate_total_scrap(
         machining['hole_drilling_scrap']
     )
 
-    # Verify math
+    # Verify math - but allow fallback if volumes don't add up
     final_part_volume = machining['part_final_volume']
-    assert abs((mcmaster_volume - total_scrap_volume) - final_part_volume) < 0.01, \
-        "Scrap calculation error: volumes don't add up"
+    volume_diff = abs((mcmaster_volume - total_scrap_volume) - final_part_volume)
+    is_approximate_scrap = False
 
-    # Calculate weights
+    # Calculate weights first (needed for fallback)
     # Round weights to 2 decimal places to ensure consistency between
     # displayed values and calculations (e.g., scrap credit = weight × price)
     density = get_material_density(material)
     mcmaster_weight = round(mcmaster_volume * density, 2)
     desired_stock_weight = round(desired_volume * density, 2)  # Weight after stock prep, before machining
     final_part_weight = round(final_part_volume * density, 2)
-    total_scrap_weight = round(total_scrap_volume * density, 2)
+
+    VOLUME_TOLERANCE = 0.01  # cubic inches
+
+    if volume_diff >= VOLUME_TOLERANCE:
+        # Volume mismatch detected - use fallback mode
+        is_approximate_scrap = True
+
+        # Log the mismatch for debugging
+        import logging
+        logger = logging.getLogger(__name__)
+        logger.warning(
+            f"Scrap volume mismatch detected (diff={volume_diff:.6f} in³):\n"
+            f"  McMaster volume: {mcmaster_volume:.6f} in³\n"
+            f"  Total scrap volume: {total_scrap_volume:.6f} in³\n"
+            f"  Final part volume: {final_part_volume:.6f} in³\n"
+            f"  Expected: (mcmaster - scrap) = part, got: "
+            f"({mcmaster_volume:.6f} - {total_scrap_volume:.6f}) = {mcmaster_volume - total_scrap_volume:.6f}, "
+            f"expected {final_part_volume:.6f}\n"
+            f"  Falling back to weight-based scrap calculation"
+        )
+
+        # Fallback: Calculate scrap weight from weight difference
+        # This is more tolerant and handles edge cases where volume math breaks down
+        total_scrap_weight = round(mcmaster_weight - final_part_weight, 2)
+
+        # Recalculate scrap volume from weight (for display consistency)
+        if density > 0:
+            total_scrap_volume = total_scrap_weight / density
+
+        if verbose:
+            print(f"\n⚠️  APPROXIMATE SCRAP (volume mismatch detected)")
+            print(f"  Volume difference: {volume_diff:.6f} in³")
+            print(f"  Using weight-based fallback: scrap_weight = stock_weight - part_weight")
+    else:
+        # Normal mode - volumes add up within tolerance
+        total_scrap_weight = round(total_scrap_volume * density, 2)
 
     # Calculate percentages
     scrap_percentage = (total_scrap_volume / mcmaster_volume * 100) if mcmaster_volume > 0 else 0
@@ -1195,6 +1233,8 @@ def calculate_total_scrap(
 
     if verbose:
         print(f"\nScrap Breakdown:")
+        if is_approximate_scrap:
+            print(f"  ⚠️  APPROXIMATE SCRAP - volume mismatch, using weight-based calculation")
         print(f"  Stock prep scrap: {stock_prep_scrap:.4f} in³")
         print(f"  Face milling scrap: {machining['face_milling_scrap']:.4f} in³")
         print(f"  Hole drilling scrap: {machining['hole_drilling_scrap']:.4f} in³")
@@ -1229,7 +1269,8 @@ def calculate_total_scrap(
         total_scrap_weight=total_scrap_weight,
         scrap_percentage=scrap_percentage,
         utilization_percentage=utilization_percentage,
-        high_scrap_warning=high_scrap_warning
+        high_scrap_warning=high_scrap_warning,
+        is_approximate_scrap=is_approximate_scrap
     )
 
 
