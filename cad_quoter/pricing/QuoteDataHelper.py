@@ -1693,23 +1693,27 @@ def extract_quote_data_from_cad(
                 misc_overhead_min = round(misc_overhead_min, 2)
                 punch_labor_hours = round(punch_labor_hours, 2)
 
-                # For multi-quantity jobs, amortize job-level labor across quantity
-                # Job-level: setup, programming, inspection (one-time costs)
+                # NOTE: For multi-quantity jobs, we do NOT amortize the minutes here.
+                # The labor_hours breakdown stores FULL job-level minutes (setup, programming, inspection).
+                # Amortization happens in the cost calculation (lines 2988-3012) where job-level
+                # costs are amortized across quantity. This ensures:
+                # - Display shows actual job-level minutes with (JOB-LEVEL) labels
+                # - Per-unit costs are correctly calculated as: (job_level_cost / qty) + variable_cost
+
+                # For multi-quantity jobs, calculate per-unit labor total
+                # Job-level: setup, programming, inspection (one-time costs, amortized across qty)
                 # Per-unit: machining, finishing, misc_overhead (scales with quantity)
                 if quantity > 1:
-                    # Amortize job-level minutes
-                    setup_min = round(setup_min / quantity, 2)
-                    programming_min = round(programming_min / quantity, 2)
-                    inspection_min = round(inspection_min / quantity, 2)
+                    # Job-level minutes (full, not amortized)
+                    job_level_min = setup_min + programming_min + inspection_min
+                    # Per-unit variable minutes
+                    per_unit_min = machining_min + finishing_min + misc_overhead_min
+                    # Total labor for the entire job
+                    total_labor_min_for_job = job_level_min + (per_unit_min * quantity)
+                    # Per-unit labor (amortized)
+                    labor_total = round(total_labor_min_for_job / quantity, 2)
 
-                    # Recalculate total per-unit labor
-                    labor_total = round(
-                        setup_min + programming_min + machining_min +
-                        inspection_min + finishing_min + misc_overhead_min,
-                        2
-                    )
-                    punch_labor_hours = round(labor_total / 60.0, 2)
-
+                punch_labor_hours = round(labor_total / 60.0, 2)
                 # Compute labor cost directly from total minutes for accuracy
                 # (avoids rounding errors from hours conversion)
                 punch_labor_cost = round(labor_total * (labor_rate / 60.0), 2)
@@ -2397,6 +2401,25 @@ def extract_quote_data_from_cad(
                 for g in times.get('edm_groups', [])
             ]
 
+            # If we have plan-based EDM time but no hole table EDM operations,
+            # create a synthetic operation to ensure EDM details are always shown
+            # when EDM minutes > 0 (avoids "ghost" EDM time in machine breakdown)
+            if punch_base_edm > 0 and not edm_ops:
+                # Get part thickness for EDM depth display
+                part_thickness = quote_data.dimensions.T if quote_data.dimensions else 0.5
+
+                edm_ops = [
+                    HoleOperation(
+                        hole_id="PLAN",
+                        diameter=0.0,  # Not from starter holes - plan-based EDM
+                        depth=part_thickness,
+                        qty=1,
+                        operation_type='edm',
+                        time_per_hole=punch_base_edm,
+                        total_time=punch_base_edm
+                    )
+                ]
+
             # Get hole operation times
             hole_drill_min = times.get('total_drill_minutes', 0.0)
             hole_tap_min = times.get('total_tap_minutes', 0.0)
@@ -2600,6 +2623,9 @@ def extract_quote_data_from_cad(
                 for g in times.get('edm_groups', [])
             ]
 
+            # NOTE: For non-punch parts, we'll check for plan-based EDM after
+            # calculating plan_edm_min (see fix around line 2668)
+
             # Accumulate hole operation times
             total_drill_min = times.get('total_drill_minutes', 0.0)
             total_tap_min = times.get('total_tap_minutes', 0.0)
@@ -2650,6 +2676,25 @@ def extract_quote_data_from_cad(
         total_edm_min = plan_edm_min + hole_table_edm_min
         if verbose:
             print(f"[DEBUG EDM] plan_edm_min={plan_edm_min:.2f}, hole_table_edm_min={hole_table_edm_min:.2f}, total_edm_min={total_edm_min:.2f}")
+
+        # If we have plan-based EDM time but no hole table EDM operations,
+        # create a synthetic operation to ensure EDM details are always shown
+        # when EDM minutes > 0 (avoids "ghost" EDM time in machine breakdown)
+        if plan_edm_min > 0 and not edm_ops:
+            # Get part thickness for EDM depth display
+            part_thickness = part_info.thickness if part_info else 0.5
+
+            edm_ops = [
+                HoleOperation(
+                    hole_id="PLAN",
+                    diameter=0.0,  # Not from starter holes - plan-based EDM
+                    depth=part_thickness,
+                    qty=1,
+                    operation_type='edm',
+                    time_per_hole=plan_edm_min,
+                    total_time=plan_edm_min
+                )
+            ]
 
         # Get other_ops_detail from plan (NEW)
         other_ops_detail_raw = plan_machine_times.get('other_ops_detail', [])

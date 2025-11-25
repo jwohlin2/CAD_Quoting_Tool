@@ -4196,12 +4196,33 @@ def estimate_machine_hours_from_plan(
             edm_time = calculate_edm_time(perimeter, thickness, num_windows, skims, material)
             time_breakdown['edm'] += edm_time
 
-            # EDM debug output
-            mpi = op.get('edm_min_per_in', 0.33)  # Default estimate
-            t_window = perimeter * mpi
-            print(f"  DEBUG [EDM {op_type}]: path_length={perimeter:.3f}\", min_per_in={mpi:.3f}, "
-                  f"part_thickness={thickness:.3f}\", "
-                  f"edm_windows_qty={num_windows}, t_window={t_window:.2f} min, total_time={edm_time:.2f} min")
+            # EDM debug output with detailed calculation breakdown
+            # Get rough and skim cut rates for transparency
+            sf_rough = get_speeds_feeds(material, "Wire_EDM_Rough")
+            rough_ipm = sf_rough.get('linear_cut_rate_ipm') or 3.0 if sf_rough else 3.0
+            rough_mpi = 1.0 / rough_ipm if rough_ipm > 0 else 0.33
+
+            sf_skim = get_speeds_feeds(material, "Wire_EDM_Skim")
+            skim_ipm = sf_skim.get('linear_cut_rate_ipm') or 2.0 if sf_skim else 2.0
+            skim_mpi = 1.0 / skim_ipm if skim_ipm > 0 else 0.5
+
+            # Calculate component times
+            setup_time = num_windows * 5  # 5 min per window
+            rough_time = (perimeter * thickness * num_windows) / rough_ipm if rough_ipm > 0 else 0
+            skim_time = (perimeter * thickness * num_windows * skims) / skim_ipm if skim_ipm > 0 and skims > 0 else 0
+
+            print(f"  DEBUG [EDM {op_type}]:")
+            print(f"    Perimeter per window: {perimeter:.3f}\"")
+            print(f"    Part thickness: {thickness:.3f}\"")
+            print(f"    Number of windows: {num_windows}")
+            print(f"    Passes: 1 rough + {skims} skim")
+            print(f"    Rough cut rate: {rough_ipm:.2f} IPM ({rough_mpi:.3f} min/in)")
+            print(f"    Skim cut rate: {skim_ipm:.2f} IPM ({skim_mpi:.3f} min/in)")
+            print(f"    Setup time: {setup_time:.2f} min ({num_windows} windows × 5.0 min/window)")
+            print(f"    Rough cut time: {rough_time:.2f} min ({perimeter:.3f}\" × {thickness:.3f}\" × {num_windows} ÷ {rough_ipm:.2f} IPM)")
+            if skims > 0:
+                print(f"    Skim cut time: {skim_time:.2f} min ({perimeter:.3f}\" × {thickness:.3f}\" × {num_windows} × {skims} ÷ {skim_ipm:.2f} IPM)")
+            print(f"    TOTAL EDM TIME: {edm_time:.2f} min (setup {setup_time:.2f} + rough {rough_time:.2f} + skim {skim_time:.2f})")
 
         # Tapping operations
         elif 'tap' in op_type:
@@ -4769,6 +4790,13 @@ def estimate_machine_hours_from_plan(
             other_time = op.get('time_minutes', 0.0)
             time_breakdown['other'] += other_time
 
+            # Store in temporary dict for later detailed breakdown (keyed by op_type)
+            if not hasattr(time_breakdown, '_other_ops_temp'):
+                time_breakdown['_other_ops_temp'] = {}
+            if op_type not in time_breakdown['_other_ops_temp']:
+                time_breakdown['_other_ops_temp'][op_type] = 0.0
+            time_breakdown['_other_ops_temp'][op_type] += other_time
+
         # Other operations
         else:
             # Check if this is a pocket/slot hiding in "other"
@@ -4776,7 +4804,20 @@ def estimate_machine_hours_from_plan(
             op_desc = op.get('description', '').lower()
             if any(kw in op_desc for kw in ['pocket', 'slot', 'profile', 'nose']):
                 # Reduce generic estimate since we can't model it precisely
-                time_breakdown['other'] += 3  # 3 minutes for unmodeled pocket/slot/profile
+                unmodeled_time = 3  # 3 minutes for unmodeled pocket/slot/profile
+                time_breakdown['other'] += unmodeled_time
+
+                # Store in temporary dict for later detailed breakdown
+                if not hasattr(time_breakdown, '_other_ops_temp'):
+                    time_breakdown['_other_ops_temp'] = {}
+
+                # Create a specific label based on the keywords found
+                found_keywords = [kw for kw in ['pocket', 'slot', 'profile', 'nose'] if kw in op_desc]
+                op_label = f"unmodeled_{found_keywords[0]}"  # Use first matching keyword
+
+                if op_label not in time_breakdown['_other_ops_temp']:
+                    time_breakdown['_other_ops_temp'][op_label] = 0.0
+                time_breakdown['_other_ops_temp'][op_label] += unmodeled_time
             else:
                 # Don't add generic time here - we'll calculate based on geometry after the loop
                 pass
@@ -4785,16 +4826,48 @@ def estimate_machine_hours_from_plan(
     other_ops_detail = []
     other_ops_minutes = 0.0
 
-    # Track unmodeled operations added in the loop above
-    unmodeled_ops_minutes = time_breakdown['other']
-    if unmodeled_ops_minutes > 0:
+    # Break down the "other" operations into detailed components
+    # This provides transparency instead of one opaque "Unmodeled operations" bucket
+    if hasattr(time_breakdown, '_other_ops_temp') and time_breakdown['_other_ops_temp']:
+        # Define human-readable labels for each operation type
+        op_type_labels = {
+            'chamfer_edges': 'Chamfer edges',
+            'machine_reliefs': 'Machine reliefs / tooling clearances',
+            'polish_cavity': 'Polish cavity surfaces',
+            'polish_contour': 'Polish contour/profile',
+            'edge_break': 'Edge break / deburr edges',
+            'deburr_and_clean': 'Deburr and clean part',
+            'unmodeled_pocket': 'Small pockets (unmodeled)',
+            'unmodeled_slot': 'Slots (unmodeled)',
+            'unmodeled_profile': 'Profile cleanup (unmodeled)',
+            'unmodeled_nose': 'Nose radii / form features (unmodeled)',
+        }
+
+        # Add each component as a separate line item
+        for op_type, minutes in sorted(time_breakdown['_other_ops_temp'].items()):
+            if minutes > 0:
+                label = op_type_labels.get(op_type, f'{op_type.replace("_", " ").title()}')
+                other_ops_detail.append({
+                    "type": op_type,
+                    "label": label,
+                    "minutes": round(minutes, 1),
+                    "source": "text"
+                })
+                other_ops_minutes += minutes
+
+        # Clean up temporary dict
+        del time_breakdown['_other_ops_temp']
+
+    # If there's any remaining "other" time not accounted for, add it as misc
+    remaining_other = time_breakdown['other'] - other_ops_minutes
+    if remaining_other > 0.1:  # Small threshold to avoid floating point artifacts
         other_ops_detail.append({
-            "type": "unmodeled_ops",
-            "label": "Unmodeled operations (pockets/slots/profiles)",
-            "minutes": round(unmodeled_ops_minutes, 1),
+            "type": "misc_other",
+            "label": "Miscellaneous operations",
+            "minutes": round(remaining_other, 1),
             "source": "text"
         })
-        other_ops_minutes += unmodeled_ops_minutes
+        other_ops_minutes += remaining_other
 
     # Add geometry-based other operations time (chamfers, radii, polish, etc.)
     # NOTE: This now returns empty since geometry-based operations moved to labor
@@ -6442,6 +6515,14 @@ def create_punch_plan(params: Dict[str, Any]) -> Dict[str, Any]:
         num_chord_dims=p.num_chord_dims
     )
 
+    # Determine if profile will be wire-cut (for mutual exclusivity with OD grinding)
+    is_carbide = _is_carbide(p.material, p.material_group)
+    profile_is_wirecut = (
+        (p.has_wire_profile or p.has_flats) and profile_process == "wire_edm"
+    ) or (
+        p.has_3d_surface and is_carbide  # Carbide form punches use wire EDM
+    )
+
     plan = {
         "ops": [],
         "fixturing": [],
@@ -6457,13 +6538,14 @@ def create_punch_plan(params: Dict[str, Any]) -> Dict[str, Any]:
         "meta": {
             "family": "Punches",
             "profile_process": profile_process,  # GRIND or WIRE EDM decision
+            "profile_is_wirecut": profile_is_wirecut,  # Flag for mutual exclusivity
         }
     }
 
     _add_punch_stock_ops(plan, p)
     _add_punch_roughing_ops(plan, p)
     _add_punch_heat_treat_ops(plan, p)
-    _add_punch_grinding_ops(plan, p)
+    _add_punch_grinding_ops(plan, p, profile_is_wirecut)
     _add_punch_hole_ops(plan, p)
     _add_punch_edge_ops(plan, p)
     _add_punch_form_ops(plan, p, profile_process)
@@ -6666,7 +6748,7 @@ def _add_punch_wire_edm_ops(plan: Dict[str, Any], p: PunchPlannerParams) -> None
     })
 
 
-def _add_punch_grinding_ops(plan: Dict[str, Any], p: PunchPlannerParams) -> None:
+def _add_punch_grinding_ops(plan: Dict[str, Any], p: PunchPlannerParams, profile_is_wirecut: bool = False) -> None:
     """Add grinding operations with punch datum heuristics.
 
     Implements:
@@ -6674,6 +6756,12 @@ def _add_punch_grinding_ops(plan: Dict[str, Any], p: PunchPlannerParams) -> None
     - Non-round/form punches: Grind_reference_faces before profiling
     - Carbide punches: only grind + WEDM (no milling)
     - Very small parts: prefer Grind_reference_faces over mill
+    - Mutual exclusivity: Skip OD grinding if profile will be wire-cut
+
+    Args:
+        plan: The plan dict to add operations to
+        p: Punch parameters
+        profile_is_wirecut: If True, skip OD grinding for round punches (profile will be shaped by wire EDM)
     """
     is_carbide = _is_carbide(p.material, p.material_group)
 
@@ -6684,7 +6772,18 @@ def _add_punch_grinding_ops(plan: Dict[str, Any], p: PunchPlannerParams) -> None
         if p.has_flats:
             _add_punch_wire_edm_ops(plan, p)
 
-        if p.num_ground_diams > 0:
+        # MUTUAL EXCLUSIVITY: Don't add OD grinding if the profile will be wire-cut
+        # Wire EDM will create the final profile shape, so OD grinding would be redundant
+        if profile_is_wirecut and p.num_ground_diams > 0:
+            warning = (
+                f"OD grinding skipped: Profile will be shaped by wire EDM. "
+                f"Only keeping face grinding for datum/length establishment."
+            )
+            print(f"[MUTUAL EXCLUSIVITY] {warning}")
+            plan.setdefault("warnings", []).append(warning)
+            # Skip to face grinding only
+
+        elif p.num_ground_diams > 0:
             # Check for cylindrical features before allowing OD grinding (turning-style operation)
             params_dict = {
                 "shape_type": p.shape_type,

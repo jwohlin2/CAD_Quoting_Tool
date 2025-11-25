@@ -1886,10 +1886,15 @@ class AppV7:
 
             def format_edm_group(op):
                 """Format EDM (wire EDM profile) operation."""
-                return (f"Hole {op.hole_id} | Starter Ø {op.diameter:.4f}\" x {op.qty:>3} | "
-                        f"thickness {op.depth:.3f}\" | "
-                        f"{op.time_per_hole:>5.2f} min/window | "
-                        f"tot. {op.qty}x{op.time_per_hole:.2f} = {op.total_time:.2f} min")
+                # Handle synthetic plan-based EDM operations
+                if op.hole_id == "PLAN":
+                    return (f"Wire EDM (from plan) | thickness {op.depth:.3f}\" | "
+                            f"Total time: {op.total_time:.2f} min")
+                else:
+                    return (f"Hole {op.hole_id} | Starter Ø {op.diameter:.4f}\" x {op.qty:>3} | "
+                            f"thickness {op.depth:.3f}\" | "
+                            f"{op.time_per_hole:>5.2f} min/window | "
+                            f"tot. {op.qty}x{op.time_per_hole:.2f} = {op.total_time:.2f} min")
 
             MILLING_DESC_WIDTH = 28
             MILLING_SEPARATOR_LENGTH = 106
