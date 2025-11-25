@@ -4828,7 +4828,7 @@ def estimate_machine_hours_from_plan(
 
     # Break down the "other" operations into detailed components
     # This provides transparency instead of one opaque "Unmodeled operations" bucket
-    if hasattr(time_breakdown, '_other_ops_temp') and time_breakdown['_other_ops_temp']:
+    if '_other_ops_temp' in time_breakdown and time_breakdown['_other_ops_temp']:
         # Define human-readable labels for each operation type
         op_type_labels = {
             'chamfer_edges': 'Chamfer edges',
@@ -4970,8 +4970,18 @@ def estimate_machine_hours_from_plan(
     # Add waterjet time to breakdown (separate category, not in 'other')
     time_breakdown['waterjet'] = waterjet_openings_minutes + waterjet_profile_minutes
 
-    # Calculate total
-    total_minutes = sum(time_breakdown.values())
+    # Calculate total - ensure all values are numeric
+    # Safety check: filter out any non-numeric values that might have slipped through
+    numeric_values = []
+    for key, value in time_breakdown.items():
+        if isinstance(value, dict):
+            print(f"[WARNING] time_breakdown['{key}'] is a dict: {value}. Skipping in sum.")
+        elif isinstance(value, (int, float)):
+            numeric_values.append(value)
+        else:
+            print(f"[WARNING] time_breakdown['{key}'] has unexpected type {type(value)}: {value}. Skipping in sum.")
+
+    total_minutes = sum(numeric_values)
 
     return {
         'breakdown_minutes': time_breakdown,
