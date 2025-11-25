@@ -986,9 +986,13 @@ class AppV7:
                 raise
             else:
                 print(f"[AppV7 ERROR] Failed to extract quote data: {e}")
+                import traceback
+                traceback.print_exc()
                 raise
         except Exception as e:
             print(f"[AppV7 ERROR] Failed to extract quote data: {e}")
+            import traceback
+            traceback.print_exc()
             raise
 
     def _get_manual_dimensions(self):
