@@ -3371,6 +3371,7 @@ def compute_labor_minutes(i: LaborInputs) -> Dict[str, Any]:
             })
 
         # Add etch operation from text extraction
+        # NOTE: Etch/marking is MACHINE TIME ONLY, not labor
         if i.plan.get('has_etch', False):
             qty = 1  # Default to 1 part unless specified
             details_with_etch = 1  # Default to 1 mark per part
