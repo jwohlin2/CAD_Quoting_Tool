@@ -5840,14 +5840,65 @@ def estimate_hole_table_times(
 
             total_time = time_per_hole * qty
 
-            # NOTE: We calculate tap drill time for cost estimation, but do NOT add it to drill_groups
-            # Tap drill operations are part of the tapping process and should not appear in "DRILL GROUPS"
-            # The tap drill time will be included in the overall tapping time below
-            tap_drill_time_per_hole = time_per_hole
-            tap_drill_total_time = total_time
+            # Add tap drill operation to drill_groups
+            # Every tap needs a pre-drill operation at the minor diameter (tap drill size)
+            # This ensures proper pipeline: DRILL (tap drill) -> TAP
+            drill_groups.append({
+                'hole_id': hole_id,
+                'diameter': tap_drill_dia,  # Use minor diameter (tap drill), not tap major
+                'depth': tap_drill_depth,
+                'qty': qty,
+                'sfm': sfm,
+                'ipr': tap_drill_fpt,
+                'rpm': tap_drill_rpm,
+                'feed_rate': tap_drill_feed,
+                'time_per_hole': round(time_per_hole, 2),
+                'total_time': round(total_time, 2),
+                'description': f"Tap drill for {entry.get('DESCRIPTION', '')}"
+            })
 
         # JIG GRIND operations (using is_jig_grind check from above)
         if is_jig_grind:
+            # Every jig-grind operation needs a pre-drill operation
+            # Drill to slightly under-size (typically 0.005-0.010" under final diameter)
+            jig_grind_pre_drill_undersize = 0.007  # inches under final diameter
+            jig_grind_pre_drill_dia = max(ref_dia - jig_grind_pre_drill_undersize, 0.05)
+
+            # Calculate pre-drill time for jig-grind hole
+            jig_pre_drill_rpm = (sfm * 12) / (3.14159 * jig_grind_pre_drill_dia) if jig_grind_pre_drill_dia > 0 else 1000
+            jig_pre_drill_rpm = min(jig_pre_drill_rpm, 3500)
+
+            # Select feed based on pre-drill diameter
+            if jig_grind_pre_drill_dia <= 0.1875:
+                jig_pre_drill_fpt = sf_drill.get('fz_ipr_0_125in', 0.002)
+            elif jig_grind_pre_drill_dia <= 0.375:
+                jig_pre_drill_fpt = sf_drill.get('fz_ipr_0_25in', 0.004)
+            else:
+                jig_pre_drill_fpt = sf_drill.get('fz_ipr_0_5in', 0.008)
+
+            jig_pre_drill_feed = jig_pre_drill_rpm * 2 * jig_pre_drill_fpt
+
+            jig_pre_drill_time_per_hole = (depth / jig_pre_drill_feed) if jig_pre_drill_feed > 0 else 1.0
+            jig_pre_drill_time_per_hole += 0.1  # Approach/retract
+
+            jig_pre_drill_total_time = jig_pre_drill_time_per_hole * qty
+
+            # Add pre-drill operation to drill_groups
+            # This ensures proper pipeline: DRILL (pre-drill) -> JIG GRIND
+            drill_groups.append({
+                'hole_id': hole_id,
+                'diameter': jig_grind_pre_drill_dia,  # Under-size pre-drill
+                'depth': depth,
+                'qty': qty,
+                'sfm': sfm,
+                'ipr': jig_pre_drill_fpt,
+                'rpm': jig_pre_drill_rpm,
+                'feed_rate': jig_pre_drill_feed,
+                'time_per_hole': round(jig_pre_drill_time_per_hole, 2),
+                'total_time': round(jig_pre_drill_total_time, 2),
+                'description': f"Pre-drill for jig-grind {entry.get('DESCRIPTION', '')}"
+            })
+
             # Jig grinding time calculation
             # Constants (can be made configurable later)
             setup_min = 0  # Setup time per bore
