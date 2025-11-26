@@ -2505,6 +2505,10 @@ class AppV7:
         total_parts_cost = 0.0
         total_weight_lb = 0.0
 
+        print("\n" + "=" * 80)
+        print("DEBUG: Parts Subtotal Calculation")
+        print("=" * 80)
+
         for part in parts_data:
             if part.cost_summary:
                 # Get part total (excluding shipping)
@@ -2513,12 +2517,36 @@ class AppV7:
                 else:
                     part_total = part.cost_summary.final_price
 
-                # Subtract per-part shipping to get cost without shipping
+                # Debug: Get filename
+                from pathlib import Path
+                filename = Path(part.cad_file_path).name if part.cad_file_path else "Unknown"
+
+                print(f"\nPart: {filename}")
+                print(f"  Quantity: {part.quantity}")
+                print(f"  final_price (per unit): ${part.cost_summary.final_price:.2f}")
+                print(f"  total_final_price: ${part.cost_summary.total_final_price:.2f}")
+                print(f"  part_total (used in calc): ${part_total:.2f}")
+
+                # Subtract per-part shipping to get price without shipping
+                # Note: We must subtract the selling price component of shipping (cost + margin),
+                # not just the shipping cost, since part_total is a selling price
                 if part.direct_cost_breakdown and part.direct_cost_breakdown.shipping:
-                    part_shipping = part.direct_cost_breakdown.shipping * part.quantity
-                    parts_subtotal_no_shipping += (part_total - part_shipping)
+                    part_shipping_cost = part.direct_cost_breakdown.shipping * part.quantity
+                    # Calculate the price component attributable to shipping (includes margin)
+                    part_shipping_price = part_shipping_cost * (1 + part.cost_summary.margin_rate)
+                    part_contribution = part_total - part_shipping_price
+                    print(f"  shipping cost (per unit): ${part.direct_cost_breakdown.shipping:.2f}")
+                    print(f"  part_shipping_cost (total): ${part_shipping_cost:.2f}")
+                    print(f"  margin_rate: {part.cost_summary.margin_rate:.2%}")
+                    print(f"  part_shipping_price (with margin): ${part_shipping_price:.2f}")
+                    print(f"  Part contribution: ${part_total:.2f} - ${part_shipping_price:.2f} = ${part_contribution:.2f}")
+                    parts_subtotal_no_shipping += part_contribution
                 else:
+                    print(f"  No shipping breakdown")
+                    print(f"  Part contribution: ${part_total:.2f}")
                     parts_subtotal_no_shipping += part_total
+
+                print(f"  Running subtotal: ${parts_subtotal_no_shipping:.2f}")
 
                 # Also track total with per-part shipping for comparison
                 total_parts_cost += part_total
@@ -2526,6 +2554,19 @@ class AppV7:
             # Calculate weight
             if part.stock_info and part.stock_info.mcmaster_weight:
                 total_weight_lb += part.stock_info.mcmaster_weight * part.quantity
+
+        # Final debug summary
+        print("\n" + "=" * 80)
+        print(f"FINAL Parts Subtotal (excl. shipping): ${parts_subtotal_no_shipping:.2f}")
+        print(f"Total Parts Cost (with shipping): ${total_parts_cost:.2f}")
+        print("=" * 80)
+
+        # Sanity check: subtotal should be positive for normal orders
+        if parts_subtotal_no_shipping < 0:
+            print(f"WARNING: Parts Subtotal is NEGATIVE: ${parts_subtotal_no_shipping:.2f}")
+            print("This indicates a calculation error - please review the debug output above.")
+        else:
+            print(f"✓ Subtotal is positive: ${parts_subtotal_no_shipping:.2f}")
 
         # Calculate order-level shipping
         from cad_quoter.pricing.mcmaster_helpers import estimate_mcmaster_shipping
