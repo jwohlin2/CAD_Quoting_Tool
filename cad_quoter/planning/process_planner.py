@@ -172,6 +172,104 @@ def needs_wedm_for_windows(windows_need_sharp: bool, window_corner_radius_req: O
     return False
 
 
+def is_simple_rectangular_part(
+    sub_type: str,
+    has_internal_form: bool,
+    form_complexity: int,
+    num_radius_dims: int,
+    num_sc_dims: int,
+    num_chord_dims: int
+) -> bool:
+    """
+    Determine if this is a simple open slot/rectangular part that doesn't need EDM.
+
+    Simple parts are characterized by:
+    - Sensor blocks, bumpers, or small die blocks
+    - No internal form or very simple form
+    - Low complexity (few radius/SC/chord dimensions)
+    - Open slots or simple rectangular geometry
+
+    Examples: sensor block 334, bumpers 339/348, small die blocks 157
+
+    Args:
+        sub_type: Part sub-type (sensor_block, bumper, die_section, etc.)
+        has_internal_form: Whether part has internal form
+        form_complexity: Complexity score (1=simple, 2=moderate, 3=complex)
+        num_radius_dims: Count of radius dimensions
+        num_sc_dims: Count of SC dimensions
+        num_chord_dims: Count of chord dimensions
+
+    Returns:
+        True if this is a simple rectangular part that doesn't need EDM
+    """
+    # Check if it's a simple part type
+    simple_types = {"sensor_block", "bumper", "small_die_block"}
+    if sub_type not in simple_types:
+        # For generic die_section, check other criteria
+        if sub_type != "die_section":
+            return False
+
+    # Simple parts have low feature counts
+    total_features = num_radius_dims + num_sc_dims + num_chord_dims
+
+    # If no internal form, it's likely just an open slot or simple block
+    if not has_internal_form:
+        return True
+
+    # If internal form exists but it's very simple (complexity=1) and low feature count
+    if form_complexity == 1 and total_features <= 2:
+        return True
+
+    return False
+
+
+def should_suppress_edm(
+    has_wire_edm_note: bool,
+    wirecut_to_geometry_note: bool,
+    has_undercut: bool,
+    smallest_inside_radius: Optional[float],
+    smallest_inside_radius_from_note: Optional[float],
+    min_section_width: Optional[float],
+    is_simple_part: bool
+) -> bool:
+    """
+    Determine if EDM should be suppressed for a simple part.
+
+    EDM should only appear when at least one of these is true:
+    - Notes contain Wire EDM keywords
+    - Geometry classifier flags features that can't be milled reasonably
+
+    If those signals are absent and the part is simple, suppress EDM.
+
+    Args:
+        has_wire_edm_note: Whether drawing notes contain Wire EDM keywords
+        wirecut_to_geometry_note: Whether drawing has WIRECUT TO GEOMETRY note
+        has_undercut: Whether the profile has undercuts or negative draft
+        smallest_inside_radius: Smallest inside radius in inches
+        smallest_inside_radius_from_note: Smallest inside radius from notes
+        min_section_width: Thinnest section width in inches
+        is_simple_part: Whether this is a simple rectangular/open slot part
+
+    Returns:
+        True if EDM should be suppressed (forced to 0)
+    """
+    # If not a simple part, don't suppress
+    if not is_simple_part:
+        return False
+
+    # Check if any EDM signals are present
+    has_edm_note = has_wire_edm_note or wirecut_to_geometry_note
+    has_geometry_flag = (
+        has_undercut or
+        (smallest_inside_radius is not None and smallest_inside_radius < 0.020) or
+        (smallest_inside_radius_from_note is not None and smallest_inside_radius_from_note < 0.020) or
+        (min_section_width is not None and min_section_width < 0.062)
+    )
+
+    # If no signals are present, suppress EDM
+    return not (has_edm_note or has_geometry_flag)
+
+
 def determine_profile_process(
     material_group: str,
     smallest_inside_radius: Optional[float],
@@ -180,17 +278,24 @@ def determine_profile_process(
     overall_height: Optional[float],
     num_radius_dims: int,
     num_sc_dims: int,
-    num_chord_dims: int
+    num_chord_dims: int,
+    has_wire_edm_note: bool = False,
+    wirecut_to_geometry_note: bool = False,
+    smallest_inside_radius_from_note: Optional[float] = None,
+    is_simple_part: bool = False
 ) -> str:
     """
     Determine whether to use GRIND or WIRE EDM for profile windows.
 
     Decision tree logic:
+    -1. EDM suppression: For simple rectangular parts without EDM signals → force GRIND
+    0. Wire EDM note detection: If drawing explicitly calls for Wire EDM → WIRE EDM
     1. Material/hardness gate: Carbide, Ceramic, or super-hard materials → WIRE EDM
     2. Small inside radius gate: radius < 0.020" → WIRE EDM
     3. Undercuts/weird draft → WIRE EDM
-    4. Slender/tiny section gate: min_section_width < 0.10 * overall_height → WIRE EDM
-    5. Complexity score: feature_count > 2 → WIRE EDM
+    4. Narrow slot gate: min_section_width < 0.062" (narrower than practical endmill) → WIRE EDM
+    5. Slender/tiny section gate: min_section_width < 0.10 * overall_height → WIRE EDM
+    6. Complexity score: feature_count > 2 → WIRE EDM
     Otherwise → GRIND
 
     Args:
@@ -202,35 +307,61 @@ def determine_profile_process(
         num_radius_dims: Count of radius dimensions
         num_sc_dims: Count of SC dimensions
         num_chord_dims: Count of chord dimensions
+        has_wire_edm_note: Whether drawing notes contain Wire EDM keywords
+        wirecut_to_geometry_note: Whether drawing has WIRECUT TO GEOMETRY note
+        smallest_inside_radius_from_note: Smallest inside radius specified in notes
+        is_simple_part: Whether this is a simple rectangular/open slot part
 
     Returns:
         "wire_edm" or "grind"
     """
+    # -1) EDM suppression for simple parts
+    if should_suppress_edm(
+        has_wire_edm_note=has_wire_edm_note,
+        wirecut_to_geometry_note=wirecut_to_geometry_note,
+        has_undercut=has_undercut,
+        smallest_inside_radius=smallest_inside_radius,
+        smallest_inside_radius_from_note=smallest_inside_radius_from_note,
+        min_section_width=min_section_width,
+        is_simple_part=is_simple_part
+    ):
+        return "grind"
+
     # Default: assume grinding is allowed
     process = "grind"
 
     # Normalize material_group to uppercase for comparison
     mat_group = (material_group or "").upper()
 
+    # 0) Wire EDM note detection - explicit drawing callout
+    if has_wire_edm_note or wirecut_to_geometry_note:
+        process = "wire_edm"
+
     # 1) Material / hardness gate
     # H1 = Carbide, C1 = Ceramic, plus any explicit material names
-    if mat_group in {"H1", "C1", "CARBIDE", "CERAMIC", "SUPER_HARD"}:
+    elif mat_group in {"H1", "C1", "CARBIDE", "CERAMIC", "SUPER_HARD"}:
         process = "wire_edm"
 
     # 2) Small inside radius gate
-    elif smallest_inside_radius is not None and smallest_inside_radius < 0.020:
+    # Use radius from note if specified, otherwise use detected radius
+    effective_radius = smallest_inside_radius_from_note or smallest_inside_radius
+    if effective_radius is not None and effective_radius < 0.020:
         process = "wire_edm"
 
     # 3) Undercuts / weird draft
     elif has_undercut:
         process = "wire_edm"
 
-    # 4) Slender / tiny section gate
+    # 4) Narrow slot gate - slots narrower than practical endmill (1/16" = 0.0625")
+    elif min_section_width is not None and min_section_width < 0.062:
+        process = "wire_edm"
+
+    # 5) Slender / tiny section gate
     elif (min_section_width is not None and overall_height is not None
           and overall_height > 0 and min_section_width < 0.10 * overall_height):
         process = "wire_edm"
 
-    # 5) Complexity score
+    # 6) Complexity score
     else:
         feature_count = num_radius_dims + num_sc_dims + num_chord_dims
         if feature_count > 2:
@@ -538,6 +669,8 @@ def planner_die_plate(params: Dict[str, Any]) -> Plan:
     p.add("drill_patterns")
 
     # 3) Window/Profile strategy (WEDM vs finish mill)
+    # IMPORTANT: Mutual exclusivity - use either EDM OR milling, never both
+    # This prevents double-counting time for the same pockets
     if needs_wedm_for_windows(windows_need_sharp, window_corner_radius_req, profile_tol):
         wire = choose_wire_size(params.get("min_inside_radius"), params.get("min_feature_width"))
         skims = choose_skims(profile_tol)
@@ -703,6 +836,9 @@ def _extract_profile_dimension_stats(params: Dict[str, Any]) -> Dict[str, Any]:
         "smallest_inside_radius": None,
         "has_undercut": False,
         "has_polish_contour_note": False,
+        "has_wire_edm_note": False,
+        "wirecut_to_geometry_note": False,
+        "smallest_inside_radius_from_note": None,
     }
 
     # Count dimension types from dimensions list
@@ -754,12 +890,42 @@ def _extract_profile_dimension_stats(params: Dict[str, Any]) -> Dict[str, Any]:
     if "text" in params:
         all_text.append(str(params["text"]).upper())
 
-    # Check for undercut notes
+    # Check for undercut notes and Wire EDM keywords
+    import re
     for text in all_text:
         if "UNDERCUT" in text or "NEGATIVE DRAFT" in text or "SMALL UNDERCUT" in text:
             stats["has_undercut"] = True
         if "POLISH CONTOUR" in text or "POLISH PROFILE" in text:
             stats["has_polish_contour_note"] = True
+
+        # Check for Wire EDM keywords
+        wire_edm_keywords = [
+            "WIRE EDM", "WIRE-EDM",
+            "WIRECUT TO GEOMETRY", "WIRECUT",
+            "EDM WINDOW",
+            "WIRE-START", "WIRE START"
+        ]
+        for keyword in wire_edm_keywords:
+            if keyword in text:
+                stats["has_wire_edm_note"] = True
+                break
+
+        # Check for "WIRECUT TO GEOMETRY" with smallest inside radius spec
+        if "WIRECUT TO GEOMETRY" in text or "WIRECUT" in text:
+            stats["wirecut_to_geometry_note"] = True
+            # Try to extract smallest inside radius value from note
+            # Pattern: "SMALLEST INSIDE RADIUS .XXXX" or "SMALLEST INSIDE RADIUS 0.XXXX"
+            radius_match = re.search(r'SMALLEST\s+INSIDE\s+RADIUS\s+\.?(\d+\.?\d*)', text)
+            if radius_match:
+                try:
+                    radius_val = float(radius_match.group(1))
+                    # If the match was ".XXXX", it's already correct
+                    # If it was "XXXX", convert to ".XXXX"
+                    if radius_val >= 1.0:
+                        radius_val = radius_val / 1000.0  # Convert from thousandths
+                    stats["smallest_inside_radius_from_note"] = radius_val
+                except (ValueError, TypeError):
+                    pass
 
     return stats
 
@@ -803,6 +969,9 @@ class DieSectionParams:
     min_section_width: Optional[float] = None  # Thinnest section width in inches
     overall_height: Optional[float] = None  # Overall height for slenderness check
     has_polish_contour_note: bool = False  # Has "POLISH CONTOUR" note
+    has_wire_edm_note: bool = False  # Has Wire EDM keywords in notes
+    wirecut_to_geometry_note: bool = False  # Has "WIRECUT TO GEOMETRY" note
+    smallest_inside_radius_from_note: Optional[float] = None  # Smallest inside radius from notes
 
     # Hole info (usually none for form die sections)
     hole_count: int = 0
@@ -930,6 +1099,9 @@ def _extract_die_section_params(params: Dict[str, Any]) -> DieSectionParams:
         min_section_width=min_section_width,
         overall_height=overall_height,
         has_polish_contour_note=profile_stats.get("has_polish_contour_note", False),
+        has_wire_edm_note=profile_stats.get("has_wire_edm_note", False),
+        wirecut_to_geometry_note=profile_stats.get("wirecut_to_geometry_note", False),
+        smallest_inside_radius_from_note=profile_stats.get("smallest_inside_radius_from_note"),
         # Other params
         hole_count=int(params.get("hole_count", 0)),
         hole_sets=params.get("hole_sets", []),
@@ -1048,6 +1220,16 @@ def create_die_section_plan(params: Dict[str, Any]) -> Dict[str, Any]:
     is_die_section = _is_carbide_die_section(p)
     complexity = _calculate_die_section_complexity(p)
 
+    # Check if this is a simple rectangular part for EDM suppression
+    is_simple = is_simple_rectangular_part(
+        sub_type=p.sub_type,
+        has_internal_form=p.has_internal_form,
+        form_complexity=p.form_complexity,
+        num_radius_dims=p.num_radius_dims,
+        num_sc_dims=p.num_sc_dims,
+        num_chord_dims=p.num_chord_dims
+    )
+
     # Determine profile process (GRIND vs WIRE EDM) using decision tree
     normalized_mat_group = _normalize_material_group(p.material, p.material_group)
     profile_process = determine_profile_process(
@@ -1058,7 +1240,11 @@ def create_die_section_plan(params: Dict[str, Any]) -> Dict[str, Any]:
         overall_height=p.overall_height,
         num_radius_dims=p.num_radius_dims,
         num_sc_dims=p.num_sc_dims,
-        num_chord_dims=p.num_chord_dims
+        num_chord_dims=p.num_chord_dims,
+        has_wire_edm_note=p.has_wire_edm_note,
+        wirecut_to_geometry_note=p.wirecut_to_geometry_note,
+        smallest_inside_radius_from_note=p.smallest_inside_radius_from_note,
+        is_simple_part=is_simple
     )
     # Update the params with the decision
     # Note: We can't modify p directly since it's a dataclass, but we can use the value
@@ -1362,6 +1548,9 @@ def _add_die_section_form_ops(plan: Dict[str, Any], p: DieSectionParams, is_carb
             "edm_min_per_in": wire_mpi,
             "part_thickness": depth,
             "t_window": t_window,
+            # Quality parameters for skim time scaling
+            "smallest_inside_radius": p.smallest_inside_radius,
+            "min_tolerance_in": p.min_tolerance_in,
         })
 
     # Form grinding for precision forms
@@ -1459,51 +1648,13 @@ def _add_die_section_finishing_ops(plan: Dict[str, Any], p: DieSectionParams,
         })
         base_time += contour_polish_time
 
-    # Edge break time - use text-based detection if available (align with plates)
-    has_edge_break = params.get('has_edge_break', False) if params else False
-
-    if has_edge_break:
-        # Use same perimeter-based calculation as plates with material factor
-        perimeter_in = 2.0 * (p.length_in + p.width_in) if p.length_in > 0 and p.width_in > 0 else 0.0
-        qty = 1  # Default to 1 part unless specified
-
-        # Extract material group from material name (same logic as plates)
-        material_upper = p.material.upper()
-        if 'ALUMINUM' in material_upper or 'AL' in material_upper:
-            material_group = 'ALUMINUM'
-        elif '52100' in material_upper:
-            material_group = '52100'
-        elif 'STAINLESS' in material_upper or 'SS' in material_upper or '316' in material_upper or '304' in material_upper:
-            material_group = 'STAINLESS'
-        elif 'CARBIDE' in material_upper:
-            material_group = 'CARBIDE'
-        elif 'CERAMIC' in material_upper:
-            material_group = 'CERAMIC'
-        else:
-            material_group = 'TOOL_STEEL'
-
-        edge_break_time = calc_edge_break_minutes(perimeter_in, qty, material_group)
-        note = f"Edge break / deburr ({perimeter_in:.1f}\" perim, {material_group})"
-    else:
-        # Fallback to simple chamfer-based calculation
-        edge_break_time = max(3.0, p.num_chamfers * 0.5 + 2.0)
-        note = "Edge break all entry/exit edges and corners"
-
-    plan["ops"].append({
-        "op": "edge_break",
-        "time_minutes": edge_break_time,
-        "note": note,
-    })
-
-    # Deburr based on complexity
-    deburr_time = 3.0 + (complexity["score"] * 0.3)
-    plan["ops"].append({
-        "op": "deburr_and_clean",
-        "time_minutes": deburr_time,
-        "note": "Deburr, clean, and inspect surfaces",
-    })
+    # NOTE: edge_break and deburr_and_clean are now handled in LABOR finishing section
+    # to avoid double-counting them as machine operations.
+    # These are manual operations (Scotch-Brite, hand cleanup) not machine time.
+    # See compute_labor_minutes() -> _calculate_finishing_labor_minutes() for the labor calculations.
 
     # Hole cleanup time (align with plate logic: 0.2 min per hole)
+    # NOTE: This is also manual labor but keeping it here for now as it's hole-specific
     hole_cleanup_time = 0.0
     if p.hole_count > 0:
         hole_cleanup_time = 0.2 * p.hole_count
@@ -1512,15 +1663,6 @@ def _add_die_section_finishing_ops(plan: Dict[str, Any], p: DieSectionParams,
             "time_minutes": hole_cleanup_time,
             "note": f"Deburr and clean {p.hole_count} holes (0.2 min each)",
         })
-
-    # Total finishing time floor
-    total_finishing = base_time + edge_break_time + deburr_time + hole_cleanup_time
-    min_finishing = 10.0 if is_carbide else 5.0
-
-    if total_finishing < min_finishing:
-        plan["warnings"].append(
-            f"Finishing time ({total_finishing:.1f} min) below minimum; adjusted to {min_finishing} min"
-        )
 
 
 def _add_die_section_qa_checks(plan: Dict[str, Any], p: DieSectionParams,
@@ -2497,7 +2639,12 @@ def plan_from_cad_file(
         detect_etch_operation,
         detect_polish_contour_operation,
         detect_waterjet_openings,
-        detect_waterjet_profile
+        detect_waterjet_profile,
+        detect_small_undercut,
+        detect_lift_spec,
+        detect_waterjet_cleanup,
+        detect_chamfer_details,
+        detect_lead_in_notes
     )
     text_dump = plan["text_dump"]
 
@@ -2532,6 +2679,38 @@ def plan_from_cad_file(
     plan["waterjet_profile_tolerance"] = waterjet_profile_tol
     if has_waterjet_profile and verbose:
         print(f"[PLANNER] Detected waterjet profile requirement (±{waterjet_profile_tol:.3f})")
+
+    # Small undercut detection
+    has_small_undercut, undercut_radius = detect_small_undercut(text_dump)
+    plan["has_small_undercut"] = has_small_undercut
+    plan["undercut_radius"] = undercut_radius
+    if has_small_undercut and verbose:
+        print(f"[PLANNER] Detected small undercut requirement (R {undercut_radius:.3f})")
+
+    # Lift spec detection
+    has_lift_spec, lift_dimension = detect_lift_spec(text_dump)
+    plan["has_lift_spec"] = has_lift_spec
+    plan["lift_dimension"] = lift_dimension
+    if has_lift_spec and verbose:
+        print(f"[PLANNER] Detected lift spec requirement ({lift_dimension:.4f}\")")
+
+    # Waterjet cleanup detection
+    has_waterjet_cleanup = detect_waterjet_cleanup(text_dump)
+    plan["has_waterjet_cleanup"] = has_waterjet_cleanup
+    if has_waterjet_cleanup and verbose:
+        print("[PLANNER] Detected waterjet cleanup/blend requirement")
+
+    # Chamfer details detection
+    chamfer_details = detect_chamfer_details(text_dump)
+    plan["chamfer_details"] = chamfer_details
+    if chamfer_details and verbose:
+        print(f"[PLANNER] Detected {len(chamfer_details)} specific chamfer callout(s)")
+
+    # Lead-in notes detection
+    has_lead_in = detect_lead_in_notes(text_dump)
+    plan["has_lead_in"] = has_lead_in
+    if has_lead_in and verbose:
+        print("[PLANNER] Detected lead-in/approach notes")
 
     if verbose:
         print(f"[PLANNER] Plan complete: {len(plan['ops'])} operations")
@@ -3450,17 +3629,30 @@ def calculate_edm_time(
     thickness: float,
     num_windows: int,
     num_skims: int = 0,
-    material: str = "GENERIC"
+    material: str = "GENERIC",
+    smallest_inside_radius: Optional[float] = None,
+    min_tolerance_in: Optional[float] = None
 ) -> float:
     """
     Calculate Wire EDM time in minutes.
 
+    Formula:
+    - rough_time = perimeter * thickness / rough_ipm
+    - skim_time = (perimeter * thickness * num_skims / skim_ipm) * quality_factor
+    - quality_factor scales based on tolerance and smallest_inside_radius
+
+    For parts with starter holes feeding a common profile (windows):
+    - Treat multiple starter holes as lead-ins to a single perimeter, not separate loops
+    - Perimeter should be estimated per pocket from dimensions
+
     Args:
-        perimeter: Total perimeter to cut in inches
+        perimeter: Total perimeter to cut in inches (estimated per pocket from dims)
         thickness: Part thickness in inches
-        num_windows: Number of windows to cut
+        num_windows: Number of windows to cut (use 1 for single perimeter with multiple lead-ins)
         num_skims: Number of skim passes
         material: Material name
+        smallest_inside_radius: Smallest inside radius in inches (for quality scaling)
+        min_tolerance_in: Tightest tolerance in inches (for quality scaling)
 
     Returns:
         Time in minutes
@@ -3477,10 +3669,26 @@ def calculate_edm_time(
     # For rough cut
     rough_time = (perimeter * thickness * num_windows) / rough_ipm
 
-    # For skim passes
-    skim_time = (perimeter * thickness * num_windows * num_skims) / skim_ipm
+    # For skim passes - scale by quality/smallest_inside_radius
+    base_skim_time = (perimeter * thickness * num_windows * num_skims) / skim_ipm
+
+    # Quality factor: tighter tolerances and smaller radii require more careful work
+    quality_factor = 1.0
+
+    if min_tolerance_in is not None and min_tolerance_in <= 0.0005:
+        # Very tight tolerance (±0.0005" or tighter) increases skim time
+        quality_factor *= 1.5
+
+    if smallest_inside_radius is not None and smallest_inside_radius < 0.030:
+        # Small inside radius requires slower, more careful skimming
+        # Scale inversely with radius: smaller radius = more time
+        radius_factor = 0.030 / max(smallest_inside_radius, 0.010)  # Cap at 3x
+        quality_factor *= min(radius_factor, 3.0)
+
+    skim_time = base_skim_time * quality_factor
 
     # Add setup time per window (threading wire, etc.)
+    # If multiple starter holes feed a common profile, num_windows should be 1
     setup_time = num_windows * 5  # 5 minutes per window
 
     return rough_time + skim_time + setup_time
@@ -4193,7 +4401,14 @@ def estimate_machine_hours_from_plan(
             # Estimate perimeter
             perimeter = op.get('wire_profile_perimeter_in', 4.0)  # inches, typical window
             thickness = op.get('thickness_in', T or 0.5)
-            edm_time = calculate_edm_time(perimeter, thickness, num_windows, skims, material)
+            # Get quality parameters for skim time scaling
+            smallest_inside_radius = op.get('smallest_inside_radius')
+            min_tolerance_in = op.get('min_tolerance_in')
+            edm_time = calculate_edm_time(
+                perimeter, thickness, num_windows, skims, material,
+                smallest_inside_radius=smallest_inside_radius,
+                min_tolerance_in=min_tolerance_in
+            )
             time_breakdown['edm'] += edm_time
 
             # EDM debug output with detailed calculation breakdown
@@ -4858,16 +5073,9 @@ def estimate_machine_hours_from_plan(
         # Clean up temporary dict
         del time_breakdown['_other_ops_temp']
 
-    # If there's any remaining "other" time not accounted for, add it as misc
-    remaining_other = time_breakdown['other'] - other_ops_minutes
-    if remaining_other > 0.1:  # Small threshold to avoid floating point artifacts
-        other_ops_detail.append({
-            "type": "misc_other",
-            "label": "Miscellaneous operations",
-            "minutes": round(remaining_other, 1),
-            "source": "text"
-        })
-        other_ops_minutes += remaining_other
+    # Store the original "other" time before adding explicit operations
+    # This will be used later to calculate any remaining unaccounted time
+    original_other_time = time_breakdown['other']
 
     # Add geometry-based other operations time (chamfers, radii, polish, etc.)
     # NOTE: This now returns empty since geometry-based operations moved to labor
@@ -4887,6 +5095,127 @@ def estimate_machine_hours_from_plan(
         qty = 1  # Default to 1 part unless specified
         details_with_etch = 1  # Default to 1 mark per part
         etch_minutes = calc_etch_minutes(has_etch_note=True, qty=qty, details_with_etch=details_with_etch)
+        if etch_minutes > 0:
+            other_ops_detail.append({
+                "type": "etch",
+                "label": "Etch/marking operation",
+                "minutes": round(etch_minutes, 1),
+                "source": "text"
+            })
+            other_ops_minutes += etch_minutes
+
+    # Calculate small undercut time from plan
+    if plan.get('has_small_undercut', False):
+        qty = 1  # Default to 1 part unless specified
+        undercut_radius = plan.get('undercut_radius', 0.020)
+        material_group = plan.get('mat_group', 'GENERIC')
+        # Determine operation type (turn vs grind) based on part characteristics
+        # Default to turning for most cases
+        operation_type = "turn"
+        undercut_minutes = calc_small_undercut_minutes(
+            has_small_undercut=True,
+            undercut_radius=undercut_radius,
+            qty=qty,
+            material_group=material_group,
+            operation_type=operation_type
+        )
+        if undercut_minutes > 0:
+            other_ops_detail.append({
+                "type": "small_undercut",
+                "label": f"Small undercut cleanup (R {undercut_radius:.3f}\")",
+                "minutes": round(undercut_minutes, 1),
+                "source": "text"
+            })
+            other_ops_minutes += undercut_minutes
+
+    # Calculate lift spec time from plan
+    if plan.get('has_lift_spec', False):
+        qty = 1  # Default to 1 part unless specified
+        lift_dimension = plan.get('lift_dimension', 0.0600)
+        lift_minutes = calc_lift_spec_minutes(
+            has_lift_spec=True,
+            lift_dimension=lift_dimension,
+            qty=qty
+        )
+        if lift_minutes > 0:
+            other_ops_detail.append({
+                "type": "lift_spec",
+                "label": f"Lift spec verification ({lift_dimension:.4f}\")",
+                "minutes": round(lift_minutes, 1),
+                "source": "text"
+            })
+            other_ops_minutes += lift_minutes
+
+    # Calculate waterjet cleanup time from plan
+    if plan.get('has_waterjet_cleanup', False):
+        qty = 1  # Default to 1 part unless specified
+        # Calculate part size factor based on dimensions
+        part_size_factor = 1.0
+        if L > 0 and W > 0:
+            part_area = L * W
+            if part_area > 100:  # Large part (> 10" × 10")
+                part_size_factor = 2.0
+            elif part_area > 50:  # Medium-large part
+                part_size_factor = 1.5
+
+        waterjet_cleanup_minutes = calc_waterjet_cleanup_minutes(
+            has_waterjet_cleanup=True,
+            qty=qty,
+            part_size_factor=part_size_factor
+        )
+        if waterjet_cleanup_minutes > 0:
+            other_ops_detail.append({
+                "type": "waterjet_cleanup",
+                "label": "Waterjet channel cleanup/blend",
+                "minutes": round(waterjet_cleanup_minutes, 1),
+                "source": "text"
+            })
+            other_ops_minutes += waterjet_cleanup_minutes
+
+    # Calculate chamfer detail time from plan (specific dimensions)
+    chamfer_details = plan.get('chamfer_details', [])
+    if chamfer_details:
+        material_group = plan.get('mat_group', 'GENERIC')
+        for chamfer_spec in chamfer_details:
+            chamfer_minutes = calc_chamfer_detail_minutes(chamfer_spec, material_group)
+            if chamfer_minutes > 0:
+                dimension = chamfer_spec.get('dimension', 0.0)
+                angle = chamfer_spec.get('angle', 45)
+                quantity = chamfer_spec.get('quantity', 1)
+                label = f"Chamfer {dimension:.3f}\" × {angle}° ({quantity} edge{'s' if quantity != 1 else ''})"
+                other_ops_detail.append({
+                    "type": "chamfer_specific",
+                    "label": label,
+                    "minutes": round(chamfer_minutes, 1),
+                    "source": "text"
+                })
+                other_ops_minutes += chamfer_minutes
+
+    # Calculate lead-in time from plan
+    if plan.get('has_lead_in', False):
+        qty = 1  # Default to 1 part unless specified
+        lead_in_minutes = calc_lead_in_minutes(has_lead_in=True, qty=qty)
+        if lead_in_minutes > 0:
+            other_ops_detail.append({
+                "type": "lead_in",
+                "label": "Lead-in/approach programming",
+                "minutes": round(lead_in_minutes, 1),
+                "source": "text"
+            })
+            other_ops_minutes += lead_in_minutes
+
+    # After all explicit operations have been added, check if there's any remaining
+    # unaccounted "other" time. This should be minimal now that we've broken out
+    # specific operations, but may still exist for truly miscellaneous work.
+    remaining_other = original_other_time - other_ops_minutes
+    if remaining_other > 0.1:  # Small threshold to avoid floating point artifacts
+        other_ops_detail.append({
+            "type": "misc_other",
+            "label": "Miscellaneous operations",
+            "minutes": round(remaining_other, 1),
+            "source": "geometry"
+        })
+        other_ops_minutes += remaining_other
 
     # Update time_breakdown['other'] to match the sum of all other_ops_detail entries
     time_breakdown['other'] = other_ops_minutes
@@ -5127,15 +5456,18 @@ def render_square_up_block(
         # Calculate volume as stock_removed_T * finish_L * finish_W
         volume_cuin = stock_removed_T * fin_L * fin_W
 
+        # Format volume - show "<0.1 in³" for tiny volumes to avoid confusing "0.0 in³"
+        vol_display = f"<0.1 in³" if volume_cuin < 0.05 else f"{volume_cuin:.1f} in³"
+
         # Build line with finished dimensions and removed thickness/volume - stay ≤106 chars
         line = (f"Face Mill - Full Square-Up | W {fin_W:.3f}\" | L {fin_L:.3f}\" | T {stock_removed_T:.3f}\" | "
-                f"Vol {volume_cuin:.1f} in³ | Time {time_min:.2f} min{ovr_badge}")
+                f"Vol {vol_display} | Time {time_min:.2f} min{ovr_badge}")
 
         lines.append(line[:106])
         total_time += time_min
 
         # Add volume breakdown line showing the calculation
-        breakdown_line = (f"  Volume: T {stock_removed_T:.3f}\" × L {fin_L:.3f}\" × W {fin_W:.3f}\" = {volume_cuin:.1f} in³ "
+        breakdown_line = (f"  Volume: T {stock_removed_T:.3f}\" × L {fin_L:.3f}\" × W {fin_W:.3f}\" = {vol_display} "
                           f"| Factor {mat_factor:.2f}")
         lines.append(breakdown_line[:106])
 
@@ -5336,7 +5668,17 @@ def calc_edge_break_minutes(perim_in: float, qty: int, material_group: str) -> f
     # Constants (tune these based on shop experience)
     BASE_MIN_PER_LOT = 3.0  # "grab Scotch-Brite, setup" time
     MIN_PER_IN_BASE = 0.02  # min/in on tool steel (~1.2 sec/in)
-    MIN_DEBURR_PER_LOT = 5.0  # don't go below this
+
+    # Perimeter-based floor (replaces flat 5.0 min floor)
+    # Scales appropriately: tiny parts get lower mins, large plates get higher mins
+    # Examples:
+    #   7" perimeter (e.g., 2"×1.5" plate):  2.0 + 0.03 * 7  = 2.21 min
+    #  10" perimeter (e.g., 3"×2" plate):    2.0 + 0.03 * 10 = 2.3 min
+    #  40" perimeter (e.g., 12"×8" plate):   2.0 + 0.03 * 40 = 3.2 min
+    #  70" perimeter (e.g., 20"×15" plate):  2.0 + 0.03 * 70 = 4.1 min
+    # 140" perimeter (e.g., 40"×30" plate):  2.0 + 0.03 * 140 = 6.2 min
+    MIN_DEBURR_BASE = 2.0      # Absolute minimum for very tiny parts
+    MIN_DEBURR_PER_IN = 0.03   # Additional floor per inch of perimeter
 
     # Material factors for edge breaking (similar to grinding)
     material_factor_map = {
@@ -5353,8 +5695,12 @@ def calc_edge_break_minutes(perim_in: float, qty: int, material_group: str) -> f
     # Top + bottom outside edges for all parts
     edge_length_total_in = 2.0 * perim_in * qty
 
+    # Calculate base time from perimeter and material
     deburr_min = BASE_MIN_PER_LOT + edge_length_total_in * MIN_PER_IN_BASE * material_factor
-    deburr_min = max(deburr_min, MIN_DEBURR_PER_LOT)
+
+    # Apply perimeter-based floor (scales with part size)
+    floor_min = MIN_DEBURR_BASE + perim_in * MIN_DEBURR_PER_IN
+    deburr_min = max(deburr_min, floor_min)
 
     return deburr_min
 
@@ -5395,22 +5741,17 @@ def calc_polish_contour_minutes(
     has_polish_contour: bool,
     qty: int,
     contour_length_in: float = None,
-    contour_width_in: float = None,
-    contour_perimeter_in: float = None,
-    form_complexity: int = 0
+    contour_width_in: float = None
 ) -> float:
     """Calculate time for polishing contoured surfaces.
 
     This is for operations like "POLISH CONTOUR" found in text.
-    Time is now tied to contour length/complexity, not a flat number.
 
     Args:
         has_polish_contour: Whether polish contour requirement was detected
         qty: Quantity of parts in the lot
         contour_length_in: Length of contoured zone (inches), optional
         contour_width_in: Width/diameter across contour (inches), optional
-        contour_perimeter_in: Perimeter of contour (inches), optional - preferred metric
-        form_complexity: Complexity level 0-3, higher = more intricate contours
 
     Returns:
         Time in minutes for polish contour operation
@@ -5420,27 +5761,21 @@ def calc_polish_contour_minutes(
 
     # Constants (tune these based on shop experience)
     POLISH_SETUP_MIN = 2.0  # minutes per lot - gather materials, setup bench
-    POLISH_MIN_PER_INCH_PERIMETER = 2.5  # min/inch of contour perimeter - more accurate than area
-    POLISH_MIN_PER_SQIN = 6.0  # min/sq.in of contour - fallback if no perimeter
+    POLISH_MIN_PER_SQIN = 6.0  # min/sq.in of contour - intensive hand work
     POLISH_BASE_PER_PART = 0.5  # min/part - handling, inspection
     MIN_POLISH_TIME_PER_LOT = 5.0  # floor time so small lots aren't under-quoted
-    COMPLEXITY_MULTIPLIER = [1.0, 1.2, 1.5, 2.0]  # Multipliers for complexity levels 0-3
 
-    # Prefer perimeter-based calculation if available
-    if contour_perimeter_in and contour_perimeter_in > 0:
-        # Use perimeter to estimate polish time (more accurate for complex contours)
-        complexity_factor = COMPLEXITY_MULTIPLIER[min(form_complexity, 3)]
-        polish_min_per_part = POLISH_BASE_PER_PART + (contour_perimeter_in * POLISH_MIN_PER_INCH_PERIMETER * complexity_factor)
-    else:
-        # Fall back to area-based calculation
-        if contour_length_in is None:
-            contour_length_in = 0.40  # inches - typical contour length
-        if contour_width_in is None:
-            contour_width_in = 0.25  # inches - typical contour width
+    # If we don't have exact geometry, fall back to a "typical" spring punch nose
+    if contour_length_in is None:
+        contour_length_in = 0.40  # inches - typical contour length
+    if contour_width_in is None:
+        contour_width_in = 0.25  # inches - typical contour width
 
-        # Approximate area of the contoured region that needs polishing
-        contour_area_sqin = contour_length_in * contour_width_in
-        polish_min_per_part = POLISH_BASE_PER_PART + contour_area_sqin * POLISH_MIN_PER_SQIN
+    # Approximate area of the contoured region that needs polishing
+    contour_area_sqin = contour_length_in * contour_width_in
+
+    # Time to polish one part
+    polish_min_per_part = POLISH_BASE_PER_PART + contour_area_sqin * POLISH_MIN_PER_SQIN
 
     # Total time for the lot
     polish_min_total = POLISH_SETUP_MIN + qty * polish_min_per_part
@@ -5449,6 +5784,67 @@ def calc_polish_contour_minutes(
     polish_min_total = max(polish_min_total, MIN_POLISH_TIME_PER_LOT)
 
     return polish_min_total
+
+
+def calc_small_undercut_minutes(
+    has_small_undercut: bool,
+    undercut_radius: float,
+    qty: int,
+    material_group: str,
+    operation_type: str = "turn"
+) -> float:
+    """Calculate time for small undercut cleanup operations.
+
+    Small undercuts require careful turning or grinding to achieve the radius.
+
+    Args:
+        has_small_undercut: Whether small undercut requirement was detected
+        undercut_radius: Radius of the undercut in inches
+        qty: Quantity of parts in the lot
+        material_group: Material group name (ALUMINUM, TOOL_STEEL, etc.)
+        operation_type: Type of operation ("turn" or "grind")
+
+    Returns:
+        Time in minutes for small undercut operation
+    """
+    if not has_small_undercut:
+        return 0.0
+
+    # Constants (tune these based on shop experience)
+    SETUP_MIN = 3.0  # minutes per lot - setup tooling
+    BASE_MIN_PER_PART = 2.0  # minutes per part - position and execute
+
+    # Material factors for undercut operations (similar to grinding)
+    material_factor_map = {
+        "ALUMINUM": 0.7,
+        "TOOL_STEEL": 1.0,
+        "52100": 1.5,
+        "STAINLESS": 1.4,
+        "CARBIDE": 3.0,
+        "CERAMIC": 4.0,
+        "GENERIC": 1.0,
+    }
+    material_factor = material_factor_map.get(material_group.upper(), 1.0)
+
+    # Smaller radii are harder and take longer (e.g., R.010 is harder than R.030)
+    radius_factor = 1.0
+    if undercut_radius < 0.015:  # Very small radius
+        radius_factor = 1.5
+    elif undercut_radius < 0.025:  # Small radius
+        radius_factor = 1.2
+
+    # Grinding takes longer than turning for undercuts
+    operation_factor = 1.5 if operation_type == "grind" else 1.0
+
+    # Calculate time
+    time_per_part = BASE_MIN_PER_PART * material_factor * radius_factor * operation_factor
+    total_time = SETUP_MIN + qty * time_per_part
+
+    # Floor time
+    MIN_TIME = 5.0
+    total_time = max(total_time, MIN_TIME)
+
+    return total_time
 
 
 def calc_centers_grind_minutes(
@@ -5487,133 +5883,6 @@ def calc_centers_grind_minutes(
     face_grind_time = qty * 2 * FACE_GRIND_MIN_PER_FACE
 
     total_time = CENTERS_SETUP_MIN + center_drill_time + od_grind_time + face_grind_time
-
-    return total_time
-
-
-def calc_spring_punch_minutes(
-    has_spring_punch: bool,
-    qty: int,
-    travel_in: Optional[float] = None,
-    od_in: float = 0.5
-) -> float:
-    """Calculate time for spring punch operations.
-
-    Includes time for spring pockets/reliefs and bottoming geometry.
-
-    Args:
-        has_spring_punch: Whether spring punch was detected
-        qty: Quantity of parts in the lot
-        travel_in: Spring travel distance in inches
-        od_in: Outside diameter for estimating pocket size
-
-    Returns:
-        Time in minutes for spring punch operations
-    """
-    if not has_spring_punch:
-        return 0.0
-
-    # Constants
-    SPRING_SETUP_MIN = 5.0  # Setup time for spring pocket machining
-    SPRING_POCKET_BASE_MIN = 8.0  # Base time to machine spring pocket per part
-    SPRING_RELIEF_MIN = 3.0  # Time to grind relief groove per part
-    BOTTOMING_GRIND_MIN = 4.0  # Time to grind bottoming geometry per part
-    TRAVEL_FACTOR = 50.0  # Additional minutes per inch of travel (affects pocket depth)
-
-    # Default travel if not specified
-    if travel_in is None:
-        travel_in = 0.0625  # Default 1/16" travel
-
-    # Spring pocket machining time (scales with travel and OD)
-    pocket_time_per_part = SPRING_POCKET_BASE_MIN + (travel_in * TRAVEL_FACTOR)
-
-    # Total time per part
-    time_per_part = pocket_time_per_part + SPRING_RELIEF_MIN + BOTTOMING_GRIND_MIN
-
-    total_time = SPRING_SETUP_MIN + qty * time_per_part
-
-    return total_time
-
-
-def calc_lift_step_minutes(
-    has_lift: bool,
-    qty: int,
-    lift_thickness_in: Optional[float] = None,
-    pad_area_sqin: float = 0.25
-) -> float:
-    """Calculate time for lift/step operations on pads.
-
-    Models explicit step-grind/facing operations and polishing.
-
-    Args:
-        has_lift: Whether lift operation was detected
-        qty: Quantity of parts in the lot
-        lift_thickness_in: Thickness of the lift/step
-        pad_area_sqin: Approximate area of the pad to be lifted/polished
-
-    Returns:
-        Time in minutes for lift/step operations
-    """
-    if not has_lift:
-        return 0.0
-
-    # Constants
-    LIFT_SETUP_MIN = 3.0  # Setup time for step grinding
-    STEP_GRIND_MIN_PER_0001 = 0.3  # Minutes per 0.001" of step height
-    FACE_GRIND_MIN_PER_SQIN = 2.0  # Minutes per square inch of face
-    POLISH_FACE_MIN_PER_SQIN = 3.0  # Minutes per square inch for polishing the stepped face
-
-    # Default lift thickness if not specified
-    if lift_thickness_in is None:
-        lift_thickness_in = 0.060  # Default .060" lift
-
-    # Calculate step grinding time based on thickness
-    lift_thousandths = lift_thickness_in * 1000
-    step_grind_time_per_part = lift_thousandths * STEP_GRIND_MIN_PER_0001
-
-    # Face grinding and polishing the pad
-    face_time_per_part = pad_area_sqin * FACE_GRIND_MIN_PER_SQIN
-    polish_time_per_part = pad_area_sqin * POLISH_FACE_MIN_PER_SQIN
-
-    time_per_part = step_grind_time_per_part + face_time_per_part + polish_time_per_part
-
-    total_time = LIFT_SETUP_MIN + qty * time_per_part
-
-    return total_time
-
-
-def calc_small_undercut_minutes(
-    has_small_undercut: bool,
-    qty: int,
-    count: int = 1,
-    avg_depth_in: float = 0.050
-) -> float:
-    """Calculate time for small undercut operations.
-
-    Time scales by count and depth rather than lumping into generic buckets.
-
-    Args:
-        has_small_undercut: Whether small undercut was detected
-        qty: Quantity of parts in the lot
-        count: Number of small undercuts
-        avg_depth_in: Average depth of undercuts
-
-    Returns:
-        Time in minutes for small undercut operations
-    """
-    if not has_small_undercut:
-        return 0.0
-
-    # Constants
-    UNDERCUT_SETUP_MIN = 2.0  # Setup time for undercut tooling
-    UNDERCUT_BASE_MIN = 3.0  # Base time per undercut
-    UNDERCUT_MIN_PER_INCH_DEPTH = 20.0  # Additional time per inch of depth
-
-    # Time per undercut
-    time_per_undercut = UNDERCUT_BASE_MIN + (avg_depth_in * UNDERCUT_MIN_PER_INCH_DEPTH)
-
-    # Total time
-    total_time = UNDERCUT_SETUP_MIN + qty * count * time_per_undercut
 
     return total_time
 
@@ -5664,6 +5933,152 @@ def calc_smallest_radius_minutes(
 
     # Total time
     total_time = RADIUS_SETUP_MIN + qty * count * time_per_radius
+
+    return total_time
+
+
+def calc_lift_spec_minutes(has_lift_spec: bool, lift_dimension: float, qty: int) -> float:
+    """Calculate time for lift/height specifications.
+
+    Lift specs require careful setup and measurement to achieve the specified height.
+
+    Args:
+        has_lift_spec: Whether lift spec requirement was detected
+        lift_dimension: Lift dimension in inches
+        qty: Quantity of parts in the lot
+
+    Returns:
+        Time in minutes for lift spec operation
+    """
+    if not has_lift_spec:
+        return 0.0
+
+    # Constants (tune these based on shop experience)
+    SETUP_MIN = 2.0  # minutes per lot - setup measurement tools
+    BASE_MIN_PER_PART = 1.5  # minutes per part - measure and adjust
+
+    # Tighter tolerances on lift dimension require more time
+    tolerance_factor = 1.0
+    if lift_dimension < 0.030:  # Very tight lift spec
+        tolerance_factor = 1.3
+    elif lift_dimension < 0.060:  # Tight lift spec
+        tolerance_factor = 1.1
+
+    time_per_part = BASE_MIN_PER_PART * tolerance_factor
+    total_time = SETUP_MIN + qty * time_per_part
+
+    # Floor time
+    MIN_TIME = 3.0
+    total_time = max(total_time, MIN_TIME)
+
+    return total_time
+
+
+def calc_waterjet_cleanup_minutes(has_waterjet_cleanup: bool, qty: int, part_size_factor: float = 1.0) -> float:
+    """Calculate time for waterjet cleanup/blend operations.
+
+    This is for cleanup/blending of waterjet channels, not cutting.
+
+    Args:
+        has_waterjet_cleanup: Whether waterjet cleanup requirement was detected
+        qty: Quantity of parts in the lot
+        part_size_factor: Factor for part size (1.0 = typical, 2.0 = large)
+
+    Returns:
+        Time in minutes for waterjet cleanup operation
+    """
+    if not has_waterjet_cleanup:
+        return 0.0
+
+    # Constants (tune these based on shop experience)
+    SETUP_MIN = 2.0  # minutes per lot - gather tools, setup bench
+    BASE_MIN_PER_PART = 3.0  # minutes per part - hand work to blend/cleanup waterjet marks
+
+    time_per_part = BASE_MIN_PER_PART * part_size_factor
+    total_time = SETUP_MIN + qty * time_per_part
+
+    # Floor time
+    MIN_TIME = 5.0
+    total_time = max(total_time, MIN_TIME)
+
+    return total_time
+
+
+def calc_chamfer_detail_minutes(chamfer_spec: Dict[str, Any], material_group: str) -> float:
+    """Calculate time for a specific chamfer operation.
+
+    Args:
+        chamfer_spec: Dict with keys: dimension, angle, quantity
+                     Example: {"dimension": 0.040, "angle": 45, "quantity": 4}
+        material_group: Material group name (ALUMINUM, TOOL_STEEL, etc.)
+
+    Returns:
+        Time in minutes for this chamfer operation
+    """
+    dimension = chamfer_spec.get("dimension", 0.0)
+    angle = chamfer_spec.get("angle", 45)
+    quantity = chamfer_spec.get("quantity", 1)
+
+    if quantity == 0:
+        return 0.0
+
+    # Constants (tune these based on shop experience)
+    BASE_MIN_PER_EDGE = 0.5  # minutes per edge - typical chamfer
+
+    # Material factors
+    material_factor_map = {
+        "ALUMINUM": 0.6,
+        "TOOL_STEEL": 1.0,
+        "52100": 1.3,
+        "STAINLESS": 1.2,
+        "CARBIDE": 2.0,
+        "CERAMIC": 2.5,
+        "GENERIC": 1.0,
+    }
+    material_factor = material_factor_map.get(material_group.upper(), 1.0)
+
+    # Smaller chamfers are trickier and take longer
+    size_factor = 1.0
+    if dimension < 0.010:  # Very small chamfer
+        size_factor = 1.5
+    elif dimension < 0.020:  # Small chamfer
+        size_factor = 1.2
+    elif dimension > 0.060:  # Large chamfer
+        size_factor = 1.1
+
+    # Non-45° angles require more care
+    angle_factor = 1.0 if angle == 45 else 1.2
+
+    time_per_edge = BASE_MIN_PER_EDGE * material_factor * size_factor * angle_factor
+    total_time = quantity * time_per_edge
+
+    return total_time
+
+
+def calc_lead_in_minutes(has_lead_in: bool, qty: int) -> float:
+    """Calculate time for lead-in/approach operations.
+
+    Lead-in notes indicate special entry/approach requirements for tools.
+
+    Args:
+        has_lead_in: Whether lead-in notes were detected
+        qty: Quantity of parts in the lot
+
+    Returns:
+        Time in minutes for lead-in programming/setup
+    """
+    if not has_lead_in:
+        return 0.0
+
+    # Constants (tune these based on shop experience)
+    PROGRAMMING_MIN = 5.0  # minutes per lot - program special approach
+    EXECUTION_MIN_PER_PART = 0.5  # minutes per part - extra time for careful entry
+
+    total_time = PROGRAMMING_MIN + qty * EXECUTION_MIN_PER_PART
+
+    # Floor time
+    MIN_TIME = 5.0
+    total_time = max(total_time, MIN_TIME)
 
     return total_time
 
@@ -5863,7 +6278,21 @@ def estimate_hole_table_times(
                    re.search(r'\bR[\.\d]+\s*(?:X\s*[\d\.]+|OVER\s*R)', combined_text) is not None)
 
         # Determine depth for drilling operation
-        if is_thru and not is_jig_grind:
+        # For jig-grind holes, use special depth logic
+        if is_jig_grind:
+            # Check for THRU (JIG GRIND) pattern - use actual plate thickness
+            if 'THRU' in combined_text and 'JIG GRIND' in combined_text:
+                depth = thickness if thickness > 0 else 0.5
+            else:
+                # Check for explicit thickness specification like "JIG GRIND 0.750 THICKNESS" or "JIG GRIND X.XXX THICKNESS"
+                thickness_match = re.search(r'JIG\s+GRIND\s+(?:X\s*)?([0-9]+\.?\d*)\s+THICKNESS', combined_text, flags=re.I)
+                if thickness_match:
+                    depth = float(thickness_match.group(1))
+                else:
+                    # For punches/blocks without explicit depth, use model thickness
+                    # This handles cases where jig-grind depth should match part thickness
+                    depth = thickness if thickness > 0 else 0.5
+        elif is_thru:
             depth = thickness if thickness > 0 else 2.0
         else:
             depth = 0.5  # Default for non-THRU holes
@@ -6079,17 +6508,18 @@ def estimate_hole_table_times(
             # Jig grinding time calculation
             # Constants (can be made configurable later)
             setup_min = 0  # Setup time per bore
-            mpsi = 7  # Minutes per square inch ground
+            mpsi = 4.5  # Minutes per square inch ground (reduced from 7 to prevent over-estimation)
             stock_diam = 0.003  # Diametral stock to remove (inches)
             stock_rate_diam = 0.003  # Diametral removal rate (inches)
 
             # Calculate grinding surface area: π × D × depth
             grind_area = 3.14159 * ref_dia * depth
 
-            # Spark out time: 0.7 + 0.2 if depth ≥ 3×D
-            spark_out_min = 0.7
+            # Spark out time: reduced from 0.7 to 0.5 baseline
+            # Add 0.15 (reduced from 0.2) for deep holes where depth ≥ 3×D
+            spark_out_min = 0.5
             if depth >= 3 * ref_dia:
-                spark_out_min += 0.2
+                spark_out_min += 0.15
 
             # Base time per hole (geometry-based)
             time_per_hole_base = (
@@ -6099,7 +6529,9 @@ def estimate_hole_table_times(
                 spark_out_min
             )
 
-            # Apply material grinding factor (aluminum < 1.0, tool steel = 1.0, carbide = 2.5, etc.)
+            # Apply material grinding factor to account for material hardness
+            # Expected values: aluminum/mold-plate < 1.0, tool steel = 1.0, carbide = 2.5
+            # This makes jig-grind faster for softer materials like aluminum
             # Try Grinding operation first, then Endmill_Profile for backward compatibility
             sf_grind = get_speeds_feeds(material, "Grinding")
             if not sf_grind:
@@ -6108,6 +6540,15 @@ def estimate_hole_table_times(
             grinding_time_factor = 1.0
             if sf_grind:
                 grinding_time_factor = sf_grind.get('grinding_time_factor', 1.0)
+
+            # Fallback material-specific factors if not found in CSV
+            # This ensures aluminum and soft materials always grind faster
+            if grinding_time_factor == 1.0:
+                material_upper = material.upper()
+                if any(kw in material_upper for kw in ['6061', '7075', 'ALUMINUM', 'ALUMINIUM', 'AL']):
+                    grinding_time_factor = 0.6  # Aluminum grinds much faster
+                elif any(kw in material_upper for kw in ['MOLD PLATE', 'MOLDPLATE', 'P20', 'P2']):
+                    grinding_time_factor = 0.7  # Mold plate grinds faster than tool steel
 
             # Apply small-diameter factor: if dia < 0.080", multiply by 1.2-1.4
             small_dia_factor = 1.0
@@ -6142,10 +6583,21 @@ def estimate_hole_table_times(
             time_per_hole = round(time_per_hole, 2)
             total_time = round(time_per_hole * qty, 2)
 
+            # Determine depth source for logging
+            depth_source = "unknown"
+            if 'THRU' in combined_text and 'JIG GRIND' in combined_text:
+                depth_source = "THRU (actual thickness)"
+            elif re.search(r'JIG\s+GRIND\s+(?:X\s*)?([0-9]+\.?\d*)\s+THICKNESS', combined_text, flags=re.I):
+                depth_source = "explicit THICKNESS spec"
+            elif thickness > 0:
+                depth_source = "model thickness"
+            else:
+                depth_source = "default fallback"
+
             # Log jig-grind calculation details
             import logging
             logging.debug(
-                f"Jig grind {hole_id}: dia={ref_dia:.4f}\", depth={depth:.3f}\", "
+                f"Jig grind {hole_id}: dia={ref_dia:.4f}\", depth={depth:.3f}\" ({depth_source}), "
                 f"t_base={time_per_hole_base:.2f}min, material_factor={grinding_time_factor:.2f}, "
                 f"small_dia_factor={small_dia_factor:.2f}, t_hole={time_per_hole:.2f}min"
                 + (f", die_section_min_applied (was {time_before_min:.2f}min)" if is_die_section and time_before_min < 20.0 else "")
@@ -6163,6 +6615,7 @@ def estimate_hole_table_times(
                 # JIG GRIND TIME MODEL TRANSPARENCY FIELDS
                 'jig_grind_dia': ref_dia,
                 'jig_grind_depth': depth,
+                'depth_source': depth_source,  # How depth was determined
                 't_hole': time_per_hole,
                 'material_factor': grinding_time_factor,
                 'small_dia_factor': small_dia_factor,
@@ -6170,6 +6623,7 @@ def estimate_hole_table_times(
                 'grind_area_sq_in': grind_area,
                 't_base': round(time_per_hole_base, 2),
                 'spark_out_min': spark_out_min,
+                'mpsi': mpsi,  # Minutes per square inch (for transparency)
             })
 
         # TAP operations
@@ -6641,24 +7095,11 @@ class PunchPlannerParams:
     num_chamfers: int = 0
     has_perp_face_grind: bool = False
     has_3d_surface: bool = False
-    form_complexity_level: int = 0
     has_polish_contour: bool = False
     has_no_step_permitted: bool = False
     has_etch: bool = False
     min_dia_tol_in: Optional[float] = None
     min_len_tol_in: Optional[float] = None
-    # Special feature flags
-    has_centers: bool = False  # Centers permitted or tight OD tolerance
-    has_spring_punch: bool = False  # Spring punch operation
-    spring_punch_travel_in: Optional[float] = None  # Spring punch travel distance
-    has_lift: bool = False  # Lift/step operation
-    lift_thickness_in: Optional[float] = None  # Lift thickness
-    lift_pad_ref: Optional[str] = None  # Pad reference for lift
-    has_small_undercut: bool = False  # Small undercut operation
-    small_undercut_count: int = 0  # Count of small undercuts
-    has_smallest_radius: bool = False  # Smallest inside radius operation
-    smallest_radius_in: Optional[float] = None  # Smallest radius value
-    smallest_radius_count: int = 0  # Count of smallest radii
     material: str = "A2"
     material_group: str = ""
     # Punch datum heuristics fields
@@ -6675,6 +7116,9 @@ class PunchPlannerParams:
     min_section_width: Optional[float] = None  # Thinnest section width in inches
     overall_height: Optional[float] = None  # Overall height for slenderness check
     has_polish_contour_note: bool = False  # Has "POLISH CONTOUR" note
+    has_wire_edm_note: bool = False  # Has Wire EDM keywords in notes
+    wirecut_to_geometry_note: bool = False  # Has "WIRECUT TO GEOMETRY" note
+    smallest_inside_radius_from_note: Optional[float] = None  # Smallest inside radius from notes
     profile_process: str = "grind"  # "grind" or "wire_edm" - decision for profile
 
     # Weight for heavy-part handling
@@ -6753,6 +7197,7 @@ def create_punch_plan(params: Dict[str, Any]) -> Dict[str, Any]:
     """Create a detailed manufacturing plan for a punch."""
     p = _extract_punch_params(params)
 
+    # Punches are typically not simple rectangular parts, so default is_simple to False
     # Determine profile process (GRIND vs WIRE EDM) using decision tree
     normalized_mat_group = _normalize_material_group(p.material, p.material_group)
     profile_process = determine_profile_process(
@@ -6763,7 +7208,11 @@ def create_punch_plan(params: Dict[str, Any]) -> Dict[str, Any]:
         overall_height=p.overall_height,
         num_radius_dims=p.num_radius_dims,
         num_sc_dims=p.num_sc_dims,
-        num_chord_dims=p.num_chord_dims
+        num_chord_dims=p.num_chord_dims,
+        has_wire_edm_note=p.has_wire_edm_note,
+        wirecut_to_geometry_note=p.wirecut_to_geometry_note,
+        smallest_inside_radius_from_note=p.smallest_inside_radius_from_note,
+        is_simple_part=False  # Punches are not simple rectangular parts
     )
 
     # Determine if profile will be wire-cut (for mutual exclusivity with OD grinding)
@@ -6800,11 +7249,6 @@ def create_punch_plan(params: Dict[str, Any]) -> Dict[str, Any]:
     _add_punch_hole_ops(plan, p)
     _add_punch_edge_ops(plan, p)
     _add_punch_form_ops(plan, p, profile_process)
-
-    # Add special feature operations (centers, spring punch, lift, etc.)
-    qty = params.get("qty", 1)
-    _add_punch_special_ops(plan, p, qty)
-
     _add_punch_qa_checks(plan, p)
     _add_punch_fixturing_notes(plan, p)
 
@@ -6878,24 +7322,11 @@ def _extract_punch_params(params: Dict[str, Any]) -> PunchPlannerParams:
         num_chamfers=int(params.get("num_chamfers", 0)),
         has_perp_face_grind=bool(params.get("has_perp_face_grind", False)),
         has_3d_surface=bool(params.get("has_3d_surface", False)),
-        form_complexity_level=int(params.get("form_complexity_level", 0)),
         has_polish_contour=bool(params.get("has_polish_contour", False)),
         has_no_step_permitted=bool(params.get("has_no_step_permitted", False)),
         has_etch=bool(params.get("has_etch", False)),
         min_dia_tol_in=params.get("min_dia_tol_in"),
         min_len_tol_in=params.get("min_len_tol_in"),
-        # Special feature flags
-        has_centers=bool(params.get("has_centers", False)),
-        has_spring_punch=bool(params.get("has_spring_punch", False)),
-        spring_punch_travel_in=params.get("spring_punch_travel_in"),
-        has_lift=bool(params.get("has_lift", False)),
-        lift_thickness_in=params.get("lift_thickness_in"),
-        lift_pad_ref=params.get("lift_pad_ref"),
-        has_small_undercut=bool(params.get("has_small_undercut", False)),
-        small_undercut_count=int(params.get("small_undercut_count", 0)),
-        has_smallest_radius=bool(params.get("has_smallest_radius", False)),
-        smallest_radius_in=params.get("smallest_radius_in"),
-        smallest_radius_count=int(params.get("smallest_radius_count", 0)),
         material=material,
         material_group=params.get("material_group", ""),
         has_flats=bool(params.get("has_flats", False)),
@@ -6910,6 +7341,9 @@ def _extract_punch_params(params: Dict[str, Any]) -> PunchPlannerParams:
         min_section_width=min_section_width,
         overall_height=overall_height,
         has_polish_contour_note=profile_stats.get("has_polish_contour_note", False),
+        has_wire_edm_note=profile_stats.get("has_wire_edm_note", False),
+        wirecut_to_geometry_note=profile_stats.get("wirecut_to_geometry_note", False),
+        smallest_inside_radius_from_note=profile_stats.get("smallest_inside_radius_from_note"),
         net_weight_lb=net_weight_lb,
     )
 
@@ -7263,128 +7697,25 @@ def _add_punch_form_ops(plan: Dict[str, Any], p: PunchPlannerParams, profile_pro
                 "note": "3D mill contoured nose section"
             })
 
-    # Add polish operations (moved to _add_punch_special_ops for better time calculation)
-    # Note: Polish contour time calculation now uses improved calc_polish_contour_minutes
-    # which ties time to contour length/complexity rather than a flat number
-
-
-def _add_punch_special_ops(plan: Dict[str, Any], p: PunchPlannerParams, qty: int = 1) -> None:
-    """Add special feature operations (centers, spring punch, lift, undercut, radius, polish).
-
-    Args:
-        plan: The plan dict to add operations to
-        p: Punch parameters
-        qty: Quantity of parts in the lot
-    """
-    # Polish contour operation (using improved time calculation)
+    # Add polish operations
     if p.has_polish_contour or p.has_polish_contour_note:
+        # Calculate polish time based on perimeter if available
+        k_polish = 2.0  # min/inch for contour polishing
         perimeter = p.wire_profile_perimeter_in if p.wire_profile_perimeter_in > 0 else 0.0
-
-        polish_time = calc_polish_contour_minutes(
-            has_polish_contour=True,
-            qty=qty,
-            contour_perimeter_in=perimeter if perimeter > 0 else None,
-            form_complexity=p.form_complexity_level
-        )
-
         if perimeter > 0:
+            polish_time = k_polish * perimeter
+            polish_time = max(polish_time, 3.0)  # Minimum 3 minutes
             plan["ops"].append({
                 "op": "polish_contour",
                 "perimeter_in": perimeter,
                 "time_minutes": polish_time,
-                "note": f"Polish contoured surface to spec: {perimeter:.2f}\" perimeter (complexity: {p.form_complexity_level})"
+                "note": f"Polish contoured surface to spec: {perimeter:.2f}\" perimeter"
             })
         else:
             plan["ops"].append({
                 "op": "polish_contour",
-                "time_minutes": polish_time,
                 "note": "Polish contoured surface to spec"
             })
-
-    # Centers/OD grinding operation
-    if p.has_centers:
-        centers_time = calc_centers_grind_minutes(
-            has_centers=True,
-            qty=qty,
-            num_diameters=p.num_ground_diams,
-            total_length_in=p.total_ground_length_in
-        )
-        plan["ops"].append({
-            "op": "centers_grind",
-            "num_diameters": p.num_ground_diams,
-            "total_length_in": p.total_ground_length_in,
-            "time_minutes": centers_time,
-            "note": f"Center drill and grind between centers: {p.num_ground_diams} diameters, {p.total_ground_length_in:.2f}\" length"
-        })
-
-    # Spring punch operation
-    if p.has_spring_punch:
-        spring_time = calc_spring_punch_minutes(
-            has_spring_punch=True,
-            qty=qty,
-            travel_in=p.spring_punch_travel_in,
-            od_in=p.max_od_or_width_in
-        )
-        travel_note = f" with {p.spring_punch_travel_in:.4f}\" travel" if p.spring_punch_travel_in else ""
-        plan["ops"].append({
-            "op": "spring_punch",
-            "travel_in": p.spring_punch_travel_in,
-            "time_minutes": spring_time,
-            "note": f"Machine spring punch pocket, relief, and bottoming geometry{travel_note}"
-        })
-
-    # Lift/step operation
-    if p.has_lift:
-        lift_time = calc_lift_step_minutes(
-            has_lift=True,
-            qty=qty,
-            lift_thickness_in=p.lift_thickness_in,
-            pad_area_sqin=0.25  # Default, could be enhanced with geometry analysis
-        )
-        lift_note = f"LIFT: {p.lift_thickness_in:.4f}\"" if p.lift_thickness_in else "LIFT operation"
-        if p.lift_pad_ref:
-            lift_note += f" on pad {p.lift_pad_ref}"
-        plan["ops"].append({
-            "op": "lift_step_grind",
-            "lift_thickness_in": p.lift_thickness_in,
-            "pad_ref": p.lift_pad_ref,
-            "time_minutes": lift_time,
-            "note": f"Step grind and polish designated face - {lift_note}"
-        })
-
-    # Small undercut operation
-    if p.has_small_undercut:
-        undercut_time = calc_small_undercut_minutes(
-            has_small_undercut=True,
-            qty=qty,
-            count=p.small_undercut_count,
-            avg_depth_in=0.050  # Default depth
-        )
-        count_note = f"{p.small_undercut_count}x " if p.small_undercut_count > 1 else ""
-        plan["ops"].append({
-            "op": "small_undercut",
-            "count": p.small_undercut_count,
-            "time_minutes": undercut_time,
-            "note": f"Machine {count_note}small undercut(s)"
-        })
-
-    # Smallest inside radius operation
-    if p.has_smallest_radius:
-        radius_time = calc_smallest_radius_minutes(
-            has_smallest_radius=True,
-            qty=qty,
-            radius_in=p.smallest_radius_in,
-            count=p.smallest_radius_count
-        )
-        radius_note = f"R{p.smallest_radius_in:.4f}\"" if p.smallest_radius_in else "small radius"
-        count_note = f" x {p.smallest_radius_count}" if p.smallest_radius_count > 1 else ""
-        plan["ops"].append({
-            "op": "smallest_radius",
-            "radius_in": p.smallest_radius_in,
-            "count": p.smallest_radius_count,
-            "time_minutes": radius_time,
-            "note": f"Machine smallest inside radius {radius_note}{count_note}"
-        })
 
 
 def _add_punch_qa_checks(plan: Dict[str, Any], p: PunchPlannerParams) -> None:
