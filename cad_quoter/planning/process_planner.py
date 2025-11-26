@@ -5395,17 +5395,22 @@ def calc_polish_contour_minutes(
     has_polish_contour: bool,
     qty: int,
     contour_length_in: float = None,
-    contour_width_in: float = None
+    contour_width_in: float = None,
+    contour_perimeter_in: float = None,
+    form_complexity: int = 0
 ) -> float:
     """Calculate time for polishing contoured surfaces.
 
     This is for operations like "POLISH CONTOUR" found in text.
+    Time is now tied to contour length/complexity, not a flat number.
 
     Args:
         has_polish_contour: Whether polish contour requirement was detected
         qty: Quantity of parts in the lot
         contour_length_in: Length of contoured zone (inches), optional
         contour_width_in: Width/diameter across contour (inches), optional
+        contour_perimeter_in: Perimeter of contour (inches), optional - preferred metric
+        form_complexity: Complexity level 0-3, higher = more intricate contours
 
     Returns:
         Time in minutes for polish contour operation
@@ -5415,21 +5420,27 @@ def calc_polish_contour_minutes(
 
     # Constants (tune these based on shop experience)
     POLISH_SETUP_MIN = 2.0  # minutes per lot - gather materials, setup bench
-    POLISH_MIN_PER_SQIN = 6.0  # min/sq.in of contour - intensive hand work
+    POLISH_MIN_PER_INCH_PERIMETER = 2.5  # min/inch of contour perimeter - more accurate than area
+    POLISH_MIN_PER_SQIN = 6.0  # min/sq.in of contour - fallback if no perimeter
     POLISH_BASE_PER_PART = 0.5  # min/part - handling, inspection
     MIN_POLISH_TIME_PER_LOT = 5.0  # floor time so small lots aren't under-quoted
+    COMPLEXITY_MULTIPLIER = [1.0, 1.2, 1.5, 2.0]  # Multipliers for complexity levels 0-3
 
-    # If we don't have exact geometry, fall back to a "typical" spring punch nose
-    if contour_length_in is None:
-        contour_length_in = 0.40  # inches - typical contour length
-    if contour_width_in is None:
-        contour_width_in = 0.25  # inches - typical contour width
+    # Prefer perimeter-based calculation if available
+    if contour_perimeter_in and contour_perimeter_in > 0:
+        # Use perimeter to estimate polish time (more accurate for complex contours)
+        complexity_factor = COMPLEXITY_MULTIPLIER[min(form_complexity, 3)]
+        polish_min_per_part = POLISH_BASE_PER_PART + (contour_perimeter_in * POLISH_MIN_PER_INCH_PERIMETER * complexity_factor)
+    else:
+        # Fall back to area-based calculation
+        if contour_length_in is None:
+            contour_length_in = 0.40  # inches - typical contour length
+        if contour_width_in is None:
+            contour_width_in = 0.25  # inches - typical contour width
 
-    # Approximate area of the contoured region that needs polishing
-    contour_area_sqin = contour_length_in * contour_width_in
-
-    # Time to polish one part
-    polish_min_per_part = POLISH_BASE_PER_PART + contour_area_sqin * POLISH_MIN_PER_SQIN
+        # Approximate area of the contoured region that needs polishing
+        contour_area_sqin = contour_length_in * contour_width_in
+        polish_min_per_part = POLISH_BASE_PER_PART + contour_area_sqin * POLISH_MIN_PER_SQIN
 
     # Total time for the lot
     polish_min_total = POLISH_SETUP_MIN + qty * polish_min_per_part
@@ -5438,6 +5449,223 @@ def calc_polish_contour_minutes(
     polish_min_total = max(polish_min_total, MIN_POLISH_TIME_PER_LOT)
 
     return polish_min_total
+
+
+def calc_centers_grind_minutes(
+    has_centers: bool,
+    qty: int,
+    num_diameters: int = 1,
+    total_length_in: float = 0.0
+) -> float:
+    """Calculate time for OD/face grinding between centers.
+
+    Args:
+        has_centers: Whether centers operation was detected
+        qty: Quantity of parts in the lot
+        num_diameters: Number of diameters to grind
+        total_length_in: Total length to be ground
+
+    Returns:
+        Time in minutes for centers grinding operation
+    """
+    if not has_centers:
+        return 0.0
+
+    # Constants
+    CENTERS_SETUP_MIN = 3.0  # Setup time for center drill and grinding between centers
+    CENTERS_DRILL_PER_PART = 0.5  # Time to center drill both ends per part
+    OD_GRIND_MIN_PER_DIAM_INCH = 1.2  # Time per diameter-inch (diameter × length)
+    FACE_GRIND_MIN_PER_FACE = 1.5  # Time to face grind each end
+
+    # Center drill both ends
+    center_drill_time = qty * CENTERS_DRILL_PER_PART
+
+    # OD grinding time based on number of diameters and length
+    od_grind_time = qty * num_diameters * total_length_in * OD_GRIND_MIN_PER_DIAM_INCH
+
+    # Face grinding both ends
+    face_grind_time = qty * 2 * FACE_GRIND_MIN_PER_FACE
+
+    total_time = CENTERS_SETUP_MIN + center_drill_time + od_grind_time + face_grind_time
+
+    return total_time
+
+
+def calc_spring_punch_minutes(
+    has_spring_punch: bool,
+    qty: int,
+    travel_in: Optional[float] = None,
+    od_in: float = 0.5
+) -> float:
+    """Calculate time for spring punch operations.
+
+    Includes time for spring pockets/reliefs and bottoming geometry.
+
+    Args:
+        has_spring_punch: Whether spring punch was detected
+        qty: Quantity of parts in the lot
+        travel_in: Spring travel distance in inches
+        od_in: Outside diameter for estimating pocket size
+
+    Returns:
+        Time in minutes for spring punch operations
+    """
+    if not has_spring_punch:
+        return 0.0
+
+    # Constants
+    SPRING_SETUP_MIN = 5.0  # Setup time for spring pocket machining
+    SPRING_POCKET_BASE_MIN = 8.0  # Base time to machine spring pocket per part
+    SPRING_RELIEF_MIN = 3.0  # Time to grind relief groove per part
+    BOTTOMING_GRIND_MIN = 4.0  # Time to grind bottoming geometry per part
+    TRAVEL_FACTOR = 50.0  # Additional minutes per inch of travel (affects pocket depth)
+
+    # Default travel if not specified
+    if travel_in is None:
+        travel_in = 0.0625  # Default 1/16" travel
+
+    # Spring pocket machining time (scales with travel and OD)
+    pocket_time_per_part = SPRING_POCKET_BASE_MIN + (travel_in * TRAVEL_FACTOR)
+
+    # Total time per part
+    time_per_part = pocket_time_per_part + SPRING_RELIEF_MIN + BOTTOMING_GRIND_MIN
+
+    total_time = SPRING_SETUP_MIN + qty * time_per_part
+
+    return total_time
+
+
+def calc_lift_step_minutes(
+    has_lift: bool,
+    qty: int,
+    lift_thickness_in: Optional[float] = None,
+    pad_area_sqin: float = 0.25
+) -> float:
+    """Calculate time for lift/step operations on pads.
+
+    Models explicit step-grind/facing operations and polishing.
+
+    Args:
+        has_lift: Whether lift operation was detected
+        qty: Quantity of parts in the lot
+        lift_thickness_in: Thickness of the lift/step
+        pad_area_sqin: Approximate area of the pad to be lifted/polished
+
+    Returns:
+        Time in minutes for lift/step operations
+    """
+    if not has_lift:
+        return 0.0
+
+    # Constants
+    LIFT_SETUP_MIN = 3.0  # Setup time for step grinding
+    STEP_GRIND_MIN_PER_0001 = 0.3  # Minutes per 0.001" of step height
+    FACE_GRIND_MIN_PER_SQIN = 2.0  # Minutes per square inch of face
+    POLISH_FACE_MIN_PER_SQIN = 3.0  # Minutes per square inch for polishing the stepped face
+
+    # Default lift thickness if not specified
+    if lift_thickness_in is None:
+        lift_thickness_in = 0.060  # Default .060" lift
+
+    # Calculate step grinding time based on thickness
+    lift_thousandths = lift_thickness_in * 1000
+    step_grind_time_per_part = lift_thousandths * STEP_GRIND_MIN_PER_0001
+
+    # Face grinding and polishing the pad
+    face_time_per_part = pad_area_sqin * FACE_GRIND_MIN_PER_SQIN
+    polish_time_per_part = pad_area_sqin * POLISH_FACE_MIN_PER_SQIN
+
+    time_per_part = step_grind_time_per_part + face_time_per_part + polish_time_per_part
+
+    total_time = LIFT_SETUP_MIN + qty * time_per_part
+
+    return total_time
+
+
+def calc_small_undercut_minutes(
+    has_small_undercut: bool,
+    qty: int,
+    count: int = 1,
+    avg_depth_in: float = 0.050
+) -> float:
+    """Calculate time for small undercut operations.
+
+    Time scales by count and depth rather than lumping into generic buckets.
+
+    Args:
+        has_small_undercut: Whether small undercut was detected
+        qty: Quantity of parts in the lot
+        count: Number of small undercuts
+        avg_depth_in: Average depth of undercuts
+
+    Returns:
+        Time in minutes for small undercut operations
+    """
+    if not has_small_undercut:
+        return 0.0
+
+    # Constants
+    UNDERCUT_SETUP_MIN = 2.0  # Setup time for undercut tooling
+    UNDERCUT_BASE_MIN = 3.0  # Base time per undercut
+    UNDERCUT_MIN_PER_INCH_DEPTH = 20.0  # Additional time per inch of depth
+
+    # Time per undercut
+    time_per_undercut = UNDERCUT_BASE_MIN + (avg_depth_in * UNDERCUT_MIN_PER_INCH_DEPTH)
+
+    # Total time
+    total_time = UNDERCUT_SETUP_MIN + qty * count * time_per_undercut
+
+    return total_time
+
+
+def calc_smallest_radius_minutes(
+    has_smallest_radius: bool,
+    qty: int,
+    radius_in: Optional[float] = None,
+    count: int = 1
+) -> float:
+    """Calculate time for smallest inside radius operations.
+
+    Time scales by count and radius size (smaller = more difficult).
+
+    Args:
+        has_smallest_radius: Whether smallest radius was detected
+        qty: Quantity of parts in the lot
+        radius_in: Radius size in inches
+        count: Number of radius locations
+
+    Returns:
+        Time in minutes for smallest radius operations
+    """
+    if not has_smallest_radius:
+        return 0.0
+
+    # Constants
+    RADIUS_SETUP_MIN = 2.0  # Setup time for radius tooling
+    RADIUS_BASE_MIN = 2.0  # Base time per radius location
+
+    # Default radius if not specified
+    if radius_in is None:
+        radius_in = 0.015  # Default .015" radius
+
+    # Difficulty factor: smaller radii are harder (inverse relationship)
+    # For radius <= 0.010", use 3x multiplier; for 0.020", use 1.5x; for >= 0.030", use 1x
+    if radius_in <= 0.010:
+        difficulty_factor = 3.0
+    elif radius_in <= 0.020:
+        difficulty_factor = 2.0
+    elif radius_in <= 0.030:
+        difficulty_factor = 1.5
+    else:
+        difficulty_factor = 1.0
+
+    # Time per radius location
+    time_per_radius = RADIUS_BASE_MIN * difficulty_factor
+
+    # Total time
+    total_time = RADIUS_SETUP_MIN + qty * count * time_per_radius
+
+    return total_time
 
 
 def calc_waterjet_metrics_from_hole_table(hole_table: List[Dict[str, Any]]) -> Dict[str, float]:
@@ -6413,11 +6641,24 @@ class PunchPlannerParams:
     num_chamfers: int = 0
     has_perp_face_grind: bool = False
     has_3d_surface: bool = False
+    form_complexity_level: int = 0
     has_polish_contour: bool = False
     has_no_step_permitted: bool = False
     has_etch: bool = False
     min_dia_tol_in: Optional[float] = None
     min_len_tol_in: Optional[float] = None
+    # Special feature flags
+    has_centers: bool = False  # Centers permitted or tight OD tolerance
+    has_spring_punch: bool = False  # Spring punch operation
+    spring_punch_travel_in: Optional[float] = None  # Spring punch travel distance
+    has_lift: bool = False  # Lift/step operation
+    lift_thickness_in: Optional[float] = None  # Lift thickness
+    lift_pad_ref: Optional[str] = None  # Pad reference for lift
+    has_small_undercut: bool = False  # Small undercut operation
+    small_undercut_count: int = 0  # Count of small undercuts
+    has_smallest_radius: bool = False  # Smallest inside radius operation
+    smallest_radius_in: Optional[float] = None  # Smallest radius value
+    smallest_radius_count: int = 0  # Count of smallest radii
     material: str = "A2"
     material_group: str = ""
     # Punch datum heuristics fields
@@ -6559,6 +6800,11 @@ def create_punch_plan(params: Dict[str, Any]) -> Dict[str, Any]:
     _add_punch_hole_ops(plan, p)
     _add_punch_edge_ops(plan, p)
     _add_punch_form_ops(plan, p, profile_process)
+
+    # Add special feature operations (centers, spring punch, lift, etc.)
+    qty = params.get("qty", 1)
+    _add_punch_special_ops(plan, p, qty)
+
     _add_punch_qa_checks(plan, p)
     _add_punch_fixturing_notes(plan, p)
 
@@ -6632,11 +6878,24 @@ def _extract_punch_params(params: Dict[str, Any]) -> PunchPlannerParams:
         num_chamfers=int(params.get("num_chamfers", 0)),
         has_perp_face_grind=bool(params.get("has_perp_face_grind", False)),
         has_3d_surface=bool(params.get("has_3d_surface", False)),
+        form_complexity_level=int(params.get("form_complexity_level", 0)),
         has_polish_contour=bool(params.get("has_polish_contour", False)),
         has_no_step_permitted=bool(params.get("has_no_step_permitted", False)),
         has_etch=bool(params.get("has_etch", False)),
         min_dia_tol_in=params.get("min_dia_tol_in"),
         min_len_tol_in=params.get("min_len_tol_in"),
+        # Special feature flags
+        has_centers=bool(params.get("has_centers", False)),
+        has_spring_punch=bool(params.get("has_spring_punch", False)),
+        spring_punch_travel_in=params.get("spring_punch_travel_in"),
+        has_lift=bool(params.get("has_lift", False)),
+        lift_thickness_in=params.get("lift_thickness_in"),
+        lift_pad_ref=params.get("lift_pad_ref"),
+        has_small_undercut=bool(params.get("has_small_undercut", False)),
+        small_undercut_count=int(params.get("small_undercut_count", 0)),
+        has_smallest_radius=bool(params.get("has_smallest_radius", False)),
+        smallest_radius_in=params.get("smallest_radius_in"),
+        smallest_radius_count=int(params.get("smallest_radius_count", 0)),
         material=material,
         material_group=params.get("material_group", ""),
         has_flats=bool(params.get("has_flats", False)),
@@ -7004,25 +7263,128 @@ def _add_punch_form_ops(plan: Dict[str, Any], p: PunchPlannerParams, profile_pro
                 "note": "3D mill contoured nose section"
             })
 
-    # Add polish operations
+    # Add polish operations (moved to _add_punch_special_ops for better time calculation)
+    # Note: Polish contour time calculation now uses improved calc_polish_contour_minutes
+    # which ties time to contour length/complexity rather than a flat number
+
+
+def _add_punch_special_ops(plan: Dict[str, Any], p: PunchPlannerParams, qty: int = 1) -> None:
+    """Add special feature operations (centers, spring punch, lift, undercut, radius, polish).
+
+    Args:
+        plan: The plan dict to add operations to
+        p: Punch parameters
+        qty: Quantity of parts in the lot
+    """
+    # Polish contour operation (using improved time calculation)
     if p.has_polish_contour or p.has_polish_contour_note:
-        # Calculate polish time based on perimeter if available
-        k_polish = 2.0  # min/inch for contour polishing
         perimeter = p.wire_profile_perimeter_in if p.wire_profile_perimeter_in > 0 else 0.0
+
+        polish_time = calc_polish_contour_minutes(
+            has_polish_contour=True,
+            qty=qty,
+            contour_perimeter_in=perimeter if perimeter > 0 else None,
+            form_complexity=p.form_complexity_level
+        )
+
         if perimeter > 0:
-            polish_time = k_polish * perimeter
-            polish_time = max(polish_time, 3.0)  # Minimum 3 minutes
             plan["ops"].append({
                 "op": "polish_contour",
                 "perimeter_in": perimeter,
                 "time_minutes": polish_time,
-                "note": f"Polish contoured surface to spec: {perimeter:.2f}\" perimeter"
+                "note": f"Polish contoured surface to spec: {perimeter:.2f}\" perimeter (complexity: {p.form_complexity_level})"
             })
         else:
             plan["ops"].append({
                 "op": "polish_contour",
+                "time_minutes": polish_time,
                 "note": "Polish contoured surface to spec"
             })
+
+    # Centers/OD grinding operation
+    if p.has_centers:
+        centers_time = calc_centers_grind_minutes(
+            has_centers=True,
+            qty=qty,
+            num_diameters=p.num_ground_diams,
+            total_length_in=p.total_ground_length_in
+        )
+        plan["ops"].append({
+            "op": "centers_grind",
+            "num_diameters": p.num_ground_diams,
+            "total_length_in": p.total_ground_length_in,
+            "time_minutes": centers_time,
+            "note": f"Center drill and grind between centers: {p.num_ground_diams} diameters, {p.total_ground_length_in:.2f}\" length"
+        })
+
+    # Spring punch operation
+    if p.has_spring_punch:
+        spring_time = calc_spring_punch_minutes(
+            has_spring_punch=True,
+            qty=qty,
+            travel_in=p.spring_punch_travel_in,
+            od_in=p.max_od_or_width_in
+        )
+        travel_note = f" with {p.spring_punch_travel_in:.4f}\" travel" if p.spring_punch_travel_in else ""
+        plan["ops"].append({
+            "op": "spring_punch",
+            "travel_in": p.spring_punch_travel_in,
+            "time_minutes": spring_time,
+            "note": f"Machine spring punch pocket, relief, and bottoming geometry{travel_note}"
+        })
+
+    # Lift/step operation
+    if p.has_lift:
+        lift_time = calc_lift_step_minutes(
+            has_lift=True,
+            qty=qty,
+            lift_thickness_in=p.lift_thickness_in,
+            pad_area_sqin=0.25  # Default, could be enhanced with geometry analysis
+        )
+        lift_note = f"LIFT: {p.lift_thickness_in:.4f}\"" if p.lift_thickness_in else "LIFT operation"
+        if p.lift_pad_ref:
+            lift_note += f" on pad {p.lift_pad_ref}"
+        plan["ops"].append({
+            "op": "lift_step_grind",
+            "lift_thickness_in": p.lift_thickness_in,
+            "pad_ref": p.lift_pad_ref,
+            "time_minutes": lift_time,
+            "note": f"Step grind and polish designated face - {lift_note}"
+        })
+
+    # Small undercut operation
+    if p.has_small_undercut:
+        undercut_time = calc_small_undercut_minutes(
+            has_small_undercut=True,
+            qty=qty,
+            count=p.small_undercut_count,
+            avg_depth_in=0.050  # Default depth
+        )
+        count_note = f"{p.small_undercut_count}x " if p.small_undercut_count > 1 else ""
+        plan["ops"].append({
+            "op": "small_undercut",
+            "count": p.small_undercut_count,
+            "time_minutes": undercut_time,
+            "note": f"Machine {count_note}small undercut(s)"
+        })
+
+    # Smallest inside radius operation
+    if p.has_smallest_radius:
+        radius_time = calc_smallest_radius_minutes(
+            has_smallest_radius=True,
+            qty=qty,
+            radius_in=p.smallest_radius_in,
+            count=p.smallest_radius_count
+        )
+        radius_note = f"R{p.smallest_radius_in:.4f}\"" if p.smallest_radius_in else "small radius"
+        count_note = f" x {p.smallest_radius_count}" if p.smallest_radius_count > 1 else ""
+        plan["ops"].append({
+            "op": "smallest_radius",
+            "radius_in": p.smallest_radius_in,
+            "count": p.smallest_radius_count,
+            "time_minutes": radius_time,
+            "note": f"Machine smallest inside radius {radius_note}{count_note}"
+        })
 
 
 def _add_punch_qa_checks(plan: Dict[str, Any], p: PunchPlannerParams) -> None:
