@@ -368,6 +368,7 @@ __all__ = [
     "SCRAP_RECOVERY_DEFAULT",
     "usdkg_to_usdlb",
     "_compute_material_block",
+    "_compute_cylindrical_material_block",
     "_compute_scrap_mass_g",
     "_density_for_material",
     "_material_cost_components",
@@ -1233,6 +1234,237 @@ def _material_cost_components(
     }
 
 
+def _compute_cylindrical_material_block(
+    geo_ctx: dict,
+    material_key: str,
+    density_g_cc: float | None,
+    scrap_pct: float,
+    *,
+    stock_price_source: str | None = None,
+    cfg: Any | None = None,
+):
+    """Compute material block for cylindrical parts (guide posts, round punches, etc.).
+
+    Uses bar stock (diameter × length) instead of plate stock (L × W × T).
+    """
+    import math as _math
+    from cad_quoter.pricing.mcmaster_helpers import pick_mcmaster_cylindrical_sku
+
+    # Extract cylindrical dimensions
+    diameter_in = float(geo_ctx.get("diameter_in") or 0.0)
+    length_in = float(geo_ctx.get("length_in") or 0.0)
+
+    # Fallback: try to extract from other keys
+    if not diameter_in:
+        diameter_in = float(geo_ctx.get("max_od_or_width_in") or 0.0)
+    if not diameter_in:
+        diameter_in = float(geo_ctx.get("diameter") or 0.0)
+
+    if not length_in:
+        length_in = float(geo_ctx.get("overall_length_in") or 0.0)
+    if not length_in:
+        length_in = float(geo_ctx.get("length") or 0.0)
+
+    if not diameter_in or not length_in:
+        # Fall back to plate logic if we can't determine cylindrical dimensions
+        source_label = "insufficient-cylindrical-geometry"
+        return {
+            "material": geo_ctx.get("material_display") or material_key,
+            "stock_L_in": None,
+            "stock_W_in": None,
+            "stock_T_in": None,
+            "stock_diam_in": None,
+            "start_lb": 0.0,
+            "net_lb": 0.0,
+            "scrap_lb": 0.0,
+            "scrap_pct": scrap_pct,
+            "source": source_label,
+            "stock_dims_in": None,
+            "supplier_min$": 0.0,
+            "stock_price$": None,
+            "total_material_cost": 0.0,
+        }
+
+    # Stock allowances for cylindrical parts
+    # Typically need +0.125" diameter for machining cleanup and +0.5" length for chucking
+    diam_allowance = 0.125  # 1/8" diameter allowance
+    length_allowance = 0.5   # 1/2" length allowance
+
+    need_diam_in = diameter_in + diam_allowance
+    need_length_in = length_in + length_allowance
+
+    material_label = str(geo_ctx.get("material_display") or material_key or "")
+
+    # Try to find cylindrical stock from McMaster
+    try:
+        from cad_quoter.pricing.mcmaster_helpers import pick_mcmaster_cylindrical_sku
+        stock_info = pick_mcmaster_cylindrical_sku(
+            need_diam_in,
+            need_length_in,
+            material_key=material_label,
+            verbose=False,
+        )
+    except Exception:
+        stock_info = None
+
+    # If no catalog match, use standard bar dimensions
+    if not stock_info or not isinstance(stock_info, dict):
+        # Round up to standard bar diameters (1/8" increments)
+        stock_diam_in = _math.ceil(need_diam_in * 8.0) / 8.0
+        # Round up length to 12" increments (common bar stock lengths: 12", 24", 36")
+        stock_length_in = _math.ceil(need_length_in / 12.0) * 12.0
+        stock_info = {
+            "stock_diam_in": float(stock_diam_in),
+            "stock_L_in": float(stock_length_in),
+            "source": "standard-bar-grid",
+        }
+
+    stock_diam_in = float(stock_info.get("stock_diam_in") or stock_info.get("diam_in") or need_diam_in)
+    stock_L_in = float(stock_info.get("stock_L_in") or stock_info.get("len_in") or need_length_in)
+
+    vendor_label = str(stock_info.get("vendor") or "StdGrid")
+    part_no = stock_info.get("mcmaster_part")
+    stock_price_val = _coerce_float_or_none(stock_info.get("price_usd"))
+    stock_price = float(stock_price_val) if stock_price_val and stock_price_val > 0 else None
+    stock_supplier_min_val = _coerce_float_or_none(stock_info.get("min_charge_usd"))
+    stock_supplier_min = float(stock_supplier_min_val) if stock_supplier_min_val else 0.0
+    stock_source_tag = str(stock_info.get("source") or "bar-stock")
+
+    # Calculate volumes using cylindrical formulas: V = π × r² × L
+    rho = float(density_g_cc or 2.70)
+    radius_in = diameter_in / 2.0
+    radius_stock_in = stock_diam_in / 2.0
+
+    vol_net_in3 = _math.pi * (radius_in ** 2) * length_in
+    vol_start_in3 = _math.pi * (radius_stock_in ** 2) * stock_L_in
+
+    net_lb = vol_net_in3 * rho * LB_PER_IN3_PER_GCC
+    start_lb = vol_start_in3 * rho * LB_PER_IN3_PER_GCC
+    scrap_lb_geom = max(0.0, start_lb - net_lb)
+    min_scrap_lb = max(0.0, start_lb * float(scrap_pct))
+    scrap_lb = max(scrap_lb_geom, min_scrap_lb)
+    net_after_scrap = max(0.0, start_lb - scrap_lb)
+
+    # Price resolution
+    provenance: list[str] = []
+    price_source = ""
+    price_per_lb = 0.0
+
+    unit_price_each = stock_price if stock_price and stock_price > 0 else None
+    unit_price_usd: float | None = None
+    api_price = None
+    api_price_source: str | None = None
+
+    if part_no and str(stock_price_source or "").strip().lower() == "mcmaster_api":
+        api_price = _mcm_price_for_part(str(part_no))
+    if api_price and api_price > 0:
+        unit_price_each = float(api_price)
+        stock_price = float(api_price)
+        unit_price_usd = float(api_price)
+        if start_lb > 0:
+            price_per_lb = float(unit_price_each) / float(start_lb)
+        api_price_source = f"McMaster API (qty=1, part={part_no})"
+        price_source = api_price_source
+        provenance.append(price_source)
+
+    if price_per_lb <= 0:
+        resolved_per_lb, resolved_source = _resolve_price_per_lb(material_key, material_label)
+        try:
+            price_per_lb = float(resolved_per_lb)
+        except (TypeError, ValueError):
+            price_per_lb = 0.0
+        if not price_source:
+            price_source = resolved_source or ""
+
+    if (unit_price_each is None or unit_price_each <= 0) and price_per_lb > 0:
+        unit_price_each = float(net_after_scrap) * float(price_per_lb)
+
+    if unit_price_each is not None and unit_price_each > 0:
+        stock_price = float(unit_price_each)
+        if not price_source:
+            price_source = vendor_label or "bar-stock"
+
+    # Supplier minimum
+    supplier_min_candidates = (
+        geo_ctx.get("supplier_min$"),
+        geo_ctx.get("supplier_min"),
+        geo_ctx.get("supplier_min_charge"),
+        geo_ctx.get("supplier_minimum_charge"),
+        geo_ctx.get("minimum_order$"),
+        geo_ctx.get("minimum_order"),
+    )
+    supplier_min = 0.0
+    for candidate in supplier_min_candidates:
+        val = _coerce_float_or_none(candidate)
+        if val is not None and math.isfinite(val):
+            supplier_min = max(supplier_min, float(val))
+    supplier_min = max(0.0, max(supplier_min, stock_supplier_min))
+
+    total_mat_cost = max(float(unit_price_each or 0.0), float(supplier_min))
+
+    source_note = vendor_label or "bar-stock"
+    if price_source:
+        source_note = price_source
+
+    round_tol_used = _coerce_float_or_none(stock_info.get("round_tol_in"))
+    if round_tol_used is None and cfg is not None:
+        round_tol_used = _coerce_float_or_none(getattr(cfg, "round_tol_in", None))
+    if round_tol_used is None:
+        round_tol_used = 0.05
+
+    result = {
+        "material": geo_ctx.get("material_display") or material_key,
+        "required_blank_diam_in": float(need_diam_in),
+        "required_blank_len_in": float(need_length_in),
+        "round_tol_in": float(round_tol_used),
+        "stock_diam_in": float(stock_diam_in),
+        "stock_L_in": float(stock_L_in),
+        "stock_W_in": float(stock_diam_in),  # For compatibility, W = diameter
+        "stock_T_in": float(stock_diam_in),  # For compatibility, T = diameter
+        "stock_dims_in": (float(stock_diam_in), float(stock_L_in)),
+        "start_lb": float(start_lb),
+        "starting_weight_lb": float(start_lb),
+        "net_lb": float(net_after_scrap),
+        "net_weight_lb": float(net_after_scrap),
+        "scrap_lb": float(scrap_lb),
+        "scrap_weight_lb": float(scrap_lb),
+        "scrap_pct": float(scrap_pct),
+        "price_per_lb": float(price_per_lb),
+        "price_per_lb$": float(price_per_lb),
+        "price_source": price_source,
+        "supplier_min": float(supplier_min),
+        "supplier_min$": float(supplier_min),
+        "source": source_note,
+        "stock_vendor": vendor_label,
+        "part_no": part_no,
+        "stock_source_tag": stock_source_tag,
+        "stock_price$": float(stock_price) if stock_price is not None else None,
+        "unit_price_each$": float(stock_price) if stock_price is not None else None,
+        "unit_price$": float(stock_price) if stock_price is not None else None,
+        "supplier_min_charge$": float(supplier_min),
+        "total_material_cost": float(total_mat_cost),
+        "is_cylindrical": True,
+    }
+
+    if stock_price_source:
+        result["stock_price_source"] = stock_price_source
+
+    if api_price and api_price > 0 and api_price_source:
+        result["stock_piece_price_usd"] = float(api_price)
+        result["stock_piece_source"] = api_price_source
+
+    if price_source:
+        result["unit_price_source"] = price_source
+        if price_source.startswith("McMaster API"):
+            result["unit_price_confidence"] = "high"
+    if unit_price_usd is not None:
+        result["unit_price_usd"] = float(unit_price_usd)
+    if provenance:
+        result["provenance"] = provenance
+
+    return result
+
+
 def _compute_material_block(
     geo_ctx: dict,
     material_key: str,
@@ -1244,6 +1476,23 @@ def _compute_material_block(
 ):
     """Produce a normalized material record including weights and cost."""
 
+    # Check if this is a cylindrical part (guide post, round punch, etc.)
+    is_cylindrical = bool(geo_ctx.get("is_cylindrical", False))
+    shape_type = str(geo_ctx.get("shape_type", "")).lower()
+    family = str(geo_ctx.get("family", "")).lower()
+
+    # Only treat as cylindrical if BOTH is_cylindrical flag is set AND shape is round
+    # This prevents square form_punches from being treated as cylindrical
+    use_cylindrical_stock = is_cylindrical and shape_type == "round"
+
+    # If cylindrical, route to bar stock logic
+    if use_cylindrical_stock:
+        return _compute_cylindrical_material_block(
+            geo_ctx, material_key, density_g_cc, scrap_pct,
+            stock_price_source=stock_price_source, cfg=cfg
+        )
+
+    # Otherwise, use standard plate logic
     t_in = float(geo_ctx.get("thickness_in") or 0.0)
     if not t_in:
         t_in = float(geo_ctx.get("thickness_mm", 0) / 25.4 or 0.0)
@@ -1833,7 +2082,7 @@ def plan_stock_blank(
         round_tol_in = 0.05
     std_sides = getattr(cfg, "std_stock_sides_in", None)
     if not isinstance(std_sides, Sequence) or not std_sides:
-        std_sides = [6, 8, 10, 12, 18, 24, 36, 48, 72]
+        std_sides = [1, 1.25, 1.5, 2, 3, 4, 6, 8, 10, 12, 18, 24, 36, 48, 72]
     std_sides = [float(side) for side in std_sides]
     stock_thicknesses = [
         0.125,

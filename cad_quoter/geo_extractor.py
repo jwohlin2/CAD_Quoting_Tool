@@ -66,6 +66,8 @@ class TextRecord:
     in_block: bool
     depth: int
     block_path: Tuple[str, ...]
+    dimtype: Optional[int] = None  # For DIMENSION entities: 0=linear, 1=aligned, 2=angular, 3=diameter, 4=radius, 6=ordinate
+    measurement: Optional[float] = None  # For DIMENSION entities: actual measured value in inches
 
 
 # --------------------------- open + layout helpers ---------------------------
@@ -169,6 +171,31 @@ def _plain(s: str) -> str:
     # Strip MTEXT control codes: \P newlines, %%c diameter symbol, etc.
     s = s.replace("\\P", "\n").replace("\\p", "\n")
     s = s.replace("%%c", "Ø").replace("%%d", "°").replace("%%p", "±")
+
+    # Handle AutoCAD Mechanical GD&T font character codes
+    # Format: {\Famgdt|c0;X} where X is a character code mapping to GD&T symbols
+    # Common mappings in amgdt font:
+    #   q = ¢ (chord length - drafting shorthand using cent symbol)
+    #   h = ⌭ (perpendicularity)
+    #   u = ⏥ (position)
+    #   etc.
+    gdt_char_map = {
+        'q': '¢',  # chord length (cent symbol used as drafting shorthand)
+        'h': '⌭',  # perpendicularity
+        'u': '⏥',  # position
+        'n': '⌖',  # concentricity
+        'o': '⊕',  # all around
+        'p': '⌯',  # flatness
+        'r': '⏄',  # parallelism
+    }
+
+    # Pattern: {\Famgdt|c0;X} or {\FAMGDT|c0;X}
+    def replace_gdt_char(m):
+        char_code = m.group(1).lower()
+        return gdt_char_map.get(char_code, char_code)
+
+    s = re.sub(r'\{\\[Ff][Aa][Mm][Gg][Dd][Tt]\|c0;(.)\}', replace_gdt_char, s)
+
     return re.sub(r"\s+", " ", s).strip()
 
 
@@ -423,6 +450,7 @@ def iter_text_records(
             continue
 
         txt, h, x, y = None, 0.0, 0.0, 0.0
+        dimtype, meas_in = None, None  # For DIMENSION entities
         if et == "TEXT":
             txt = getattr(ent.dxf, "text", "") or ""
             h = float(getattr(ent.dxf, "height", 0.0) or 0.0)
@@ -447,23 +475,56 @@ def iter_text_records(
             if mt is not None:
                 txt = _mtext_to_str(mt)
         elif et == "DIMENSION":
-            # Some variants carry measurement text at .dxf.text
-            txt = getattr(ent.dxf, "text", "") or ""
-            # Resolve <> placeholder with actual dimension measurement
-            if "<>" in txt:
-                try:
+            # Get dimension type to detect radial/diameter dimensions
+            # dimtype values: 0=linear, 1=aligned, 2=angular, 3=diameter, 4=radius, 6=ordinate
+            dimtype_raw = getattr(ent.dxf, "dimtype", 0) if hasattr(ent, "dxf") else 0
+            # Mask to get just the dimension type (lower 3 bits)
+            # The dimtype field includes flags in higher bits
+            dimtype = dimtype_raw & 0x07
+
+            # Always extract the actual measurement value
+            # For ordinate dimensions, get_measurement() returns the ordinate coordinate,
+            # not the dimension value. Use actual_measurement instead.
+            meas_in = None
+            try:
+                # Try actual_measurement first (more reliable for all dimension types)
+                if hasattr(ent.dxf, "actual_measurement"):
+                    meas = ent.dxf.actual_measurement
+                else:
                     meas = ent.get_measurement()
-                    if meas is not None:
-                        if hasattr(meas, "magnitude"):
-                            meas = meas.magnitude
-                        # Assume drawing units are inches
-                        meas_in = float(meas)
-                        meas_str = f"{meas_in:.4f}".rstrip("0").rstrip(".")
-                        if meas_str.startswith("0."):
-                            meas_str = meas_str[1:]
-                        txt = txt.replace("<>", meas_str)
-                except Exception:
-                    pass
+
+                if meas is not None:
+                    if hasattr(meas, "magnitude"):
+                        meas = meas.magnitude
+                    # Assume drawing units are inches
+                    meas_in = float(meas)
+            except Exception:
+                pass
+
+            # Get dimension text override (if any)
+            txt = getattr(ent.dxf, "text", "") or ""
+
+            # For dimensions, prefer actual measurement over text override
+            # This ensures we get the real dimension value, not arbitrary text
+            if meas_in is not None:
+                meas_str = f"{meas_in:.4f}".rstrip("0").rstrip(".")
+                if meas_str.startswith("0."):
+                    meas_str = meas_str[1:]
+
+                # Add prefix for radial/diameter dimensions
+                if dimtype == 4:  # Radial dimension
+                    meas_str = f"R{meas_str}"
+                elif dimtype == 3:  # Diameter dimension
+                    meas_str = f"Ø{meas_str}"
+
+                # Use the formatted measurement as the text
+                # If there's a text override with <>, replace it; otherwise use measurement
+                if "<>" in txt:
+                    txt = txt.replace("<>", meas_str)
+                else:
+                    # No placeholder - use the actual measurement
+                    # (Text override might be arbitrary/wrong, prefer measurement)
+                    txt = meas_str
 
         if txt:
             txt = _decode_uplus(_plain(str(txt)))
@@ -480,6 +541,8 @@ def iter_text_records(
                     from_block,
                     depth,
                     block_path,
+                    dimtype,
+                    meas_in,
                 )
 
 
@@ -522,21 +585,25 @@ def collect_all_text(
             exclude_layers=exclude_layers,
             min_height=min_height,
         ):
-            rows.append(
-                {
-                    "layout": rec.layout,
-                    "layer": rec.layer,
-                    "etype": rec.etype,
-                    "text": rec.text,
-                    "x": rec.x,
-                    "y": rec.y,
-                    "height": rec.height,
-                    "rotation": rec.rotation,
-                    "in_block": rec.in_block,
-                    "depth": rec.depth,
-                    "block_path": list(rec.block_path),
-                }
-            )
+            row_dict = {
+                "layout": rec.layout,
+                "layer": rec.layer,
+                "etype": rec.etype,
+                "text": rec.text,
+                "x": rec.x,
+                "y": rec.y,
+                "height": rec.height,
+                "rotation": rec.rotation,
+                "in_block": rec.in_block,
+                "depth": rec.depth,
+                "block_path": list(rec.block_path),
+            }
+            # Add dimension-specific fields if present
+            if rec.dimtype is not None:
+                row_dict["dimtype"] = rec.dimtype
+            if rec.measurement is not None:
+                row_dict["measurement"] = rec.measurement
+            rows.append(row_dict)
     return rows
 
 

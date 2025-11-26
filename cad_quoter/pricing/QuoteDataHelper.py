@@ -107,6 +107,9 @@ class ScrapInfo:
     total_scrap_volume: float = 0.0  # Total material removed (in³)
     total_scrap_weight: float = 0.0  # lbs
 
+    # Weight calculations
+    desired_stock_weight: float = 0.0  # Weight after stock prep, before machining (lbs)
+
     # Scrap percentages
     scrap_percentage: float = 0.0  # Scrap as % of McMaster stock
     utilization_percentage: float = 0.0  # Final part as % of McMaster stock
@@ -118,6 +121,9 @@ class ScrapInfo:
 
     # High scrap warning
     high_scrap_warning: bool = False  # True if scrap_percentage > HIGH_SCRAP_THRESHOLD
+
+    # Approximate scrap flag (when volume math doesn't add up and fallback is used)
+    is_approximate_scrap: bool = False
 
 
 @dataclass
@@ -160,7 +166,13 @@ class MillingOperation:
     # Geometry
     length: float = 0.0  # inches
     width: float = 0.0  # inches
+    thickness: float = 0.0  # inches (finished thickness)
     perimeter: float = 0.0  # inches (for side ops)
+
+    # Stock dimensions (for square-up operations)
+    stock_length: float = 0.0  # inches
+    stock_width: float = 0.0  # inches
+    stock_thickness: float = 0.0  # inches
 
     # Tool parameters
     tool_diameter: float = 0.0  # inches
@@ -179,6 +191,12 @@ class MillingOperation:
 
     # Volume removal (for grinding operations)
     volume_removed_cuin: float = 0.0  # cubic inches
+    volume_thickness: float = 0.0  # cubic inches (volume from thickness removal)
+    volume_length_trim: float = 0.0  # cubic inches (volume from length trimming)
+    volume_width_trim: float = 0.0  # cubic inches (volume from width trimming)
+
+    # Material factor (for square-up operations)
+    material_factor: float = 1.0
 
     # Additional debug fields for square-up operations
     sq_top_bottom_stock: Optional[float] = None  # inches - stock removed from top/bottom
@@ -324,6 +342,7 @@ class MachineHoursBreakdown:
     total_other_minutes: float = 0.0
     total_waterjet_minutes: float = 0.0  # NEW: Waterjet operations (promoted to first-class)
     total_cmm_minutes: float = 0.0  # CMM checking time (machine only, setup is in labor)
+    total_inspection_minutes: float = 0.0  # Non-CMM inspection time (e.g., in-process checks for punch parts)
     cmm_holes_checked: int = 0  # Number of holes inspected by CMM
     holes_total: int = 0  # Total number of holes from hole table (sum of QTY)
     hole_entries: int = 0  # Count of unique hole groups (A, B, C, etc.) from hole table
@@ -447,6 +466,7 @@ class QuoteData:
     cad_file_name: str = ""
     extraction_timestamp: str = ""
     quantity: int = 1  # Number of parts to quote
+    part_family: str = ""  # Part family/type that determined the planner routing
 
     # Core data
     part_dimensions: PartDimensions = None
@@ -558,47 +578,269 @@ class QuoteData:
         return cls.from_dict(data)
 
 
+@dataclass
+class OrderData:
+    """
+    Order data structure that can hold multiple parts/files.
+
+    Enables multi-file orders where each part has its own quote data,
+    but shipping and totals are calculated at the order level.
+    """
+    # Order metadata
+    order_id: str = ""
+    order_name: str = ""
+    order_timestamp: str = ""
+
+    # Parts in this order (list of QuoteData objects)
+    parts: List[QuoteData] = None
+
+    # Order-level overrides (if any)
+    notes: str = ""
+
+    def __post_init__(self):
+        """Initialize parts list if None."""
+        if self.parts is None:
+            self.parts = []
+        if not self.order_timestamp:
+            from datetime import datetime
+            self.order_timestamp = datetime.now().isoformat()
+        if not self.order_id:
+            # Generate a simple order ID based on timestamp
+            self.order_id = f"ORD_{self.order_timestamp.replace(':', '').replace('-', '').replace('.', '')[:14]}"
+
+    def add_part(self, quote_data: QuoteData) -> int:
+        """
+        Add a part to the order.
+
+        Args:
+            quote_data: QuoteData for the part to add
+
+        Returns:
+            Index of the added part
+        """
+        self.parts.append(quote_data)
+        return len(self.parts) - 1
+
+    def remove_part(self, index: int) -> None:
+        """
+        Remove a part from the order.
+
+        Args:
+            index: Index of the part to remove
+        """
+        if 0 <= index < len(self.parts):
+            del self.parts[index]
+
+    def get_part(self, index: int) -> Optional[QuoteData]:
+        """
+        Get a part by index.
+
+        Args:
+            index: Index of the part
+
+        Returns:
+            QuoteData or None if index is invalid
+        """
+        if 0 <= index < len(self.parts):
+            return self.parts[index]
+        return None
+
+    def get_total_weight_lb(self) -> float:
+        """
+        Calculate total order weight (for shipping).
+
+        Returns sum of (part_weight * quantity) for all parts.
+        """
+        total = 0.0
+        for part in self.parts:
+            if part.stock_info and part.stock_info.mcmaster_weight:
+                # Stock weight per piece * quantity for this part
+                total += part.stock_info.mcmaster_weight * part.quantity
+        return total
+
+    def get_parts_subtotal(self) -> float:
+        """
+        Calculate total cost of all parts (before order-level shipping).
+
+        Returns sum of final_price for all parts.
+        Note: Each part's final_price already includes per-part shipping.
+        For order-level shipping, we'll need to subtract per-part shipping
+        and add order-level shipping instead.
+        """
+        subtotal = 0.0
+        for part in self.parts:
+            if part.cost_summary:
+                # Use total_final_price if quantity > 1
+                if part.quantity > 1:
+                    subtotal += part.cost_summary.total_final_price
+                else:
+                    subtotal += part.cost_summary.final_price
+        return subtotal
+
+    def get_order_shipping_cost(self) -> float:
+        """
+        Calculate order-level shipping based on total weight.
+
+        Uses the existing shipping estimator but applies it to total order weight.
+        """
+        from cad_quoter.pricing.mcmaster_helpers import estimate_mcmaster_shipping
+        total_weight = self.get_total_weight_lb()
+        return estimate_mcmaster_shipping(total_weight)
+
+    def get_order_total(self) -> float:
+        """
+        Calculate final order total.
+
+        This is the grand total the customer pays:
+        - Sum of all part costs (excluding per-part shipping)
+        - Plus order-level shipping
+
+        Note: Current implementation has shipping embedded in each part.
+        For true order-level shipping, we need to:
+        1. Sum parts without their individual shipping
+        2. Add single order shipping based on total weight
+        """
+        # For now, return parts subtotal + order shipping
+        # (This will be refined when we update the cost calculation)
+        parts_subtotal_no_shipping = 0.0
+        for part in self.parts:
+            if part.cost_summary:
+                # Get the total cost without shipping
+                # Each part's final price includes shipping, so we subtract it
+                if part.quantity > 1:
+                    part_total = part.cost_summary.total_final_price
+                else:
+                    part_total = part.cost_summary.final_price
+
+                # Subtract the per-part shipping cost
+                if part.direct_cost_breakdown:
+                    part_shipping = part.direct_cost_breakdown.shipping
+                    parts_subtotal_no_shipping += (part_total - part_shipping * part.quantity)
+                else:
+                    parts_subtotal_no_shipping += part_total
+
+        order_shipping = self.get_order_shipping_cost()
+        return parts_subtotal_no_shipping + order_shipping
+
+    def to_dict(self) -> Dict[str, Any]:
+        """Convert to dictionary (for JSON serialization)."""
+        return {
+            'order_id': self.order_id,
+            'order_name': self.order_name,
+            'order_timestamp': self.order_timestamp,
+            'notes': self.notes,
+            'parts': [part.to_dict() for part in self.parts]
+        }
+
+    def to_json(self, filepath: Optional[str | Path] = None, indent: int = 2) -> str:
+        """
+        Convert to JSON string.
+
+        Args:
+            filepath: Optional path to save JSON file
+            indent: JSON indentation level
+
+        Returns:
+            JSON string
+        """
+        data = self.to_dict()
+        json_str = json.dumps(data, indent=indent)
+
+        if filepath:
+            Path(filepath).write_text(json_str)
+
+        return json_str
+
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any]) -> 'OrderData':
+        """Create OrderData from dictionary."""
+        # Convert parts list
+        if 'parts' in data and isinstance(data['parts'], list):
+            data['parts'] = [
+                QuoteData.from_dict(part) if isinstance(part, dict) else part
+                for part in data['parts']
+            ]
+
+        return cls(**data)
+
+    @classmethod
+    def from_json(cls, json_str_or_path: str | Path) -> 'OrderData':
+        """
+        Load OrderData from JSON string or file.
+
+        Args:
+            json_str_or_path: JSON string or path to JSON file
+
+        Returns:
+            OrderData instance
+        """
+        # Check if it's a file path
+        try:
+            path = Path(json_str_or_path)
+            if path.exists():
+                json_str = path.read_text()
+            else:
+                json_str = json_str_or_path
+        except:
+            json_str = json_str_or_path
+
+        data = json.loads(json_str)
+        return cls.from_dict(data)
+
+
 # ============================================================================
 # EXTRACTION FUNCTIONS
 # ============================================================================
 
 
-def detect_punch_drawing(cad_file_path: Path, text_dump: str = None) -> bool:
+def detect_punch_drawing(cad_file_path: Path, text_dump: str = None, plan: dict = None) -> bool:
     """
     Detect if a CAD file is a punch drawing (individual punch component).
 
-    Detection is based on:
-    1. Filename containing 'punch', 'pilot', 'pin', etc.
-    2. Text content containing PUNCH, PILOT PIN, etc.
+    Detection uses multiple heuristics with confidence scoring:
+    1. Text-based: Filename and drawing text containing punch keywords
+    2. Geometry-based: Cylindrical shape with high aspect ratio (L/D > 2.5)
+    3. Feature-based: Turned/ground operations, few holes, no windows
 
     Excludes die shoes, holders, and other tooling that references punches.
 
     Args:
         cad_file_path: Path to CAD file
         text_dump: Optional text dump from drawing (if already extracted)
+        plan: Optional process plan dict with extracted_dims and ops
 
     Returns:
-        True if file appears to be a punch drawing
+        True if file appears to be a punch drawing (confidence score >= 3)
     """
+    import re
+
+    confidence_score = 0
+    debug_signals = []
+
+    # ========================================================================
+    # 1. TEXT-BASED DETECTION (existing logic + enhancements)
+    # ========================================================================
+
     # Check filename
     filename = cad_file_path.stem.upper()
 
     # Exclusion patterns - these are NOT punches even if they reference punches
     exclusion_patterns = ["SHOE", "HOLDER", "BASE", "PLATE", "DIE SET", "BLOCK", "INSERT", "SPACER"]
     if any(excl in filename for excl in exclusion_patterns):
+        debug_signals.append(f"EXCLUSION in filename: {filename}")
         return False
 
     # Punch indicators in filename
     filename_indicators = ["PUNCH", "PILOT", "PIN", "FORM", "GUIDE POST"]
     if any(ind in filename for ind in filename_indicators):
-        return True
+        confidence_score += 5  # Strong signal from filename
+        debug_signals.append(f"Filename match (+5): {filename}")
 
     # Check text content if provided
     if text_dump:
         text_upper = text_dump.upper()
 
         # Check for exclusions first - die shoes, holders, etc.
-        # These parts reference punches but are not themselves punches
         exclusion_indicators = [
             "DIE SHOE",
             "PUNCH SHOE",
@@ -615,6 +857,7 @@ def detect_punch_drawing(cad_file_path: Path, text_dump: str = None) -> bool:
             "PUNCH SPACER",
         ]
         if any(excl in text_upper for excl in exclusion_indicators):
+            debug_signals.append(f"EXCLUSION in text: found {[e for e in exclusion_indicators if e in text_upper]}")
             return False
 
         # Punch indicators in text
@@ -627,28 +870,126 @@ def detect_punch_drawing(cad_file_path: Path, text_dump: str = None) -> bool:
             "PUNCH TIP",
             "GUIDE POST",
         ]
-        # Only trigger on specific punch phrases, not just "PUNCH" alone
-        # (since die shoes often reference punches in their title blocks)
-        if any(ind in text_upper for ind in text_indicators):
-            return True
+        found_indicators = [ind for ind in text_indicators if ind in text_upper]
+        if found_indicators:
+            confidence_score += 4  # Strong signal from text
+            debug_signals.append(f"Text indicators (+4): {found_indicators}")
 
-        # Check for standalone "PUNCH" - but only if no exclusion words are nearby
-        # This catches drawings titled just "PUNCH" without SHOE/HOLDER/etc.
-        if "PUNCH" in text_upper:
-            # Make sure PUNCH isn't followed by exclusion words
-            # e.g., "PUNCH CLEARANCE" or "PUNCH LOCATION" in notes
+        # Check for standalone "PUNCH" - but only if no exclusion words nearby
+        if "PUNCH" in text_upper and not found_indicators:
             punch_exclusion_suffixes = ["SHOE", "HOLDER", "PLATE", "POCKET", "CLEARANCE", "LOCATION", "BLOCK"]
-            # Find all occurrences of PUNCH
-            import re
             punch_pattern = r'\bPUNCH\b'
             for match in re.finditer(punch_pattern, text_upper):
-                # Get text after this PUNCH occurrence
-                after_punch = text_upper[match.end():match.end()+15]  # Check next 15 chars
-                # If PUNCH is not followed by an exclusion suffix, it's likely a punch drawing
+                after_punch = text_upper[match.end():match.end()+15]
                 if not any(suffix in after_punch for suffix in punch_exclusion_suffixes):
-                    return True
+                    confidence_score += 3  # Moderate signal
+                    debug_signals.append("Standalone PUNCH (+3)")
+                    break
 
-    return False
+        # NEW: Check for part number callouts (e.g., "PART 2", "PART 6", "DETAIL 14")
+        # Individual component callouts suggest punch parts in assembly drawings
+        part_number_patterns = [
+            r'\bPART\s*[#:]?\s*([0-9]{1,2})\b',
+            r'\bDETAIL\s*[#:]?\s*([0-9]{1,2})\b',
+            r'\bITEM\s*[#:]?\s*([0-9]{1,2})\b',
+        ]
+        for pattern in part_number_patterns:
+            matches = re.findall(pattern, text_upper)
+            if matches:
+                # Part numbers 1-20 are typically individual components (punches/pins)
+                # Part numbers > 100 are typically assemblies/plates
+                part_nums = [int(m) for m in matches if m.isdigit()]
+                small_part_nums = [n for n in part_nums if 1 <= n <= 20]
+                if small_part_nums:
+                    confidence_score += 3  # Strong signal for individual components
+                    debug_signals.append(f"Small part numbers (+3): {small_part_nums[:5]}")
+                    break
+
+    # ========================================================================
+    # 2. GEOMETRY-BASED DETECTION (NEW)
+    # ========================================================================
+
+    if plan and 'extracted_dims' in plan:
+        dims = plan['extracted_dims']
+        L = dims.get('L', 0.0)
+        W = dims.get('W', 0.0)
+        T = dims.get('T', 0.0)
+
+        if L > 0 and W > 0 and T > 0:
+            # Check if part is cylindrical (two dimensions similar, one much larger)
+            # Sort dimensions to get smallest, middle, largest
+            sorted_dims = sorted([L, W, T])
+            smallest = sorted_dims[0]
+            middle = sorted_dims[1]
+            largest = sorted_dims[2]
+
+            # Cylindrical check: smallest ≈ middle (diameter) and largest >> diameter
+            diameter_similarity_ratio = middle / smallest if smallest > 0 else 0
+            aspect_ratio = largest / middle if middle > 0 else 0
+            max_cross_section = max(W, T)
+
+            # Signal 1: Two dimensions are similar (within 30%) → suggests round part
+            if 0.7 <= diameter_similarity_ratio <= 1.3:
+                confidence_score += 2
+                debug_signals.append(f"Round geometry (+2): {smallest:.2f}\" ≈ {middle:.2f}\"")
+
+            # Signal 2: High aspect ratio (L/D > 2.5) → suggests punch/pin shape
+            if aspect_ratio > 2.5:
+                confidence_score += 2
+                debug_signals.append(f"High aspect ratio (+2): L/D = {aspect_ratio:.1f}")
+
+            # Signal 3: Small cross-section (< 3") → punches are typically small
+            if max_cross_section < 3.0:
+                confidence_score += 1
+                debug_signals.append(f"Small diameter (+1): {max_cross_section:.2f}\"")
+
+    # ========================================================================
+    # 3. FEATURE-BASED DETECTION (NEW)
+    # ========================================================================
+
+    if plan and 'ops' in plan:
+        ops = plan.get('ops', [])
+        op_types = [op.get('op', '') for op in ops]
+
+        # Signal 1: Has wire EDM windows → NOT a punch (plates have windows)
+        windows = plan.get('windows', [])
+        if len(windows) > 0:
+            confidence_score -= 3  # Strong negative signal
+            debug_signals.append(f"EDM windows (-3): {len(windows)} windows")
+
+        # Signal 2: Has grinding operations → suggests turned part
+        grind_ops = [op for op in op_types if 'grind' in op.lower()]
+        if grind_ops:
+            confidence_score += 1
+            debug_signals.append(f"Grinding ops (+1): {len(grind_ops)}")
+
+        # Signal 3: Few holes (< 3) → punches typically have 0-2 holes
+        hole_sets = plan.get('hole_sets', [])
+        total_holes = sum(h.get('qty', 0) for h in hole_sets)
+        if total_holes < 3:
+            confidence_score += 1
+            debug_signals.append(f"Few holes (+1): {total_holes} holes")
+
+        # Signal 4: Many holes (> 10) → likely a plate
+        if total_holes > 10:
+            confidence_score -= 2
+            debug_signals.append(f"Many holes (-2): {total_holes} holes")
+
+    # ========================================================================
+    # DECISION: Threshold-based classification
+    # ========================================================================
+
+    is_punch = confidence_score >= 3
+
+    # Debug output (can be enabled with verbose flag in future)
+    if False:  # Set to True to enable debug output
+        print(f"\n=== PUNCH DETECTION: {cad_file_path.name} ===")
+        for signal in debug_signals:
+            print(f"  {signal}")
+        print(f"  TOTAL SCORE: {confidence_score}")
+        print(f"  DECISION: {'PUNCH' if is_punch else 'PLATE'}")
+
+    return is_punch
 
 
 def extract_punch_quote_data(
@@ -664,7 +1005,7 @@ def extract_punch_quote_data(
         cad_file_path: Path to DXF/DWG file
         quote_data: QuoteData object to populate
         verbose: Print progress messages
-        plan: Optional plan dict with cached text_dump and cached_dxf_path
+        plan: Optional plan dict with process planning data
 
     Returns:
         Dict with punch features, plan, and time estimates
@@ -673,38 +1014,19 @@ def extract_punch_quote_data(
         return {"error": "Punch extraction modules not available"}
 
     try:
-        # Use cached text from plan if available (avoids ODA conversion)
-        if plan and plan.get('text_dump'):
-            text_dump = plan['text_dump']
-            text_lines = text_dump.split('\n')
-            if verbose:
-                print(f"  Using cached text ({len(text_lines)} lines) from plan")
-        else:
-            # Extract text from DXF - use cached DXF path if available
-            from cad_quoter.geo_extractor import open_doc, collect_all_text
+        # Extract text from DXF
+        from cad_quoter.geo_extractor import open_doc, collect_all_text
 
-            # Use cached DXF to avoid ODA conversion
-            doc_path = cad_file_path
-            if plan and plan.get('cached_dxf_path'):
-                doc_path = Path(plan['cached_dxf_path'])
-                if verbose:
-                    print(f"  Using cached DXF for text extraction: {doc_path.name}")
+        doc = open_doc(cad_file_path)
+        text_records = list(collect_all_text(doc))
+        text_lines = [rec["text"] for rec in text_records if rec.get("text")]
+        text_dump = "\n".join(text_lines)
 
-            doc = open_doc(doc_path)
-            text_records = list(collect_all_text(doc))
-            text_lines = [rec["text"] for rec in text_records if rec.get("text")]
-            text_dump = "\n".join(text_lines)
+        if verbose:
+            print(f"  Extracted {len(text_lines)} text lines from drawing")
 
-            if verbose:
-                print(f"  Extracted {len(text_lines)} text lines from drawing")
-
-        # Extract punch features - use cached DXF path if available
-        dxf_path_for_punch = cad_file_path
-        if plan and plan.get('cached_dxf_path'):
-            dxf_path_for_punch = Path(plan['cached_dxf_path'])
-            if verbose:
-                print(f"  Using cached DXF for punch extraction: {dxf_path_for_punch.name}")
-        punch_features = extract_punch_features_from_dxf(dxf_path_for_punch, text_dump)
+        # Extract punch features
+        punch_features = extract_punch_features_from_dxf(cad_file_path, text_dump)
 
         if verbose:
             print(f"  Punch features extracted:")
@@ -752,6 +1074,158 @@ def extract_punch_quote_data(
             "is_punch": True,
             "error": str(e),
         }
+
+
+def estimate_tool_changes_from_ops(ops, hole_table=None, part_type=None):
+    """
+    Estimate tool changes based on operation-specific logic and hole table analysis.
+
+    This replaces the crude "len(ops) * 2" estimator with intelligent detection of
+    actual tools implied by operations and hole features.
+
+    Args:
+        ops: List of operation dictionaries from the process plan
+        hole_table: List of hole table entries (optional)
+        part_type: Type of part (e.g., "die_plate", "punch") for specific clamping (optional)
+
+    Returns:
+        int: Estimated number of unique tool changes
+
+    Example:
+        >>> ops = [{"op_desc": "SQ UP PLATE"}, {"op_desc": "FINISH MILL"}]
+        >>> hole_table = [{"OPERATION": "DRILL", "REF_DIAM": "0.201", "QTY": 4}]
+        >>> estimate_tool_changes_from_ops(ops, hole_table, "die_plate")
+        5  # spot drill, drill 0.201", square-up mill, finish mill, (clamped to min 4)
+    """
+    import re
+
+    # Use a set of tuples to track unique tools
+    tools = set()
+
+    # ========================================================================
+    # 1. Process milling operations from ops
+    # ========================================================================
+    for op in ops:
+        op_desc = op.get('op_desc', '').upper()
+
+        # 1.1 Square-up / facing / side mill
+        if any(keyword in op_desc for keyword in ['SQ UP', 'SQUARE', 'FACE MILL', 'SIDE MILL']):
+            tools.add(("mill", "face_mill_std"))
+
+        # 1.2 Finish mill
+        if 'FINISH' in op_desc and 'MILL' in op_desc:
+            tools.add(("mill", "finish_endmill_std"))
+
+        # 1.3 Grinding operations
+        if 'SURFACE GRIND' in op_desc or 'GRIND' in op_desc:
+            tools.add(("grind", "surface_plate_wheel"))
+
+        if 'JIG GRIND' in op_desc:
+            tools.add(("grind", "jig_bore_wheel"))
+
+        # 1.4 Deburr / chamfer / edge break
+        if any(keyword in op_desc for keyword in ['CHAMFER', 'EDGE BREAK', 'BREAK ALL CORNERS']):
+            tools.add(("deburr", "chamfer_mill"))
+
+        # 1.5 Engraving / etching
+        if 'ETCH' in op_desc or 'ENGRAVE' in op_desc:
+            tools.add(("engrave", "engrave_cutter"))
+
+        # 1.6 EDM / waterjet / laser operations don't add milling tools
+        # (no action needed - we simply don't add tools for these ops)
+
+    # ========================================================================
+    # 2. Process hole table for drilling/tapping/counterboring tools
+    # ========================================================================
+    if hole_table:
+        # Track if any holes need drilling (to add universal spot drill)
+        has_any_drilled_holes = False
+
+        for hole in hole_table:
+            # Get operation type and description
+            operation = hole.get('OPERATION', '').upper()
+            description = hole.get('DESCRIPTION', '').upper()
+            combined_text = f"{operation} {description}".upper()
+
+            # Parse diameter from REF_DIAM field
+            ref_diam_str = hole.get('REF_DIAM', '')
+
+            # Match decimal after ∅ symbol or standalone
+            dia_match = re.search(r'[∅Ø]\s*(\d*\.\d+)', ref_diam_str)
+            if not dia_match:
+                # Try fractional format like 11/32
+                frac_match = re.search(r'(\d+)/(\d+)', ref_diam_str)
+                if frac_match:
+                    ref_dia = float(frac_match.group(1)) / float(frac_match.group(2))
+                else:
+                    dia_match = re.search(r'(\d+\.\d+)', ref_diam_str)
+                    ref_dia = float(dia_match.group(1)) if dia_match else 0.5
+            else:
+                ref_dia = float(dia_match.group(1))
+
+            # Detect operation types
+            is_tap = 'TAP' in combined_text
+            is_cbore = any(keyword in combined_text for keyword in ["C'BORE", "C\u2019BORE", 'CBORE', 'COUNTERBORE'])
+            is_ream = 'REAM' in combined_text
+            is_jig_grind = 'JIG GRIND' in combined_text
+            is_edm = 'EDM' in combined_text
+
+            # Determine if this is a drilled hole (not EDM or jig grind only)
+            is_drilled = not (is_edm or (is_jig_grind and not is_tap))
+
+            # 2.1 Add spot drill if any holes are drilled or tapped
+            if is_drilled or is_tap:
+                has_any_drilled_holes = True
+
+            # 2.2 Add drill tool for unique drill diameter
+            if is_drilled and ref_dia > 0:
+                tools.add(("drill", round(ref_dia, 4)))
+
+            # 2.3 Add tap tool for unique thread size
+            if is_tap:
+                # Extract thread size from description (e.g., "1/4-20", "M6x1.0")
+                thread_match = re.search(r'(\d+/\d+[-\s]*\d+|M\d+[xX][\d.]+|\d+[-\s]*\d+\s*UNC|\d+[-\s]*\d+\s*UNF)', combined_text)
+                if thread_match:
+                    thread_size = thread_match.group(1).strip()
+                    tools.add(("tap", thread_size))
+                else:
+                    # Fallback to diameter if no specific thread size found
+                    tools.add(("tap", f"tap_{round(ref_dia, 4)}"))
+
+            # 2.4 Add reamer tool for unique ream diameter
+            if is_ream and ref_dia > 0:
+                tools.add(("ream", round(ref_dia, 4)))
+
+            # 2.5 Add counterbore tool for unique cbore diameter
+            if is_cbore:
+                # Try to extract counterbore diameter from description
+                cbore_match = re.search(r'[∅Ø]\s*(\d*\.\d+)', description)
+                if cbore_match:
+                    cbore_dia = float(cbore_match.group(1))
+                    tools.add(("cbore", round(cbore_dia, 4)))
+                else:
+                    # Fallback to a standard counterbore size
+                    tools.add(("cbore", round(ref_dia * 1.5, 4)))
+
+        # Add universal spot drill if any holes need drilling
+        if has_any_drilled_holes:
+            tools.add(("drill", "spot_drill_std"))
+
+    # ========================================================================
+    # 3. Calculate final tool count
+    # ========================================================================
+    tool_count = len(tools)
+
+    # ========================================================================
+    # 4. Apply floor/ceiling for die plates
+    # ========================================================================
+    if part_type == "die_plate":
+        # Typical lower bound - most die plates need at least face mill, finish mill, spot drill, drill
+        tool_count = max(4, tool_count)
+        # Hard upper bound for sanity - prevent overcounting
+        tool_count = min(12, tool_count)
+
+    return tool_count
 
 
 def extract_quote_data_from_cad(
@@ -870,8 +1344,51 @@ def extract_quote_data_from_cad(
     if not use_ocr and verbose:
         print("  Skipping OCR dimension extraction (manual dimensions provided)")
 
-    plan = plan_from_cad_file(cad_file_path, use_paddle_ocr=use_ocr, verbose=False)
+    plan = plan_from_cad_file(cad_file_path, use_paddle_ocr=use_ocr, verbose=verbose)
     quote_data.raw_plan = plan if verbose else None  # Only store if verbose
+
+    # FALLBACK: If dimensions weren't extracted (use_ocr=False), force extraction for die sections
+    # This ensures form operations have proper perimeter calculations
+    extracted_dims = plan.get('extracted_dims', {})
+    dims_missing = not extracted_dims or all(extracted_dims.get(k, 0.0) == 0.0 for k in ['L', 'W', 'T'])
+
+    if dims_missing and not dimension_override:
+        if verbose:
+            print("  [FALLBACK] Dimensions missing - extracting with DimensionFinder...")
+
+        from cad_quoter.planning import extract_dimensions_from_cad
+        dims_tuple = extract_dimensions_from_cad(cad_file_path)
+
+        if dims_tuple:
+            L, W, T = dims_tuple
+            if verbose:
+                print(f"  [FALLBACK] Extracted dimensions: L={L:.3f}\", W={W:.3f}\", T={T:.3f}\"")
+
+            # Update plan with extracted dimensions
+            plan['extracted_dims'] = {'L': L, 'W': W, 'T': T}
+
+            # For die sections, regenerate the plan with proper dimensions
+            # This ensures form operations calculate correct perimeter
+            planner_family = plan.get('planner', '')
+            if 'Sections' in planner_family or 'die_section' in str(plan.get('meta', {}).get('sub_type', '')):
+                if verbose:
+                    print(f"  [FALLBACK] Regenerating die section plan with dimensions...")
+
+                from cad_quoter.planning.process_planner import plan_job
+                params = {
+                    'plate_LxW': (L, W),
+                    'T': T,
+                    'material': plan.get('material', 'A2'),
+                    'has_internal_form': True,  # Preserve form detection
+                    'hole_sets': plan.get('hole_sets', []),
+                }
+                regenerated_plan = plan_job(planner_family, params)
+                regenerated_plan['extracted_dims'] = {'L': L, 'W': W, 'T': T}
+                regenerated_plan['source_file'] = plan.get('source_file')
+                plan = regenerated_plan
+
+                if verbose:
+                    print(f"  [FALLBACK] Plan regenerated with dimensions")
 
     # Use extracted quantity from plan if available and user didn't specify a quantity
     extracted_qty = plan.get("extracted_part_quantity", 1)
@@ -893,12 +1410,9 @@ def extract_quote_data_from_cad(
             if verbose:
                 print(f"[PUNCH] Using family override: {family_override}")
         else:
-            # Auto-detect: First check by filename
-            is_punch = detect_punch_drawing(cad_file_path)
-
-            # If not detected by filename, check text content
-            if not is_punch and plan.get('text_dump'):
-                is_punch = detect_punch_drawing(cad_file_path, plan.get('text_dump'))
+            # Auto-detect using enhanced heuristics (text + geometry + features)
+            # Pass plan to enable geometry-based and feature-based detection
+            is_punch = detect_punch_drawing(cad_file_path, plan.get('text_dump'), plan)
 
         if is_punch:
             if verbose:
@@ -944,41 +1458,42 @@ def extract_quote_data_from_cad(
                     if verbose:
                         print("  [PUNCH] Punch dimensions are zero, falling back to DimensionFinder...")
 
-                    # Use cached dimensions from plan if available (avoids ODA conversion)
-                    if 'extracted_dims' in plan and plan['extracted_dims']:
-                        dims_data = plan['extracted_dims']
-                        L = dims_data.get('L', 0.0)
-                        W = dims_data.get('W', 0.0)
-                        T = dims_data.get('T', 0.0)
-                        if L > 0 and W > 0:
-                            quote_data.part_dimensions = PartDimensions(
-                                length=L,
-                                width=W,
-                                thickness=T,
-                            )
+                    # Extract dimensions from CAD file
+                    from cad_quoter.planning.process_planner import extract_dimensions_from_cad
+                    dims = extract_dimensions_from_cad(cad_file_path)
+                    if dims:
+                        L, W, T = dims
+
+                        # For cylindrical parts, infer diameter from dimensions
+                        # (DimensionFinder returns L×W×T for bounding box, but W≈T for round parts)
+                        if is_cylindrical:
+                            # Use the smaller of W/T as diameter (more conservative)
+                            # Or average if they're close (within 10%)
+                            if abs(W - T) / max(W, T) < 0.10:
+                                inferred_diameter = (W + T) / 2.0
+                            else:
+                                inferred_diameter = min(W, T)
+
                             if verbose:
-                                print(f"  [PUNCH] Using cached dimensions: {L:.3f} x {W:.3f} x {T:.3f}")
+                                print(f"  [PUNCH] Cylindrical part - inferring diameter from W×T: {inferred_diameter:.3f}\"")
                         else:
-                            if verbose:
-                                print("  [PUNCH] Cached dimensions are zero, DimensionFinder also failed")
+                            inferred_diameter = 0.0
+
+                        # Preserve is_cylindrical flag when creating new PartDimensions
+                        quote_data.part_dimensions = PartDimensions(
+                            length=L,
+                            width=W,
+                            thickness=T,
+                            diameter=inferred_diameter,
+                            is_cylindrical=is_cylindrical,
+                        )
+                        if verbose:
+                            print(f"  [PUNCH] DimensionFinder found: {L:.3f} x {W:.3f} x {T:.3f}")
+                            if is_cylindrical:
+                                print(f"  [PUNCH] Part is cylindrical (family={family}), diameter={inferred_diameter:.3f}\"")
                     else:
-                        # No cached dims, fall back to extraction - use cached DXF if available
-                        from cad_quoter.planning.process_planner import extract_dimensions_from_cad
-                        # Use cached DXF path to avoid ODA conversion
-                        dim_path = plan.get('cached_dxf_path', cad_file_path) if plan else cad_file_path
-                        dims = extract_dimensions_from_cad(dim_path)
-                        if dims:
-                            L, W, T = dims
-                            quote_data.part_dimensions = PartDimensions(
-                                length=L,
-                                width=W,
-                                thickness=T,
-                            )
-                            if verbose:
-                                print(f"  [PUNCH] DimensionFinder found: {L:.3f} x {W:.3f} x {T:.3f}")
-                        else:
-                            if verbose:
-                                print("  [PUNCH] DimensionFinder also failed to extract dimensions")
+                        if verbose:
+                            print("  [PUNCH] DimensionFinder also failed to extract dimensions")
 
                 # Apply dimension override for punch parts
                 if dimension_override:
@@ -998,14 +1513,19 @@ def extract_quote_data_from_cad(
                     if verbose:
                         print(f"  [PUNCH] Reordered to: length={length}, width={width}, thickness={thickness}")
 
-                    # For cylindrical parts, preserve the original detected diameter
-                    # Dimension overrides (L×W×T) are intended for rectangular plates,
-                    # not for overriding the diameter of round parts
+                    # For cylindrical parts, infer diameter from dimension override if needed
+                    # Dimension overrides (L×W×T) can update the diameter if W and T are similar
                     if is_cylindrical:
-                        # Keep original diameter from punch features (already set at line 912)
-                        diameter = quote_data.part_dimensions.diameter
+                        # If W ≈ T (within 10%), this suggests a round part with diameter ≈ W ≈ T
+                        # Use the average or infer from dimensions
+                        if abs(width - thickness) / max(width, thickness) < 0.10:
+                            diameter = (width + thickness) / 2.0
+                        else:
+                            # Use the smaller value as diameter (more conservative)
+                            diameter = min(width, thickness)
+
                         if verbose:
-                            print(f"  [PUNCH] Cylindrical part - preserving detected diameter: {diameter:.3f}\" (use Diameter 1/2 fields to override)")
+                            print(f"  [PUNCH] Cylindrical part - inferring diameter from dimension override: {diameter:.3f}\"")
                             print(f"  [PUNCH] DEBUG: quote_data.part_dimensions before update = diameter:{quote_data.part_dimensions.diameter}, is_cyl:{quote_data.part_dimensions.is_cylindrical}")
                     else:
                         diameter = 0.0
@@ -1121,6 +1641,7 @@ def extract_quote_data_from_cad(
                 punch_edm_min = round(mh.get("total_edm_minutes", 0.0), 2)
                 punch_other_min = round(mh.get("total_other_minutes", 0.0), 2)
                 punch_cmm_min = round(mh.get("total_cmm_minutes", 0.0), 2)
+                punch_inspection_min = round(mh.get("total_inspection_minutes", 0.0), 2)
                 punch_etch_min = round(mh.get("total_etch_minutes", 0.0), 2)
                 punch_edge_break_min = round(mh.get("total_edge_break_minutes", 0.0), 2)
                 punch_polish_min = round(mh.get("total_polish_minutes", 0.0), 2)
@@ -1138,6 +1659,7 @@ def extract_quote_data_from_cad(
                     total_edm_minutes=punch_edm_min,
                     total_other_minutes=punch_other_min,
                     total_cmm_minutes=punch_cmm_min,
+                    total_inspection_minutes=punch_inspection_min,
                     total_etch_minutes=punch_etch_min,
                     total_edge_break_minutes=punch_edge_break_min,
                     total_polish_minutes=punch_polish_min,
@@ -1172,6 +1694,27 @@ def extract_quote_data_from_cad(
                 misc_overhead_min = round(misc_overhead_min, 2)
                 punch_labor_hours = round(punch_labor_hours, 2)
 
+                # NOTE: For multi-quantity jobs, we do NOT amortize the minutes here.
+                # The labor_hours breakdown stores FULL job-level minutes (setup, programming, inspection).
+                # Amortization happens in the cost calculation (lines 2988-3012) where job-level
+                # costs are amortized across quantity. This ensures:
+                # - Display shows actual job-level minutes with (JOB-LEVEL) labels
+                # - Per-unit costs are correctly calculated as: (job_level_cost / qty) + variable_cost
+
+                # For multi-quantity jobs, calculate per-unit labor total
+                # Job-level: setup, programming, inspection (one-time costs, amortized across qty)
+                # Per-unit: machining, finishing, misc_overhead (scales with quantity)
+                if quantity > 1:
+                    # Job-level minutes (full, not amortized)
+                    job_level_min = setup_min + programming_min + inspection_min
+                    # Per-unit variable minutes
+                    per_unit_min = machining_min + finishing_min + misc_overhead_min
+                    # Total labor for the entire job
+                    total_labor_min_for_job = job_level_min + (per_unit_min * quantity)
+                    # Per-unit labor (amortized)
+                    labor_total = round(total_labor_min_for_job / quantity, 2)
+
+                punch_labor_hours = round(labor_total / 60.0, 2)
                 # Compute labor cost directly from total minutes for accuracy
                 # (avoids rounding errors from hours conversion)
                 punch_labor_cost = round(labor_total * (labor_rate / 60.0), 2)
@@ -1267,11 +1810,8 @@ def extract_quote_data_from_cad(
             material = material_override
             detected_from_cad = False
         else:
-            # Use cached text from plan if available (avoids ODA conversion)
-            cached_text = None
-            if 'text_dump' in plan and plan['text_dump']:
-                cached_text = plan['text_dump'].split('\n')
-            material = detect_material_in_cad(cad_file_path, text_list=cached_text)
+            # Detect material from CAD file
+            material = detect_material_in_cad(cad_file_path)
             detected_from_cad = True
             if material == "GENERIC":
                 material = DEFAULT_MATERIAL
@@ -1322,6 +1862,35 @@ def extract_quote_data_from_cad(
             'volume': quote_data.part_dimensions.volume,
             'area': quote_data.part_dimensions.area,
         })()
+
+    # ========================================================================
+    # Set part family based on the planner that was used
+    # ========================================================================
+    # Extract planner/family from the plan (set by plan_job or punch extraction)
+    if is_punch and punch_data and "error" not in punch_data:
+        # For punch parts, get family from punch_features
+        features = punch_data.get("punch_features", {})
+        detected_family = features.get("family", "")
+        if detected_family:
+            # Map punch families to display names
+            family_map = {
+                "guide_post": "Guide Post",
+                "round_punch": "Punch",
+                "pilot_pin": "Pilot Pin",
+                "bushing": "Bushing",
+                "form_punch": "Form Punch",
+                "spring_punch": "Spring Punch",
+            }
+            quote_data.part_family = family_map.get(detected_family, "Punches")
+        else:
+            quote_data.part_family = "Punches"
+    else:
+        # For plate/die/section parts, get from plan planner field
+        planner = plan.get("planner", "Plates")
+        quote_data.part_family = planner
+
+    if verbose:
+        print(f"  Part family: {quote_data.part_family}")
 
     # ========================================================================
     # STEP 3: Calculate direct costs (McMaster stock, scrap, pricing)
@@ -1397,27 +1966,51 @@ def extract_quote_data_from_cad(
     part_diameter_2 = quote_data.part_dimensions.diameter_2 if quote_data.part_dimensions else 0.0
     part_length = quote_data.part_dimensions.length if quote_data.part_dimensions else 0.0
 
+    # Initialize desired_diameter (will be calculated for cylindrical parts)
+    desired_diameter_with_allowance = 0.0
+
     if is_cylindrical and part_diameter > 0 and part_length > 0:
         # For tapered parts, use the larger diameter for stock selection
         stock_diameter = max(part_diameter, part_diameter_2) if part_diameter_2 > 0 else part_diameter
+
+        # Add machining allowances for cylindrical parts (similar to plate stock)
+        # - Diameter needs extra material for turning/grinding (like thickness allowance)
+        # - Length needs extra material for facing and holding (like length allowance)
+        DIAMETER_ALLOWANCE = 0.25  # +0.25" for turning/grinding (matches thickness allowance)
+        LENGTH_ALLOWANCE = 0.50    # +0.50" for facing/holding (matches length allowance)
+
+        desired_diameter_with_allowance = stock_diameter + DIAMETER_ALLOWANCE
+        desired_cylindrical_length = part_length + LENGTH_ALLOWANCE
 
         # Use cylindrical lookup for guide posts, spring pins, etc.
         if verbose:
             if part_diameter_2 > 0:
                 print(f"  [CYLINDRICAL] Tapered part detected (diam1={part_diameter:.3f}\", diam2={part_diameter_2:.3f}\")")
-                print(f"  [CYLINDRICAL] Using larger diameter for stock lookup (diam={stock_diameter:.3f}\", length={part_length:.3f}\")")
+                print(f"  [CYLINDRICAL] Using larger diameter for stock lookup: {stock_diameter:.3f}\" → {desired_diameter_with_allowance:.3f}\" (with {DIAMETER_ALLOWANCE}\" allowance)")
+                print(f"  [CYLINDRICAL] Length for stock lookup: {part_length:.3f}\" → {desired_cylindrical_length:.3f}\" (with {LENGTH_ALLOWANCE}\" allowance)")
             else:
-                print(f"  [CYLINDRICAL] Using cylindrical stock lookup (diam={stock_diameter:.3f}\", length={part_length:.3f}\")")
+                print(f"  [CYLINDRICAL] Using cylindrical stock lookup")
+                print(f"  [CYLINDRICAL]   Diameter: {stock_diameter:.3f}\" → {desired_diameter_with_allowance:.3f}\" (with {DIAMETER_ALLOWANCE}\" allowance)")
+                print(f"  [CYLINDRICAL]   Length: {part_length:.3f}\" → {desired_cylindrical_length:.3f}\" (with {LENGTH_ALLOWANCE}\" allowance)")
 
         mcmaster_result = pick_mcmaster_cylindrical_sku(
-            need_diam_in=stock_diameter,
-            need_length_in=part_length,
+            need_diam_in=desired_diameter_with_allowance,
+            need_length_in=desired_cylindrical_length,
             material_key=material,
             catalog_rows=catalog_rows,
             verbose=verbose
         )
     else:
         # Use standard plate lookup
+        if verbose:
+            print(f"  [PLATE STOCK] Using plate stock lookup")
+            if is_cylindrical:
+                print(f"  [WARNING] Part is marked as cylindrical but missing dimensions:")
+                print(f"    - is_cylindrical: {is_cylindrical}")
+                print(f"    - part_diameter: {part_diameter}")
+                print(f"    - part_length: {part_length}")
+                print(f"  [WARNING] Falling back to plate stock (L×W×T)")
+
         mcmaster_result = pick_mcmaster_plate_sku(
             need_L_in=desired_L,
             need_W_in=desired_W,
@@ -1601,8 +2194,8 @@ def extract_quote_data_from_cad(
     # Use McMaster dimensions from scrap_calc (which already did the catalog lookup)
     # For cylindrical parts, also include diameter
     if is_cylindrical:
-        # For tapered parts, use the larger diameter that was used for stock selection
-        desired_diameter = stock_diameter if part_diameter_2 > 0 else part_diameter
+        # Use the desired diameter with allowance (calculated earlier)
+        desired_diameter = desired_diameter_with_allowance
         mcmaster_diameter = mcmaster_result.get('stock_diam_in', 0.0) if mcmaster_result else 0.0
     else:
         desired_diameter = 0.0
@@ -1667,12 +2260,14 @@ def extract_quote_data_from_cad(
         hole_drilling_scrap=scrap_calc.hole_drilling_scrap,
         total_scrap_volume=scrap_calc.total_scrap_volume,
         total_scrap_weight=scrap_calc.total_scrap_weight,
+        desired_stock_weight=scrap_calc.desired_stock_weight,
         scrap_percentage=scrap_pct,
         utilization_percentage=scrap_calc.utilization_percentage,
         scrap_price_per_lb=scrap_value_calc.get('scrap_price_per_lb'),
         scrap_value=scrap_value_calc.get('scrap_value', 0.0),
         scrap_price_source=scrap_value_calc.get('price_source', ''),
-        high_scrap_warning=scrap_pct > HIGH_SCRAP_THRESHOLD
+        high_scrap_warning=scrap_pct > HIGH_SCRAP_THRESHOLD,
+        is_approximate_scrap=scrap_calc.is_approximate_scrap
     )
 
     # Calculate direct cost breakdown
@@ -1710,28 +2305,46 @@ def extract_quote_data_from_cad(
     if verbose:
         print("[4/5] Calculating machine hours...")
 
+    # Helper function to safely convert values to float
+    def safe_float(value, name="unknown"):
+        """Convert value to float, handling dict or other non-numeric types."""
+        if isinstance(value, dict):
+            print(f"[WARNING] Field '{name}' is a dict: {value}. Using 0.0.")
+            return 0.0
+        try:
+            return float(value) if value is not None else 0.0
+        except (TypeError, ValueError) as e:
+            print(f"[WARNING] Cannot convert '{name}' value {value} to float: {e}. Using 0.0.")
+            return 0.0
+
     # Always process hole operations - both punch and non-punch parts need hole times
-    # Use cached hole operations from plan if available (avoids redundant ODA conversion)
-    if 'hole_operations_data' in plan and plan['hole_operations_data']:
-        hole_table = plan['hole_operations_data']
-        if verbose:
-            print("  Using cached hole operations from plan")
-    else:
-        hole_table = extract_hole_operations_from_cad(cad_file_path)
+    # Extract hole operations from CAD file
+    hole_table = extract_hole_operations_from_cad(cad_file_path)
 
     # For punch parts, process holes and add times to punch base times
     if is_punch and punch_data and "error" not in punch_data:
         if verbose:
             print(f"  [PUNCH] Base punch times: {quote_data.machine_hours.total_hours:.2f} hr")
 
-        # Get base punch times
-        punch_base_milling = quote_data.machine_hours.total_milling_minutes
-        punch_base_grinding = quote_data.machine_hours.total_grinding_minutes
-        punch_base_drill = quote_data.machine_hours.total_drill_minutes
-        punch_base_tap = quote_data.machine_hours.total_tap_minutes
-        punch_base_edm = quote_data.machine_hours.total_edm_minutes
-        punch_base_other = quote_data.machine_hours.total_other_minutes
-        punch_base_cmm = quote_data.machine_hours.total_cmm_minutes
+        # Get base punch times - ensure all values are floats
+        def safe_float(value, name="unknown"):
+            """Convert value to float, handling dict or other non-numeric types."""
+            if isinstance(value, dict):
+                print(f"WARNING: {name} is a dict: {value}. Using 0.0.")
+                return 0.0
+            try:
+                return float(value) if value is not None else 0.0
+            except (TypeError, ValueError) as e:
+                print(f"WARNING: Cannot convert {name} value {value} to float: {e}. Using 0.0.")
+                return 0.0
+        punch_base_milling = safe_float(quote_data.machine_hours.total_milling_minutes, "total_milling_minutes")
+        punch_base_grinding = safe_float(quote_data.machine_hours.total_grinding_minutes, "total_grinding_minutes")
+        punch_base_drill = safe_float(quote_data.machine_hours.total_drill_minutes, "total_drill_minutes")
+        punch_base_tap = safe_float(quote_data.machine_hours.total_tap_minutes, "total_tap_minutes")
+        punch_base_edm = safe_float(quote_data.machine_hours.total_edm_minutes, "total_edm_minutes")
+        punch_base_other = safe_float(quote_data.machine_hours.total_other_minutes, "total_other_minutes")
+        punch_base_cmm = safe_float(quote_data.machine_hours.total_cmm_minutes, "total_cmm_minutes")
+        punch_base_inspection = safe_float(quote_data.machine_hours.total_inspection_minutes, "total_inspection_minutes")
 
         # Process hole table for punch parts
         hole_entries = len(hole_table) if hole_table else 0
@@ -1840,15 +2453,34 @@ def extract_quote_data_from_cad(
                 for g in times.get('edm_groups', [])
             ]
 
-            # Get hole operation times
-            hole_drill_min = times.get('total_drill_minutes', 0.0)
-            hole_tap_min = times.get('total_tap_minutes', 0.0)
-            hole_cbore_min = times.get('total_cbore_minutes', 0.0)
-            hole_cdrill_min = times.get('total_cdrill_minutes', 0.0)
-            hole_jig_grind_min = times.get('total_jig_grind_minutes', 0.0)
-            hole_edm_min = times.get('total_edm_minutes', 0.0)
+            # If we have plan-based EDM time but no hole table EDM operations,
+            # create a synthetic operation to ensure EDM details are always shown
+            # when EDM minutes > 0 (avoids "ghost" EDM time in machine breakdown)
+            if punch_base_edm > 0 and not edm_ops:
+                # Get part thickness for EDM depth display
+                part_thickness = quote_data.dimensions.T if quote_data.dimensions else 0.5
 
-        # Merge hole times with punch base times
+                edm_ops = [
+                    HoleOperation(
+                        hole_id="PLAN",
+                        diameter=0.0,  # Not from starter holes - plan-based EDM
+                        depth=part_thickness,
+                        qty=1,
+                        operation_type='edm',
+                        time_per_hole=punch_base_edm,
+                        total_time=punch_base_edm
+                    )
+                ]
+
+            # Get hole operation times - ensure all values are floats
+            hole_drill_min = safe_float(times.get('total_drill_minutes', 0.0), "hole_total_drill_minutes")
+            hole_tap_min = safe_float(times.get('total_tap_minutes', 0.0), "hole_total_tap_minutes")
+            hole_cbore_min = safe_float(times.get('total_cbore_minutes', 0.0), "hole_total_cbore_minutes")
+            hole_cdrill_min = safe_float(times.get('total_cdrill_minutes', 0.0), "hole_total_cdrill_minutes")
+            hole_jig_grind_min = safe_float(times.get('total_jig_grind_minutes', 0.0), "hole_total_jig_grind_minutes")
+            hole_edm_min = safe_float(times.get('total_edm_minutes', 0.0), "hole_total_edm_minutes")
+
+        # Merge hole times with punch base times (both already converted to float)
         total_drill_min = round(punch_base_drill + hole_drill_min, 2)
         total_tap_min = round(punch_base_tap + hole_tap_min, 2)
         total_cbore_min = round(hole_cbore_min, 2)
@@ -1859,6 +2491,7 @@ def extract_quote_data_from_cad(
         total_edm_min = round(punch_base_edm + hole_edm_min, 2)
         total_other_min = round(punch_base_other, 2)
         total_cmm_min = round(punch_base_cmm, 2)
+        total_inspection_min = round(punch_base_inspection, 2)
 
         # Extract special operation times from base punch hours
         total_etch_min = round(quote_data.machine_hours.total_etch_minutes, 2)
@@ -1870,7 +2503,7 @@ def extract_quote_data_from_cad(
             total_drill_min + total_tap_min + total_cbore_min +
             total_cdrill_min + total_jig_grind_min +
             total_milling_min + total_grinding_min + total_edm_min + total_other_min +
-            total_cmm_min + total_etch_min + total_edge_break_min + total_polish_min, 2
+            total_cmm_min + total_inspection_min + total_etch_min + total_edge_break_min + total_polish_min, 2
         )
         grand_total_hours = round(grand_total_minutes / 60.0, 2)
         machine_cost = round(grand_total_minutes * (machine_rate / 60.0), 2)
@@ -1895,6 +2528,7 @@ def extract_quote_data_from_cad(
             total_edm_minutes=total_edm_min,
             total_other_minutes=total_other_min,
             total_cmm_minutes=total_cmm_min,
+            total_inspection_minutes=total_inspection_min,
             total_etch_minutes=total_etch_min,
             total_edge_break_minutes=total_edge_break_min,
             total_polish_minutes=total_polish_min,
@@ -2041,16 +2675,32 @@ def extract_quote_data_from_cad(
                 for g in times.get('edm_groups', [])
             ]
 
+            # NOTE: For non-punch parts, we'll check for plan-based EDM after
+            # calculating plan_edm_min (see fix around line 2668)
+
+            # Helper function to safely get float values
+            def safe_get_float_from_times(key, default=0.0):
+                """Safely get a float value from times dict, handling dicts and non-numeric values."""
+                val = times.get(key, default)
+                if isinstance(val, dict):
+                    print(f"WARNING: times['{key}'] is a dict: {val}. Using {default}.")
+                    return default
+                try:
+                    return float(val) if val is not None else default
+                except (TypeError, ValueError) as e:
+                    print(f"WARNING: Cannot convert times['{key}'] value {val} to float: {e}. Using {default}.")
+                    return default
+
             # Accumulate hole operation times
-            total_drill_min = times.get('total_drill_minutes', 0.0)
-            total_tap_min = times.get('total_tap_minutes', 0.0)
-            total_cbore_min = times.get('total_cbore_minutes', 0.0)
-            total_cdrill_min = times.get('total_cdrill_minutes', 0.0)
-            total_jig_grind_min = times.get('total_jig_grind_minutes', 0.0)
+            total_drill_min = safe_get_float_from_times('total_drill_minutes', 0.0)
+            total_tap_min = safe_get_float_from_times('total_tap_minutes', 0.0)
+            total_cbore_min = safe_get_float_from_times('total_cbore_minutes', 0.0)
+            total_cdrill_min = safe_get_float_from_times('total_cdrill_minutes', 0.0)
+            total_jig_grind_min = safe_get_float_from_times('total_jig_grind_minutes', 0.0)
             # EDM time from "FOR WIRE EDM" holes (starter holes for wire EDM operations)
-            hole_table_edm_min = times.get('total_edm_minutes', 0.0)
+            hole_table_edm_min = safe_get_float_from_times('total_edm_minutes', 0.0)
             # Slot milling time (obround features)
-            slot_milling_min = times.get('total_slot_minutes', 0.0)
+            slot_milling_min = safe_get_float_from_times('total_slot_minutes', 0.0)
         else:
             hole_table_edm_min = 0.0
             slot_milling_min = 0.0
@@ -2073,31 +2723,72 @@ def extract_quote_data_from_cad(
         slot_ops_raw = plan_machine_times.get('slot_operations', [])
         waterjet_ops_raw = plan_machine_times.get('waterjet_operations', [])  # NEW: Waterjet ops
 
+        # Helper function to safely get float values
+        def safe_get_float(op_dict, key, default=0.0):
+            """Safely get a float value from operation dict, handling dicts and non-numeric values."""
+            val = op_dict.get(key, default)
+            if isinstance(val, dict):
+                print(f"WARNING: Operation '{key}' is a dict: {val}. Using {default}.")
+                return default
+            try:
+                return float(val) if val is not None else default
+            except (TypeError, ValueError) as e:
+                print(f"WARNING: Cannot convert '{key}' value {val} to float: {e}. Using {default}.")
+                return default
+
         # Calculate totals from detailed operations (what's displayed in report)
-        total_milling_ops_min = sum(op.get('time_minutes', 0.0) for op in milling_ops_raw)
-        total_grinding_ops_min = sum(op.get('time_minutes', 0.0) for op in grinding_ops_raw)
-        total_pocket_ops_min = sum(op.get('pocket_time_min', 0.0) for op in pocket_ops_raw)
-        total_slot_ops_min = sum(op.get('slot_mill_time_min', 0.0) for op in slot_ops_raw)
-        total_waterjet_ops_min = sum(op.get('time_min', 0.0) for op in waterjet_ops_raw)  # NEW
+        total_milling_ops_min = sum(safe_get_float(op, 'time_minutes') for op in milling_ops_raw)
+        total_grinding_ops_min = sum(safe_get_float(op, 'time_minutes') for op in grinding_ops_raw)
+        total_pocket_ops_min = sum(safe_get_float(op, 'pocket_time_min') for op in pocket_ops_raw)
+        total_slot_ops_min = sum(safe_get_float(op, 'slot_mill_time_min') for op in slot_ops_raw)
+        total_waterjet_ops_min = sum(safe_get_float(op, 'time_min') for op in waterjet_ops_raw)  # NEW
 
         # Get breakdown totals (may include non-detailed operations)
-        breakdown_milling_min = plan_machine_times['breakdown_minutes'].get('milling', 0.0)
-        breakdown_grinding_min = plan_machine_times['breakdown_minutes'].get('grinding', 0.0)
-        breakdown_pocket_min = plan_machine_times['breakdown_minutes'].get('pockets', 0.0)
-        breakdown_slot_min = plan_machine_times['breakdown_minutes'].get('slots', 0.0)
-        breakdown_waterjet_min = plan_machine_times['breakdown_minutes'].get('waterjet', 0.0)  # NEW
+        # Use safe_get_float to handle any dict values in breakdown_minutes
+        breakdown_milling_min = safe_get_float(plan_machine_times.get('breakdown_minutes', {}), 'milling', 0.0)
+        breakdown_grinding_min = safe_get_float(plan_machine_times.get('breakdown_minutes', {}), 'grinding', 0.0)
+        breakdown_pocket_min = safe_get_float(plan_machine_times.get('breakdown_minutes', {}), 'pockets', 0.0)
+        breakdown_slot_min = safe_get_float(plan_machine_times.get('breakdown_minutes', {}), 'slots', 0.0)
+        breakdown_waterjet_min = safe_get_float(plan_machine_times.get('breakdown_minutes', {}), 'waterjet', 0.0)  # NEW
         # EDM from plan operations + EDM from hole table "FOR WIRE EDM" entries
-        total_edm_min = plan_machine_times['breakdown_minutes'].get('edm', 0.0) + hole_table_edm_min
+        plan_edm_min = safe_get_float(plan_machine_times.get('breakdown_minutes', {}), 'edm', 0.0)
+        # Ensure both values are floats before addition
+        if isinstance(hole_table_edm_min, dict):
+            print(f"WARNING: hole_table_edm_min is a dict: {hole_table_edm_min}. Using 0.0.")
+            hole_table_edm_min = 0.0
+        total_edm_min = plan_edm_min + float(hole_table_edm_min)
+        if verbose:
+            print(f"[DEBUG EDM] plan_edm_min={plan_edm_min:.2f}, hole_table_edm_min={hole_table_edm_min:.2f}, total_edm_min={total_edm_min:.2f}")
+
+        # If we have plan-based EDM time but no hole table EDM operations,
+        # create a synthetic operation to ensure EDM details are always shown
+        # when EDM minutes > 0 (avoids "ghost" EDM time in machine breakdown)
+        if plan_edm_min > 0 and not edm_ops:
+            # Get part thickness for EDM depth display
+            part_thickness = part_info.thickness if part_info else 0.5
+
+            edm_ops = [
+                HoleOperation(
+                    hole_id="PLAN",
+                    diameter=0.0,  # Not from starter holes - plan-based EDM
+                    depth=part_thickness,
+                    qty=1,
+                    operation_type='edm',
+                    time_per_hole=plan_edm_min,
+                    total_time=plan_edm_min
+                )
+            ]
 
         # Get other_ops_detail from plan (NEW)
         other_ops_detail_raw = plan_machine_times.get('other_ops_detail', [])
-        total_other_min = plan_machine_times.get('other_ops_minutes', 0.0)
+        total_other_min = safe_get_float(plan_machine_times, 'other_ops_minutes', 0.0)
 
         # Any milling/grinding/pocket/slot time not in detailed ops goes to "other" for transparency
-        milling_overhead_min = breakdown_milling_min - total_milling_ops_min
-        grinding_overhead_min = breakdown_grinding_min - total_grinding_ops_min
-        pocket_overhead_min = breakdown_pocket_min - total_pocket_ops_min
-        slot_overhead_min = breakdown_slot_min - total_slot_ops_min
+        # Ensure all values are floats before subtraction
+        milling_overhead_min = float(breakdown_milling_min) - float(total_milling_ops_min)
+        grinding_overhead_min = float(breakdown_grinding_min) - float(total_grinding_ops_min)
+        pocket_overhead_min = float(breakdown_pocket_min) - float(total_pocket_ops_min)
+        slot_overhead_min = float(breakdown_slot_min) - float(total_slot_ops_min)
 
         # Add overflow to other_ops_detail if non-zero
         overflow_total = milling_overhead_min + grinding_overhead_min + pocket_overhead_min + slot_overhead_min
@@ -2112,7 +2803,11 @@ def extract_quote_data_from_cad(
 
         # Use detailed ops totals for display (ensures Total Milling Time matches ops sum)
         # Add slot milling time from hole table to milling totals (legacy slot handling)
-        total_milling_min = total_milling_ops_min + slot_milling_min
+        # Ensure both values are floats before addition
+        if isinstance(slot_milling_min, dict):
+            print(f"WARNING: slot_milling_min is a dict: {slot_milling_min}. Using 0.0.")
+            slot_milling_min = 0.0
+        total_milling_min = float(total_milling_ops_min) + float(slot_milling_min)
         total_grinding_min = total_grinding_ops_min
         total_pocket_min = total_pocket_ops_min
         total_slot_min = total_slot_ops_min
@@ -2182,17 +2877,18 @@ def extract_quote_data_from_cad(
         cmm_checking_machine_min = round(cmm_checking_machine_min, 2)
 
         # Extract special operation times (edge break, etch, polish)
-        total_edge_break_min = round(plan_machine_times.get('edge_break_minutes', 0.0), 2)
-        total_etch_min = round(plan_machine_times.get('etch_minutes', 0.0), 2)
-        total_polish_min = round(plan_machine_times.get('polish_minutes', 0.0), 2)
+        total_edge_break_min = round(safe_get_float(plan_machine_times, 'edge_break_minutes', 0.0), 2)
+        total_etch_min = round(safe_get_float(plan_machine_times, 'etch_minutes', 0.0), 2)
+        total_polish_min = round(safe_get_float(plan_machine_times, 'polish_minutes', 0.0), 2)
 
+        # Ensure all values are floats before final summation
         grand_total_minutes = round(
-            total_drill_min + total_tap_min + total_cbore_min +
-            total_cdrill_min + total_jig_grind_min +
-            total_milling_min + total_grinding_min + total_pocket_min + total_slot_min +
-            total_edm_min + total_other_min + total_waterjet_min +  # NEW: Added waterjet
-            total_edge_break_min + total_etch_min + total_polish_min +
-            cmm_checking_machine_min, 2
+            float(total_drill_min) + float(total_tap_min) + float(total_cbore_min) +
+            float(total_cdrill_min) + float(total_jig_grind_min) +
+            float(total_milling_min) + float(total_grinding_min) + float(total_pocket_min) + float(total_slot_min) +
+            float(total_edm_min) + float(total_other_min) + float(total_waterjet_min) +  # NEW: Added waterjet
+            float(total_edge_break_min) + float(total_etch_min) + float(total_polish_min) +
+            float(cmm_checking_machine_min), 2
         )
         grand_total_hours = round(grand_total_minutes / 60.0, 2)
 
@@ -2273,13 +2969,21 @@ def extract_quote_data_from_cad(
         ops = plan.get('ops', [])
         # Note: holes_total is already calculated earlier in STEP 4
 
+        # Estimate tool changes using operation-specific logic
+        part_type = plan.get('planner', 'die_plate')  # 'die_plate', 'punch', etc.
+        tool_changes = estimate_tool_changes_from_ops(
+            ops=ops,
+            hole_table=hole_table,
+            part_type=part_type
+        )
+
         # Estimate labor inputs (simplified - could be more sophisticated)
         # Pass machine_time_minutes for simple-part setup guardrail
         # Pass plan data for finishing labor detail calculation
         labor_inputs = LaborInputs(
             ops_total=len(ops),
             holes_total=holes_total,
-            tool_changes=len(ops) * 2,  # Rough estimate
+            tool_changes=tool_changes,
             fixturing_complexity=1,
             cmm_setup_min=cmm_setup_labor_min,  # Add CMM setup to inspection labor
             cmm_holes_checked=cmm_holes_checked,  # Holes checked by CMM (avoid double counting)
@@ -2298,13 +3002,26 @@ def extract_quote_data_from_cad(
         labor_result = compute_labor_minutes(labor_inputs)
         minutes = labor_result['minutes']
 
+        # Helper function to safely get float values from labor minutes
+        def safe_labor_float(key, default=0.0):
+            """Safely get a float value from minutes dict."""
+            val = minutes.get(key, default)
+            if isinstance(val, dict):
+                print(f"WARNING: Labor minutes['{key}'] is a dict: {val}. Using {default}.")
+                return default
+            try:
+                return float(val) if val is not None else default
+            except (TypeError, ValueError) as e:
+                print(f"WARNING: Cannot convert labor minutes['{key}'] value {val} to float: {e}. Using {default}.")
+                return default
+
         # Extract individual category minutes with rounding for consistent display
-        setup_min = round(minutes.get('Setup', 0.0), 2)
-        programming_min = round(minutes.get('Programming', 0.0), 2)
-        machining_min = round(minutes.get('Machining_Steps', 0.0), 2)
-        inspection_min = round(minutes.get('Inspection', 0.0), 2)
-        finishing_min = round(minutes.get('Finishing', 0.0), 2)
-        labor_total = round(minutes.get('Labor_Total', 0.0), 2)
+        setup_min = round(safe_labor_float('Setup', 0.0), 2)
+        programming_min = round(safe_labor_float('Programming', 0.0), 2)
+        machining_min = round(safe_labor_float('Machining_Steps', 0.0), 2)
+        inspection_min = round(safe_labor_float('Inspection', 0.0), 2)
+        finishing_min = round(safe_labor_float('Finishing', 0.0), 2)
+        labor_total = round(safe_labor_float('Labor_Total', 0.0), 2)
 
         # Extract finishing detail breakdown
         finishing_breakdown = labor_result.get('finishing_breakdown', {})
@@ -2322,6 +3039,26 @@ def extract_quote_data_from_cad(
         # Sanity check: total should equal sum of categories + overhead
         assert abs(labor_total - (visible_labor_sum + misc_overhead_min)) < 0.01, \
             f"Labor time mismatch: total={labor_total:.2f}, sum={visible_labor_sum:.2f}, overhead={misc_overhead_min:.2f}"
+
+        # NOTE: For multi-quantity jobs, we do NOT amortize the minutes here.
+        # The labor_hours breakdown stores FULL job-level minutes (setup, programming, inspection).
+        # Amortization happens in the cost calculation (lines 2943-2949) where job-level
+        # costs are amortized across quantity. This ensures:
+        # - Display shows actual job-level minutes with (JOB-LEVEL) labels
+        # - Per-unit costs are correctly calculated as: (job_level_cost / qty) + variable_cost
+
+        # For multi-quantity jobs, calculate per-unit labor total
+        # Job-level: setup, programming, inspection (one-time costs, amortized across qty)
+        # Per-unit: machining, finishing, misc_overhead (scales with quantity)
+        if quantity > 1:
+            # Job-level minutes (full, not amortized)
+            job_level_min = setup_min + programming_min + inspection_min
+            # Per-unit variable minutes
+            per_unit_min = machining_min + finishing_min + misc_overhead_min
+            # Total labor for the entire job
+            total_labor_min_for_job = job_level_min + (per_unit_min * quantity)
+            # Per-unit labor (amortized)
+            labor_total = round(total_labor_min_for_job / quantity, 2)
 
         labor_total_hours = round(labor_total / 60.0, 2)
         # Compute labor cost directly from total minutes for accuracy
@@ -2356,33 +3093,36 @@ def extract_quote_data_from_cad(
     # Use the same formula as labor_hours.labor_cost to ensure consistency
     setup_labor = round(quote_data.labor_hours.setup_minutes * (labor_rate / 60.0), 2)
     programming_labor = round(quote_data.labor_hours.programming_minutes * (labor_rate / 60.0), 2)
-    amortized_setup_cost = round((setup_labor + programming_labor) / quantity, 2)
+    inspection_labor = round(quote_data.labor_hours.inspection_minutes * (labor_rate / 60.0), 2)
 
-    # Calculate variable costs per unit (material, machining, inspection, finishing)
+    # Job-level costs (setup, programming, first-article inspection) - amortized across quantity
+    job_level_labor = setup_labor + programming_labor + inspection_labor
+    amortized_job_level_cost = round(job_level_labor / quantity, 2)
+
+    # Calculate variable costs per unit (material, machining, finishing)
     material_cost_per_unit = quote_data.direct_cost_breakdown.net_material_cost
     machine_cost_per_unit = quote_data.machine_hours.machine_cost
 
-    # Variable labor costs per unit (machining, inspection, finishing)
+    # Variable labor costs per unit (machining, finishing only - inspection is job-level)
     # Round each component before summing for display consistency
     machining_labor = round(quote_data.labor_hours.machining_steps_minutes * (labor_rate / 60.0), 2)
-    inspection_labor = round(quote_data.labor_hours.inspection_minutes * (labor_rate / 60.0), 2)
     finishing_labor = round(quote_data.labor_hours.finishing_minutes * (labor_rate / 60.0), 2)
     misc_overhead_labor = round(quote_data.labor_hours.misc_overhead_minutes * (labor_rate / 60.0), 2)
-    variable_labor_per_unit = machining_labor + inspection_labor + finishing_labor + misc_overhead_labor
+    variable_labor_per_unit = machining_labor + finishing_labor + misc_overhead_labor
 
     # Per-unit costs
     # Round each component to 2 decimal places before summing to ensure the total
     # matches the sum of the displayed line items exactly.
     per_unit_direct_cost = round(material_cost_per_unit, 2)
     per_unit_machine_cost = round(machine_cost_per_unit, 2)
-    per_unit_labor_cost = round(amortized_setup_cost + variable_labor_per_unit, 2)
+    per_unit_labor_cost = round(amortized_job_level_cost + variable_labor_per_unit, 2)
     per_unit_total_cost = round(per_unit_direct_cost + per_unit_machine_cost + per_unit_labor_cost, 2)
 
     # Total costs for all units
     # Use displayed (rounded) components to ensure total = sum of displayed parts
     total_direct_cost = round(per_unit_direct_cost * quantity, 2)
     total_machine_cost = round(per_unit_machine_cost * quantity, 2)
-    total_labor_cost = round((setup_labor + programming_labor) + (variable_labor_per_unit * quantity), 2)
+    total_labor_cost = round(job_level_labor + (variable_labor_per_unit * quantity), 2)
     total_total_cost = total_direct_cost + total_machine_cost + total_labor_cost
 
     # Margin and pricing

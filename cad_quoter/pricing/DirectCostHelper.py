@@ -677,6 +677,7 @@ class ScrapInfo:
     material: str = ""
     density: float = 0.0
     mcmaster_weight: float = 0.0
+    desired_stock_weight: float = 0.0  # Weight after stock prep, before machining
     final_part_weight: float = 0.0
     total_scrap_weight: float = 0.0
 
@@ -686,6 +687,9 @@ class ScrapInfo:
 
     # High scrap warning
     high_scrap_warning: bool = False  # True if scrap_percentage > HIGH_SCRAP_THRESHOLD
+
+    # Approximate scrap flag (when volume math doesn't add up and fallback is used)
+    is_approximate_scrap: bool = False
 
 
 def calculate_stock_prep_scrap(
@@ -1040,31 +1044,57 @@ def calculate_total_scrap(
 
         # Use cylindrical lookup for round bar stock
         if is_cylindrical and part_diameter is not None and part_length is not None:
+            # Add machining allowances for cylindrical parts (similar to plate stock)
+            # - Diameter needs extra material for turning/grinding (like thickness allowance)
+            # - Length needs extra material for facing and holding (like length allowance)
+            DIAMETER_ALLOWANCE = 0.25  # +0.25" for turning/grinding (matches thickness allowance)
+            LENGTH_ALLOWANCE = 0.50    # +0.50" for facing/holding (matches length allowance)
+
+            desired_diameter = part_diameter + DIAMETER_ALLOWANCE
+            desired_cylindrical_length = part_length + LENGTH_ALLOWANCE
+
             if verbose:
-                print(f"  [CYLINDRICAL] Using round bar stock lookup (diam={part_diameter:.3f}\", length={part_length:.3f}\")")
-                print(f"  [CYLINDRICAL] DEBUG: part_length={part_length}, desired_length={desired_length}")
+                print(f"  [CYLINDRICAL] Using round bar stock lookup")
+                print(f"  [CYLINDRICAL]   Diameter: {part_diameter:.3f}\" → {desired_diameter:.3f}\" (with {DIAMETER_ALLOWANCE}\" allowance)")
+                print(f"  [CYLINDRICAL]   Length: {part_length:.3f}\" → {desired_cylindrical_length:.3f}\" (with {LENGTH_ALLOWANCE}\" allowance)")
 
             result = pick_mcmaster_cylindrical_sku(
-                need_diam_in=part_diameter,
-                need_length_in=part_length,
+                need_diam_in=desired_diameter,
+                need_length_in=desired_cylindrical_length,
                 material_key=material,
                 catalog_rows=catalog_rows,
                 verbose=verbose
             )
 
             if result:
-                mcmaster_length = result.get('stock_L_in', part_length)
-                mcmaster_width = result.get('stock_diam_in', part_diameter)
-                mcmaster_thickness = result.get('stock_diam_in', part_diameter)
+                mcmaster_length = result.get('stock_L_in', desired_cylindrical_length)
+                mcmaster_width = result.get('stock_diam_in', desired_diameter)
+                mcmaster_thickness = result.get('stock_diam_in', desired_diameter)
+
+                # CRITICAL: Ensure stock dimensions never shrink below required dimensions
+                # (T1769-219 & T1769-134 bug fix: catalog rounding must never make stock smaller than needed)
+                if mcmaster_length < desired_cylindrical_length or mcmaster_width < desired_diameter:
+                    if verbose:
+                        print(f"WARNING: Catalog returned cylindrical stock smaller than required!")
+                        print(f"  Catalog: diam={mcmaster_width:.3f}\" × length={mcmaster_length:.3f}\"")
+                        print(f"  Required: diam={desired_diameter:.3f}\" × length={desired_cylindrical_length:.3f}\"")
+                        print(f"  Adjusting stock to meet minimum requirements...")
+
+                    # Ensure each dimension is at least as large as required
+                    mcmaster_length = max(mcmaster_length, desired_cylindrical_length)
+                    mcmaster_width = max(mcmaster_width, desired_diameter)
+                    mcmaster_thickness = max(mcmaster_thickness, desired_diameter)
+
                 if verbose:
                     print(f"Found McMaster cylindrical stock: diam={mcmaster_width}\" x length={mcmaster_length}\"")
             else:
-                # Fallback: use part dimensions for cylindrical
-                mcmaster_length = part_length
-                mcmaster_width = part_diameter
-                mcmaster_thickness = part_diameter
+                # Fallback: use desired dimensions (with allowances) for cylindrical
+                mcmaster_length = desired_cylindrical_length
+                mcmaster_width = desired_diameter
+                mcmaster_thickness = desired_diameter
                 if verbose:
-                    print(f"No McMaster cylindrical stock found, using part dimensions")
+                    print(f"No McMaster cylindrical stock found, using desired dimensions with allowances")
+                    print(f"  Stock dimensions: diam={mcmaster_width:.3f}\" x length={mcmaster_length:.3f}\"")
         else:
             # Use standard plate lookup
             result = pick_mcmaster_plate_sku(
@@ -1080,6 +1110,21 @@ def calculate_total_scrap(
                 mcmaster_length = result.get('stock_L_in', desired_length)
                 mcmaster_width = result.get('stock_W_in', desired_width)
                 mcmaster_thickness = result.get('stock_T_in', desired_thickness)
+
+                # CRITICAL: Ensure stock dimensions never shrink below required dimensions
+                # (T1769-219 & T1769-134 bug fix: catalog rounding must never make stock smaller than needed)
+                if mcmaster_length < desired_length or mcmaster_width < desired_width or mcmaster_thickness < desired_thickness:
+                    if verbose:
+                        print(f"WARNING: Catalog returned stock smaller than required!")
+                        print(f"  Catalog: {mcmaster_length:.3f}\" × {mcmaster_width:.3f}\" × {mcmaster_thickness:.3f}\"")
+                        print(f"  Required: {desired_length:.3f}\" × {desired_width:.3f}\" × {desired_thickness:.3f}\"")
+                        print(f"  Adjusting stock to meet minimum requirements...")
+
+                    # Ensure each dimension is at least as large as required
+                    mcmaster_length = max(mcmaster_length, desired_length)
+                    mcmaster_width = max(mcmaster_width, desired_width)
+                    mcmaster_thickness = max(mcmaster_thickness, desired_thickness)
+
                 if verbose:
                     print(f"Found McMaster stock: {mcmaster_length}\" x {mcmaster_width}\" x {mcmaster_thickness}\"")
             else:
@@ -1105,15 +1150,24 @@ def calculate_total_scrap(
         verbose=False
     )
 
-    # Calculate stock prep scrap
-    stock_prep_scrap = calculate_stock_prep_scrap(
-        mcmaster_length, mcmaster_width, mcmaster_thickness,
-        desired_length, desired_width, desired_thickness
-    )
-
-    # Calculate total scrap
-    mcmaster_volume = mcmaster_length * mcmaster_width * mcmaster_thickness
-    desired_volume = desired_length * desired_width * desired_thickness
+    # Calculate volumes and stock prep scrap
+    # For cylindrical parts, use π×r²×L formula instead of L×W×T
+    import math
+    if is_cylindrical:
+        # For cylindrical parts, width and thickness are both set to diameter
+        mcmaster_diameter = mcmaster_width  # or mcmaster_thickness, they're the same
+        desired_diameter = desired_width    # or desired_thickness, they're the same
+        mcmaster_volume = math.pi * (mcmaster_diameter / 2.0) ** 2 * mcmaster_length
+        desired_volume = math.pi * (desired_diameter / 2.0) ** 2 * desired_length
+        stock_prep_scrap = mcmaster_volume - desired_volume
+    else:
+        # For plate parts, use L×W×T
+        mcmaster_volume = mcmaster_length * mcmaster_width * mcmaster_thickness
+        desired_volume = desired_length * desired_width * desired_thickness
+        stock_prep_scrap = calculate_stock_prep_scrap(
+            mcmaster_length, mcmaster_width, mcmaster_thickness,
+            desired_length, desired_width, desired_thickness
+        )
 
     total_scrap_volume = (
         stock_prep_scrap +
@@ -1121,28 +1175,86 @@ def calculate_total_scrap(
         machining['hole_drilling_scrap']
     )
 
-    # Verify math
+    # Verify math - but allow fallback if volumes don't add up
     final_part_volume = machining['part_final_volume']
-    assert abs((mcmaster_volume - total_scrap_volume) - final_part_volume) < 0.01, \
-        "Scrap calculation error: volumes don't add up"
+    volume_diff = abs((mcmaster_volume - total_scrap_volume) - final_part_volume)
+    is_approximate_scrap = False
 
-    # Calculate weights
+    # Calculate weights first (needed for fallback)
     # Round weights to 2 decimal places to ensure consistency between
     # displayed values and calculations (e.g., scrap credit = weight × price)
     density = get_material_density(material)
     mcmaster_weight = round(mcmaster_volume * density, 2)
+    desired_stock_weight = round(desired_volume * density, 2)  # Weight after stock prep, before machining
     final_part_weight = round(final_part_volume * density, 2)
-    total_scrap_weight = round(total_scrap_volume * density, 2)
+
+    VOLUME_TOLERANCE = 0.01  # cubic inches
+
+    if volume_diff >= VOLUME_TOLERANCE:
+        # Volume mismatch detected - use fallback mode
+        is_approximate_scrap = True
+
+        # Log the mismatch for debugging
+        import logging
+        logger = logging.getLogger(__name__)
+        logger.warning(
+            f"Scrap volume mismatch detected (diff={volume_diff:.6f} in³):\n"
+            f"  McMaster volume: {mcmaster_volume:.6f} in³\n"
+            f"  Total scrap volume: {total_scrap_volume:.6f} in³\n"
+            f"  Final part volume: {final_part_volume:.6f} in³\n"
+            f"  Expected: (mcmaster - scrap) = part, got: "
+            f"({mcmaster_volume:.6f} - {total_scrap_volume:.6f}) = {mcmaster_volume - total_scrap_volume:.6f}, "
+            f"expected {final_part_volume:.6f}\n"
+            f"  Falling back to weight-based scrap calculation"
+        )
+
+        # Fallback: Calculate scrap weight from weight difference
+        # This is more tolerant and handles edge cases where volume math breaks down
+        total_scrap_weight = round(mcmaster_weight - final_part_weight, 2)
+
+        # Clamp scrap weight to be non-negative
+        if total_scrap_weight < 0:
+            logger.warning(
+                f"Negative scrap weight detected ({total_scrap_weight:.2f} lbs). "
+                f"McMaster weight ({mcmaster_weight:.2f} lbs) < Part weight ({final_part_weight:.2f} lbs). "
+                f"Clamping to 0."
+            )
+            total_scrap_weight = 0.0
+
+        # Recalculate scrap volume from weight (for display consistency)
+        if density > 0:
+            total_scrap_volume = total_scrap_weight / density
+
+        if verbose:
+            print(f"\n⚠️  APPROXIMATE SCRAP (volume mismatch detected)")
+            print(f"  Volume difference: {volume_diff:.6f} in³")
+            print(f"  Using weight-based fallback: scrap_weight = stock_weight - part_weight")
+    else:
+        # Normal mode - volumes add up within tolerance
+        total_scrap_weight = round(total_scrap_volume * density, 2)
+
+        # Clamp scrap weight to be non-negative (shouldn't happen in normal mode, but just in case)
+        if total_scrap_weight < 0:
+            logger.warning(
+                f"Negative scrap weight in normal mode ({total_scrap_weight:.2f} lbs). Clamping to 0."
+            )
+            total_scrap_weight = 0.0
 
     # Calculate percentages
     scrap_percentage = (total_scrap_volume / mcmaster_volume * 100) if mcmaster_volume > 0 else 0
     utilization_percentage = (final_part_volume / mcmaster_volume * 100) if mcmaster_volume > 0 else 0
+
+    # Clamp scrap percentage to [0, 100] to prevent display issues
+    scrap_percentage = max(0.0, min(100.0, scrap_percentage))
+    utilization_percentage = max(0.0, min(100.0, utilization_percentage))
 
     # Check for high scrap warning
     high_scrap_warning = scrap_percentage > HIGH_SCRAP_THRESHOLD
 
     if verbose:
         print(f"\nScrap Breakdown:")
+        if is_approximate_scrap:
+            print(f"  ⚠️  APPROXIMATE SCRAP - volume mismatch, using weight-based calculation")
         print(f"  Stock prep scrap: {stock_prep_scrap:.4f} in³")
         print(f"  Face milling scrap: {machining['face_milling_scrap']:.4f} in³")
         print(f"  Hole drilling scrap: {machining['hole_drilling_scrap']:.4f} in³")
@@ -1172,11 +1284,13 @@ def calculate_total_scrap(
         material=material,
         density=density,
         mcmaster_weight=mcmaster_weight,
+        desired_stock_weight=desired_stock_weight,
         final_part_weight=final_part_weight,
         total_scrap_weight=total_scrap_weight,
         scrap_percentage=scrap_percentage,
         utilization_percentage=utilization_percentage,
-        high_scrap_warning=high_scrap_warning
+        high_scrap_warning=high_scrap_warning,
+        is_approximate_scrap=is_approximate_scrap
     )
 
 

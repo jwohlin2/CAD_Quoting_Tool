@@ -203,16 +203,15 @@ class AppV7:
         self.quote_vars = {}
         self.cad_file_path: Optional[str] = None
 
+        # Multi-part order support
+        from cad_quoter.pricing.QuoteDataHelper import OrderData
+        self.current_order = OrderData()  # Current order (can hold multiple parts)
+        self.active_part_index: Optional[int] = None  # Index of currently selected part
+
         # Cached totals for summary display
         self.direct_cost_total: Optional[float] = None
         self.machine_cost_total: Optional[float] = None
         self.labor_cost_total: Optional[float] = None
-
-        # Cached CAD extraction results using QuoteDataHelper (to avoid redundant ODA/OCR calls)
-        self._cached_quote_data = None
-
-        # Track previous quote inputs for smart cache invalidation
-        self._previous_quote_inputs: Optional[dict] = None
 
         # Default profit margin applied to the final price
         self.margin_rate: float = 0.15
@@ -239,6 +238,8 @@ class AppV7:
         file_menu = tk.Menu(menubar, tearoff=0)
         menubar.add_cascade(label="File", menu=file_menu)
         file_menu.add_command(label="Open CAD File...", command=self.load_cad)
+        file_menu.add_command(label="Load Order...", command=self.load_order)
+        file_menu.add_separator()
         file_menu.add_command(label="Save Quote...", command=self.save_quote)
         file_menu.add_separator()
         file_menu.add_command(label="Exit", command=self.root.quit)
@@ -271,9 +272,21 @@ class AppV7:
                    command=self.open_drawing_preview).pack(side=tk.LEFT, padx=5)
 
     def _create_tabs(self) -> None:
-        """Create the tabbed interface."""
-        self.notebook = ttk.Notebook(self.root)
-        self.notebook.pack(fill=tk.BOTH, expand=True, padx=2, pady=2)
+        """Create the tabbed interface with parts list sidebar."""
+        # Create main container with grid layout
+        main_container = ttk.Frame(self.root)
+        main_container.pack(fill=tk.BOTH, expand=True, padx=2, pady=2)
+        main_container.grid_rowconfigure(0, weight=1)
+        main_container.grid_columnconfigure(0, weight=1)  # Notebook (expandable)
+
+        # Create notebook
+        self.notebook = ttk.Notebook(main_container)
+        self.notebook.grid(row=0, column=0, sticky="nsew")
+
+        # Order Parts tab (new)
+        self.order_parts_tab = tk.Frame(self.notebook)
+        self.notebook.add(self.order_parts_tab, text="Order Parts")
+        self._create_order_parts_tab()
 
         # GEO tab
         self.geo_tab = tk.Frame(self.notebook)
@@ -289,6 +302,298 @@ class AppV7:
         self.output_tab = tk.Frame(self.notebook)
         self.notebook.add(self.output_tab, text="Output")
         self._create_output_tab()
+
+    def _create_order_parts_tab(self) -> None:
+        """Create the Order Parts tab with parts list and management buttons."""
+        # Main container for the tab
+        parts_container = ttk.Frame(self.order_parts_tab, padding=10)
+        parts_container.pack(fill=tk.BOTH, expand=True)
+
+        # Parts listbox with scrollbar
+        listbox_frame = ttk.Frame(parts_container)
+        listbox_frame.pack(fill=tk.BOTH, expand=True, pady=(0, 10))
+
+        scrollbar = ttk.Scrollbar(listbox_frame)
+        scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+
+        self.parts_listbox = tk.Listbox(
+            listbox_frame,
+            yscrollcommand=scrollbar.set,
+            selectmode=tk.SINGLE,
+            font=("TkDefaultFont", 10)
+        )
+        self.parts_listbox.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        scrollbar.config(command=self.parts_listbox.yview)
+
+        # Bind selection event
+        self.parts_listbox.bind('<<ListboxSelect>>', self._on_part_selected)
+
+        # Buttons for managing parts
+        btn_frame = ttk.Frame(parts_container)
+        btn_frame.pack(fill=tk.X, pady=(0, 10))
+
+        ttk.Button(
+            btn_frame,
+            text="Add Part(s)...",
+            command=self.add_parts_to_order
+        ).pack(side=tk.LEFT, padx=5)
+
+        ttk.Button(
+            btn_frame,
+            text="Remove Part",
+            command=self.remove_part_from_order
+        ).pack(side=tk.LEFT, padx=5)
+
+        # Info label showing current selection
+        self.part_info_label = ttk.Label(
+            parts_container,
+            text="No parts in order",
+            relief=tk.SUNKEN,
+            anchor=tk.W,
+            padding=5
+        )
+        self.part_info_label.pack(fill=tk.X)
+
+    def _refresh_parts_list(self) -> None:
+        """Refresh the parts listbox and dropdown to reflect current order."""
+        self.parts_listbox.delete(0, tk.END)
+
+        if not self.current_order.parts:
+            self.part_info_label.config(text="No parts in order")
+            # Clear the dropdown
+            if hasattr(self, 'part_selector'):
+                self.part_selector['values'] = []
+                self.part_selector_var.set("")
+            return
+
+        # Populate both listbox and dropdown with the same format
+        part_options = []
+        for i, part in enumerate(self.current_order.parts):
+            # Format: "[1] filename.dwg · Qty: 5"
+            display_text = f"[{i+1}] {part.cad_file_name} · Qty: {part.quantity}"
+            self.parts_listbox.insert(tk.END, display_text)
+            part_options.append(display_text)
+
+        # Update dropdown with all parts
+        if hasattr(self, 'part_selector'):
+            self.part_selector['values'] = part_options
+            # Set current selection if there's an active part
+            if self.active_part_index is not None and 0 <= self.active_part_index < len(part_options):
+                self.part_selector_var.set(part_options[self.active_part_index])
+
+        # Update info label
+        total_parts = len(self.current_order.parts)
+        self.part_info_label.config(text=f"{total_parts} part(s) in order")
+
+    def _on_part_selected(self, event) -> None:
+        """Handle part selection from the listbox."""
+        selection = self.parts_listbox.curselection()
+        if not selection:
+            return
+
+        part_index = selection[0]
+        if part_index != self.active_part_index:
+            self.active_part_index = part_index
+            self._load_active_part_to_ui()
+
+    def _on_part_selector_changed(self, event) -> None:
+        """Handle part selection from the dropdown in Quote Editor tab."""
+        if not hasattr(self, 'part_selector') or not self.part_selector_var.get():
+            return
+
+        # Extract the part index from the dropdown selection
+        # Format: "[1] filename.dwg · Qty: 5"
+        selected_text = self.part_selector_var.get()
+        if selected_text.startswith("["):
+            try:
+                part_index = int(selected_text.split("]")[0][1:]) - 1
+                if part_index != self.active_part_index and 0 <= part_index < len(self.current_order.parts):
+                    self.active_part_index = part_index
+                    self._load_active_part_to_ui()
+                    # Update the listbox selection to match
+                    self.parts_listbox.selection_clear(0, tk.END)
+                    self.parts_listbox.selection_set(part_index)
+                    self.parts_listbox.see(part_index)
+            except (ValueError, IndexError):
+                pass
+
+    def _load_active_part_to_ui(self) -> None:
+        """Load the active part's data into the UI (Quote Editor, GEO tab, etc.)."""
+        if self.active_part_index is None:
+            return
+
+        part = self.current_order.get_part(self.active_part_index)
+        if not part:
+            return
+
+        # Update the CAD file path
+        self.cad_file_path = part.cad_file_path
+
+        # Populate Quote Editor fields from the active part's data
+        self._populate_quote_fields_from_part(part)
+
+        # Update info label
+        self.part_info_label.config(
+            text=f"Active: Part {self.active_part_index + 1} - {part.cad_file_name}"
+        )
+
+        # Update the part selector dropdown
+        if hasattr(self, 'part_selector') and hasattr(self, 'part_selector_var'):
+            part_options = self.part_selector['values']
+            if part_options and 0 <= self.active_part_index < len(part_options):
+                self.part_selector_var.set(part_options[self.active_part_index])
+
+        # Update status bar
+        self.status_bar.config(
+            text=f"Viewing Part {self.active_part_index + 1}: {part.cad_file_name}"
+        )
+
+    def _populate_quote_fields_from_part(self, part) -> None:
+        """Populate Quote Editor fields from a QuoteData object."""
+        # Family
+        if hasattr(self, 'family_var'):
+            family_value = getattr(part, 'part_family', '')
+            if family_value:
+                self.family_var.set(family_value)
+
+        # Dimensions
+        if part.part_dimensions:
+            if hasattr(self, 'quote_fields'):
+                if 'length' in self.quote_fields:
+                    self.quote_fields['length'].delete(0, tk.END)
+                    if part.part_dimensions.length:
+                        self.quote_fields['length'].insert(0, str(part.part_dimensions.length))
+
+                if 'width' in self.quote_fields:
+                    self.quote_fields['width'].delete(0, tk.END)
+                    if part.part_dimensions.width:
+                        self.quote_fields['width'].insert(0, str(part.part_dimensions.width))
+
+                if 'thickness' in self.quote_fields:
+                    self.quote_fields['thickness'].delete(0, tk.END)
+                    if part.part_dimensions.thickness:
+                        self.quote_fields['thickness'].insert(0, str(part.part_dimensions.thickness))
+
+                if 'diameter1' in self.quote_fields:
+                    self.quote_fields['diameter1'].delete(0, tk.END)
+                    if part.part_dimensions.diameter_major:
+                        self.quote_fields['diameter1'].insert(0, str(part.part_dimensions.diameter_major))
+
+                if 'diameter2' in self.quote_fields:
+                    self.quote_fields['diameter2'].delete(0, tk.END)
+                    if part.part_dimensions.diameter_minor:
+                        self.quote_fields['diameter2'].insert(0, str(part.part_dimensions.diameter_minor))
+
+        # Quantity
+        if hasattr(self, 'qty_var'):
+            self.qty_var.set(str(part.quantity))
+
+        # Material
+        if hasattr(self, 'material_var') and part.material_info:
+            if part.material_info.material_name:
+                self.material_var.set(part.material_info.material_name)
+
+        # CMM level
+        # (Note: This might need to be stored in QuoteData if not already)
+
+        # Margin
+        if hasattr(self, 'margin_var') and part.cost_summary:
+            margin_pct = part.cost_summary.margin_rate * 100
+            self.margin_var.set(str(margin_pct))
+
+    def add_parts_to_order(self) -> None:
+        """Add one or more CAD files as parts to the current order."""
+        filenames = filedialog.askopenfilenames(
+            title="Select CAD File(s) to Add",
+            filetypes=[
+                ("All CAD Files", "*.dwg *.dxf *.step *.stp *.iges *.igs"),
+                ("DWG Files", "*.dwg"),
+                ("DXF Files", "*.dxf"),
+                ("All Files", "*.*")
+            ]
+        )
+
+        if not filenames:
+            return
+
+        self.status_bar.config(text=f"Adding {len(filenames)} part(s) to order...")
+        self.root.update_idletasks()
+
+        added_count = 0
+        for filename in filenames:
+            try:
+                # Load this file as a part (lightweight - just store the path initially)
+                # Full extraction happens when user generates the quote
+                from cad_quoter.pricing.QuoteDataHelper import QuoteData
+                part = QuoteData()
+                part.cad_file_path = filename
+                part.cad_file_name = Path(filename).name
+                from datetime import datetime
+                part.extraction_timestamp = datetime.now().isoformat()
+
+                # Add to order
+                part_index = self.current_order.add_part(part)
+                added_count += 1
+
+                print(f"[AppV7] Added part {part_index + 1}: {part.cad_file_name}")
+
+            except Exception as e:
+                messagebox.showerror(
+                    "Error Adding Part",
+                    f"Failed to add {Path(filename).name}:\n{str(e)}"
+                )
+                continue
+
+        # Refresh the parts list
+        self._refresh_parts_list()
+
+        # Auto-select the first part if nothing was selected before
+        if self.active_part_index is None and self.current_order.parts:
+            self.parts_listbox.selection_set(0)
+            self.active_part_index = 0
+            self._load_active_part_to_ui()
+
+        self.status_bar.config(text=f"Added {added_count} part(s) to order. Total: {len(self.current_order.parts)} parts.")
+
+    def remove_part_from_order(self) -> None:
+        """Remove the selected part from the order."""
+        if self.active_part_index is None:
+            messagebox.showinfo("No Selection", "Please select a part to remove.")
+            return
+
+        part = self.current_order.get_part(self.active_part_index)
+        if not part:
+            return
+
+        # Confirm removal
+        result = messagebox.askyesno(
+            "Confirm Removal",
+            f"Remove part {self.active_part_index + 1} ({part.cad_file_name})?"
+        )
+
+        if not result:
+            return
+
+        # Remove the part
+        self.current_order.remove_part(self.active_part_index)
+
+        # Refresh the list
+        self._refresh_parts_list()
+
+        # Update active part index
+        if not self.current_order.parts:
+            # No parts left
+            self.active_part_index = None
+            self.cad_file_path = None
+            self.part_info_label.config(text="No parts in order")
+            self.status_bar.config(text="Order is now empty")
+        else:
+            # Select the previous part, or the first part if we removed index 0
+            if self.active_part_index >= len(self.current_order.parts):
+                self.active_part_index = len(self.current_order.parts) - 1
+
+            self.parts_listbox.selection_set(self.active_part_index)
+            self._load_active_part_to_ui()
 
     def open_drawing_preview(self) -> None:
         """Open the drawing preview image file with the system default viewer.
@@ -429,9 +734,25 @@ class AppV7:
         editor_scroll = ScrollableFrame(self.quote_editor_tab)
         editor_scroll.pack(fill="both", expand=True)
 
+        # Part selector dropdown
+        selector_frame = ttk.Frame(editor_scroll.inner)
+        selector_frame.grid(row=0, column=0, sticky="ew", padx=10, pady=(5, 5))
+
+        ttk.Label(selector_frame, text="Select Part to Edit:", font=("TkDefaultFont", 10, "bold")).pack(side=tk.LEFT, padx=(0, 10))
+
+        self.part_selector_var = tk.StringVar()
+        self.part_selector = ttk.Combobox(
+            selector_frame,
+            textvariable=self.part_selector_var,
+            state="readonly",
+            width=60
+        )
+        self.part_selector.pack(side=tk.LEFT, fill=tk.X, expand=True)
+        self.part_selector.bind('<<ComboboxSelected>>', self._on_part_selector_changed)
+
         # Quote-Specific Variables section with Labelframe (like appV5)
         quote_frame = ttk.Labelframe(editor_scroll.inner, text="Quote-Specific Variables", padding=(10, 5))
-        quote_frame.grid(row=0, column=0, sticky="ew", padx=10, pady=5)
+        quote_frame.grid(row=1, column=0, sticky="ew", padx=10, pady=5)
 
         # Define all the quote variables from the screenshot
         self.quote_fields = {}
@@ -555,98 +876,11 @@ class AppV7:
                                    bd=1, relief=tk.SUNKEN, anchor=tk.W)
         self.status_bar.pack(side=tk.BOTTOM, fill=tk.X)
 
-    def _clear_cad_cache(self) -> None:
-        """Clear cached CAD extraction results (QuoteData and DXF path)."""
-        self._cached_quote_data = None
-        self._cached_dxf_path = None  # Clear cached DXF conversion
-        print("[AppV7] Cleared CAD extraction cache")
-
-    def _get_ocr_cache_path(self, cad_file_path: str) -> Path:
-        """
-        Get the path to the OCR cache file for a given CAD file.
-
-        Args:
-            cad_file_path: Path to CAD file
-
-        Returns:
-            Path to the .ocr_cache.json sidecar file
-        """
-        cad_path = Path(cad_file_path)
-        cache_path = cad_path.parent / f".{cad_path.name}.ocr_cache.json"
-        return cache_path
-
-    def _load_ocr_cache(self, cad_file_path: str) -> Optional[dict]:
-        """
-        Load cached OCR results from sidecar file.
-
-        Args:
-            cad_file_path: Path to CAD file
-
-        Returns:
-            Dictionary with cached OCR data or None if no cache exists
-        """
-        cache_path = self._get_ocr_cache_path(cad_file_path)
-
-        if not cache_path.exists():
-            print(f"[AppV7] No OCR cache found at {cache_path.name}")
-            return None
-
-        try:
-            with open(cache_path, 'r') as f:
-                cache_data = json.load(f)
-
-            # Validate cache structure
-            if 'dimensions' in cache_data and 'material' in cache_data:
-                print(f"[AppV7] Loaded OCR cache from {cache_path.name}")
-                return cache_data
-            else:
-                print(f"[AppV7] Invalid OCR cache format in {cache_path.name}")
-                return None
-
-        except Exception as e:
-            print(f"[AppV7] Failed to load OCR cache: {e}")
-            return None
-
-    def _save_ocr_cache(self, cad_file_path: str, dimensions: tuple, material: str) -> None:
-        """
-        Save OCR results to sidecar cache file.
-
-        Args:
-            cad_file_path: Path to CAD file
-            dimensions: Tuple of (length, width, thickness) in inches
-            material: Detected material name
-        """
-        cache_path = self._get_ocr_cache_path(cad_file_path)
-
-        try:
-            import time
-            cache_data = {
-                'dimensions': {
-                    'length': dimensions[0],
-                    'width': dimensions[1],
-                    'thickness': dimensions[2]
-                },
-                'material': material,
-                'timestamp': Path(cad_file_path).stat().st_mtime,
-                'cached_at': time.time()
-            }
-
-            with open(cache_path, 'w') as f:
-                json.dump(cache_data, f, indent=2)
-
-            print(f"[AppV7] Saved OCR cache to {cache_path.name}")
-
-        except Exception as e:
-            print(f"[AppV7] Failed to save OCR cache: {e}")
-
     def remove_overrides(self) -> None:
         """
-        Clear all user overrides and remove the OCR cache file.
+        Clear all user overrides.
 
-        This method:
-        1. Clears all quote field entries (dimensions, material, rates, etc.)
-        2. Deletes the OCR cache file if it exists
-        3. Clears in-memory cached data
+        This method clears all quote field entries (dimensions, material, rates, etc.).
         """
         try:
             # Clear all quote field entries
@@ -668,28 +902,9 @@ class AppV7:
                         field.set('')
                         cleared_fields.append(label)
 
-            # Delete OCR cache file if it exists
-            cache_deleted = False
-            if self.cad_file_path:
-                cache_path = self._get_ocr_cache_path(self.cad_file_path)
-                if cache_path.exists():
-                    cache_path.unlink()
-                    cache_deleted = True
-                    print(f"[AppV7] Deleted OCR cache file: {cache_path.name}")
-
-            # Clear in-memory caches
-            self._clear_cad_cache()
-            self._previous_quote_inputs = None
-
             # Show success message
-            message_parts = []
             if cleared_fields:
-                message_parts.append(f"Cleared {len(cleared_fields)} override field(s)")
-            if cache_deleted:
-                message_parts.append("Deleted OCR cache file")
-
-            if message_parts:
-                messagebox.showinfo("Overrides Removed", "\n".join(message_parts))
+                messagebox.showinfo("Overrides Removed", f"Cleared {len(cleared_fields)} override field(s)")
             else:
                 messagebox.showinfo("Overrides Removed", "No overrides to clear")
 
@@ -700,12 +915,9 @@ class AppV7:
             print(f"[AppV7] {error_msg}")
             messagebox.showerror("Error", error_msg)
 
-    def _get_or_create_quote_data(self):
+    def _extract_quote_data(self):
         """
-        Get cached QuoteData or extract it once using QuoteDataHelper.
-
-        This replaces the old separate caching of plan, part_info, and hole_operations
-        with a unified QuoteData structure that contains everything.
+        Extract QuoteData from CAD file using QuoteDataHelper.
 
         Returns:
             QuoteData with all extraction results
@@ -713,97 +925,75 @@ class AppV7:
         if not self.cad_file_path:
             raise ValueError("No CAD file loaded")
 
-        if self._cached_quote_data is None:
-            print("[AppV7] Extracting complete quote data (ODA + OCR will run once)...")
-            from cad_quoter.pricing.QuoteDataHelper import extract_quote_data_from_cad
+        print("[AppV7] Extracting quote data from CAD file...")
+        from cad_quoter.pricing.QuoteDataHelper import extract_quote_data_from_cad
 
-            # Read all overrides from Quote Editor
-            dimension_override = self._get_manual_dimensions()
-            diameter_overrides = self._get_diameter_overrides()
-            material_override = self._get_field_string("Material")
-            cmm_inspection_level_override = self._get_cmm_inspection_level()
+        # Read all overrides from Quote Editor
+        dimension_override = self._get_manual_dimensions()
+        diameter_overrides = self._get_diameter_overrides()
+        material_override = self._get_field_string("Material")
+        cmm_inspection_level_override = self._get_cmm_inspection_level()
 
-            # Try to load OCR cache if no manual dimensions provided (saves ~43 seconds!)
-            ocr_cache_used = False
-            if dimension_override is None:
-                ocr_cache = self._load_ocr_cache(self.cad_file_path)
-                if ocr_cache:
-                    dims = ocr_cache['dimensions']
-                    dimension_override = (dims['length'], dims['width'], dims['thickness'])
-                    ocr_cache_used = True
-                    print(f"[AppV7] Using cached OCR dimensions: {dimension_override} (saves ~43 seconds!)")
+        machine_rate = self._get_field_float("Machine Rate ($/hr)", self.MACHINE_RATE)
+        labor_rate = self._get_field_float("Labor Rate ($/hr)", self.LABOR_RATE)
+        margin_percent = self._get_field_float("Margin (%)", 15.0)
+        margin_rate = (margin_percent / 100.0) if margin_percent is not None else 0.15  # Convert percentage to decimal
+        mcmaster_price_override = self._get_field_float("McMaster Price Override ($)")
+        scrap_value_override = self._get_field_float("Scrap Value Override ($)")
+        quantity = self._get_quantity()
+        family_override = self._get_part_family()
 
-            machine_rate = self._get_field_float("Machine Rate ($/hr)", self.MACHINE_RATE)
-            labor_rate = self._get_field_float("Labor Rate ($/hr)", self.LABOR_RATE)
-            margin_percent = self._get_field_float("Margin (%)", 15.0)
-            margin_rate = (margin_percent / 100.0) if margin_percent is not None else 0.15  # Convert percentage to decimal
-            mcmaster_price_override = self._get_field_float("McMaster Price Override ($)")
-            scrap_value_override = self._get_field_float("Scrap Value Override ($)")
-            quantity = self._get_quantity()
-            family_override = self._get_part_family()
+        try:
+            quote_data = extract_quote_data_from_cad(
+                cad_file_path=self.cad_file_path,
+                machine_rate=machine_rate,
+                labor_rate=labor_rate,
+                margin_rate=margin_rate,
+                material_override=material_override,
+                dimension_override=dimension_override,
+                diameter_overrides=diameter_overrides,
+                mcmaster_price_override=mcmaster_price_override,
+                scrap_value_override=scrap_value_override,
+                quantity=quantity,
+                family_override=family_override,
+                cmm_inspection_level_override=cmm_inspection_level_override,
+                verbose=True
+            )
 
-            try:
-                # Use cached DXF path if available to avoid redundant ODA conversion
-                cad_path_for_quote = self._cached_dxf_path if hasattr(self, '_cached_dxf_path') and self._cached_dxf_path else self.cad_file_path
+            if dimension_override:
+                print(f"[AppV7] Quote data extracted (using manual dimensions: {dimension_override})")
+            else:
+                print("[AppV7] Quote data extracted successfully")
 
-                self._cached_quote_data = extract_quote_data_from_cad(
-                    cad_file_path=cad_path_for_quote,
-                    machine_rate=machine_rate,
-                    labor_rate=labor_rate,
-                    margin_rate=margin_rate,
-                    material_override=material_override,
-                    dimension_override=dimension_override,
-                    diameter_overrides=diameter_overrides,
-                    mcmaster_price_override=mcmaster_price_override,
-                    scrap_value_override=scrap_value_override,
-                    quantity=quantity,
-                    family_override=family_override,
-                    cmm_inspection_level_override=cmm_inspection_level_override,
-                    verbose=True
+            return quote_data
+
+        except ValueError as e:
+            error_msg = str(e)
+            # Check if it's a dimension extraction failure
+            if "Could not extract dimensions" in error_msg:
+                print(f"[AppV7 ERROR] OCR dimension extraction failed: {e}")
+                messagebox.showerror(
+                    "OCR Dimension Extraction Failed",
+                    "Could not extract dimensions from the CAD file.\n\n"
+                    "Please enter the part dimensions manually in the Quote Editor tab:\n"
+                    "- Length (in)\n"
+                    "- Width (in)\n"
+                    "- Thickness (in)\n\n"
+                    "Then click 'Generate Quote' again."
                 )
-
-                # Save OCR results to cache for next time (if we actually ran OCR)
-                if not ocr_cache_used and dimension_override is None:
-                    # OCR was just performed, save results to cache
-                    dims = self._cached_quote_data.part_dimensions
-                    material = self._cached_quote_data.material_info.material_name
-                    self._save_ocr_cache(
-                        self.cad_file_path,
-                        (dims.length, dims.width, dims.thickness),
-                        material
-                    )
-
-                if dimension_override:
-                    print(f"[AppV7] Quote data cached (using manual/cached dimensions: {dimension_override})")
-                else:
-                    print("[AppV7] Quote data cached for reuse")
-            except ValueError as e:
-                error_msg = str(e)
-                # Check if it's a dimension extraction failure
-                if "Could not extract dimensions" in error_msg:
-                    print(f"[AppV7 ERROR] OCR dimension extraction failed: {e}")
-                    messagebox.showerror(
-                        "OCR Dimension Extraction Failed",
-                        "Could not extract dimensions from the CAD file.\n\n"
-                        "Please enter the part dimensions manually in the Quote Editor tab:\n"
-                        "- Length (in)\n"
-                        "- Width (in)\n"
-                        "- Thickness (in)\n\n"
-                        "Then click 'Generate Quote' again."
-                    )
-                    # Switch to Quote Editor tab so user can see the fields
-                    self.notebook.select(self.quote_editor_tab)
-                    raise
-                else:
-                    print(f"[AppV7 ERROR] Failed to extract quote data: {e}")
-                    raise
-            except Exception as e:
-                print(f"[AppV7 ERROR] Failed to extract quote data: {e}")
+                # Switch to Quote Editor tab so user can see the fields
+                self.notebook.select(self.quote_editor_tab)
                 raise
-        else:
-            print("[AppV7] Using cached quote data (no ODA/OCR)")
-
-        return self._cached_quote_data
+            else:
+                print(f"[AppV7 ERROR] Failed to extract quote data: {e}")
+                import traceback
+                traceback.print_exc()
+                raise
+        except Exception as e:
+            print(f"[AppV7 ERROR] Failed to extract quote data: {e}")
+            import traceback
+            traceback.print_exc()
+            raise
 
     def _get_manual_dimensions(self):
         """
@@ -1043,56 +1233,6 @@ class AppV7:
         except Exception:
             return None  # Return None on error to use default
 
-    def _get_current_quote_inputs(self) -> dict:
-        """
-        Capture all quote inputs that affect CAD extraction and pricing.
-
-        Returns a dictionary of current input values for comparison.
-        Used to determine if cache should be invalidated.
-        """
-        return {
-            'material': self._get_field_string("Material", ""),
-            'length': self._get_field_string("Length (in)", ""),
-            'width': self._get_field_string("Width (in)", ""),
-            'thickness': self._get_field_string("Thickness (in)", ""),
-            'diameter_1': self._get_field_string("Diameter 1 (in)", ""),
-            'diameter_2': self._get_field_string("Diameter 2 (in)", ""),
-            'machine_rate': self._get_field_string("Machine Rate ($/hr)", "90"),
-            'labor_rate': self._get_field_string("Labor Rate ($/hr)", "90"),
-            'margin': self._get_field_string("Margin (%)", "15"),
-            'mcmaster_override': self._get_field_string("McMaster Price Override ($)", ""),
-            'scrap_override': self._get_field_string("Scrap Value Override ($)", ""),
-            'quantity': self._get_field_string("Quantity", "1"),
-            'part_family': self._get_part_family(),
-        }
-
-    def _quote_inputs_changed(self) -> bool:
-        """
-        Check if any quote inputs have changed since last generation.
-
-        Returns:
-            True if inputs changed (cache should be cleared)
-            False if inputs unchanged (cache can be reused)
-        """
-        current_inputs = self._get_current_quote_inputs()
-
-        # First time generating quote - consider it changed
-        if self._previous_quote_inputs is None:
-            self._previous_quote_inputs = current_inputs
-            return True
-
-        # Compare current inputs to previous
-        if current_inputs != self._previous_quote_inputs:
-            if hasattr(self, 'status_bar'):
-                self.status_bar.config(text="Input changed - regenerating quote data...")
-            self._previous_quote_inputs = current_inputs
-            return True
-
-        # Inputs unchanged - can reuse cache
-        if hasattr(self, 'status_bar'):
-            self.status_bar.config(text="Using cached quote data (inputs unchanged)...")
-        return False
-
     def _find_existing_drawing_image(self, cad_filename: str) -> bool:
         """
         Check if a drawing image already exists for the CAD file.
@@ -1238,31 +1378,8 @@ class AppV7:
                 # Store the CAD file path
                 self.cad_file_path = filename
 
-                # Clear cached CAD extraction results
-                self._clear_cad_cache()
-
-                # Reset previous quote inputs so cache will be regenerated
-                self._previous_quote_inputs = None
-
-                # Pre-convert DWG to DXF once to avoid multiple ODA converter invocations
-                # This cached path will be used for hole table extraction AND quote generation
-                file_for_extraction = filename
-                if filename.lower().endswith('.dwg'):
-                    try:
-                        from cad_quoter.geometry import convert_dwg_to_dxf
-                        self.status_bar.config(text=f"Converting DWG to DXF (one-time)...")
-                        self.root.update_idletasks()
-                        dxf_path = convert_dwg_to_dxf(filename)
-                        if dxf_path:
-                            self._cached_dxf_path = dxf_path
-                            file_for_extraction = dxf_path
-                            print(f"[AppV7] Cached DXF conversion: {Path(dxf_path).name}")
-                    except Exception as e:
-                        print(f"[AppV7] DWG conversion failed, will retry per-function: {e}")
-                        # Fall back to original - each function will try its own conversion
-
-                # Load and extract hole table data using cached DXF if available
-                self._extract_and_display_hole_table(file_for_extraction)
+                # Load and extract hole table data
+                self._extract_and_display_hole_table(filename)
 
                 # Check for existing drawing image (fast, <1ms)
                 has_existing_image = self._find_existing_drawing_image(filename)
@@ -1274,6 +1391,27 @@ class AppV7:
                     status_msg = "CAD file loaded. Review the Quote Editor and generate the quote. (Drawing preview generating in background...)"
                 else:
                     status_msg = "CAD file loaded. Review the Quote Editor and generate the quote. (Drawing preview available)"
+
+                # Add this file as a part to the order (for backward compatibility)
+                # Clear existing order if there's only one old part
+                if len(self.current_order.parts) <= 1:
+                    from cad_quoter.pricing.QuoteDataHelper import QuoteData, OrderData
+                    self.current_order = OrderData()  # Reset order
+
+                    # Create a new part
+                    part = QuoteData()
+                    part.cad_file_path = filename
+                    part.cad_file_name = Path(filename).name
+                    from datetime import datetime
+                    part.extraction_timestamp = datetime.now().isoformat()
+
+                    # Add to order
+                    self.current_order.add_part(part)
+                    self.active_part_index = 0
+
+                    # Refresh parts list
+                    self._refresh_parts_list()
+                    self.parts_listbox.selection_set(0)
 
                 self.status_bar.config(text=status_msg)
                 self.notebook.select(self.geo_tab)
@@ -1375,15 +1513,16 @@ class AppV7:
             return "house rate"
         return source_label
 
-    def _generate_direct_costs_report(self) -> str:
+    def _generate_direct_costs_report(self, quote_data=None) -> str:
         """Generate formatted direct costs report using QuoteData."""
         self.direct_cost_total = None
         if not self.cad_file_path:
             return "No CAD file loaded. Please load a CAD file first."
 
         try:
-            # Get cached QuoteData (avoids redundant ODA/OCR)
-            quote_data = self._get_or_create_quote_data()
+            # Extract quote data from CAD file if not provided
+            if quote_data is None:
+                quote_data = self._extract_quote_data()
 
             # Extract data from QuoteData
             part_dims = quote_data.part_dimensions
@@ -1391,6 +1530,9 @@ class AppV7:
             stock_info = quote_data.stock_info
             scrap_info = quote_data.scrap_info
             cost_breakdown = quote_data.direct_cost_breakdown
+
+            # Get quantity for total cost calculation (from temp variable set in main thread)
+            quantity = getattr(self, '_temp_quantity', 1)
 
             # Check if overrides were used (read from temp variables set in main thread)
             material_override = getattr(self, '_temp_material_override', None)
@@ -1416,10 +1558,22 @@ class AppV7:
             if material_override:
                 material_label += " (OVERRIDDEN)"
             report.append(material_label)
-            report.append(f"  Required Stock: {stock_info.desired_length:.2f} × {stock_info.desired_width:.2f} × {stock_info.desired_thickness:.2f} in")
-            report.append(f"  Rounded to catalog: {stock_info.mcmaster_length:.2f} × {stock_info.mcmaster_width:.2f} × {stock_info.mcmaster_thickness:.3f}")
-            report.append(f"  Starting Weight: {self._format_weight(stock_info.mcmaster_weight)}")
-            report.append(f"  Net Weight: {self._format_weight(stock_info.final_part_weight)}")
+
+            # Check if part is cylindrical (guide posts, round punches, etc.)
+            is_cylindrical = getattr(part_dims, 'is_cylindrical', False)
+
+            if is_cylindrical:
+                # For cylindrical parts, show Length × Diameter
+                # For cylindrical parts, diameter is stored in width field
+                report.append(f"  Required Stock: {stock_info.desired_length:.2f} × Ø{stock_info.desired_width:.2f} in")
+                report.append(f"  Rounded to catalog: {stock_info.mcmaster_length:.2f} × Ø{stock_info.mcmaster_width:.3f}")
+            else:
+                # For plate parts, show Length × Width × Thickness
+                report.append(f"  Required Stock: {stock_info.desired_length:.2f} × {stock_info.desired_width:.2f} × {stock_info.desired_thickness:.2f} in")
+                report.append(f"  Rounded to catalog: {stock_info.mcmaster_length:.2f} × {stock_info.mcmaster_width:.2f} × {stock_info.mcmaster_thickness:.3f}")
+            report.append(f"  Starting Weight (catalog): {self._format_weight(stock_info.mcmaster_weight)}")
+            report.append(f"  Required Stock Weight: {self._format_weight(scrap_info.desired_stock_weight)}")
+            report.append(f"  Net Weight (final part): {self._format_weight(stock_info.final_part_weight)}")
             report.append(f"  Scrap Percentage: {scrap_info.scrap_percentage:.1f}%")
             report.append(f"  Scrap Weight: {self._format_weight(scrap_info.total_scrap_weight)}")
 
@@ -1452,11 +1606,29 @@ class AppV7:
                 stock_label = f"  Stock Piece (McMaster part {stock_info.mcmaster_part_number})"
             else:
                 stock_label = "  Stock Piece (no McMaster match)"
-            report.append(f"{stock_label}".ljust(50) + f"{formatted_price:>24}")
+
+            # Show per-unit or total costs based on quantity
+            if quantity > 1:
+                report.append(f"{stock_label} × {quantity}".ljust(50) + f"{formatted_price:>24}")
+            else:
+                report.append(f"{stock_label}".ljust(50) + f"{formatted_price:>24}")
 
             if stock_info.mcmaster_price is not None:
-                report.append(f"  Tax".ljust(50) + f"+${cost_breakdown.tax:>22.2f}")
-                report.append(f"  Shipping".ljust(50) + f"+${cost_breakdown.shipping:>22.2f}")
+                # Check if we're in a multi-part order context
+                in_multi_part_order = len(self.current_order.parts) > 1
+
+                if quantity > 1:
+                    report.append(f"  Tax (${cost_breakdown.tax:.2f} × {quantity})".ljust(50) + f"+${cost_breakdown.tax * quantity:>22.2f}")
+                    if in_multi_part_order:
+                        report.append(f"  Shipping (if standalone)".ljust(50) + f"+${cost_breakdown.shipping:>22.2f}")
+                    else:
+                        report.append(f"  Shipping".ljust(50) + f"+${cost_breakdown.shipping:>22.2f}")
+                else:
+                    report.append(f"  Tax".ljust(50) + f"+${cost_breakdown.tax:>22.2f}")
+                    if in_multi_part_order:
+                        report.append(f"  Shipping (if standalone)".ljust(50) + f"+${cost_breakdown.shipping:>22.2f}")
+                    else:
+                        report.append(f"  Shipping".ljust(50) + f"+${cost_breakdown.shipping:>22.2f}")
 
             if cost_breakdown.scrap_credit > 0:
                 # Use the scrap price source from scrap_info (could be Wieland, ScrapMetalBuyers, or house_rate)
@@ -1467,13 +1639,22 @@ class AppV7:
                 scrap_credit_line = f"  Scrap Credit @ {source_label} ${scrap_info.scrap_price_per_lb:.2f}/lb × {scrap_weight_formatted}"
                 if scrap_value_override is not None:
                     scrap_credit_line += " (MANUAL)"
-                report.append(f"{scrap_credit_line.ljust(50)}-${cost_breakdown.scrap_credit:>22.2f}")
+
+                if quantity > 1:
+                    scrap_credit_line += f" × {quantity}"
+                    report.append(f"{scrap_credit_line.ljust(50)}-${cost_breakdown.scrap_credit * quantity:>22.2f}")
+                else:
+                    report.append(f"{scrap_credit_line.ljust(50)}-${cost_breakdown.scrap_credit:>22.2f}")
 
             report.append(" " * 50 + "-" * 24)
 
             if stock_info.mcmaster_price is not None:
                 self.direct_cost_total = cost_breakdown.net_material_cost
-                report.append(f"  Total Material Cost :".ljust(50) + f"${cost_breakdown.net_material_cost:>23.2f}")
+                if quantity > 1:
+                    report.append(f"  Total Material Cost (per unit):".ljust(50) + f"${cost_breakdown.net_material_cost:>23.2f}")
+                    report.append(f"  Total Material Cost ({quantity} units):".ljust(50) + f"${cost_breakdown.net_material_cost * quantity:>23.2f}")
+                else:
+                    report.append(f"  Total Material Cost :".ljust(50) + f"${cost_breakdown.net_material_cost:>23.2f}")
             else:
                 self.direct_cost_total = None
                 report.append(f"  Total Material Cost :".ljust(50) + "Price N/A".rjust(24))
@@ -1487,15 +1668,16 @@ class AppV7:
             import traceback
             return f"Error generating direct costs report:\n{str(e)}\n\n{traceback.format_exc()}"
 
-    def _generate_machine_hours_report(self) -> str:
+    def _generate_machine_hours_report(self, quote_data=None) -> str:
         """Generate formatted machine hours report using QuoteData."""
         self.machine_cost_total = None
         if not self.cad_file_path:
             return "No CAD file loaded. Please load a CAD file first."
 
         try:
-            # Get cached QuoteData (avoids redundant ODA/OCR)
-            quote_data = self._get_or_create_quote_data()
+            # Extract quote data from CAD file if not provided
+            if quote_data is None:
+                quote_data = self._extract_quote_data()
 
             machine_hours = quote_data.machine_hours
 
@@ -1708,10 +1890,15 @@ class AppV7:
 
             def format_edm_group(op):
                 """Format EDM (wire EDM profile) operation."""
-                return (f"Hole {op.hole_id} | Starter Ø {op.diameter:.4f}\" x {op.qty:>3} | "
-                        f"thickness {op.depth:.3f}\" | "
-                        f"{op.time_per_hole:>5.2f} min/window | "
-                        f"tot. {op.qty}x{op.time_per_hole:.2f} = {op.total_time:.2f} min")
+                # Handle synthetic plan-based EDM operations
+                if op.hole_id == "PLAN":
+                    return (f"Wire EDM (from plan) | thickness {op.depth:.3f}\" | "
+                            f"Total time: {op.total_time:.2f} min")
+                else:
+                    return (f"Hole {op.hole_id} | Starter Ø {op.diameter:.4f}\" x {op.qty:>3} | "
+                            f"thickness {op.depth:.3f}\" | "
+                            f"{op.time_per_hole:>5.2f} min/window | "
+                            f"tot. {op.qty}x{op.time_per_hole:.2f} = {op.total_time:.2f} min")
 
             MILLING_DESC_WIDTH = 28
             MILLING_SEPARATOR_LENGTH = 106
@@ -1745,10 +1932,24 @@ class AppV7:
             def format_grinding_op(op):
                 """Format grinding operation with all details"""
                 lines = []
-                lines.append(f"{op.op_description} | L={op.length:.3f}\" | W={op.width:.3f}\" | Area={op.area:.2f} sq in")
-                lines.append(f"  stock_removed={op.stock_removed_total:.3f}\" | faces={op.faces} | volume={op.volume_removed:.3f} cu in")
-                lines.append(f"  min_per_cuin={op.min_per_cuin:.1f} | material_factor={op.material_factor:.2f}")
-                lines.append(f"  time = {op.volume_removed:.3f} × {op.min_per_cuin:.1f} × {op.material_factor:.2f} = {op.time_minutes:.2f} min")
+
+                # Check if this is a volume-based or non-volume-based operation
+                # Non-volume operations have volume_removed near 0 but non-zero time
+                is_volume_based = op.volume_removed > 0.001
+
+                if is_volume_based:
+                    # Volume-based grinding: show geometry and volume calculation
+                    lines.append(f"{op.op_description} | L={op.length:.3f}\" | W={op.width:.3f}\" | Area={op.area:.2f} sq in")
+                    lines.append(f"  stock_removed={op.stock_removed_total:.3f}\" | faces={op.faces} | volume={op.volume_removed:.3f} cu in")
+                    lines.append(f"  min_per_cuin={op.min_per_cuin:.1f} | material_factor={op.material_factor:.2f}")
+                    lines.append(f"  time = {op.volume_removed:.3f} × {op.min_per_cuin:.1f} × {op.material_factor:.2f} = {op.time_minutes:.2f} min")
+                else:
+                    # Non-volume-based grinding: show simplified format
+                    lines.append(f"{op.op_description} | faces={op.faces}")
+                    if op.material_factor != 1.0:
+                        lines.append(f"  material_factor={op.material_factor:.2f}")
+                    lines.append(f"  time = {op.time_minutes:.2f} min")
+
                 return "\n".join(lines)
 
             # Build the report
@@ -1825,6 +2026,10 @@ class AppV7:
                     'op_description': op.op_description,
                     'length': op.length,
                     'width': op.width,
+                    'thickness': op.thickness,
+                    'stock_length': op.stock_length,
+                    'stock_width': op.stock_width,
+                    'stock_thickness': op.stock_thickness,
                     'perimeter': op.perimeter,
                     'tool_diameter': op.tool_diameter,
                     'passes': op.passes,
@@ -1838,6 +2043,11 @@ class AppV7:
                     'time_minutes': op.time_minutes,
                     '_used_override': op._used_override,
                     'override_time_minutes': op.override_time_minutes,
+                    'material_factor': op.material_factor,
+                    'volume_removed_cuin': op.volume_removed_cuin,
+                    'volume_thickness': op.volume_thickness,
+                    'volume_length_trim': op.volume_length_trim,
+                    'volume_width_trim': op.volume_width_trim,
                 })
 
             grinding_ops_dicts = []
@@ -1990,6 +2200,8 @@ class AppV7:
 
             if machine_hours.total_cmm_minutes > 0:
                 report.append(f"  CMM (machine time):               {machine_hours.total_cmm_minutes:>10.2f} min")
+            if machine_hours.total_inspection_minutes > 0:
+                report.append(f"  Inspection (machine time):        {machine_hours.total_inspection_minutes:>10.2f} min")
             report.append("-" * 74)
 
             # Summary (read from temp variable set in main thread to avoid Tkinter widget access)
@@ -2014,17 +2226,19 @@ class AppV7:
             import traceback
             return f"Error generating machine hours report:\n{str(e)}\n\n{traceback.format_exc()}"
 
-    def _generate_labor_hours_report(self) -> str:
+    def _generate_labor_hours_report(self, quote_data=None) -> str:
         """Generate formatted labor hours report using QuoteData."""
         self.labor_cost_total = None
         if not self.cad_file_path:
             return "No CAD file loaded. Please load a CAD file first."
 
         try:
-            # Get cached QuoteData (avoids redundant ODA/OCR)
-            quote_data = self._get_or_create_quote_data()
+            # Extract quote data from CAD file if not provided
+            if quote_data is None:
+                quote_data = self._extract_quote_data()
 
             labor_hours = quote_data.labor_hours
+            quantity = quote_data.quantity
 
             # Format the report
             report = []
@@ -2035,14 +2249,33 @@ class AppV7:
             # Summary table
             report.append("LABOR BREAKDOWN BY CATEGORY")
             report.append("-" * 74)
-            report.append(f"  Setup / Prep:                    {labor_hours.setup_minutes:>10.2f} minutes")
-            report.append(f"  Programming / Prove-out:         {labor_hours.programming_minutes:>10.2f} minutes")
-            report.append(f"  Machining Steps:                 {labor_hours.machining_steps_minutes:>10.2f} minutes")
-            report.append(f"  Inspection:                      {labor_hours.inspection_minutes:>10.2f} minutes")
 
-            # Finishing / Deburr with detailed breakdown
+            # Job-level costs (amortized across quantity)
+            if quantity > 1:
+                report.append(f"  Setup / Prep:                    {labor_hours.setup_minutes:>10.2f} minutes  (JOB-LEVEL)")
+                report.append(f"  Programming / Prove-out:         {labor_hours.programming_minutes:>10.2f} minutes  (JOB-LEVEL)")
+            else:
+                report.append(f"  Setup / Prep:                    {labor_hours.setup_minutes:>10.2f} minutes")
+                report.append(f"  Programming / Prove-out:         {labor_hours.programming_minutes:>10.2f} minutes")
+
+            # Variable costs (per-unit)
+            if quantity > 1:
+                report.append(f"  Machining Steps:                 {labor_hours.machining_steps_minutes:>10.2f} minutes  (PER UNIT)")
+            else:
+                report.append(f"  Machining Steps:                 {labor_hours.machining_steps_minutes:>10.2f} minutes")
+
+            # Inspection (job-level, includes CMM setup if present)
+            if quantity > 1:
+                report.append(f"  Inspection:                      {labor_hours.inspection_minutes:>10.2f} minutes  (JOB-LEVEL)")
+            else:
+                report.append(f"  Inspection:                      {labor_hours.inspection_minutes:>10.2f} minutes")
+
+            # Finishing / Deburr with detailed breakdown (per-unit cost)
             if labor_hours.finishing_detail and len(labor_hours.finishing_detail) > 0:
-                report.append(f"  Finishing / Deburr (Total):      {labor_hours.finishing_minutes:>10.2f} minutes")
+                if quantity > 1:
+                    report.append(f"  Finishing / Deburr (Total):      {labor_hours.finishing_minutes:>10.2f} minutes  (PER UNIT)")
+                else:
+                    report.append(f"  Finishing / Deburr (Total):      {labor_hours.finishing_minutes:>10.2f} minutes")
                 # Show detail breakdown with indentation - align minutes with main items
                 for detail in labor_hours.finishing_detail:
                     label = detail.get('label', 'Unknown operation')
@@ -2050,7 +2283,10 @@ class AppV7:
                     # Use 37 char width for label to align with main items (4 spaces + bullet + space + label)
                     report.append(f"    • {label:<33} {minutes:>10.1f} minutes")
             else:
-                report.append(f"  Finishing / Deburr:              {labor_hours.finishing_minutes:>10.2f} minutes")
+                if quantity > 1:
+                    report.append(f"  Finishing / Deburr:              {labor_hours.finishing_minutes:>10.2f} minutes  (PER UNIT)")
+                else:
+                    report.append(f"  Finishing / Deburr:              {labor_hours.finishing_minutes:>10.2f} minutes")
 
             # Show misc overhead if non-zero
             if abs(labor_hours.misc_overhead_minutes) > 0.01:
@@ -2133,16 +2369,242 @@ class AppV7:
         lines.append("")
         return lines
 
+    def _generate_multi_part_order_report(self) -> None:
+        """Generate a report for a multi-part order."""
+        self.output_text.delete(1.0, tk.END)
+
+        # Order header
+        header_lines = [
+            "=" * 74,
+            "MULTI-PART ORDER QUOTE",
+            "=" * 74,
+            f"Order ID: {self.current_order.order_id}",
+            f"Total Parts: {len(self.current_order.parts)}",
+            f"Generated: {self.current_order.order_timestamp}",
+            "=" * 74,
+            "",
+            ""
+        ]
+        self.output_text.insert(tk.END, "\n".join(header_lines))
+
+        # Generate report for each part
+        all_parts_data = []
+        for part_idx, part in enumerate(self.current_order.parts):
+            try:
+                # Part header
+                part_header = [
+                    "",
+                    "█" * 74,
+                    f"PART {part_idx + 1} OF {len(self.current_order.parts)} – {part.cad_file_name}",
+                    "█" * 74,
+                    ""
+                ]
+                self.output_text.insert(tk.END, "\n".join(part_header))
+
+                # Set this part as active temporarily
+                old_active_index = self.active_part_index
+                self.active_part_index = part_idx
+
+                # Extract quote data for this part if not already extracted
+                if not part.cost_summary or not part.cost_summary.final_price:
+                    # Need to extract - set up temporary vars from part data
+                    self.cad_file_path = part.cad_file_path
+
+                    # Get overrides from part data or use defaults
+                    self._temp_machine_rate = self.MACHINE_RATE
+                    self._temp_labor_rate = self.LABOR_RATE
+                    self._temp_material_override = part.material_info.material_name if part.material_info else ""
+                    self._temp_mcmaster_override = None
+                    self._temp_scrap_override = None
+
+                    # Extract quote data
+                    from cad_quoter.pricing.QuoteDataHelper import extract_quote_data_from_cad
+                    part_quote = self._extract_quote_data()
+
+                    # Update the part in the order with the extracted data
+                    self.current_order.parts[part_idx] = part_quote
+                    part = part_quote
+
+                # Generate the three reports for this part (pass part data to avoid re-extraction)
+                labor_report = self._generate_labor_hours_report(quote_data=part)
+                machine_report = self._generate_machine_hours_report(quote_data=part)
+                direct_report = self._generate_direct_costs_report(quote_data=part)
+
+                # Insert part reports
+                self.output_text.insert(tk.END, labor_report)
+                self.output_text.insert(tk.END, "\n\n" + "=" * 74 + "\n\n")
+                self.output_text.insert(tk.END, machine_report)
+                self.output_text.insert(tk.END, "\n\n" + "=" * 74 + "\n\n")
+                self.output_text.insert(tk.END, direct_report)
+
+                # Part cost summary
+                if part.cost_summary:
+                    part_summary = [
+                        "",
+                        "",
+                        "=" * 74,
+                        f"PART {part_idx + 1} COST SUMMARY",
+                        "=" * 74,
+                        self._format_cost_summary_line("Direct Cost (per unit)", part.cost_summary.direct_cost or 0),
+                        self._format_cost_summary_line("Machine Cost (per unit)", part.cost_summary.machine_cost or 0),
+                        self._format_cost_summary_line("Labor Cost (per unit)", part.cost_summary.labor_cost or 0),
+                        "-" * 74,
+                        self._format_cost_summary_line("Total Cost (per unit)", part.cost_summary.total_cost or 0),
+                        self._format_cost_summary_line(f"Margin ({part.cost_summary.margin_rate:.0%})", part.cost_summary.margin_amount or 0),
+                        self._format_cost_summary_line("Final Price (per unit)", part.cost_summary.final_price or 0),
+                    ]
+
+                    if part.quantity > 1:
+                        part_summary.extend([
+                            "",
+                            f"Quantity: {part.quantity} units",
+                            "-" * 74,
+                            self._format_cost_summary_line("Total Part Cost", (part.cost_summary.total_cost or 0) * part.quantity),
+                            self._format_cost_summary_line("Total Part Price", (part.cost_summary.final_price or 0) * part.quantity),
+                        ])
+
+                    part_summary.append("")
+                    self.output_text.insert(tk.END, "\n".join(part_summary))
+
+                # Store part data for order summary
+                all_parts_data.append(part)
+
+                # Restore active index
+                self.active_part_index = old_active_index
+
+            except Exception as e:
+                error_msg = f"\n\nERROR generating quote for Part {part_idx + 1}: {str(e)}\n\n"
+                self.output_text.insert(tk.END, error_msg)
+                print(f"[AppV7] Error generating part {part_idx + 1}: {e}")
+                import traceback
+                traceback.print_exc()
+                continue
+
+        # Generate order-level summary
+        self._generate_order_level_summary(all_parts_data)
+
+        # Show output and update status
+        self.notebook.select(self.output_tab)
+        self.status_bar.config(text=f"Multi-part order quote generated ({len(all_parts_data)} parts)!")
+
+    def _generate_order_level_summary(self, parts_data) -> None:
+        """Generate the order-level summary section."""
+        summary_lines = [
+            "",
+            "",
+            "█" * 74,
+            "█" * 74,
+            "TOTAL ORDER COSTS",
+            "█" * 74,
+            "█" * 74,
+            ""
+        ]
+
+        # Calculate order totals
+        parts_subtotal_no_shipping = 0.0
+        total_parts_cost = 0.0
+        total_weight_lb = 0.0
+
+        print("\n" + "=" * 80)
+        print("DEBUG: Parts Subtotal Calculation")
+        print("=" * 80)
+
+        for part in parts_data:
+            if part.cost_summary:
+                # Get part total (excluding shipping)
+                if part.quantity > 1:
+                    part_total = part.cost_summary.total_final_price
+                else:
+                    part_total = part.cost_summary.final_price
+
+                # Debug: Get filename
+                from pathlib import Path
+                filename = Path(part.cad_file_path).name if part.cad_file_path else "Unknown"
+
+                print(f"\nPart: {filename}")
+                print(f"  Quantity: {part.quantity}")
+                print(f"  final_price (per unit): ${part.cost_summary.final_price:.2f}")
+                print(f"  total_final_price: ${part.cost_summary.total_final_price:.2f}")
+                print(f"  part_total (used in calc): ${part_total:.2f}")
+
+                # Subtract per-part shipping to get price without shipping
+                # Note: We must subtract the selling price component of shipping (cost + margin),
+                # not just the shipping cost, since part_total is a selling price
+                if part.direct_cost_breakdown and part.direct_cost_breakdown.shipping:
+                    part_shipping_cost = part.direct_cost_breakdown.shipping * part.quantity
+                    # Calculate the price component attributable to shipping (includes margin)
+                    part_shipping_price = part_shipping_cost * (1 + part.cost_summary.margin_rate)
+                    part_contribution = part_total - part_shipping_price
+                    print(f"  shipping cost (per unit): ${part.direct_cost_breakdown.shipping:.2f}")
+                    print(f"  part_shipping_cost (total): ${part_shipping_cost:.2f}")
+                    print(f"  margin_rate: {part.cost_summary.margin_rate:.2%}")
+                    print(f"  part_shipping_price (with margin): ${part_shipping_price:.2f}")
+                    print(f"  Part contribution: ${part_total:.2f} - ${part_shipping_price:.2f} = ${part_contribution:.2f}")
+                    parts_subtotal_no_shipping += part_contribution
+                else:
+                    print(f"  No shipping breakdown")
+                    print(f"  Part contribution: ${part_total:.2f}")
+                    parts_subtotal_no_shipping += part_total
+
+                print(f"  Running subtotal: ${parts_subtotal_no_shipping:.2f}")
+
+                # Also track total with per-part shipping for comparison
+                total_parts_cost += part_total
+
+            # Calculate weight
+            if part.stock_info and part.stock_info.mcmaster_weight:
+                total_weight_lb += part.stock_info.mcmaster_weight * part.quantity
+
+        # Final debug summary
+        print("\n" + "=" * 80)
+        print(f"FINAL Parts Subtotal (excl. shipping): ${parts_subtotal_no_shipping:.2f}")
+        print(f"Total Parts Cost (with shipping): ${total_parts_cost:.2f}")
+        print("=" * 80)
+
+        # Sanity check: subtotal should be positive for normal orders
+        if parts_subtotal_no_shipping < 0:
+            print(f"WARNING: Parts Subtotal is NEGATIVE: ${parts_subtotal_no_shipping:.2f}")
+            print("This indicates a calculation error - please review the debug output above.")
+        else:
+            print(f"✓ Subtotal is positive: ${parts_subtotal_no_shipping:.2f}")
+
+        # Calculate order-level shipping
+        from cad_quoter.pricing.mcmaster_helpers import estimate_mcmaster_shipping
+        order_shipping = estimate_mcmaster_shipping(total_weight_lb)
+
+        # Calculate grand total
+        order_total = parts_subtotal_no_shipping + order_shipping
+
+        # Build summary
+        summary_lines.append(f"Number of parts: {len(parts_data)}")
+        summary_lines.append("")
+        summary_lines.append("-" * 74)
+        summary_lines.append(self._format_cost_summary_line("Parts Subtotal (excl. shipping)", parts_subtotal_no_shipping))
+        summary_lines.append("")
+        summary_lines.append(f"Total Order Weight: {total_weight_lb:.2f} lb")
+        summary_lines.append(self._format_cost_summary_line("Total Order Shipping Cost", order_shipping))
+        summary_lines.append("")
+        summary_lines.append("=" * 74)
+        summary_lines.append(self._format_cost_summary_line("ORDER TOTAL", order_total))
+        summary_lines.append("=" * 74)
+        summary_lines.append("")
+
+        self.output_text.insert(tk.END, "\n".join(summary_lines))
+
     def generate_quote(self) -> None:
         """Generate the quote."""
-        # Smart cache invalidation - only clear if inputs changed
-        # This saves 40+ seconds by avoiding redundant ODA/OCR extraction
-        if self._quote_inputs_changed():
-            self._clear_cad_cache()
-            print("[AppV7] Cache cleared - quote inputs changed")
-        else:
-            print("[AppV7] Reusing cached quote data - inputs unchanged (saves ~40+ seconds)")
+        # Check if we have a multi-part order
+        if len(self.current_order.parts) > 1:
+            self._generate_multi_part_order_report()
+            return
+        elif len(self.current_order.parts) == 0:
+            messagebox.showinfo(
+                "No Parts",
+                "Please add at least one part using 'Add Part(s)...' button before generating a quote."
+            )
+            return
 
+        # Single-part flow (backward compatible with original behavior)
         # Collect values from quote editor
         quote_data = {}
         for label, field in self.quote_fields.items():
@@ -2157,15 +2619,18 @@ class AppV7:
         self._temp_material_override = self._get_field_string("Material")
         self._temp_mcmaster_override = self._get_field_float("McMaster Price Override ($)")
         self._temp_scrap_override = self._get_field_float("Scrap Value Override ($)")
+        self._temp_quantity = self._get_quantity()
 
         # Display in output tab
         self.output_text.delete(1.0, tk.END)
 
-        # CRITICAL: Extract quote data ONCE before parallel report generation
-        # This prevents race condition where all 3 threads try to extract simultaneously
+        # CRITICAL: Extract quote data FIRST before displaying header
+        # This ensures we display the actual detected part family, not user input
         try:
-            # This ensures _cached_quote_data is populated before threading
-            _ = self._get_or_create_quote_data()
+            # Extract quote data before starting parallel threads
+            quote_data = self._extract_quote_data()
+            # Store for use in summary and save functionality
+            self._last_quote_data = quote_data
         except Exception as e:
             # If extraction fails, show error and abort
             error_msg = f"Error extracting quote data:\n{str(e)}"
@@ -2173,17 +2638,48 @@ class AppV7:
             self.status_bar.config(text="Quote generation failed - see Output tab")
             return
 
+        # Add quote header with file name and part family from actual extraction
+        from pathlib import Path
+        cad_filename = Path(self.cad_file_path).name if self.cad_file_path else "Unknown File"
+        part_family = quote_data.part_family if quote_data.part_family else "Unknown"
+        quantity = quote_data.quantity
+        material = quote_data.material_info.material_name if quote_data.material_info else ""
+
+        header_lines = [
+            "=" * 74,
+            "QUOTE SUMMARY",
+            "=" * 74,
+            f"CAD File: {cad_filename}",
+            f"Part Type: {part_family}",
+        ]
+
+        # Add quantity if > 1
+        if quantity and quantity > 1:
+            header_lines.append(f"Quantity: {quantity} part(s)")
+
+        # Add material if detected/overridden
+        if material:
+            header_lines.append(f"Material: {material}")
+
+        header_lines.extend([
+            "=" * 74,
+            "",
+            ""
+        ])
+
+        self.output_text.insert(tk.END, "\n".join(header_lines))
+
         # Generate all three reports in parallel for 10-20 second speedup
         # The reports are independent and can run concurrently
-        # NOTE: Quote data is already cached, so no race conditions
+        # NOTE: Quote data extracted once and passed to all threads to avoid redundant extraction
         # NOTE: All widget values read above, so threads don't access Tkinter widgets
         print("[AppV7] Generating reports in parallel...")
 
         with ThreadPoolExecutor(max_workers=3, thread_name_prefix="ReportGen") as executor:
             # Submit all three report generation tasks concurrently
-            future_labor = executor.submit(self._generate_labor_hours_report)
-            future_machine = executor.submit(self._generate_machine_hours_report)
-            future_direct = executor.submit(self._generate_direct_costs_report)
+            future_labor = executor.submit(self._generate_labor_hours_report, quote_data)
+            future_machine = executor.submit(self._generate_machine_hours_report, quote_data)
+            future_direct = executor.submit(self._generate_direct_costs_report, quote_data)
 
             # Wait for all reports to complete and collect results
             labor_hours_report = future_labor.result()
@@ -2198,6 +2694,7 @@ class AppV7:
         del self._temp_material_override
         del self._temp_mcmaster_override
         del self._temp_scrap_override
+        del self._temp_quantity
 
         # Insert reports in the correct order
         self.output_text.insert(tk.END, labor_hours_report)
@@ -2266,7 +2763,7 @@ class AppV7:
             margin_amount = total_cost * margin_rate
             final_cost = total_cost + margin_amount
 
-            quote_data = self._cached_quote_data
+            # Use extracted quote data for cost summary
             if quote_data and quote_data.cost_summary:
                 total_cost = quote_data.cost_summary.total_cost
                 margin_amount = quote_data.cost_summary.margin_amount
@@ -2308,18 +2805,25 @@ class AppV7:
         self.status_bar.config(text="Quote generated successfully!")
 
     def save_quote(self) -> None:
-        """Save the quote to JSON file."""
-        if not self.cad_file_path:
-            messagebox.showwarning("No Quote", "Please load a CAD file and generate a quote first.")
+        """Save the quote or order to JSON file."""
+        # Check if we have a multi-part order
+        if len(self.current_order.parts) > 1:
+            # Save as multi-part order
+            self._save_order()
             return
+        elif len(self.current_order.parts) == 0:
+            # Fallback to old behavior for backward compatibility
+            if not self.cad_file_path:
+                messagebox.showwarning("No Quote", "Please load a CAD file and generate a quote first.")
+                return
 
-        if self._cached_quote_data is None:
-            messagebox.showwarning("No Quote", "Please generate a quote first before saving.")
-            return
+            if not hasattr(self, '_last_quote_data') or self._last_quote_data is None:
+                messagebox.showwarning("No Quote", "Please generate a quote first before saving.")
+                return
 
-        # Suggest filename based on CAD file
+        # Single-part save (backward compatible)
         from pathlib import Path
-        suggested_name = Path(self.cad_file_path).stem + "_quote.json"
+        suggested_name = Path(self.cad_file_path).stem + "_quote.json" if self.cad_file_path else "quote.json"
 
         filename = filedialog.asksaveasfilename(
             title="Save Quote",
@@ -2331,12 +2835,72 @@ class AppV7:
         if filename:
             try:
                 from cad_quoter.pricing.QuoteDataHelper import save_quote_data
-                save_quote_data(self._cached_quote_data, filename)
+                save_quote_data(self._last_quote_data, filename)
                 self.status_bar.config(text=f"Quote saved to: {filename}")
                 messagebox.showinfo("Success", f"Quote saved successfully to:\n{filename}")
             except Exception as e:
                 messagebox.showerror("Save Error", f"Failed to save quote:\n{str(e)}")
                 self.status_bar.config(text="Error saving quote")
+
+    def _save_order(self) -> None:
+        """Save a multi-part order to JSON file."""
+        suggested_name = f"order_{self.current_order.order_id}.json"
+
+        filename = filedialog.asksaveasfilename(
+            title="Save Order",
+            defaultextension=".json",
+            initialfile=suggested_name,
+            filetypes=[("JSON Files", "*.json"), ("All Files", "*.*")]
+        )
+
+        if filename:
+            try:
+                # Save using OrderData's to_json method
+                self.current_order.to_json(filepath=filename)
+                self.status_bar.config(text=f"Order saved to: {filename}")
+                messagebox.showinfo("Success", f"Order with {len(self.current_order.parts)} parts saved successfully to:\n{filename}")
+            except Exception as e:
+                messagebox.showerror("Save Error", f"Failed to save order:\n{str(e)}")
+                self.status_bar.config(text="Error saving order")
+
+    def load_order(self) -> None:
+        """Load a multi-part order from JSON file."""
+        filename = filedialog.askopenfilename(
+            title="Load Order",
+            filetypes=[("JSON Files", "*.json"), ("All Files", "*.*")]
+        )
+
+        if not filename:
+            return
+
+        try:
+            from cad_quoter.pricing.QuoteDataHelper import OrderData
+
+            # Load the order
+            self.current_order = OrderData.from_json(filename)
+
+            # Refresh the parts list UI
+            self._refresh_parts_list()
+
+            # Auto-select the first part if available
+            if self.current_order.parts:
+                self.parts_listbox.selection_set(0)
+                self.active_part_index = 0
+                self._load_active_part_to_ui()
+
+            self.status_bar.config(text=f"Order loaded: {len(self.current_order.parts)} parts")
+            messagebox.showinfo(
+                "Success",
+                f"Order loaded successfully!\n\n"
+                f"Order ID: {self.current_order.order_id}\n"
+                f"Parts: {len(self.current_order.parts)}"
+            )
+
+        except Exception as e:
+            messagebox.showerror("Load Error", f"Failed to load order:\n{str(e)}")
+            self.status_bar.config(text="Error loading order")
+            import traceback
+            traceback.print_exc()
 
     def show_llm_inspector(self) -> None:
         """Show LLM inspector window."""

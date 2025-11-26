@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import csv
 import os
-from functools import lru_cache
 from fractions import Fraction
 from typing import Any, Mapping, Sequence
 
@@ -13,7 +12,6 @@ from cad_quoter.vendors.mcmaster_stock import parse_inches as _parse_inches
 from cad_quoter.pricing.MaterialMapper import material_mapper
 
 
-@lru_cache(maxsize=1)
 def load_mcmaster_catalog_rows(path: str | None = None) -> list[dict[str, Any]]:
     """Return rows from the McMaster stock catalog CSV."""
 
@@ -34,7 +32,6 @@ def load_mcmaster_catalog_rows(path: str | None = None) -> list[dict[str, Any]]:
         return []
 
 
-@lru_cache(maxsize=1)
 def _load_catalog_indexed_by_material() -> dict[str, list[dict[str, Any]]]:
     """Load catalog and pre-index by material for O(1) lookups.
 
@@ -302,14 +299,34 @@ def _pick_mcmaster_plate_sku_impl(
     candidates.sort(key=lambda c: (c["area"], max(c["overL"], c["overW"])))
     best = candidates[0]
 
+    # CRITICAL FIX: Ensure the selected stock is NEVER smaller than required
+    # (Fix for rod stock rounding down bug - applies to plate stock too for consistency)
+    # This is a safety check to catch any edge cases that slip through the filtering
+    best_L = float(best["len_in"])
+    best_W = float(best["wid_in"])
+    best_T = float(best["thk_in"])
+
+    # Check if stock covers the required dimensions (either orientation)
+    covers_as_is = (best_L >= need_L_in and best_W >= need_W_in)
+    covers_rotated = (best_L >= need_W_in and best_W >= need_L_in)
+    thickness_ok = best_T >= need_T_in
+
+    if not ((covers_as_is or covers_rotated) and thickness_ok):
+        if verbose:
+            print(f"[McMaster Lookup] WARNING: Best candidate is smaller than required!")
+            print(f"  Candidate: {best_L:.3f} × {best_W:.3f} × {best_T:.3f} in")
+            print(f"  Required: {need_L_in:.3f} × {need_W_in:.3f} × {need_T_in:.3f} in")
+            print(f"  Rejecting this candidate to prevent impossible stock sizes")
+        return None  # Better to return None than return stock that's too small
+
     if verbose:
-        print(f"[McMaster Lookup] FOUND: {best['len_in']} × {best['wid_in']} × {best['thk_in']} in")
+        print(f"[McMaster Lookup] FOUND: {best_L} × {best_W} × {best_T} in")
         print(f"[McMaster Lookup] Part: {best['mcmaster_part']}")
 
     return {
-        "stock_L_in": float(best["len_in"]),
-        "stock_W_in": float(best["wid_in"]),
-        "stock_T_in": float(best["thk_in"]),
+        "stock_L_in": best_L,
+        "stock_W_in": best_W,
+        "stock_T_in": best_T,
         "mcmaster_part": best["mcmaster_part"],
         "source": best.get("source") or "mcmaster-catalog",
     }
@@ -372,7 +389,9 @@ def pick_mcmaster_cylindrical_sku(
     candidates: list[dict[str, Any]] = []
 
     # Tolerance for diameter matching (allow rounding up to next standard size)
-    diam_tolerance = 0.125  # Allow up to 1/8" larger diameter
+    # For small diameters (<2"), use 0.5" tolerance to reach next standard size
+    # For larger diameters (>=2"), use 0.25" tolerance
+    diam_tolerance = 0.5 if need_diam_in < 2.0 else 0.25
     length_tolerance = 12.0  # Allow up to 12" longer stock (round bar comes in standard lengths like 12", 36")
 
     for row in material_rows:
@@ -438,13 +457,27 @@ def pick_mcmaster_cylindrical_sku(
     candidates.sort(key=lambda c: c["waste_volume"])
     best = candidates[0]
 
+    # CRITICAL FIX: Ensure the selected stock is NEVER smaller than required
+    # (Fix for rod stock rounding down bug - T1769-219 & T1769-134)
+    # This is a safety check to catch any edge cases that slip through the filtering
+    best_diam = float(best["diam_in"])
+    best_len = float(best["len_in"])
+
+    if best_diam < need_diam_in or best_len < need_length_in:
+        if verbose:
+            print(f"[Cylindrical Lookup] WARNING: Best candidate is smaller than required!")
+            print(f"  Candidate: diam={best_diam:.3f} in, length={best_len:.3f} in")
+            print(f"  Required: diam={need_diam_in:.3f} in, length={need_length_in:.3f} in")
+            print(f"  Rejecting this candidate to prevent impossible stock sizes")
+        return None  # Better to return None than return stock that's too small
+
     if verbose:
-        print(f"[Cylindrical Lookup] FOUND: diam={best['diam_in']:.3f} in, length={best['len_in']:.3f} in")
+        print(f"[Cylindrical Lookup] FOUND: diam={best_diam:.3f} in, length={best_len:.3f} in")
         print(f"[Cylindrical Lookup] Part: {best['mcmaster_part']}")
 
     return {
-        "stock_diam_in": float(best["diam_in"]),
-        "stock_L_in": float(best["len_in"]),
+        "stock_diam_in": best_diam,
+        "stock_L_in": best_len,
         "mcmaster_part": best["mcmaster_part"],
         "source": best.get("source") or "mcmaster-catalog",
     }

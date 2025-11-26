@@ -548,16 +548,19 @@ def _csv_row(
 def _wire_mins_per_in(material: str, material_group: str, thickness_in: float) -> float:
     """Calculate wire EDM minutes per inch based on material and thickness.
 
-    Uses banded thickness approach with fallback to conservative defaults.
+    Uses banded thickness approach with fallback to converting from linear_cut_rate_ipm.
     """
-    row = _csv_row(material, material_group, operation_hint="Wire_EDM")
+    # Try Wire_EDM_Rough first, then Wire_EDM, then Generic
+    row = _csv_row(material, material_group, operation_hint="Wire_EDM_Rough")
+    if not row:
+        row = _csv_row(material, material_group, operation_hint="Wire_EDM")
 
     # Try generic wire_mins_per_in column first
     base = _try_float(row.get("wire_mins_per_in"), default=None)
     if base is not None and base > 0:
         return max(0.01, base)
 
-    # Use thickness-based banding
+    # Use thickness-based banding if available
     if thickness_in <= 0.125:
         band = "wire_mpi_thin"
     elif thickness_in <= 0.500:
@@ -565,7 +568,17 @@ def _wire_mins_per_in(material: str, material_group: str, thickness_in: float) -
     else:
         band = "wire_mpi_thick"
 
-    return max(0.01, _try_float(row.get(band), default=0.9))
+    banded_value = _try_float(row.get(band), default=None)
+    if banded_value is not None and banded_value > 0:
+        return max(0.01, banded_value)
+
+    # Fall back to converting from linear_cut_rate_ipm
+    ipm = _try_float(row.get("linear_cut_rate_ipm"), default=None)
+    if ipm is not None and ipm > 0:
+        return 1.0 / ipm
+
+    # Final fallback to conservative default
+    return 0.9
 
 
 def estimate_wire_edm_minutes(
@@ -1045,13 +1058,20 @@ class PunchMachineHours:
 
     def calculate_totals(self):
         """Calculate total minutes and hours."""
+        # Helper to ensure all values are floats
+        def safe_val(value, name="unknown"):
+            if isinstance(value, dict):
+                print(f"WARNING: PunchMachineHours.{name} is a dict: {value}. Using 0.0.")
+                return 0.0
+            return float(value) if value is not None else 0.0
+
         self.total_minutes = (
-            self.rough_turning_min + self.finish_turning_min +
-            self.od_grinding_min + self.id_grinding_min + self.face_grinding_min +
-            self.drilling_min + self.tapping_min + self.chamfer_min +
-            self.polishing_min + self.edm_min + self.sawing_min + self.etch_marking_min +
-            self.inspection_min +
-            self.critical_od_grinding_min + self.critical_od_inspection_min
+            safe_val(self.rough_turning_min, "rough_turning_min") + safe_val(self.finish_turning_min, "finish_turning_min") +
+            safe_val(self.od_grinding_min, "od_grinding_min") + safe_val(self.id_grinding_min, "id_grinding_min") + safe_val(self.face_grinding_min, "face_grinding_min") +
+            safe_val(self.drilling_min, "drilling_min") + safe_val(self.tapping_min, "tapping_min") + safe_val(self.chamfer_min, "chamfer_min") +
+            safe_val(self.polishing_min, "polishing_min") + safe_val(self.edm_min, "edm_min") + safe_val(self.sawing_min, "sawing_min") + safe_val(self.etch_marking_min, "etch_marking_min") +
+            safe_val(self.inspection_min, "inspection_min") +
+            safe_val(self.critical_od_grinding_min, "critical_od_grinding_min") + safe_val(self.critical_od_inspection_min, "critical_od_inspection_min")
         )
         self.total_hours = self.total_minutes / 60.0
 
@@ -1072,10 +1092,17 @@ class PunchLaborHours:
 
     def calculate_totals(self):
         """Calculate total minutes and hours."""
+        # Helper to ensure all values are floats
+        def safe_val(value, name="unknown"):
+            if isinstance(value, dict):
+                print(f"WARNING: PunchLaborHours.{name} is a dict: {value}. Using 0.0.")
+                return 0.0
+            return float(value) if value is not None else 0.0
+
         self.total_minutes = (
-            self.lathe_setup_min + self.grinder_setup_min + self.edm_setup_min +
-            self.cam_programming_min + self.handling_min + self.deburring_min +
-            self.inspection_setup_min + self.first_article_min
+            safe_val(self.lathe_setup_min, "lathe_setup_min") + safe_val(self.grinder_setup_min, "grinder_setup_min") + safe_val(self.edm_setup_min, "edm_setup_min") +
+            safe_val(self.cam_programming_min, "cam_programming_min") + safe_val(self.handling_min, "handling_min") + safe_val(self.deburring_min, "deburring_min") +
+            safe_val(self.inspection_setup_min, "inspection_setup_min") + safe_val(self.first_article_min, "first_article_min")
         )
         self.total_hours = self.total_minutes / 60.0
 
@@ -1357,6 +1384,35 @@ def estimate_punch_machine_hours(punch_plan: dict[str, Any], punch_features: dic
         from cad_quoter.planning.process_planner import calc_etch_minutes
         hours.etch_marking_min = calc_etch_minutes(has_etch_note=True, qty=1, details_with_etch=1)
 
+    # Check for wire_edm operations in punch_plan (e.g., wire_edm_form for carbide punches)
+    ops = punch_plan.get("ops", [])
+    for op in ops:
+        op_type = op.get("op", "").lower()
+
+        # Wire EDM form operations for carbide form punches
+        if op_type == "wire_edm_form" or op_type == "wire_edm_profile":
+            from cad_quoter.pricing.time_estimator import _wire_mins_per_in
+            perimeter = op.get("wire_profile_perimeter_in", 0.0)
+            thickness = op.get("thickness_in", 0.0)
+
+            # Get material from operation or features
+            material = op.get("material") or punch_features.get("material_callout", "A2")
+            material_group = op.get("material_group", "")
+
+            # Calculate EDM time (linear cut rate only, no material factor)
+            mpi = _wire_mins_per_in(material, material_group, thickness)
+
+            edm_time = perimeter * mpi
+
+            # Use time_minutes from operation if provided
+            if "time_minutes" in op:
+                edm_time = op["time_minutes"]
+
+            hours.edm_min += edm_time
+
+            print(f"  DEBUG [Punch EDM {op_type}]: path_length={perimeter:.3f}\", min_per_in={mpi:.3f}, "
+                  f"thickness={thickness:.3f}\", time={edm_time:.2f} min")
+
     hours.calculate_totals()
 
     return hours
@@ -1436,45 +1492,71 @@ def estimate_punch_labor_hours(punch_plan: dict[str, Any], punch_features: dict[
 
 def convert_punch_to_quote_machine_hours(machine_hours: PunchMachineHours, labor_hours: PunchLaborHours) -> dict[str, Any]:
     """Convert PunchMachineHours to QuoteDataHelper format."""
+    # Helper function to ensure all values are floats, not dicts
+    def ensure_float(value, field_name="unknown"):
+        if isinstance(value, dict):
+            print(f"WARNING: Field '{field_name}' is a dict: {value}. Using 0.0 instead.")
+            return 0.0
+        return float(value) if value is not None else 0.0
+
+    # Perform additions AFTER converting each value to float
+    total_milling = ensure_float(machine_hours.rough_turning_min, "rough_turning_min") + ensure_float(machine_hours.finish_turning_min, "finish_turning_min")
+    total_grinding = ensure_float(machine_hours.od_grinding_min, "od_grinding_min") + ensure_float(machine_hours.id_grinding_min, "id_grinding_min") + ensure_float(machine_hours.face_grinding_min, "face_grinding_min")
+    total_other = ensure_float(machine_hours.sawing_min, "sawing_min") + ensure_float(machine_hours.chamfer_min, "chamfer_min") + ensure_float(machine_hours.polishing_min, "polishing_min")
+    total_inspection = ensure_float(machine_hours.inspection_min, "inspection_min") + ensure_float(machine_hours.critical_od_inspection_min, "critical_od_inspection_min")
+
     result = {
-        "total_drill_minutes": machine_hours.drilling_min,
-        "total_tap_minutes": machine_hours.tapping_min,
+        "total_drill_minutes": ensure_float(machine_hours.drilling_min, "drilling_min"),
+        "total_tap_minutes": ensure_float(machine_hours.tapping_min, "tapping_min"),
         "total_cbore_minutes": 0.0,
         "total_cdrill_minutes": 0.0,
         "total_jig_grind_minutes": 0.0,
-        "total_milling_minutes": machine_hours.rough_turning_min + machine_hours.finish_turning_min,
-        "total_grinding_minutes": machine_hours.od_grinding_min + machine_hours.id_grinding_min + machine_hours.face_grinding_min,
-        "total_edm_minutes": machine_hours.edm_min,
-        "total_other_minutes": machine_hours.sawing_min + machine_hours.chamfer_min + machine_hours.polishing_min,
-        "total_cmm_minutes": machine_hours.inspection_min + machine_hours.critical_od_inspection_min,
-        "total_etch_minutes": machine_hours.etch_marking_min,
+        "total_milling_minutes": total_milling,
+        "total_grinding_minutes": total_grinding,
+        "total_edm_minutes": ensure_float(machine_hours.edm_min, "edm_min"),
+        "total_other_minutes": total_other,
+        "total_inspection_minutes": total_inspection,
+        "total_etch_minutes": ensure_float(machine_hours.etch_marking_min, "etch_marking_min"),
         "total_edge_break_minutes": 0.0,  # Edge break is typically in labor for punches
-        "total_polish_minutes": machine_hours.polishing_min,  # Already included in polishing_min
-        "total_minutes": machine_hours.total_minutes,
-        "total_hours": machine_hours.total_hours,
+        "total_polish_minutes": ensure_float(machine_hours.polishing_min, "polishing_min"),  # Already included in polishing_min
+        "total_minutes": ensure_float(machine_hours.total_minutes, "total_minutes"),
+        "total_hours": ensure_float(machine_hours.total_hours, "total_hours"),
     }
 
     # Add critical OD tracking for breakdown visibility
-    if machine_hours.critical_od_tolerance_in > 0:
-        result["critical_od_tolerance_in"] = machine_hours.critical_od_tolerance_in
-        result["critical_od_grinding_minutes"] = machine_hours.critical_od_grinding_min
-        result["critical_od_inspection_minutes"] = machine_hours.critical_od_inspection_min
+    critical_od_tol = ensure_float(machine_hours.critical_od_tolerance_in, "critical_od_tolerance_in")
+    if critical_od_tol > 0:
+        critical_od_grinding = ensure_float(machine_hours.critical_od_grinding_min, "critical_od_grinding_min")
+        result["critical_od_tolerance_in"] = critical_od_tol
+        result["critical_od_grinding_minutes"] = critical_od_grinding
+        result["critical_od_inspection_minutes"] = ensure_float(machine_hours.critical_od_inspection_min, "critical_od_inspection_min")
         # Include critical OD grinding in total grinding
-        result["total_grinding_minutes"] += machine_hours.critical_od_grinding_min
+        result["total_grinding_minutes"] += critical_od_grinding
 
     return result
 
 
 def convert_punch_to_quote_labor_hours(labor_hours: PunchLaborHours) -> dict[str, Any]:
     """Convert PunchLaborHours to QuoteDataHelper format."""
+    # Helper function to ensure all values are floats
+    def ensure_float(value, field_name="unknown"):
+        if isinstance(value, dict):
+            print(f"WARNING: Labor field '{field_name}' is a dict: {value}. Using 0.0 instead.")
+            return 0.0
+        return float(value) if value is not None else 0.0
+
+    # Perform additions AFTER converting each value to float
+    total_setup = ensure_float(labor_hours.lathe_setup_min, "lathe_setup_min") + ensure_float(labor_hours.grinder_setup_min, "grinder_setup_min") + ensure_float(labor_hours.edm_setup_min, "edm_setup_min")
+    total_inspection = ensure_float(labor_hours.inspection_setup_min, "inspection_setup_min") + ensure_float(labor_hours.first_article_min, "first_article_min")
+
     return {
-        "total_setup_minutes": labor_hours.lathe_setup_min + labor_hours.grinder_setup_min + labor_hours.edm_setup_min,
-        "cam_programming_minutes": labor_hours.cam_programming_min,
-        "handling_minutes": labor_hours.handling_min,
-        "deburring_minutes": labor_hours.deburring_min,
-        "inspection_minutes": labor_hours.inspection_setup_min + labor_hours.first_article_min,
-        "total_minutes": labor_hours.total_minutes,
-        "total_hours": labor_hours.total_hours,
+        "total_setup_minutes": total_setup,
+        "cam_programming_minutes": ensure_float(labor_hours.cam_programming_min, "cam_programming_min"),
+        "handling_minutes": ensure_float(labor_hours.handling_min, "handling_min"),
+        "deburring_minutes": ensure_float(labor_hours.deburring_min, "deburring_min"),
+        "inspection_minutes": total_inspection,
+        "total_minutes": ensure_float(labor_hours.total_minutes, "total_minutes"),
+        "total_hours": ensure_float(labor_hours.total_hours, "total_hours"),
     }
 
 
