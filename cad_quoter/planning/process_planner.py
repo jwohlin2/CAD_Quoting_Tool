@@ -1648,51 +1648,13 @@ def _add_die_section_finishing_ops(plan: Dict[str, Any], p: DieSectionParams,
         })
         base_time += contour_polish_time
 
-    # Edge break time - use text-based detection if available (align with plates)
-    has_edge_break = params.get('has_edge_break', False) if params else False
-
-    if has_edge_break:
-        # Use same perimeter-based calculation as plates with material factor
-        perimeter_in = 2.0 * (p.length_in + p.width_in) if p.length_in > 0 and p.width_in > 0 else 0.0
-        qty = 1  # Default to 1 part unless specified
-
-        # Extract material group from material name (same logic as plates)
-        material_upper = p.material.upper()
-        if 'ALUMINUM' in material_upper or 'AL' in material_upper:
-            material_group = 'ALUMINUM'
-        elif '52100' in material_upper:
-            material_group = '52100'
-        elif 'STAINLESS' in material_upper or 'SS' in material_upper or '316' in material_upper or '304' in material_upper:
-            material_group = 'STAINLESS'
-        elif 'CARBIDE' in material_upper:
-            material_group = 'CARBIDE'
-        elif 'CERAMIC' in material_upper:
-            material_group = 'CERAMIC'
-        else:
-            material_group = 'TOOL_STEEL'
-
-        edge_break_time = calc_edge_break_minutes(perimeter_in, qty, material_group)
-        note = f"Edge break / deburr ({perimeter_in:.1f}\" perim, {material_group})"
-    else:
-        # Fallback to simple chamfer-based calculation
-        edge_break_time = max(3.0, p.num_chamfers * 0.5 + 2.0)
-        note = "Edge break all entry/exit edges and corners"
-
-    plan["ops"].append({
-        "op": "edge_break",
-        "time_minutes": edge_break_time,
-        "note": note,
-    })
-
-    # Deburr based on complexity
-    deburr_time = 3.0 + (complexity["score"] * 0.3)
-    plan["ops"].append({
-        "op": "deburr_and_clean",
-        "time_minutes": deburr_time,
-        "note": "Deburr, clean, and inspect surfaces",
-    })
+    # NOTE: edge_break and deburr_and_clean are now handled in LABOR finishing section
+    # to avoid double-counting them as machine operations.
+    # These are manual operations (Scotch-Brite, hand cleanup) not machine time.
+    # See compute_labor_minutes() -> _calculate_finishing_labor_minutes() for the labor calculations.
 
     # Hole cleanup time (align with plate logic: 0.2 min per hole)
+    # NOTE: This is also manual labor but keeping it here for now as it's hole-specific
     hole_cleanup_time = 0.0
     if p.hole_count > 0:
         hole_cleanup_time = 0.2 * p.hole_count
@@ -1701,15 +1663,6 @@ def _add_die_section_finishing_ops(plan: Dict[str, Any], p: DieSectionParams,
             "time_minutes": hole_cleanup_time,
             "note": f"Deburr and clean {p.hole_count} holes (0.2 min each)",
         })
-
-    # Total finishing time floor
-    total_finishing = base_time + edge_break_time + deburr_time + hole_cleanup_time
-    min_finishing = 10.0 if is_carbide else 5.0
-
-    if total_finishing < min_finishing:
-        plan["warnings"].append(
-            f"Finishing time ({total_finishing:.1f} min) below minimum; adjusted to {min_finishing} min"
-        )
 
 
 def _add_die_section_qa_checks(plan: Dict[str, Any], p: DieSectionParams,
@@ -5561,7 +5514,17 @@ def calc_edge_break_minutes(perim_in: float, qty: int, material_group: str) -> f
     # Constants (tune these based on shop experience)
     BASE_MIN_PER_LOT = 3.0  # "grab Scotch-Brite, setup" time
     MIN_PER_IN_BASE = 0.02  # min/in on tool steel (~1.2 sec/in)
-    MIN_DEBURR_PER_LOT = 5.0  # don't go below this
+
+    # Perimeter-based floor (replaces flat 5.0 min floor)
+    # Scales appropriately: tiny parts get lower mins, large plates get higher mins
+    # Examples:
+    #   7" perimeter (e.g., 2"×1.5" plate):  2.0 + 0.03 * 7  = 2.21 min
+    #  10" perimeter (e.g., 3"×2" plate):    2.0 + 0.03 * 10 = 2.3 min
+    #  40" perimeter (e.g., 12"×8" plate):   2.0 + 0.03 * 40 = 3.2 min
+    #  70" perimeter (e.g., 20"×15" plate):  2.0 + 0.03 * 70 = 4.1 min
+    # 140" perimeter (e.g., 40"×30" plate):  2.0 + 0.03 * 140 = 6.2 min
+    MIN_DEBURR_BASE = 2.0      # Absolute minimum for very tiny parts
+    MIN_DEBURR_PER_IN = 0.03   # Additional floor per inch of perimeter
 
     # Material factors for edge breaking (similar to grinding)
     material_factor_map = {
@@ -5578,8 +5541,12 @@ def calc_edge_break_minutes(perim_in: float, qty: int, material_group: str) -> f
     # Top + bottom outside edges for all parts
     edge_length_total_in = 2.0 * perim_in * qty
 
+    # Calculate base time from perimeter and material
     deburr_min = BASE_MIN_PER_LOT + edge_length_total_in * MIN_PER_IN_BASE * material_factor
-    deburr_min = max(deburr_min, MIN_DEBURR_PER_LOT)
+
+    # Apply perimeter-based floor (scales with part size)
+    floor_min = MIN_DEBURR_BASE + perim_in * MIN_DEBURR_PER_IN
+    deburr_min = max(deburr_min, floor_min)
 
     return deburr_min
 
