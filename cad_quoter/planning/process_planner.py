@@ -172,6 +172,104 @@ def needs_wedm_for_windows(windows_need_sharp: bool, window_corner_radius_req: O
     return False
 
 
+def is_simple_rectangular_part(
+    sub_type: str,
+    has_internal_form: bool,
+    form_complexity: int,
+    num_radius_dims: int,
+    num_sc_dims: int,
+    num_chord_dims: int
+) -> bool:
+    """
+    Determine if this is a simple open slot/rectangular part that doesn't need EDM.
+
+    Simple parts are characterized by:
+    - Sensor blocks, bumpers, or small die blocks
+    - No internal form or very simple form
+    - Low complexity (few radius/SC/chord dimensions)
+    - Open slots or simple rectangular geometry
+
+    Examples: sensor block 334, bumpers 339/348, small die blocks 157
+
+    Args:
+        sub_type: Part sub-type (sensor_block, bumper, die_section, etc.)
+        has_internal_form: Whether part has internal form
+        form_complexity: Complexity score (1=simple, 2=moderate, 3=complex)
+        num_radius_dims: Count of radius dimensions
+        num_sc_dims: Count of SC dimensions
+        num_chord_dims: Count of chord dimensions
+
+    Returns:
+        True if this is a simple rectangular part that doesn't need EDM
+    """
+    # Check if it's a simple part type
+    simple_types = {"sensor_block", "bumper", "small_die_block"}
+    if sub_type not in simple_types:
+        # For generic die_section, check other criteria
+        if sub_type != "die_section":
+            return False
+
+    # Simple parts have low feature counts
+    total_features = num_radius_dims + num_sc_dims + num_chord_dims
+
+    # If no internal form, it's likely just an open slot or simple block
+    if not has_internal_form:
+        return True
+
+    # If internal form exists but it's very simple (complexity=1) and low feature count
+    if form_complexity == 1 and total_features <= 2:
+        return True
+
+    return False
+
+
+def should_suppress_edm(
+    has_wire_edm_note: bool,
+    wirecut_to_geometry_note: bool,
+    has_undercut: bool,
+    smallest_inside_radius: Optional[float],
+    smallest_inside_radius_from_note: Optional[float],
+    min_section_width: Optional[float],
+    is_simple_part: bool
+) -> bool:
+    """
+    Determine if EDM should be suppressed for a simple part.
+
+    EDM should only appear when at least one of these is true:
+    - Notes contain Wire EDM keywords
+    - Geometry classifier flags features that can't be milled reasonably
+
+    If those signals are absent and the part is simple, suppress EDM.
+
+    Args:
+        has_wire_edm_note: Whether drawing notes contain Wire EDM keywords
+        wirecut_to_geometry_note: Whether drawing has WIRECUT TO GEOMETRY note
+        has_undercut: Whether the profile has undercuts or negative draft
+        smallest_inside_radius: Smallest inside radius in inches
+        smallest_inside_radius_from_note: Smallest inside radius from notes
+        min_section_width: Thinnest section width in inches
+        is_simple_part: Whether this is a simple rectangular/open slot part
+
+    Returns:
+        True if EDM should be suppressed (forced to 0)
+    """
+    # If not a simple part, don't suppress
+    if not is_simple_part:
+        return False
+
+    # Check if any EDM signals are present
+    has_edm_note = has_wire_edm_note or wirecut_to_geometry_note
+    has_geometry_flag = (
+        has_undercut or
+        (smallest_inside_radius is not None and smallest_inside_radius < 0.020) or
+        (smallest_inside_radius_from_note is not None and smallest_inside_radius_from_note < 0.020) or
+        (min_section_width is not None and min_section_width < 0.062)
+    )
+
+    # If no signals are present, suppress EDM
+    return not (has_edm_note or has_geometry_flag)
+
+
 def determine_profile_process(
     material_group: str,
     smallest_inside_radius: Optional[float],
@@ -180,17 +278,24 @@ def determine_profile_process(
     overall_height: Optional[float],
     num_radius_dims: int,
     num_sc_dims: int,
-    num_chord_dims: int
+    num_chord_dims: int,
+    has_wire_edm_note: bool = False,
+    wirecut_to_geometry_note: bool = False,
+    smallest_inside_radius_from_note: Optional[float] = None,
+    is_simple_part: bool = False
 ) -> str:
     """
     Determine whether to use GRIND or WIRE EDM for profile windows.
 
     Decision tree logic:
+    -1. EDM suppression: For simple rectangular parts without EDM signals → force GRIND
+    0. Wire EDM note detection: If drawing explicitly calls for Wire EDM → WIRE EDM
     1. Material/hardness gate: Carbide, Ceramic, or super-hard materials → WIRE EDM
     2. Small inside radius gate: radius < 0.020" → WIRE EDM
     3. Undercuts/weird draft → WIRE EDM
-    4. Slender/tiny section gate: min_section_width < 0.10 * overall_height → WIRE EDM
-    5. Complexity score: feature_count > 2 → WIRE EDM
+    4. Narrow slot gate: min_section_width < 0.062" (narrower than practical endmill) → WIRE EDM
+    5. Slender/tiny section gate: min_section_width < 0.10 * overall_height → WIRE EDM
+    6. Complexity score: feature_count > 2 → WIRE EDM
     Otherwise → GRIND
 
     Args:
@@ -202,35 +307,61 @@ def determine_profile_process(
         num_radius_dims: Count of radius dimensions
         num_sc_dims: Count of SC dimensions
         num_chord_dims: Count of chord dimensions
+        has_wire_edm_note: Whether drawing notes contain Wire EDM keywords
+        wirecut_to_geometry_note: Whether drawing has WIRECUT TO GEOMETRY note
+        smallest_inside_radius_from_note: Smallest inside radius specified in notes
+        is_simple_part: Whether this is a simple rectangular/open slot part
 
     Returns:
         "wire_edm" or "grind"
     """
+    # -1) EDM suppression for simple parts
+    if should_suppress_edm(
+        has_wire_edm_note=has_wire_edm_note,
+        wirecut_to_geometry_note=wirecut_to_geometry_note,
+        has_undercut=has_undercut,
+        smallest_inside_radius=smallest_inside_radius,
+        smallest_inside_radius_from_note=smallest_inside_radius_from_note,
+        min_section_width=min_section_width,
+        is_simple_part=is_simple_part
+    ):
+        return "grind"
+
     # Default: assume grinding is allowed
     process = "grind"
 
     # Normalize material_group to uppercase for comparison
     mat_group = (material_group or "").upper()
 
+    # 0) Wire EDM note detection - explicit drawing callout
+    if has_wire_edm_note or wirecut_to_geometry_note:
+        process = "wire_edm"
+
     # 1) Material / hardness gate
     # H1 = Carbide, C1 = Ceramic, plus any explicit material names
-    if mat_group in {"H1", "C1", "CARBIDE", "CERAMIC", "SUPER_HARD"}:
+    elif mat_group in {"H1", "C1", "CARBIDE", "CERAMIC", "SUPER_HARD"}:
         process = "wire_edm"
 
     # 2) Small inside radius gate
-    elif smallest_inside_radius is not None and smallest_inside_radius < 0.020:
+    # Use radius from note if specified, otherwise use detected radius
+    effective_radius = smallest_inside_radius_from_note or smallest_inside_radius
+    if effective_radius is not None and effective_radius < 0.020:
         process = "wire_edm"
 
     # 3) Undercuts / weird draft
     elif has_undercut:
         process = "wire_edm"
 
-    # 4) Slender / tiny section gate
+    # 4) Narrow slot gate - slots narrower than practical endmill (1/16" = 0.0625")
+    elif min_section_width is not None and min_section_width < 0.062:
+        process = "wire_edm"
+
+    # 5) Slender / tiny section gate
     elif (min_section_width is not None and overall_height is not None
           and overall_height > 0 and min_section_width < 0.10 * overall_height):
         process = "wire_edm"
 
-    # 5) Complexity score
+    # 6) Complexity score
     else:
         feature_count = num_radius_dims + num_sc_dims + num_chord_dims
         if feature_count > 2:
@@ -538,6 +669,8 @@ def planner_die_plate(params: Dict[str, Any]) -> Plan:
     p.add("drill_patterns")
 
     # 3) Window/Profile strategy (WEDM vs finish mill)
+    # IMPORTANT: Mutual exclusivity - use either EDM OR milling, never both
+    # This prevents double-counting time for the same pockets
     if needs_wedm_for_windows(windows_need_sharp, window_corner_radius_req, profile_tol):
         wire = choose_wire_size(params.get("min_inside_radius"), params.get("min_feature_width"))
         skims = choose_skims(profile_tol)
@@ -703,6 +836,9 @@ def _extract_profile_dimension_stats(params: Dict[str, Any]) -> Dict[str, Any]:
         "smallest_inside_radius": None,
         "has_undercut": False,
         "has_polish_contour_note": False,
+        "has_wire_edm_note": False,
+        "wirecut_to_geometry_note": False,
+        "smallest_inside_radius_from_note": None,
     }
 
     # Count dimension types from dimensions list
@@ -754,12 +890,42 @@ def _extract_profile_dimension_stats(params: Dict[str, Any]) -> Dict[str, Any]:
     if "text" in params:
         all_text.append(str(params["text"]).upper())
 
-    # Check for undercut notes
+    # Check for undercut notes and Wire EDM keywords
+    import re
     for text in all_text:
         if "UNDERCUT" in text or "NEGATIVE DRAFT" in text or "SMALL UNDERCUT" in text:
             stats["has_undercut"] = True
         if "POLISH CONTOUR" in text or "POLISH PROFILE" in text:
             stats["has_polish_contour_note"] = True
+
+        # Check for Wire EDM keywords
+        wire_edm_keywords = [
+            "WIRE EDM", "WIRE-EDM",
+            "WIRECUT TO GEOMETRY", "WIRECUT",
+            "EDM WINDOW",
+            "WIRE-START", "WIRE START"
+        ]
+        for keyword in wire_edm_keywords:
+            if keyword in text:
+                stats["has_wire_edm_note"] = True
+                break
+
+        # Check for "WIRECUT TO GEOMETRY" with smallest inside radius spec
+        if "WIRECUT TO GEOMETRY" in text or "WIRECUT" in text:
+            stats["wirecut_to_geometry_note"] = True
+            # Try to extract smallest inside radius value from note
+            # Pattern: "SMALLEST INSIDE RADIUS .XXXX" or "SMALLEST INSIDE RADIUS 0.XXXX"
+            radius_match = re.search(r'SMALLEST\s+INSIDE\s+RADIUS\s+\.?(\d+\.?\d*)', text)
+            if radius_match:
+                try:
+                    radius_val = float(radius_match.group(1))
+                    # If the match was ".XXXX", it's already correct
+                    # If it was "XXXX", convert to ".XXXX"
+                    if radius_val >= 1.0:
+                        radius_val = radius_val / 1000.0  # Convert from thousandths
+                    stats["smallest_inside_radius_from_note"] = radius_val
+                except (ValueError, TypeError):
+                    pass
 
     return stats
 
@@ -803,6 +969,9 @@ class DieSectionParams:
     min_section_width: Optional[float] = None  # Thinnest section width in inches
     overall_height: Optional[float] = None  # Overall height for slenderness check
     has_polish_contour_note: bool = False  # Has "POLISH CONTOUR" note
+    has_wire_edm_note: bool = False  # Has Wire EDM keywords in notes
+    wirecut_to_geometry_note: bool = False  # Has "WIRECUT TO GEOMETRY" note
+    smallest_inside_radius_from_note: Optional[float] = None  # Smallest inside radius from notes
 
     # Hole info (usually none for form die sections)
     hole_count: int = 0
@@ -930,6 +1099,9 @@ def _extract_die_section_params(params: Dict[str, Any]) -> DieSectionParams:
         min_section_width=min_section_width,
         overall_height=overall_height,
         has_polish_contour_note=profile_stats.get("has_polish_contour_note", False),
+        has_wire_edm_note=profile_stats.get("has_wire_edm_note", False),
+        wirecut_to_geometry_note=profile_stats.get("wirecut_to_geometry_note", False),
+        smallest_inside_radius_from_note=profile_stats.get("smallest_inside_radius_from_note"),
         # Other params
         hole_count=int(params.get("hole_count", 0)),
         hole_sets=params.get("hole_sets", []),
@@ -1048,6 +1220,16 @@ def create_die_section_plan(params: Dict[str, Any]) -> Dict[str, Any]:
     is_die_section = _is_carbide_die_section(p)
     complexity = _calculate_die_section_complexity(p)
 
+    # Check if this is a simple rectangular part for EDM suppression
+    is_simple = is_simple_rectangular_part(
+        sub_type=p.sub_type,
+        has_internal_form=p.has_internal_form,
+        form_complexity=p.form_complexity,
+        num_radius_dims=p.num_radius_dims,
+        num_sc_dims=p.num_sc_dims,
+        num_chord_dims=p.num_chord_dims
+    )
+
     # Determine profile process (GRIND vs WIRE EDM) using decision tree
     normalized_mat_group = _normalize_material_group(p.material, p.material_group)
     profile_process = determine_profile_process(
@@ -1058,7 +1240,11 @@ def create_die_section_plan(params: Dict[str, Any]) -> Dict[str, Any]:
         overall_height=p.overall_height,
         num_radius_dims=p.num_radius_dims,
         num_sc_dims=p.num_sc_dims,
-        num_chord_dims=p.num_chord_dims
+        num_chord_dims=p.num_chord_dims,
+        has_wire_edm_note=p.has_wire_edm_note,
+        wirecut_to_geometry_note=p.wirecut_to_geometry_note,
+        smallest_inside_radius_from_note=p.smallest_inside_radius_from_note,
+        is_simple_part=is_simple
     )
     # Update the params with the decision
     # Note: We can't modify p directly since it's a dataclass, but we can use the value
@@ -1362,6 +1548,9 @@ def _add_die_section_form_ops(plan: Dict[str, Any], p: DieSectionParams, is_carb
             "edm_min_per_in": wire_mpi,
             "part_thickness": depth,
             "t_window": t_window,
+            # Quality parameters for skim time scaling
+            "smallest_inside_radius": p.smallest_inside_radius,
+            "min_tolerance_in": p.min_tolerance_in,
         })
 
     # Form grinding for precision forms
@@ -3450,17 +3639,30 @@ def calculate_edm_time(
     thickness: float,
     num_windows: int,
     num_skims: int = 0,
-    material: str = "GENERIC"
+    material: str = "GENERIC",
+    smallest_inside_radius: Optional[float] = None,
+    min_tolerance_in: Optional[float] = None
 ) -> float:
     """
     Calculate Wire EDM time in minutes.
 
+    Formula:
+    - rough_time = perimeter * thickness / rough_ipm
+    - skim_time = (perimeter * thickness * num_skims / skim_ipm) * quality_factor
+    - quality_factor scales based on tolerance and smallest_inside_radius
+
+    For parts with starter holes feeding a common profile (windows):
+    - Treat multiple starter holes as lead-ins to a single perimeter, not separate loops
+    - Perimeter should be estimated per pocket from dimensions
+
     Args:
-        perimeter: Total perimeter to cut in inches
+        perimeter: Total perimeter to cut in inches (estimated per pocket from dims)
         thickness: Part thickness in inches
-        num_windows: Number of windows to cut
+        num_windows: Number of windows to cut (use 1 for single perimeter with multiple lead-ins)
         num_skims: Number of skim passes
         material: Material name
+        smallest_inside_radius: Smallest inside radius in inches (for quality scaling)
+        min_tolerance_in: Tightest tolerance in inches (for quality scaling)
 
     Returns:
         Time in minutes
@@ -3477,10 +3679,26 @@ def calculate_edm_time(
     # For rough cut
     rough_time = (perimeter * thickness * num_windows) / rough_ipm
 
-    # For skim passes
-    skim_time = (perimeter * thickness * num_windows * num_skims) / skim_ipm
+    # For skim passes - scale by quality/smallest_inside_radius
+    base_skim_time = (perimeter * thickness * num_windows * num_skims) / skim_ipm
+
+    # Quality factor: tighter tolerances and smaller radii require more careful work
+    quality_factor = 1.0
+
+    if min_tolerance_in is not None and min_tolerance_in <= 0.0005:
+        # Very tight tolerance (±0.0005" or tighter) increases skim time
+        quality_factor *= 1.5
+
+    if smallest_inside_radius is not None and smallest_inside_radius < 0.030:
+        # Small inside radius requires slower, more careful skimming
+        # Scale inversely with radius: smaller radius = more time
+        radius_factor = 0.030 / max(smallest_inside_radius, 0.010)  # Cap at 3x
+        quality_factor *= min(radius_factor, 3.0)
+
+    skim_time = base_skim_time * quality_factor
 
     # Add setup time per window (threading wire, etc.)
+    # If multiple starter holes feed a common profile, num_windows should be 1
     setup_time = num_windows * 5  # 5 minutes per window
 
     return rough_time + skim_time + setup_time
@@ -4193,7 +4411,14 @@ def estimate_machine_hours_from_plan(
             # Estimate perimeter
             perimeter = op.get('wire_profile_perimeter_in', 4.0)  # inches, typical window
             thickness = op.get('thickness_in', T or 0.5)
-            edm_time = calculate_edm_time(perimeter, thickness, num_windows, skims, material)
+            # Get quality parameters for skim time scaling
+            smallest_inside_radius = op.get('smallest_inside_radius')
+            min_tolerance_in = op.get('min_tolerance_in')
+            edm_time = calculate_edm_time(
+                perimeter, thickness, num_windows, skims, material,
+                smallest_inside_radius=smallest_inside_radius,
+                min_tolerance_in=min_tolerance_in
+            )
             time_breakdown['edm'] += edm_time
 
             # EDM debug output with detailed calculation breakdown
@@ -6434,6 +6659,9 @@ class PunchPlannerParams:
     min_section_width: Optional[float] = None  # Thinnest section width in inches
     overall_height: Optional[float] = None  # Overall height for slenderness check
     has_polish_contour_note: bool = False  # Has "POLISH CONTOUR" note
+    has_wire_edm_note: bool = False  # Has Wire EDM keywords in notes
+    wirecut_to_geometry_note: bool = False  # Has "WIRECUT TO GEOMETRY" note
+    smallest_inside_radius_from_note: Optional[float] = None  # Smallest inside radius from notes
     profile_process: str = "grind"  # "grind" or "wire_edm" - decision for profile
 
     # Weight for heavy-part handling
@@ -6512,6 +6740,7 @@ def create_punch_plan(params: Dict[str, Any]) -> Dict[str, Any]:
     """Create a detailed manufacturing plan for a punch."""
     p = _extract_punch_params(params)
 
+    # Punches are typically not simple rectangular parts, so default is_simple to False
     # Determine profile process (GRIND vs WIRE EDM) using decision tree
     normalized_mat_group = _normalize_material_group(p.material, p.material_group)
     profile_process = determine_profile_process(
@@ -6522,7 +6751,11 @@ def create_punch_plan(params: Dict[str, Any]) -> Dict[str, Any]:
         overall_height=p.overall_height,
         num_radius_dims=p.num_radius_dims,
         num_sc_dims=p.num_sc_dims,
-        num_chord_dims=p.num_chord_dims
+        num_chord_dims=p.num_chord_dims,
+        has_wire_edm_note=p.has_wire_edm_note,
+        wirecut_to_geometry_note=p.wirecut_to_geometry_note,
+        smallest_inside_radius_from_note=p.smallest_inside_radius_from_note,
+        is_simple_part=False  # Punches are not simple rectangular parts
     )
 
     # Determine if profile will be wire-cut (for mutual exclusivity with OD grinding)
@@ -6651,6 +6884,9 @@ def _extract_punch_params(params: Dict[str, Any]) -> PunchPlannerParams:
         min_section_width=min_section_width,
         overall_height=overall_height,
         has_polish_contour_note=profile_stats.get("has_polish_contour_note", False),
+        has_wire_edm_note=profile_stats.get("has_wire_edm_note", False),
+        wirecut_to_geometry_note=profile_stats.get("wirecut_to_geometry_note", False),
+        smallest_inside_radius_from_note=profile_stats.get("smallest_inside_radius_from_note"),
         net_weight_lb=net_weight_lb,
     )
 
