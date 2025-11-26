@@ -5127,15 +5127,18 @@ def render_square_up_block(
         # Calculate volume as stock_removed_T * finish_L * finish_W
         volume_cuin = stock_removed_T * fin_L * fin_W
 
+        # Format volume - show "<0.1 in³" for tiny volumes to avoid confusing "0.0 in³"
+        vol_display = f"<0.1 in³" if volume_cuin < 0.05 else f"{volume_cuin:.1f} in³"
+
         # Build line with finished dimensions and removed thickness/volume - stay ≤106 chars
         line = (f"Face Mill - Full Square-Up | W {fin_W:.3f}\" | L {fin_L:.3f}\" | T {stock_removed_T:.3f}\" | "
-                f"Vol {volume_cuin:.1f} in³ | Time {time_min:.2f} min{ovr_badge}")
+                f"Vol {vol_display} | Time {time_min:.2f} min{ovr_badge}")
 
         lines.append(line[:106])
         total_time += time_min
 
         # Add volume breakdown line showing the calculation
-        breakdown_line = (f"  Volume: T {stock_removed_T:.3f}\" × L {fin_L:.3f}\" × W {fin_W:.3f}\" = {volume_cuin:.1f} in³ "
+        breakdown_line = (f"  Volume: T {stock_removed_T:.3f}\" × L {fin_L:.3f}\" × W {fin_W:.3f}\" = {vol_display} "
                           f"| Factor {mat_factor:.2f}")
         lines.append(breakdown_line[:106])
 
