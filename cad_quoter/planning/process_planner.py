@@ -5635,7 +5635,21 @@ def estimate_hole_table_times(
                    re.search(r'\bR[\.\d]+\s*(?:X\s*[\d\.]+|OVER\s*R)', combined_text) is not None)
 
         # Determine depth for drilling operation
-        if is_thru and not is_jig_grind:
+        # For jig-grind holes, use special depth logic
+        if is_jig_grind:
+            # Check for THRU (JIG GRIND) pattern - use actual plate thickness
+            if 'THRU' in combined_text and 'JIG GRIND' in combined_text:
+                depth = thickness if thickness > 0 else 0.5
+            else:
+                # Check for explicit thickness specification like "JIG GRIND 0.750 THICKNESS" or "JIG GRIND X.XXX THICKNESS"
+                thickness_match = re.search(r'JIG\s+GRIND\s+(?:X\s*)?([0-9]+\.?\d*)\s+THICKNESS', combined_text, flags=re.I)
+                if thickness_match:
+                    depth = float(thickness_match.group(1))
+                else:
+                    # For punches/blocks without explicit depth, use model thickness
+                    # This handles cases where jig-grind depth should match part thickness
+                    depth = thickness if thickness > 0 else 0.5
+        elif is_thru:
             depth = thickness if thickness > 0 else 2.0
         else:
             depth = 0.5  # Default for non-THRU holes
@@ -5851,17 +5865,18 @@ def estimate_hole_table_times(
             # Jig grinding time calculation
             # Constants (can be made configurable later)
             setup_min = 0  # Setup time per bore
-            mpsi = 7  # Minutes per square inch ground
+            mpsi = 4.5  # Minutes per square inch ground (reduced from 7 to prevent over-estimation)
             stock_diam = 0.003  # Diametral stock to remove (inches)
             stock_rate_diam = 0.003  # Diametral removal rate (inches)
 
             # Calculate grinding surface area: π × D × depth
             grind_area = 3.14159 * ref_dia * depth
 
-            # Spark out time: 0.7 + 0.2 if depth ≥ 3×D
-            spark_out_min = 0.7
+            # Spark out time: reduced from 0.7 to 0.5 baseline
+            # Add 0.15 (reduced from 0.2) for deep holes where depth ≥ 3×D
+            spark_out_min = 0.5
             if depth >= 3 * ref_dia:
-                spark_out_min += 0.2
+                spark_out_min += 0.15
 
             # Base time per hole (geometry-based)
             time_per_hole_base = (
@@ -5871,7 +5886,9 @@ def estimate_hole_table_times(
                 spark_out_min
             )
 
-            # Apply material grinding factor (aluminum < 1.0, tool steel = 1.0, carbide = 2.5, etc.)
+            # Apply material grinding factor to account for material hardness
+            # Expected values: aluminum/mold-plate < 1.0, tool steel = 1.0, carbide = 2.5
+            # This makes jig-grind faster for softer materials like aluminum
             # Try Grinding operation first, then Endmill_Profile for backward compatibility
             sf_grind = get_speeds_feeds(material, "Grinding")
             if not sf_grind:
@@ -5880,6 +5897,15 @@ def estimate_hole_table_times(
             grinding_time_factor = 1.0
             if sf_grind:
                 grinding_time_factor = sf_grind.get('grinding_time_factor', 1.0)
+
+            # Fallback material-specific factors if not found in CSV
+            # This ensures aluminum and soft materials always grind faster
+            if grinding_time_factor == 1.0:
+                material_upper = material.upper()
+                if any(kw in material_upper for kw in ['6061', '7075', 'ALUMINUM', 'ALUMINIUM', 'AL']):
+                    grinding_time_factor = 0.6  # Aluminum grinds much faster
+                elif any(kw in material_upper for kw in ['MOLD PLATE', 'MOLDPLATE', 'P20', 'P2']):
+                    grinding_time_factor = 0.7  # Mold plate grinds faster than tool steel
 
             # Apply small-diameter factor: if dia < 0.080", multiply by 1.2-1.4
             small_dia_factor = 1.0
@@ -5914,10 +5940,21 @@ def estimate_hole_table_times(
             time_per_hole = round(time_per_hole, 2)
             total_time = round(time_per_hole * qty, 2)
 
+            # Determine depth source for logging
+            depth_source = "unknown"
+            if 'THRU' in combined_text and 'JIG GRIND' in combined_text:
+                depth_source = "THRU (actual thickness)"
+            elif re.search(r'JIG\s+GRIND\s+(?:X\s*)?([0-9]+\.?\d*)\s+THICKNESS', combined_text, flags=re.I):
+                depth_source = "explicit THICKNESS spec"
+            elif thickness > 0:
+                depth_source = "model thickness"
+            else:
+                depth_source = "default fallback"
+
             # Log jig-grind calculation details
             import logging
             logging.debug(
-                f"Jig grind {hole_id}: dia={ref_dia:.4f}\", depth={depth:.3f}\", "
+                f"Jig grind {hole_id}: dia={ref_dia:.4f}\", depth={depth:.3f}\" ({depth_source}), "
                 f"t_base={time_per_hole_base:.2f}min, material_factor={grinding_time_factor:.2f}, "
                 f"small_dia_factor={small_dia_factor:.2f}, t_hole={time_per_hole:.2f}min"
                 + (f", die_section_min_applied (was {time_before_min:.2f}min)" if is_die_section and time_before_min < 20.0 else "")
@@ -5935,6 +5972,7 @@ def estimate_hole_table_times(
                 # JIG GRIND TIME MODEL TRANSPARENCY FIELDS
                 'jig_grind_dia': ref_dia,
                 'jig_grind_depth': depth,
+                'depth_source': depth_source,  # How depth was determined
                 't_hole': time_per_hole,
                 'material_factor': grinding_time_factor,
                 'small_dia_factor': small_dia_factor,
@@ -5942,6 +5980,7 @@ def estimate_hole_table_times(
                 'grind_area_sq_in': grind_area,
                 't_base': round(time_per_hole_base, 2),
                 'spark_out_min': spark_out_min,
+                'mpsi': mpsi,  # Minutes per square inch (for transparency)
             })
 
         # TAP operations
