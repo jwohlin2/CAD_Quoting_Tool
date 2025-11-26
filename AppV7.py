@@ -2624,39 +2624,8 @@ class AppV7:
         # Display in output tab
         self.output_text.delete(1.0, tk.END)
 
-        # Add quote header with file name and part family
-        from pathlib import Path
-        cad_filename = Path(self.cad_file_path).name if self.cad_file_path else "Unknown File"
-        part_family = quote_data.get("Part Family", "Unknown")
-        quantity = quote_data.get("Quantity", "1")
-        material = quote_data.get("Material", "")
-
-        header_lines = [
-            "=" * 74,
-            "QUOTE SUMMARY",
-            "=" * 74,
-            f"CAD File: {cad_filename}",
-            f"Part Type: {part_family}",
-        ]
-
-        # Add quantity if > 1
-        if quantity and str(quantity) != "1":
-            header_lines.append(f"Quantity: {quantity} part(s)")
-
-        # Add material if overridden
-        if material:
-            header_lines.append(f"Material: {material}")
-
-        header_lines.extend([
-            "=" * 74,
-            "",
-            ""
-        ])
-
-        self.output_text.insert(tk.END, "\n".join(header_lines))
-
-        # CRITICAL: Extract quote data ONCE before parallel report generation
-        # Extract quote data before threading to prevent race conditions
+        # CRITICAL: Extract quote data FIRST before displaying header
+        # This ensures we display the actual detected part family, not user input
         try:
             # Extract quote data before starting parallel threads
             quote_data = self._extract_quote_data()
@@ -2668,6 +2637,37 @@ class AppV7:
             self.output_text.insert(tk.END, error_msg)
             self.status_bar.config(text="Quote generation failed - see Output tab")
             return
+
+        # Add quote header with file name and part family from actual extraction
+        from pathlib import Path
+        cad_filename = Path(self.cad_file_path).name if self.cad_file_path else "Unknown File"
+        part_family = quote_data.part_family if quote_data.part_family else "Unknown"
+        quantity = quote_data.quantity
+        material = quote_data.material_info.material_name if quote_data.material_info else ""
+
+        header_lines = [
+            "=" * 74,
+            "QUOTE SUMMARY",
+            "=" * 74,
+            f"CAD File: {cad_filename}",
+            f"Part Type: {part_family}",
+        ]
+
+        # Add quantity if > 1
+        if quantity and quantity > 1:
+            header_lines.append(f"Quantity: {quantity} part(s)")
+
+        # Add material if detected/overridden
+        if material:
+            header_lines.append(f"Material: {material}")
+
+        header_lines.extend([
+            "=" * 74,
+            "",
+            ""
+        ])
+
+        self.output_text.insert(tk.END, "\n".join(header_lines))
 
         # Generate all three reports in parallel for 10-20 second speedup
         # The reports are independent and can run concurrently

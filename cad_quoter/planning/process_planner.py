@@ -73,13 +73,17 @@ def plan_job(family: str, params: Dict[str, Any]) -> Dict[str, Any]:
 
     plan = PLANNERS[family](params)
 
+    # Normalize the plan and ensure planner field is set
+    plan_dict = normalize_plan(plan)
+
+    # Set the planner field to the resolved family name for consistent routing identification
+    plan_dict["planner"] = family
+
     # Add classification warning if present
     if classification_warning:
-        plan_dict = normalize_plan(plan)
         plan_dict.setdefault("warnings", []).append(classification_warning)
-        return plan_dict
 
-    return normalize_plan(plan)
+    return plan_dict
 
 # ---------------------------------------------------------------------------
 # Core primitives
@@ -127,6 +131,14 @@ def normalize_plan(plan: Plan | Dict[str, Any]) -> Dict[str, Any]:
         # Preserve meta key for die sections and other families with metadata
         if "meta" in plan:
             d["meta"] = dict(plan["meta"])
+
+    # Set planner field based on family in meta (for consistent routing identification)
+    if "meta" in d and "family" in d["meta"]:
+        d["planner"] = d["meta"]["family"]
+    elif "planner" not in d:
+        # Default to Plates if no family/planner information available
+        d["planner"] = "Plates"
+
     derive_directs(d)
     return d
 
