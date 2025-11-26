@@ -5847,6 +5847,96 @@ def calc_small_undercut_minutes(
     return total_time
 
 
+def calc_centers_grind_minutes(
+    has_centers: bool,
+    qty: int,
+    num_diameters: int = 1,
+    total_length_in: float = 0.0
+) -> float:
+    """Calculate time for OD/face grinding between centers.
+
+    Args:
+        has_centers: Whether centers operation was detected
+        qty: Quantity of parts in the lot
+        num_diameters: Number of diameters to grind
+        total_length_in: Total length to be ground
+
+    Returns:
+        Time in minutes for centers grinding operation
+    """
+    if not has_centers:
+        return 0.0
+
+    # Constants
+    CENTERS_SETUP_MIN = 3.0  # Setup time for center drill and grinding between centers
+    CENTERS_DRILL_PER_PART = 0.5  # Time to center drill both ends per part
+    OD_GRIND_MIN_PER_DIAM_INCH = 1.2  # Time per diameter-inch (diameter × length)
+    FACE_GRIND_MIN_PER_FACE = 1.5  # Time to face grind each end
+
+    # Center drill both ends
+    center_drill_time = qty * CENTERS_DRILL_PER_PART
+
+    # OD grinding time based on number of diameters and length
+    od_grind_time = qty * num_diameters * total_length_in * OD_GRIND_MIN_PER_DIAM_INCH
+
+    # Face grinding both ends
+    face_grind_time = qty * 2 * FACE_GRIND_MIN_PER_FACE
+
+    total_time = CENTERS_SETUP_MIN + center_drill_time + od_grind_time + face_grind_time
+
+    return total_time
+
+
+def calc_smallest_radius_minutes(
+    has_smallest_radius: bool,
+    qty: int,
+    radius_in: Optional[float] = None,
+    count: int = 1
+) -> float:
+    """Calculate time for smallest inside radius operations.
+
+    Time scales by count and radius size (smaller = more difficult).
+
+    Args:
+        has_smallest_radius: Whether smallest radius was detected
+        qty: Quantity of parts in the lot
+        radius_in: Radius size in inches
+        count: Number of radius locations
+
+    Returns:
+        Time in minutes for smallest radius operations
+    """
+    if not has_smallest_radius:
+        return 0.0
+
+    # Constants
+    RADIUS_SETUP_MIN = 2.0  # Setup time for radius tooling
+    RADIUS_BASE_MIN = 2.0  # Base time per radius location
+
+    # Default radius if not specified
+    if radius_in is None:
+        radius_in = 0.015  # Default .015" radius
+
+    # Difficulty factor: smaller radii are harder (inverse relationship)
+    # For radius <= 0.010", use 3x multiplier; for 0.020", use 1.5x; for >= 0.030", use 1x
+    if radius_in <= 0.010:
+        difficulty_factor = 3.0
+    elif radius_in <= 0.020:
+        difficulty_factor = 2.0
+    elif radius_in <= 0.030:
+        difficulty_factor = 1.5
+    else:
+        difficulty_factor = 1.0
+
+    # Time per radius location
+    time_per_radius = RADIUS_BASE_MIN * difficulty_factor
+
+    # Total time
+    total_time = RADIUS_SETUP_MIN + qty * count * time_per_radius
+
+    return total_time
+
+
 def calc_lift_spec_minutes(has_lift_spec: bool, lift_dimension: float, qty: int) -> float:
     """Calculate time for lift/height specifications.
 

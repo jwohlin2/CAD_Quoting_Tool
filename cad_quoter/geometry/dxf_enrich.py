@@ -1381,6 +1381,18 @@ class PunchFeatureSummary:
     has_sharp_edges: bool = False
     has_gdt: bool = False
     has_etch: bool = False
+    # Special feature flags
+    has_centers: bool = False  # Centers permitted or tight OD tolerance
+    has_spring_punch: bool = False  # Spring punch operation
+    spring_punch_travel_in: Optional[float] = None  # Spring punch travel distance
+    has_lift: bool = False  # Lift/step operation
+    lift_thickness_in: Optional[float] = None  # Lift thickness
+    lift_pad_ref: Optional[str] = None  # Pad reference for lift
+    has_small_undercut: bool = False  # Small undercut operation
+    small_undercut_count: int = 0  # Count of small undercuts
+    has_smallest_radius: bool = False  # Smallest inside radius operation
+    smallest_radius_in: Optional[float] = None  # Smallest radius value
+    smallest_radius_count: int = 0  # Count of smallest radii
     material_callout: Optional[str] = None
     extraction_source: str = "dxf_geometry_and_text"
     confidence_score: float = 1.0
@@ -2233,6 +2245,196 @@ def detect_punch_pain_flags(text_dump: str) -> Dict[str, bool]:
     }
 
 
+def detect_centers_operation(text_dump: str, min_dia_tol_in: Optional[float] = None) -> bool:
+    """Detect if centers/OD grinding operation is required from text.
+
+    Returns True if:
+    - "CENTERS PERMITTED" appears in text, OR
+    - OD tolerance indicates grinding precision (< 0.0002")
+
+    Args:
+        text_dump: Raw text from DXF
+        min_dia_tol_in: Minimum diameter tolerance in inches
+
+    Returns:
+        True if centers/OD grinding should be used
+    """
+    if not text_dump:
+        return False
+
+    # First filter out any struck-out/crossed-out text
+    filtered_text = _filter_struck_out_text(text_dump)
+    text_upper = filtered_text.upper()
+
+    # Check for explicit centers permitted note
+    centers_patterns = [
+        r'\bCENTERS\s+PERMITTED',
+        r'\bCENTER\s+PERMITTED',
+        r'\bUSE\s+CENTERS',
+        r'\bGRIND\s+BETWEEN\s+CENTERS',
+    ]
+
+    for pattern in centers_patterns:
+        if re.search(pattern, text_upper):
+            return True
+
+    # Check for tight OD tolerance that implies grinding
+    if min_dia_tol_in is not None and min_dia_tol_in < 0.0002:
+        return True
+
+    return False
+
+
+def detect_spring_punch_operation(text_dump: str) -> tuple[bool, Optional[float]]:
+    """Detect if spring punch operation is required from text.
+
+    Returns:
+        Tuple of (has_spring_punch, travel_inches)
+        Example: (True, 0.0625) for "SPRING PUNCH .0625 TRAVEL"
+    """
+    if not text_dump:
+        return False, None
+
+    # First filter out any struck-out/crossed-out text
+    filtered_text = _filter_struck_out_text(text_dump)
+    text_upper = filtered_text.upper()
+
+    # Patterns for spring punch operations
+    spring_patterns = [
+        r'\bSPRING\s+PUNCH',
+        r'\bSPRING\s+LOADED\s+PUNCH',
+    ]
+
+    has_spring = False
+    for pattern in spring_patterns:
+        if re.search(pattern, text_upper):
+            has_spring = True
+            break
+
+    if not has_spring:
+        return False, None
+
+    # Extract travel distance (e.g., ".0625 TRAVEL", "0.0625\" TRAVEL")
+    travel_match = re.search(r'0*\.(\d{3,4})\s*(?:\"|INCHES?)?\s+TRAVEL', text_upper)
+    if travel_match:
+        digits = travel_match.group(1)
+        travel = float(f"0.{digits}")
+        return True, travel
+
+    # If spring punch detected but no travel specified, return default
+    return True, None
+
+
+def detect_lift_operation(text_dump: str) -> tuple[bool, Optional[float], Optional[str]]:
+    """Detect if lift/step operation is required from text.
+
+    Returns:
+        Tuple of (has_lift, lift_thickness_in, pad_reference)
+        Example: (True, 0.0600, "130") for "LIFT: .0600 ON PAD 130"
+    """
+    if not text_dump:
+        return False, None, None
+
+    # First filter out any struck-out/crossed-out text
+    filtered_text = _filter_struck_out_text(text_dump)
+    text_upper = filtered_text.upper()
+
+    # Patterns for lift operations
+    # Example: "LIFT: .0600" or "LIFT .0600 ON PAD 130"
+    lift_match = re.search(
+        r'\bLIFT[:\s]+0*\.(\d{3,4})(?:\s+ON\s+(?:PAD|SECTION|AREA)\s+(\w+))?',
+        text_upper
+    )
+
+    if not lift_match:
+        return False, None, None
+
+    # Extract lift thickness
+    digits = lift_match.group(1)
+    lift_thickness = float(f"0.{digits}")
+
+    # Extract pad/section reference if present
+    pad_ref = lift_match.group(2) if lift_match.lastindex >= 2 else None
+
+    return True, lift_thickness, pad_ref
+
+
+def detect_small_undercut_operation(text_dump: str) -> tuple[bool, int]:
+    """Detect if small undercut operation is required from text.
+
+    Returns:
+        Tuple of (has_small_undercut, count)
+        Example: (True, 2) for "2 SMALL UNDERCUTS"
+    """
+    if not text_dump:
+        return False, 0
+
+    # First filter out any struck-out/crossed-out text
+    filtered_text = _filter_struck_out_text(text_dump)
+    text_upper = filtered_text.upper()
+
+    # Patterns for small undercut
+    undercut_patterns = [
+        r'(\d+)\s+SMALL\s+UNDERCUTS?',
+        r'SMALL\s+UNDERCUTS?\s+[X×]\s*(\d+)',
+        r'\bSMALL\s+UNDERCUT\b',
+    ]
+
+    for pattern in undercut_patterns:
+        match = re.search(pattern, text_upper)
+        if match:
+            # Try to extract count
+            if match.lastindex and match.group(1):
+                try:
+                    count = int(match.group(1))
+                    return True, count
+                except (ValueError, IndexError):
+                    pass
+            # Found pattern but no count
+            return True, 1
+
+    return False, 0
+
+
+def detect_smallest_radius_operation(text_dump: str) -> tuple[bool, Optional[float], int]:
+    """Detect if smallest inside radius operation is required from text.
+
+    Returns:
+        Tuple of (has_smallest_radius, radius_in, count)
+        Example: (True, 0.015, 4) for "SMALLEST INSIDE RADIUS .015 X 4"
+    """
+    if not text_dump:
+        return False, None, 0
+
+    # First filter out any struck-out/crossed-out text
+    filtered_text = _filter_struck_out_text(text_dump)
+    text_upper = filtered_text.upper()
+
+    # Patterns for smallest inside radius
+    # Example: "SMALLEST INSIDE RADIUS .015" or "SMALLEST INSIDE RADIUS R.015 X 4"
+    radius_match = re.search(
+        r'SMALLEST\s+INSIDE\s+RADIUS\s+R?0*\.(\d{3,4})(?:\s+[X×]\s*(\d+))?',
+        text_upper
+    )
+
+    if not radius_match:
+        return False, None, 0
+
+    # Extract radius value
+    digits = radius_match.group(1)
+    radius = float(f"0.{digits}")
+
+    # Extract count if present
+    count = 1
+    if radius_match.lastindex >= 2 and radius_match.group(2):
+        try:
+            count = int(radius_match.group(2))
+        except ValueError:
+            count = 1
+
+    return True, radius, count
+
+
 def parse_punch_holes_from_text(text_dump: str) -> Dict[str, Any]:
     """Parse hole and tap specifications from free text."""
     taps = []
@@ -2405,6 +2607,31 @@ def extract_punch_features_from_dxf(dxf_path: Path, text_dump: str) -> PunchFeat
 
     # Detect etch operation requirement
     summary.has_etch = detect_etch_operation(text_dump)
+
+    # Extract tolerances from dimension data
+    summary.min_dia_tol_in = dim_data.get("min_dia_tol")
+    summary.min_len_tol_in = dim_data.get("min_len_tol")
+
+    # Detect special feature operations
+    summary.has_centers = detect_centers_operation(text_dump, summary.min_dia_tol_in)
+
+    has_spring, spring_travel = detect_spring_punch_operation(text_dump)
+    summary.has_spring_punch = has_spring
+    summary.spring_punch_travel_in = spring_travel
+
+    has_lift, lift_thickness, lift_pad = detect_lift_operation(text_dump)
+    summary.has_lift = has_lift
+    summary.lift_thickness_in = lift_thickness
+    summary.lift_pad_ref = lift_pad
+
+    has_undercut, undercut_count = detect_small_undercut_operation(text_dump)
+    summary.has_small_undercut = has_undercut
+    summary.small_undercut_count = undercut_count
+
+    has_radius, radius_val, radius_count = detect_smallest_radius_operation(text_dump)
+    summary.has_smallest_radius = has_radius
+    summary.smallest_radius_in = radius_val
+    summary.smallest_radius_count = radius_count
 
     hole_data = parse_punch_holes_from_text(text_dump)
     summary.tap_count = hole_data["tap_count"]
