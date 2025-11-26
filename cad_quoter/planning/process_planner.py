@@ -2497,7 +2497,12 @@ def plan_from_cad_file(
         detect_etch_operation,
         detect_polish_contour_operation,
         detect_waterjet_openings,
-        detect_waterjet_profile
+        detect_waterjet_profile,
+        detect_small_undercut,
+        detect_lift_spec,
+        detect_waterjet_cleanup,
+        detect_chamfer_details,
+        detect_lead_in_notes
     )
     text_dump = plan["text_dump"]
 
@@ -2532,6 +2537,38 @@ def plan_from_cad_file(
     plan["waterjet_profile_tolerance"] = waterjet_profile_tol
     if has_waterjet_profile and verbose:
         print(f"[PLANNER] Detected waterjet profile requirement (±{waterjet_profile_tol:.3f})")
+
+    # Small undercut detection
+    has_small_undercut, undercut_radius = detect_small_undercut(text_dump)
+    plan["has_small_undercut"] = has_small_undercut
+    plan["undercut_radius"] = undercut_radius
+    if has_small_undercut and verbose:
+        print(f"[PLANNER] Detected small undercut requirement (R {undercut_radius:.3f})")
+
+    # Lift spec detection
+    has_lift_spec, lift_dimension = detect_lift_spec(text_dump)
+    plan["has_lift_spec"] = has_lift_spec
+    plan["lift_dimension"] = lift_dimension
+    if has_lift_spec and verbose:
+        print(f"[PLANNER] Detected lift spec requirement ({lift_dimension:.4f}\")")
+
+    # Waterjet cleanup detection
+    has_waterjet_cleanup = detect_waterjet_cleanup(text_dump)
+    plan["has_waterjet_cleanup"] = has_waterjet_cleanup
+    if has_waterjet_cleanup and verbose:
+        print("[PLANNER] Detected waterjet cleanup/blend requirement")
+
+    # Chamfer details detection
+    chamfer_details = detect_chamfer_details(text_dump)
+    plan["chamfer_details"] = chamfer_details
+    if chamfer_details and verbose:
+        print(f"[PLANNER] Detected {len(chamfer_details)} specific chamfer callout(s)")
+
+    # Lead-in notes detection
+    has_lead_in = detect_lead_in_notes(text_dump)
+    plan["has_lead_in"] = has_lead_in
+    if has_lead_in and verbose:
+        print("[PLANNER] Detected lead-in/approach notes")
 
     if verbose:
         print(f"[PLANNER] Plan complete: {len(plan['ops'])} operations")
@@ -4858,16 +4895,9 @@ def estimate_machine_hours_from_plan(
         # Clean up temporary dict
         del time_breakdown['_other_ops_temp']
 
-    # If there's any remaining "other" time not accounted for, add it as misc
-    remaining_other = time_breakdown['other'] - other_ops_minutes
-    if remaining_other > 0.1:  # Small threshold to avoid floating point artifacts
-        other_ops_detail.append({
-            "type": "misc_other",
-            "label": "Miscellaneous operations",
-            "minutes": round(remaining_other, 1),
-            "source": "text"
-        })
-        other_ops_minutes += remaining_other
+    # Store the original "other" time before adding explicit operations
+    # This will be used later to calculate any remaining unaccounted time
+    original_other_time = time_breakdown['other']
 
     # Add geometry-based other operations time (chamfers, radii, polish, etc.)
     # NOTE: This now returns empty since geometry-based operations moved to labor
@@ -4887,6 +4917,127 @@ def estimate_machine_hours_from_plan(
         qty = 1  # Default to 1 part unless specified
         details_with_etch = 1  # Default to 1 mark per part
         etch_minutes = calc_etch_minutes(has_etch_note=True, qty=qty, details_with_etch=details_with_etch)
+        if etch_minutes > 0:
+            other_ops_detail.append({
+                "type": "etch",
+                "label": "Etch/marking operation",
+                "minutes": round(etch_minutes, 1),
+                "source": "text"
+            })
+            other_ops_minutes += etch_minutes
+
+    # Calculate small undercut time from plan
+    if plan.get('has_small_undercut', False):
+        qty = 1  # Default to 1 part unless specified
+        undercut_radius = plan.get('undercut_radius', 0.020)
+        material_group = plan.get('mat_group', 'GENERIC')
+        # Determine operation type (turn vs grind) based on part characteristics
+        # Default to turning for most cases
+        operation_type = "turn"
+        undercut_minutes = calc_small_undercut_minutes(
+            has_small_undercut=True,
+            undercut_radius=undercut_radius,
+            qty=qty,
+            material_group=material_group,
+            operation_type=operation_type
+        )
+        if undercut_minutes > 0:
+            other_ops_detail.append({
+                "type": "small_undercut",
+                "label": f"Small undercut cleanup (R {undercut_radius:.3f}\")",
+                "minutes": round(undercut_minutes, 1),
+                "source": "text"
+            })
+            other_ops_minutes += undercut_minutes
+
+    # Calculate lift spec time from plan
+    if plan.get('has_lift_spec', False):
+        qty = 1  # Default to 1 part unless specified
+        lift_dimension = plan.get('lift_dimension', 0.0600)
+        lift_minutes = calc_lift_spec_minutes(
+            has_lift_spec=True,
+            lift_dimension=lift_dimension,
+            qty=qty
+        )
+        if lift_minutes > 0:
+            other_ops_detail.append({
+                "type": "lift_spec",
+                "label": f"Lift spec verification ({lift_dimension:.4f}\")",
+                "minutes": round(lift_minutes, 1),
+                "source": "text"
+            })
+            other_ops_minutes += lift_minutes
+
+    # Calculate waterjet cleanup time from plan
+    if plan.get('has_waterjet_cleanup', False):
+        qty = 1  # Default to 1 part unless specified
+        # Calculate part size factor based on dimensions
+        part_size_factor = 1.0
+        if L > 0 and W > 0:
+            part_area = L * W
+            if part_area > 100:  # Large part (> 10" × 10")
+                part_size_factor = 2.0
+            elif part_area > 50:  # Medium-large part
+                part_size_factor = 1.5
+
+        waterjet_cleanup_minutes = calc_waterjet_cleanup_minutes(
+            has_waterjet_cleanup=True,
+            qty=qty,
+            part_size_factor=part_size_factor
+        )
+        if waterjet_cleanup_minutes > 0:
+            other_ops_detail.append({
+                "type": "waterjet_cleanup",
+                "label": "Waterjet channel cleanup/blend",
+                "minutes": round(waterjet_cleanup_minutes, 1),
+                "source": "text"
+            })
+            other_ops_minutes += waterjet_cleanup_minutes
+
+    # Calculate chamfer detail time from plan (specific dimensions)
+    chamfer_details = plan.get('chamfer_details', [])
+    if chamfer_details:
+        material_group = plan.get('mat_group', 'GENERIC')
+        for chamfer_spec in chamfer_details:
+            chamfer_minutes = calc_chamfer_detail_minutes(chamfer_spec, material_group)
+            if chamfer_minutes > 0:
+                dimension = chamfer_spec.get('dimension', 0.0)
+                angle = chamfer_spec.get('angle', 45)
+                quantity = chamfer_spec.get('quantity', 1)
+                label = f"Chamfer {dimension:.3f}\" × {angle}° ({quantity} edge{'s' if quantity != 1 else ''})"
+                other_ops_detail.append({
+                    "type": "chamfer_specific",
+                    "label": label,
+                    "minutes": round(chamfer_minutes, 1),
+                    "source": "text"
+                })
+                other_ops_minutes += chamfer_minutes
+
+    # Calculate lead-in time from plan
+    if plan.get('has_lead_in', False):
+        qty = 1  # Default to 1 part unless specified
+        lead_in_minutes = calc_lead_in_minutes(has_lead_in=True, qty=qty)
+        if lead_in_minutes > 0:
+            other_ops_detail.append({
+                "type": "lead_in",
+                "label": "Lead-in/approach programming",
+                "minutes": round(lead_in_minutes, 1),
+                "source": "text"
+            })
+            other_ops_minutes += lead_in_minutes
+
+    # After all explicit operations have been added, check if there's any remaining
+    # unaccounted "other" time. This should be minimal now that we've broken out
+    # specific operations, but may still exist for truly miscellaneous work.
+    remaining_other = original_other_time - other_ops_minutes
+    if remaining_other > 0.1:  # Small threshold to avoid floating point artifacts
+        other_ops_detail.append({
+            "type": "misc_other",
+            "label": "Miscellaneous operations",
+            "minutes": round(remaining_other, 1),
+            "source": "geometry"
+        })
+        other_ops_minutes += remaining_other
 
     # Update time_breakdown['other'] to match the sum of all other_ops_detail entries
     time_breakdown['other'] = other_ops_minutes
@@ -5438,6 +5589,213 @@ def calc_polish_contour_minutes(
     polish_min_total = max(polish_min_total, MIN_POLISH_TIME_PER_LOT)
 
     return polish_min_total
+
+
+def calc_small_undercut_minutes(
+    has_small_undercut: bool,
+    undercut_radius: float,
+    qty: int,
+    material_group: str,
+    operation_type: str = "turn"
+) -> float:
+    """Calculate time for small undercut cleanup operations.
+
+    Small undercuts require careful turning or grinding to achieve the radius.
+
+    Args:
+        has_small_undercut: Whether small undercut requirement was detected
+        undercut_radius: Radius of the undercut in inches
+        qty: Quantity of parts in the lot
+        material_group: Material group name (ALUMINUM, TOOL_STEEL, etc.)
+        operation_type: Type of operation ("turn" or "grind")
+
+    Returns:
+        Time in minutes for small undercut operation
+    """
+    if not has_small_undercut:
+        return 0.0
+
+    # Constants (tune these based on shop experience)
+    SETUP_MIN = 3.0  # minutes per lot - setup tooling
+    BASE_MIN_PER_PART = 2.0  # minutes per part - position and execute
+
+    # Material factors for undercut operations (similar to grinding)
+    material_factor_map = {
+        "ALUMINUM": 0.7,
+        "TOOL_STEEL": 1.0,
+        "52100": 1.5,
+        "STAINLESS": 1.4,
+        "CARBIDE": 3.0,
+        "CERAMIC": 4.0,
+        "GENERIC": 1.0,
+    }
+    material_factor = material_factor_map.get(material_group.upper(), 1.0)
+
+    # Smaller radii are harder and take longer (e.g., R.010 is harder than R.030)
+    radius_factor = 1.0
+    if undercut_radius < 0.015:  # Very small radius
+        radius_factor = 1.5
+    elif undercut_radius < 0.025:  # Small radius
+        radius_factor = 1.2
+
+    # Grinding takes longer than turning for undercuts
+    operation_factor = 1.5 if operation_type == "grind" else 1.0
+
+    # Calculate time
+    time_per_part = BASE_MIN_PER_PART * material_factor * radius_factor * operation_factor
+    total_time = SETUP_MIN + qty * time_per_part
+
+    # Floor time
+    MIN_TIME = 5.0
+    total_time = max(total_time, MIN_TIME)
+
+    return total_time
+
+
+def calc_lift_spec_minutes(has_lift_spec: bool, lift_dimension: float, qty: int) -> float:
+    """Calculate time for lift/height specifications.
+
+    Lift specs require careful setup and measurement to achieve the specified height.
+
+    Args:
+        has_lift_spec: Whether lift spec requirement was detected
+        lift_dimension: Lift dimension in inches
+        qty: Quantity of parts in the lot
+
+    Returns:
+        Time in minutes for lift spec operation
+    """
+    if not has_lift_spec:
+        return 0.0
+
+    # Constants (tune these based on shop experience)
+    SETUP_MIN = 2.0  # minutes per lot - setup measurement tools
+    BASE_MIN_PER_PART = 1.5  # minutes per part - measure and adjust
+
+    # Tighter tolerances on lift dimension require more time
+    tolerance_factor = 1.0
+    if lift_dimension < 0.030:  # Very tight lift spec
+        tolerance_factor = 1.3
+    elif lift_dimension < 0.060:  # Tight lift spec
+        tolerance_factor = 1.1
+
+    time_per_part = BASE_MIN_PER_PART * tolerance_factor
+    total_time = SETUP_MIN + qty * time_per_part
+
+    # Floor time
+    MIN_TIME = 3.0
+    total_time = max(total_time, MIN_TIME)
+
+    return total_time
+
+
+def calc_waterjet_cleanup_minutes(has_waterjet_cleanup: bool, qty: int, part_size_factor: float = 1.0) -> float:
+    """Calculate time for waterjet cleanup/blend operations.
+
+    This is for cleanup/blending of waterjet channels, not cutting.
+
+    Args:
+        has_waterjet_cleanup: Whether waterjet cleanup requirement was detected
+        qty: Quantity of parts in the lot
+        part_size_factor: Factor for part size (1.0 = typical, 2.0 = large)
+
+    Returns:
+        Time in minutes for waterjet cleanup operation
+    """
+    if not has_waterjet_cleanup:
+        return 0.0
+
+    # Constants (tune these based on shop experience)
+    SETUP_MIN = 2.0  # minutes per lot - gather tools, setup bench
+    BASE_MIN_PER_PART = 3.0  # minutes per part - hand work to blend/cleanup waterjet marks
+
+    time_per_part = BASE_MIN_PER_PART * part_size_factor
+    total_time = SETUP_MIN + qty * time_per_part
+
+    # Floor time
+    MIN_TIME = 5.0
+    total_time = max(total_time, MIN_TIME)
+
+    return total_time
+
+
+def calc_chamfer_detail_minutes(chamfer_spec: Dict[str, Any], material_group: str) -> float:
+    """Calculate time for a specific chamfer operation.
+
+    Args:
+        chamfer_spec: Dict with keys: dimension, angle, quantity
+                     Example: {"dimension": 0.040, "angle": 45, "quantity": 4}
+        material_group: Material group name (ALUMINUM, TOOL_STEEL, etc.)
+
+    Returns:
+        Time in minutes for this chamfer operation
+    """
+    dimension = chamfer_spec.get("dimension", 0.0)
+    angle = chamfer_spec.get("angle", 45)
+    quantity = chamfer_spec.get("quantity", 1)
+
+    if quantity == 0:
+        return 0.0
+
+    # Constants (tune these based on shop experience)
+    BASE_MIN_PER_EDGE = 0.5  # minutes per edge - typical chamfer
+
+    # Material factors
+    material_factor_map = {
+        "ALUMINUM": 0.6,
+        "TOOL_STEEL": 1.0,
+        "52100": 1.3,
+        "STAINLESS": 1.2,
+        "CARBIDE": 2.0,
+        "CERAMIC": 2.5,
+        "GENERIC": 1.0,
+    }
+    material_factor = material_factor_map.get(material_group.upper(), 1.0)
+
+    # Smaller chamfers are trickier and take longer
+    size_factor = 1.0
+    if dimension < 0.010:  # Very small chamfer
+        size_factor = 1.5
+    elif dimension < 0.020:  # Small chamfer
+        size_factor = 1.2
+    elif dimension > 0.060:  # Large chamfer
+        size_factor = 1.1
+
+    # Non-45° angles require more care
+    angle_factor = 1.0 if angle == 45 else 1.2
+
+    time_per_edge = BASE_MIN_PER_EDGE * material_factor * size_factor * angle_factor
+    total_time = quantity * time_per_edge
+
+    return total_time
+
+
+def calc_lead_in_minutes(has_lead_in: bool, qty: int) -> float:
+    """Calculate time for lead-in/approach operations.
+
+    Lead-in notes indicate special entry/approach requirements for tools.
+
+    Args:
+        has_lead_in: Whether lead-in notes were detected
+        qty: Quantity of parts in the lot
+
+    Returns:
+        Time in minutes for lead-in programming/setup
+    """
+    if not has_lead_in:
+        return 0.0
+
+    # Constants (tune these based on shop experience)
+    PROGRAMMING_MIN = 5.0  # minutes per lot - program special approach
+    EXECUTION_MIN_PER_PART = 0.5  # minutes per part - extra time for careful entry
+
+    total_time = PROGRAMMING_MIN + qty * EXECUTION_MIN_PER_PART
+
+    # Floor time
+    MIN_TIME = 5.0
+    total_time = max(total_time, MIN_TIME)
+
+    return total_time
 
 
 def calc_waterjet_metrics_from_hole_table(hole_table: List[Dict[str, Any]]) -> Dict[str, float]:

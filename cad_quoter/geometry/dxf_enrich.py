@@ -2008,6 +2008,205 @@ def detect_waterjet_profile(text_dump: str) -> tuple[bool, float]:
     return True, tolerance
 
 
+def detect_small_undercut(text_dump: str) -> tuple[bool, float]:
+    """Detect small undercut operations from text.
+
+    Returns:
+        Tuple of (has_small_undercut, undercut_radius)
+        Example: (True, 0.020) for "SMALL UNDERCUT, R .020"
+    """
+    if not text_dump:
+        return False, 0.0
+
+    # First filter out any struck-out/crossed-out text
+    filtered_text = _filter_struck_out_text(text_dump)
+    text_upper = filtered_text.upper()
+
+    # Patterns for small undercut operations
+    undercut_patterns = [
+        r'\bSMALL\s+UNDERCUT',
+        r'\bUNDERCUT',
+        r'\bUNDER\s*CUT',
+    ]
+
+    has_undercut = False
+    match_obj = None
+    for pattern in undercut_patterns:
+        match_obj = re.search(pattern, text_upper)
+        if match_obj:
+            has_undercut = True
+            break
+
+    if not has_undercut:
+        return False, 0.0
+
+    # Extract radius from nearby text (e.g., "R .020", "R.020", "R 0.020")
+    # Search near the undercut keyword
+    undercut_radius = 0.020  # Default radius for small undercuts
+    if match_obj:
+        search_start = max(0, match_obj.start() - 20)
+        search_end = min(len(text_upper), match_obj.end() + 50)
+        nearby_text = text_upper[search_start:search_end]
+
+        # Match patterns like "R .020", "R.020", "R 0.020"
+        radius_match = re.search(r'R\s*(?:0)?\.(\d+)', nearby_text)
+        if radius_match:
+            # Convert matched digits to float (e.g., "020" -> 0.020, "030" -> 0.030)
+            digits = radius_match.group(1)
+            undercut_radius = float(f"0.{digits}")
+
+    return True, undercut_radius
+
+
+def detect_lift_spec(text_dump: str) -> tuple[bool, float]:
+    """Detect lift/height specifications from text.
+
+    Returns:
+        Tuple of (has_lift_spec, lift_dimension)
+        Example: (True, 0.0600) for "LIFT: .0600"
+    """
+    if not text_dump:
+        return False, 0.0
+
+    # First filter out any struck-out/crossed-out text
+    filtered_text = _filter_struck_out_text(text_dump)
+    text_upper = filtered_text.upper()
+
+    # Patterns for lift specifications
+    lift_patterns = [
+        r'\bLIFT\s*:\s*(?:0)?\.(\d+)',
+        r'\bLIFT\s+(?:0)?\.(\d+)',
+        r'\bHEIGHT\s*:\s*(?:0)?\.(\d+)',
+    ]
+
+    for pattern in lift_patterns:
+        match = re.search(pattern, text_upper)
+        if match:
+            # Convert matched digits to float (e.g., "0600" -> 0.0600)
+            digits = match.group(1)
+            lift_dim = float(f"0.{digits}")
+            return True, lift_dim
+
+    return False, 0.0
+
+
+def detect_waterjet_cleanup(text_dump: str) -> bool:
+    """Detect waterjet cleanup/blend operations from text.
+
+    This is different from waterjet cutting - it's cleanup/blending of waterjet channels.
+
+    Returns:
+        True if "WATERJET CLEANUP" or similar text is found.
+    """
+    if not text_dump:
+        return False
+
+    # First filter out any struck-out/crossed-out text
+    filtered_text = _filter_struck_out_text(text_dump)
+    text_upper = filtered_text.upper()
+
+    # Patterns for waterjet cleanup/blend operations
+    cleanup_patterns = [
+        r'\bWATERJET\s+CLEANUP',
+        r'\bWATERJET\s+BLEND',
+        r'\bWATERJET\s+CHANNEL\s+CLEANUP',
+        r'\bWATERJET\s+CHANNEL\s+BLEND',
+        r'\bWATER\s+JET\s+CLEANUP',
+        r'\bWATER\s+JET\s+BLEND',
+        r'\bBLEND\s+WATERJET',
+        r'\bCLEANUP\s+WATERJET',
+    ]
+
+    for pattern in cleanup_patterns:
+        if re.search(pattern, text_upper):
+            return True
+
+    return False
+
+
+def detect_chamfer_details(text_dump: str) -> List[Dict[str, Any]]:
+    """Detect chamfer specifications with dimensions from text.
+
+    Returns:
+        List of chamfer specs: [{"dimension": 0.040, "angle": 45, "quantity": 4}, ...]
+        Example: "(4) .040 × 45°" -> [{"dimension": 0.040, "angle": 45, "quantity": 4}]
+    """
+    if not text_dump:
+        return []
+
+    # First filter out any struck-out/crossed-out text
+    filtered_text = _filter_struck_out_text(text_dump)
+    text_upper = filtered_text.upper()
+
+    chamfers = []
+
+    # Pattern 1: "(4) .040 × 45°" or "(4) 0.040 X 45" - with quantity
+    qty_pattern = r'\((\d+)\)\s*(?:0)?\.(\d+)\s*[X×]\s*(\d+)°?'
+    for match in re.finditer(qty_pattern, text_upper):
+        qty = int(match.group(1))
+        dimension = float(f"0.{match.group(2)}")  # e.g., "040" -> 0.040
+        angle = int(match.group(3))
+        chamfers.append({
+            "dimension": dimension,
+            "angle": angle,
+            "quantity": qty,
+        })
+
+    # Pattern 2: ".040 × 45°" or "0.040 X 45" - single chamfer (no quantity)
+    single_pattern = r'(?<!\d)(?:0)?\.(\d+)\s*[X×]\s*(\d+)°?(?!\d)'
+    for match in re.finditer(single_pattern, text_upper):
+        dimension = float(f"0.{match.group(1)}")  # e.g., "040" -> 0.040
+        angle = int(match.group(2))
+
+        # Check if this dimension/angle combo already exists from a quantity pattern
+        already_exists = any(
+            c["dimension"] == dimension and c["angle"] == angle
+            for c in chamfers
+        )
+
+        if not already_exists:
+            chamfers.append({
+                "dimension": dimension,
+                "angle": angle,
+                "quantity": 1,
+            })
+
+    return chamfers
+
+
+def detect_lead_in_notes(text_dump: str) -> bool:
+    """Detect lead-in or approach notes from text.
+
+    Lead-in notes typically indicate special entry/approach requirements for tools.
+
+    Returns:
+        True if lead-in notes are found.
+    """
+    if not text_dump:
+        return False
+
+    # First filter out any struck-out/crossed-out text
+    filtered_text = _filter_struck_out_text(text_dump)
+    text_upper = filtered_text.upper()
+
+    # Patterns for lead-in/approach notes
+    lead_in_patterns = [
+        r'\bLEAD\s*-?\s*IN',
+        r'\bLEAD\s+IN',
+        r'\bAPPROACH',
+        r'\bENTRY\s+ANGLE',
+        r'\bENTRY\s+POINT',
+        r'\bRAMP\s+IN',
+        r'\bRAMP\s+ENTRY',
+    ]
+
+    for pattern in lead_in_patterns:
+        if re.search(pattern, text_upper):
+            return True
+
+    return False
+
+
 def detect_punch_pain_flags(text_dump: str) -> Dict[str, bool]:
     """Detect quality/pain flags from text."""
     text_upper = text_dump.upper()
