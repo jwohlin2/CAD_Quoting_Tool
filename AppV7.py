@@ -2459,8 +2459,8 @@ class AppV7:
                             "",
                             f"Quantity: {part.quantity} units",
                             "-" * 74,
-                            self._format_cost_summary_line("Total Part Cost", (part.cost_summary.total_cost or 0) * part.quantity),
-                            self._format_cost_summary_line("Total Part Price", (part.cost_summary.final_price or 0) * part.quantity),
+                            self._format_cost_summary_line("Total Part Cost", part.cost_summary.total_total_cost or 0),
+                            self._format_cost_summary_line("Total Part Price", part.cost_summary.total_final_price or 0),
                         ])
 
                     part_summary.append("")
@@ -2512,10 +2512,9 @@ class AppV7:
         for part in parts_data:
             if part.cost_summary:
                 # Get part total (excluding shipping)
-                if part.quantity > 1:
-                    part_total = part.cost_summary.total_final_price
-                else:
-                    part_total = part.cost_summary.final_price
+                # Always use total_final_price as it includes quantity multiplication
+                # (final_price × quantity) regardless of whether quantity is 1 or more
+                part_total = part.cost_summary.total_final_price
 
                 # Debug: Get filename
                 from pathlib import Path
