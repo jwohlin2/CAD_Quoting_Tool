@@ -1165,11 +1165,21 @@ class AppV7:
 
     def _get_quantity(self) -> int:
         """
-        Get the quantity value from Quote Editor field.
+        Get the quantity value from Quote Editor field or temp override.
+
+        In multi-part processing, we set _temp_quantity to ensure each part
+        is extracted with its specific quantity rather than the UI field value.
 
         Returns:
             Integer quantity value (minimum 1, default 1)
         """
+        # Check for temp quantity first (used in multi-part processing)
+        if hasattr(self, '_temp_quantity'):
+            temp_qty = getattr(self, '_temp_quantity', None)
+            if temp_qty is not None and temp_qty >= 1:
+                return int(temp_qty)
+
+        # Otherwise read from UI field
         try:
             quantity = self._get_field_float("Quantity", 1.0)
             if quantity is None or quantity < 1:
@@ -2406,7 +2416,28 @@ class AppV7:
                 self.active_part_index = part_idx
 
                 # Extract quote data for this part if not already extracted
+                # OR if the quantity doesn't match (indicating cached data is stale)
+                needs_extraction = False
+
                 if not part.cost_summary or not part.cost_summary.final_price:
+                    needs_extraction = True
+                    print(f"[AppV7] Part {part_idx + 1} needs extraction (no cost data)")
+                elif part.cost_summary and part.cost_summary.final_price:
+                    # Check if total_final_price matches expected value (final_price × quantity)
+                    # If they don't match, the data was extracted with a different quantity
+                    expected_total = part.cost_summary.final_price * part.quantity
+                    actual_total = part.cost_summary.total_final_price
+
+                    # Allow small rounding differences but catch major discrepancies
+                    if abs(expected_total - actual_total) > 0.50:
+                        print(f"[AppV7] Part {part_idx + 1} quantity mismatch detected:")
+                        print(f"  Expected total: ${expected_total:.2f} (${part.cost_summary.final_price:.2f} × {part.quantity})")
+                        print(f"  Actual total: ${actual_total:.2f}")
+                        print(f"  Difference: ${abs(expected_total - actual_total):.2f}")
+                        print(f"  Re-extracting with correct quantity...")
+                        needs_extraction = True
+
+                if needs_extraction:
                     # Need to extract - set up temporary vars from part data
                     self.cad_file_path = part.cad_file_path
 
@@ -2417,9 +2448,16 @@ class AppV7:
                     self._temp_mcmaster_override = None
                     self._temp_scrap_override = None
 
+                    # CRITICAL: Set the quantity for this part so _get_quantity() returns the right value
+                    self._temp_quantity = part.quantity
+
                     # Extract quote data
                     from cad_quoter.pricing.QuoteDataHelper import extract_quote_data_from_cad
                     part_quote = self._extract_quote_data()
+
+                    # Clean up temp quantity
+                    if hasattr(self, '_temp_quantity'):
+                        delattr(self, '_temp_quantity')
 
                     # Update the part in the order with the extracted data
                     self.current_order.parts[part_idx] = part_quote
