@@ -528,19 +528,26 @@ def convert_dwg_to_dxf(dwg_path: str, *, out_ver="ACAD2018") -> str:
     out_dxf = out_dir / (dwg.stem + ".dxf")
 
     exe_lower = Path(exe).name.lower()
+
+    # On Windows, hide the converter window using CREATE_NO_WINDOW flag
+    import platform
+    creation_flags = 0
+    if platform.system() == "Windows":
+        creation_flags = subprocess.CREATE_NO_WINDOW
+
     try:
         if exe_lower.endswith(".bat") or exe_lower.endswith(".cmd"):
             # ? run batch via cmd.exe so it actually executes
             cmd = ["cmd", "/c", exe, str(dwg), str(out_dxf)]
-            proc = subprocess.run(cmd, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+            proc = subprocess.run(cmd, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, creationflags=creation_flags)
         elif "odafileconverter" in exe_lower:
             # ? official ODAFileConverter CLI
             cmd = [exe, str(dwg.parent), str(out_dir), out_ver, "DXF", "0", "0", dwg.name]
-            proc = subprocess.run(cmd, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+            proc = subprocess.run(cmd, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, creationflags=creation_flags)
         else:
             # ? generic exe that accepts <in> <out>
             cmd = [exe, str(dwg), str(out_dxf)]
-            proc = subprocess.run(cmd, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+            proc = subprocess.run(cmd, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, creationflags=creation_flags)
     except subprocess.CalledProcessError as e:
         raise RuntimeError(
             "DWG?DXF conversion failed.\n"
