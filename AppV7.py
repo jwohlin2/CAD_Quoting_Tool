@@ -385,6 +385,25 @@ class AppV7:
         total_parts = len(self.current_order.parts)
         self.part_info_label.config(text=f"{total_parts} part(s) in order")
 
+    def _save_ui_to_active_part(self) -> None:
+        """Save current UI field values back to the active part object."""
+        if self.active_part_index is None:
+            return
+
+        part = self.current_order.get_part(self.active_part_index)
+        if not part:
+            return
+
+        # Save quantity from UI
+        try:
+            if "Quantity" in self.quote_fields:
+                qty_str = self.quote_fields["Quantity"].get()
+                qty = int(float(qty_str)) if qty_str else 1
+                if qty >= 1:
+                    part.quantity = qty
+        except (ValueError, AttributeError, tk.TclError):
+            pass  # Keep existing quantity if UI value is invalid
+
     def _on_part_selected(self, event) -> None:
         """Handle part selection from the listbox."""
         selection = self.parts_listbox.curselection()
@@ -393,6 +412,9 @@ class AppV7:
 
         part_index = selection[0]
         if part_index != self.active_part_index:
+            # Save current part's UI values before switching
+            self._save_ui_to_active_part()
+
             self.active_part_index = part_index
             self._load_active_part_to_ui()
 
@@ -408,6 +430,9 @@ class AppV7:
             try:
                 part_index = int(selected_text.split("]")[0][1:]) - 1
                 if part_index != self.active_part_index and 0 <= part_index < len(self.current_order.parts):
+                    # Save current part's UI values before switching
+                    self._save_ui_to_active_part()
+
                     self.active_part_index = part_index
                     self._load_active_part_to_ui()
                     # Update the listbox selection to match
@@ -485,8 +510,9 @@ class AppV7:
                         self.quote_fields['diameter2'].insert(0, str(part.part_dimensions.diameter_minor))
 
         # Quantity
-        if hasattr(self, 'qty_var'):
-            self.qty_var.set(str(part.quantity))
+        if "Quantity" in self.quote_fields:
+            self.quote_fields["Quantity"].delete(0, tk.END)
+            self.quote_fields["Quantity"].insert(0, str(part.quantity))
 
         # Material
         if hasattr(self, 'material_var') and part.material_info:
@@ -2381,6 +2407,11 @@ class AppV7:
 
     def _generate_multi_part_order_report(self) -> None:
         """Generate a report for a multi-part order."""
+        print("\n" + "="*80)
+        print("★★★ STARTING MULTI-PART ORDER REPORT GENERATION ★★★")
+        print(f"Total parts in order: {len(self.current_order.parts)}")
+        print("="*80 + "\n")
+
         self.output_text.delete(1.0, tk.END)
 
         # Order header
@@ -2419,6 +2450,15 @@ class AppV7:
                 # OR if the quantity doesn't match (indicating cached data is stale)
                 needs_extraction = False
 
+                # DEBUG: Show part quantity
+                print(f"[AppV7 DEBUG] Part {part_idx + 1}: {part.cad_file_name}")
+                print(f"  part.quantity = {part.quantity}")
+                if part.cost_summary:
+                    print(f"  final_price = ${part.cost_summary.final_price:.2f}" if part.cost_summary.final_price else "  final_price = None")
+                    print(f"  total_final_price = ${part.cost_summary.total_final_price:.2f}" if part.cost_summary.total_final_price else "  total_final_price = None")
+                else:
+                    print(f"  cost_summary = None")
+
                 if not part.cost_summary or not part.cost_summary.final_price:
                     needs_extraction = True
                     print(f"[AppV7] Part {part_idx + 1} needs extraction (no cost data)")
@@ -2426,7 +2466,7 @@ class AppV7:
                     # Check if total_final_price matches expected value (final_price × quantity)
                     # If they don't match, the data was extracted with a different quantity
                     expected_total = part.cost_summary.final_price * part.quantity
-                    actual_total = part.cost_summary.total_final_price
+                    actual_total = part.cost_summary.total_final_price or 0.0
 
                     # Allow small rounding differences but catch major discrepancies
                     if abs(expected_total - actual_total) > 0.50:
@@ -2436,6 +2476,8 @@ class AppV7:
                         print(f"  Difference: ${abs(expected_total - actual_total):.2f}")
                         print(f"  Re-extracting with correct quantity...")
                         needs_extraction = True
+                    else:
+                        print(f"[AppV7] Part {part_idx + 1} quantities match, using cached data")
 
                 if needs_extraction:
                     # Need to extract - set up temporary vars from part data
@@ -2510,12 +2552,19 @@ class AppV7:
                 # Restore active index
                 self.active_part_index = old_active_index
 
+                # Clean up temp quantity variable
+                if hasattr(self, '_temp_quantity'):
+                    delattr(self, '_temp_quantity')
+
             except Exception as e:
                 error_msg = f"\n\nERROR generating quote for Part {part_idx + 1}: {str(e)}\n\n"
                 self.output_text.insert(tk.END, error_msg)
                 print(f"[AppV7] Error generating part {part_idx + 1}: {e}")
                 import traceback
                 traceback.print_exc()
+                # Clean up temp variables even on error
+                if hasattr(self, '_temp_quantity'):
+                    delattr(self, '_temp_quantity')
                 continue
 
         # Generate order-level summary
@@ -2549,10 +2598,9 @@ class AppV7:
 
         for part in parts_data:
             if part.cost_summary:
-                # Get part total (excluding shipping)
-                # Always use total_final_price as it includes quantity multiplication
-                # (final_price × quantity) regardless of whether quantity is 1 or more
-                part_total = part.cost_summary.total_final_price
+                # FIX: Always recalculate total as final_price × quantity
+                # Don't trust total_final_price as it might be from a stale extraction
+                part_total = part.cost_summary.final_price * part.quantity
 
                 # Debug: Get filename
                 from pathlib import Path
@@ -2561,18 +2609,20 @@ class AppV7:
                 print(f"\nPart: {filename}")
                 print(f"  Quantity: {part.quantity}")
                 print(f"  final_price (per unit): ${part.cost_summary.final_price:.2f}")
-                print(f"  total_final_price: ${part.cost_summary.total_final_price:.2f}")
+                print(f"  RECALCULATED total: ${part_total:.2f} (${part.cost_summary.final_price:.2f} × {part.quantity})")
+                print(f"  old total_final_price: ${part.cost_summary.total_final_price:.2f}")
                 print(f"  part_total (used in calc): ${part_total:.2f}")
 
                 # Subtract per-part shipping to get price without shipping
                 # Note: We must subtract the selling price component of shipping (cost + margin),
                 # not just the shipping cost, since part_total is a selling price
                 if part.direct_cost_breakdown and part.direct_cost_breakdown.shipping:
-                    part_shipping_cost = part.direct_cost_breakdown.shipping * part.quantity
+                    # Note: shipping is already for total quantity (see QuoteDataHelper.py line 2283)
+                    part_shipping_cost = part.direct_cost_breakdown.shipping
                     # Calculate the price component attributable to shipping (includes margin)
                     part_shipping_price = part_shipping_cost * (1 + part.cost_summary.margin_rate)
                     part_contribution = part_total - part_shipping_price
-                    print(f"  shipping cost (per unit): ${part.direct_cost_breakdown.shipping:.2f}")
+                    print(f"  shipping cost (total, already includes qty): ${part.direct_cost_breakdown.shipping:.2f}")
                     print(f"  part_shipping_cost (total): ${part_shipping_cost:.2f}")
                     print(f"  margin_rate: {part.cost_summary.margin_rate:.2%}")
                     print(f"  part_shipping_price (with margin): ${part_shipping_price:.2f}")
@@ -2598,12 +2648,51 @@ class AppV7:
         print(f"Total Parts Cost (with shipping): ${total_parts_cost:.2f}")
         print("=" * 80)
 
-        # Sanity check: subtotal should be positive for normal orders
-        if parts_subtotal_no_shipping < 0:
-            print(f"WARNING: Parts Subtotal is NEGATIVE: ${parts_subtotal_no_shipping:.2f}")
-            print("This indicates a calculation error - please review the debug output above.")
+        # ========================================================================
+        # SANITY CHECKS
+        # ========================================================================
+        print("\n" + "=" * 80)
+        print("SANITY CHECKS")
+        print("=" * 80)
+
+        # Check 1: Verify our subtotal matches sum of total_final_price
+        expected_subtotal_with_shipping = sum(
+            p.cost_summary.total_final_price
+            for p in parts_data
+            if p.cost_summary
+        )
+        print(f"✓ Check 1: Verify total_final_price sum")
+        print(f"  Sum of all parts' total_final_price: ${expected_subtotal_with_shipping:.2f}")
+        print(f"  Total parts cost (with shipping):    ${total_parts_cost:.2f}")
+        if abs(expected_subtotal_with_shipping - total_parts_cost) < 0.01:
+            print(f"  ✓ PASS: Values match within $0.01")
         else:
-            print(f"✓ Subtotal is positive: ${parts_subtotal_no_shipping:.2f}")
+            print(f"  ✗ FAIL: Mismatch of ${abs(expected_subtotal_with_shipping - total_parts_cost):.2f}")
+
+        # Check 2: Subtotal should be positive
+        print(f"\n✓ Check 2: Parts subtotal should be positive")
+        if parts_subtotal_no_shipping <= 0:
+            print(f"  ✗ FAIL: Parts Subtotal is NOT positive: ${parts_subtotal_no_shipping:.2f}")
+            print("  This indicates a calculation error - review the debug output above.")
+        else:
+            print(f"  ✓ PASS: Subtotal is positive: ${parts_subtotal_no_shipping:.2f}")
+
+        # Check 3: Verify quantity multiplication is working
+        print(f"\n✓ Check 3: Verify quantity is being multiplied correctly")
+        total_units = sum(p.quantity for p in parts_data)
+        avg_per_unit_price = sum(
+            p.cost_summary.final_price for p in parts_data if p.cost_summary
+        ) / len(parts_data)
+        print(f"  Total units across all parts: {total_units}")
+        print(f"  Average per-unit price: ${avg_per_unit_price:.2f}")
+        print(f"  If quantities were ignored, subtotal would be ≈ ${avg_per_unit_price * len(parts_data):.2f}")
+        print(f"  Actual subtotal (excl. shipping): ${parts_subtotal_no_shipping:.2f}")
+        if parts_subtotal_no_shipping > avg_per_unit_price * len(parts_data):
+            print(f"  ✓ PASS: Subtotal indicates quantities ARE being multiplied")
+        else:
+            print(f"  ✗ WARNING: Subtotal seems too low - quantities might not be applied correctly")
+
+        print("=" * 80)
 
         # Calculate order-level shipping
         from cad_quoter.pricing.mcmaster_helpers import estimate_mcmaster_shipping
@@ -2611,6 +2700,20 @@ class AppV7:
 
         # Calculate grand total
         order_total = parts_subtotal_no_shipping + order_shipping
+
+        # Check 4: Order total should be greater than parts subtotal (if shipping > 0)
+        print(f"\n✓ Check 4: Order total should exceed parts subtotal (if shipping > 0)")
+        print(f"  Parts Subtotal: ${parts_subtotal_no_shipping:.2f}")
+        print(f"  Order Shipping: ${order_shipping:.2f}")
+        print(f"  Order Total:    ${order_total:.2f}")
+        if order_shipping > 0:
+            if order_total > parts_subtotal_no_shipping:
+                print(f"  ✓ PASS: Order total (${order_total:.2f}) > Parts subtotal (${parts_subtotal_no_shipping:.2f})")
+            else:
+                print(f"  ✗ FAIL: Order total should be greater than parts subtotal when shipping > 0")
+        else:
+            print(f"  ✓ INFO: No shipping cost, totals should match")
+        print("=" * 80 + "\n")
 
         # Build summary
         summary_lines.append(f"Number of parts: {len(parts_data)}")
@@ -2630,6 +2733,13 @@ class AppV7:
 
     def generate_quote(self) -> None:
         """Generate the quote."""
+        print("\n" + "#"*80)
+        print("### CODE VERSION CHECK: generate_quote() called - NEW CODE IS RUNNING ###")
+        print("#"*80 + "\n")
+
+        # Save current UI values to active part before generating
+        self._save_ui_to_active_part()
+
         # Check if we have a multi-part order
         if len(self.current_order.parts) > 1:
             self._generate_multi_part_order_report()
