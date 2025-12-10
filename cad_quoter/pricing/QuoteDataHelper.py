@@ -100,6 +100,11 @@ HIGH_SCRAP_THRESHOLD = 80.0  # percent
 @dataclass
 class ScrapInfo:
     """Scrap calculation results."""
+    # Volume breakdown (for debugging and validation)
+    mcmaster_volume: float = 0.0  # Catalog stock volume (in³)
+    desired_volume: float = 0.0  # Desired stock volume after stock prep (in³)
+    final_part_volume: float = 0.0  # Final part volume (in³)
+
     # Scrap breakdown by source
     stock_prep_scrap: float = 0.0  # McMaster → Desired (in³)
     face_milling_scrap: float = 0.0  # Desired → Part envelope (in³)
@@ -1696,23 +1701,23 @@ def extract_quote_data_from_cad(
 
                 # NOTE: For multi-quantity jobs, we do NOT amortize the minutes here.
                 # The labor_hours breakdown stores FULL job-level minutes (setup, programming, inspection).
-                # Amortization happens in the cost calculation (lines 2988-3012) where job-level
-                # costs are amortized across quantity. This ensures:
-                # - Display shows actual job-level minutes with (JOB-LEVEL) labels
-                # - Per-unit costs are correctly calculated as: (job_level_cost / qty) + variable_cost
+                # For display purposes, these show the actual one-time costs with (JOB-LEVEL) labels.
+                # But the TOTAL labor time and cost must be amortized across quantity to get per-unit values.
 
-                # For multi-quantity jobs, calculate per-unit labor total
+                # CRITICAL FIX: Always calculate amortized labor, even for quantity==1
+                # (matches fix in main milling/grinding path around line 3049)
+                #
                 # Job-level: setup, programming, inspection (one-time costs, amortized across qty)
                 # Per-unit: machining, finishing, misc_overhead (scales with quantity)
-                if quantity > 1:
-                    # Job-level minutes (full, not amortized)
-                    job_level_min = setup_min + programming_min + inspection_min
-                    # Per-unit variable minutes
-                    per_unit_min = machining_min + finishing_min + misc_overhead_min
-                    # Total labor for the entire job
-                    total_labor_min_for_job = job_level_min + (per_unit_min * quantity)
-                    # Per-unit labor (amortized)
-                    labor_total = round(total_labor_min_for_job / quantity, 2)
+
+                # Job-level minutes (full, not amortized)
+                job_level_min = setup_min + programming_min + inspection_min
+                # Per-unit variable minutes
+                per_unit_min = machining_min + finishing_min + misc_overhead_min
+                # Total labor for the entire job
+                total_labor_min_for_job = job_level_min + (per_unit_min * quantity)
+                # Per-unit labor (amortized) - works correctly for qty=1 and qty>1
+                labor_total = round(total_labor_min_for_job / quantity, 2)
 
                 punch_labor_hours = round(labor_total / 60.0, 2)
                 # Compute labor cost directly from total minutes for accuracy
@@ -2196,7 +2201,9 @@ def extract_quote_data_from_cad(
     if is_cylindrical:
         # Use the desired diameter with allowance (calculated earlier)
         desired_diameter = desired_diameter_with_allowance
-        mcmaster_diameter = mcmaster_result.get('stock_diam_in', 0.0) if mcmaster_result else 0.0
+        # Use catalog diameter if found, otherwise use the fallback diameter from scrap_calc
+        # (scrap_calc.mcmaster_width stores the diameter for cylindrical parts)
+        mcmaster_diameter = mcmaster_result.get('stock_diam_in', scrap_calc.mcmaster_width) if mcmaster_result else scrap_calc.mcmaster_width
     else:
         desired_diameter = 0.0
         mcmaster_diameter = 0.0
@@ -2206,12 +2213,12 @@ def extract_quote_data_from_cad(
         desired_width=desired_W,
         desired_thickness=desired_T,
         desired_diameter=desired_diameter,
-        desired_volume=desired_L * desired_W * desired_T,
+        desired_volume=scrap_calc.desired_volume,  # Use correct volume from scrap_calc (handles both cylindrical and plate)
         mcmaster_length=scrap_calc.mcmaster_length,
         mcmaster_width=scrap_calc.mcmaster_width,
         mcmaster_thickness=scrap_calc.mcmaster_thickness,
         mcmaster_diameter=mcmaster_diameter,
-        mcmaster_volume=scrap_calc.mcmaster_length * scrap_calc.mcmaster_width * scrap_calc.mcmaster_thickness,
+        mcmaster_volume=scrap_calc.mcmaster_volume,  # Use correct volume from scrap_calc (handles both cylindrical and plate)
         mcmaster_part_number=mcmaster_part_num,
         mcmaster_price=mcmaster_price,
         price_is_estimated=price_is_estimated,
@@ -2222,8 +2229,8 @@ def extract_quote_data_from_cad(
     # Stock size sanity guardrails
     # Check that stock dimensions are reasonable relative to part dimensions
     stock_thickness_ratio = scrap_calc.mcmaster_thickness / part_info.thickness if part_info.thickness > 0 else 0
-    part_volume = part_info.length * part_info.width * part_info.thickness
-    stock_volume = scrap_calc.mcmaster_length * scrap_calc.mcmaster_width * scrap_calc.mcmaster_thickness
+    part_volume = scrap_calc.part_final_volume  # Use correct volume from scrap calc
+    stock_volume = scrap_calc.mcmaster_volume   # Use correct volume from scrap calc
     stock_volume_ratio = stock_volume / part_volume if part_volume > 0 else 0
 
     # Warning thresholds
@@ -2255,6 +2262,9 @@ def extract_quote_data_from_cad(
     # Populate scrap info
     scrap_pct = scrap_calc.scrap_percentage
     quote_data.scrap_info = ScrapInfo(
+        mcmaster_volume=scrap_calc.mcmaster_volume,
+        desired_volume=scrap_calc.desired_volume,
+        final_part_volume=scrap_calc.part_final_volume,  # Note: DirectCostHelper uses 'part_final_volume'
         stock_prep_scrap=scrap_calc.stock_prep_scrap,
         face_milling_scrap=scrap_calc.face_milling_scrap,
         hole_drilling_scrap=scrap_calc.hole_drilling_scrap,
@@ -3040,25 +3050,25 @@ def extract_quote_data_from_cad(
         assert abs(labor_total - (visible_labor_sum + misc_overhead_min)) < 0.01, \
             f"Labor time mismatch: total={labor_total:.2f}, sum={visible_labor_sum:.2f}, overhead={misc_overhead_min:.2f}"
 
-        # NOTE: For multi-quantity jobs, we do NOT amortize the minutes here.
-        # The labor_hours breakdown stores FULL job-level minutes (setup, programming, inspection).
-        # Amortization happens in the cost calculation (lines 2943-2949) where job-level
-        # costs are amortized across quantity. This ensures:
-        # - Display shows actual job-level minutes with (JOB-LEVEL) labels
-        # - Per-unit costs are correctly calculated as: (job_level_cost / qty) + variable_cost
+        # NOTE: The labor_hours breakdown stores FULL job-level minutes (setup, programming, inspection).
+        # For display purposes, these show the actual one-time costs with (JOB-LEVEL) labels.
+        # But the TOTAL labor time and cost must be amortized across quantity to get per-unit values.
 
-        # For multi-quantity jobs, calculate per-unit labor total
+        # CRITICAL FIX: Always calculate amortized labor, even for quantity==1
+        # Previously, this only ran if quantity > 1, which meant parts extracted with
+        # quantity=1 (or before quantity was set) would have incorrect labor costs.
+        #
         # Job-level: setup, programming, inspection (one-time costs, amortized across qty)
         # Per-unit: machining, finishing, misc_overhead (scales with quantity)
-        if quantity > 1:
-            # Job-level minutes (full, not amortized)
-            job_level_min = setup_min + programming_min + inspection_min
-            # Per-unit variable minutes
-            per_unit_min = machining_min + finishing_min + misc_overhead_min
-            # Total labor for the entire job
-            total_labor_min_for_job = job_level_min + (per_unit_min * quantity)
-            # Per-unit labor (amortized)
-            labor_total = round(total_labor_min_for_job / quantity, 2)
+
+        # Job-level minutes (full, not amortized)
+        job_level_min = setup_min + programming_min + inspection_min
+        # Per-unit variable minutes
+        per_unit_min = machining_min + finishing_min + misc_overhead_min
+        # Total labor for the entire job
+        total_labor_min_for_job = job_level_min + (per_unit_min * quantity)
+        # Per-unit labor (amortized) - dividing by quantity works correctly for qty=1 and qty>1
+        labor_total = round(total_labor_min_for_job / quantity, 2)
 
         labor_total_hours = round(labor_total / 60.0, 2)
         # Compute labor cost directly from total minutes for accuracy

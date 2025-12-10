@@ -1156,9 +1156,28 @@ def calculate_total_scrap(
     if is_cylindrical:
         # For cylindrical parts, width and thickness are both set to diameter
         mcmaster_diameter = mcmaster_width  # or mcmaster_thickness, they're the same
-        desired_diameter = desired_width    # or desired_thickness, they're the same
+
+        # CRITICAL BUG FIX: For cylindrical parts, we need to reconstruct desired dimensions
+        # using the same allowances that were used during catalog lookup.
+        #
+        # From lines 1050-1054, the cylindrical allowances are:
+        #   - DIAMETER_ALLOWANCE = 0.25" (turning/grinding)
+        #   - LENGTH_ALLOWANCE = 0.50" (facing/holding)
+        #
+        # Reconstruct desired dimensions for cylindrical parts:
+        if part_diameter is not None and part_length is not None:
+            DIAMETER_ALLOWANCE = 0.25
+            LENGTH_ALLOWANCE = 0.50
+            desired_diameter_calculated = part_diameter + DIAMETER_ALLOWANCE
+            desired_cylindrical_length_calculated = part_length + LENGTH_ALLOWANCE
+        else:
+            # Fallback: if part dimensions aren't available, use mcmaster dimensions
+            # (This handles edge cases where part_diameter/part_length weren't provided)
+            desired_diameter_calculated = mcmaster_diameter
+            desired_cylindrical_length_calculated = mcmaster_length
+
         mcmaster_volume = math.pi * (mcmaster_diameter / 2.0) ** 2 * mcmaster_length
-        desired_volume = math.pi * (desired_diameter / 2.0) ** 2 * desired_length
+        desired_volume = math.pi * (desired_diameter_calculated / 2.0) ** 2 * desired_cylindrical_length_calculated
         stock_prep_scrap = mcmaster_volume - desired_volume
     else:
         # For plate parts, use L×W×T
@@ -1241,6 +1260,16 @@ def calculate_total_scrap(
             total_scrap_weight = 0.0
 
     # Calculate percentages
+    # Use the same formula for both cylindrical and plate parts:
+    # Scrap % = total_scrap / starting_stock (catalog volume)
+    #
+    # This matches the displayed weights:
+    # Scrap % = Scrap Weight / Starting Weight × 100
+    #
+    # Previous approach tried to exclude "stock prep scrap" for cylindrical parts,
+    # but this was incorrect because stock prep scrap includes diameter reduction
+    # (which IS machining scrap), not just length waste.
+    #
     scrap_percentage = (total_scrap_volume / mcmaster_volume * 100) if mcmaster_volume > 0 else 0
     utilization_percentage = (final_part_volume / mcmaster_volume * 100) if mcmaster_volume > 0 else 0
 
