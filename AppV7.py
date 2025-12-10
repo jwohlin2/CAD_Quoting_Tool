@@ -1605,9 +1605,9 @@ class AppV7:
 
             if is_cylindrical:
                 # For cylindrical parts, show Length × Diameter
-                # For cylindrical parts, diameter is stored in width field
-                report.append(f"  Required Stock: {stock_info.desired_length:.2f} × Ø{stock_info.desired_width:.2f} in")
-                report.append(f"  Rounded to catalog: {stock_info.mcmaster_length:.2f} × Ø{stock_info.mcmaster_width:.3f}")
+                # Use explicit diameter fields (desired_diameter and mcmaster_diameter)
+                report.append(f"  Required Stock: {stock_info.desired_length:.2f} × Ø{stock_info.desired_diameter:.2f} in")
+                report.append(f"  Rounded to catalog: {stock_info.mcmaster_length:.2f} × Ø{stock_info.mcmaster_diameter:.3f}")
             else:
                 # For plate parts, show Length × Width × Thickness
                 report.append(f"  Required Stock: {stock_info.desired_length:.2f} × {stock_info.desired_width:.2f} × {stock_info.desired_thickness:.2f} in")
@@ -2545,12 +2545,17 @@ class AppV7:
                     ]
 
                     if part.quantity > 1:
+                        # Calculate total cost and price by multiplying per-unit values by quantity
+                        # (Don't trust stored totals as they might be from a stale extraction with different quantity)
+                        total_part_cost = part.cost_summary.total_cost * part.quantity
+                        total_part_price = part.cost_summary.final_price * part.quantity
+
                         part_summary.extend([
                             "",
                             f"Quantity: {part.quantity} units",
                             "-" * 74,
-                            self._format_cost_summary_line("Total Part Cost", part.cost_summary.total_total_cost or 0),
-                            self._format_cost_summary_line("Total Part Price", part.cost_summary.total_final_price or 0),
+                            self._format_cost_summary_line("Total Part Cost", total_part_cost),
+                            self._format_cost_summary_line("Total Part Price", total_part_price),
                         ])
 
                     part_summary.append("")

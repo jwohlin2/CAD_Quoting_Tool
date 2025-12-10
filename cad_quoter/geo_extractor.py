@@ -729,6 +729,9 @@ def extract_part_quantity_from_text(text_records) -> int:
     or parts lists). When multiple numbers are found before QTY, prefers the
     one closest to the QTY keyword.
 
+    Skips HOLE TABLE records which may contain dimension values that look
+    like quantities (e.g., ".1850" becomes "1850" after text extraction).
+
     Args:
         text_records: Iterable of text strings OR dicts with a 'text' field
 
@@ -749,6 +752,7 @@ def extract_part_quantity_from_text(text_records) -> int:
         1
     """
     candidates = []
+    simple_qty_candidates = []
 
     for record in text_records:
         # Handle both string and dict inputs
@@ -761,6 +765,21 @@ def extract_part_quantity_from_text(text_records) -> int:
 
         if not text or "QTY" not in text.upper():
             continue
+
+        # Skip HOLE TABLE records - they contain dimension values that look like quantities
+        if "HOLE TABLE" in text.upper():
+            continue
+
+        # Check for simple "QTY <number>" pattern (preferred)
+        simple_match = re.search(r'\bQTY\s+(\d{1,4})\b', text, re.IGNORECASE)
+        if simple_match:
+            try:
+                qty = int(simple_match.group(1))
+                if 1 <= qty <= 9999:
+                    simple_qty_candidates.append(qty)
+                    continue  # Don't process this record further
+            except (ValueError, TypeError):
+                pass
 
         # Find position of QTY keyword (case-insensitive)
         qty_match = re.search(r'\bQTY\b', text, re.IGNORECASE)
@@ -791,6 +810,17 @@ def extract_part_quantity_from_text(text_records) -> int:
             number_matches.sort(key=lambda x: x[1])
             # Take the closest number
             candidates.append(number_matches[0][0])
+
+    # Prefer simple "QTY <number>" patterns over complex extraction
+    if simple_qty_candidates:
+        unique_simple = set(simple_qty_candidates)
+        if len(unique_simple) == 1:
+            # All simple patterns agree
+            return simple_qty_candidates[0]
+        # Multiple different simple quantities - take the most common
+        from collections import Counter
+        counter = Counter(simple_qty_candidates)
+        return counter.most_common(1)[0][0]
 
     # If we found exactly one candidate, use it with confidence
     if len(candidates) == 1:
