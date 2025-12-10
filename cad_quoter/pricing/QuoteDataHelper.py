@@ -2063,7 +2063,7 @@ def extract_quote_data_from_cad(
                 if mcmaster_price:
                     price_is_estimated = True
                     if verbose:
-                        print(f"  ✓ Estimated price from volume: ${mcmaster_price:.2f}")
+                        print(f"  [OK] Estimated price from volume: ${mcmaster_price:.2f}")
             else:
                 # Normal flow: try direct pricing first
                 mcmaster_price = get_mcmaster_price(mcmaster_part_num, quantity=quantity)
@@ -2090,7 +2090,7 @@ def extract_quote_data_from_cad(
                     if mcmaster_price:
                         price_is_estimated = True
                         if verbose:
-                            print(f"  ✓ Estimated price from volume: ${mcmaster_price:.2f}")
+                            print(f"  [OK] Estimated price from volume: ${mcmaster_price:.2f}")
 
     # If we still don't have a price and no part was found, try volume-based estimation
     if mcmaster_price is None and not mcmaster_part_num:
@@ -2133,7 +2133,7 @@ def extract_quote_data_from_cad(
         if mcmaster_price:
             price_is_estimated = True
             if verbose:
-                print(f"  ✓ Estimated price from volume: ${mcmaster_price:.2f}")
+                print(f"  [OK] Estimated price from volume: ${mcmaster_price:.2f}")
 
     # If volume-based estimation also failed, try weight-based estimation using largest catalog part
     if mcmaster_price is None:
@@ -2169,7 +2169,7 @@ def extract_quote_data_from_cad(
             mcmaster_price = estimated_price
             price_is_estimated = True
             if verbose:
-                print(f"  ✓ Estimated price from weight: ${mcmaster_price:.2f}")
+                print(f"  [OK] Estimated price from weight: ${mcmaster_price:.2f}")
                 print(f"     ({source})")
 
     # Final fallback: if all estimation methods failed, use default price per lb × weight
@@ -2191,7 +2191,7 @@ def extract_quote_data_from_cad(
             mcmaster_price = round(stock_weight * fallback_price_per_lb * WEIGHT_PRICE_FACTOR, 2)
             price_is_estimated = True
             if verbose:
-                print(f"  ✓ Fallback price: ${mcmaster_price:.2f}")
+                print(f"  [OK] Fallback price: ${mcmaster_price:.2f}")
                 print(f"     (${fallback_price_per_lb:.2f}/lb × {stock_weight:.2f} lb × {WEIGHT_PRICE_FACTOR} factor)")
                 print(f"     (source: {price_source})")
 
@@ -2290,18 +2290,25 @@ def extract_quote_data_from_cad(
         # IMPORTANT: Calculate shipping for total weight (all pieces), not per-item weight
         stock_weight = scrap_calc.mcmaster_weight if scrap_calc.mcmaster_weight else 0.0
         total_weight = stock_weight * quantity
-        shipping = round(estimate_mcmaster_shipping(total_weight), 2)
+        shipping_total = round(estimate_mcmaster_shipping(total_weight), 2)
         scrap_credit = round(scrap_value_calc.get('scrap_value', 0.0), 2)
-        net_cost = max(0, round(mcmaster_price + tax + shipping - scrap_credit, 2))
+
+        # MULTI-QUANTITY FIX: Shipping is a job-level cost, amortize across quantity
+        # Material cost per blank (assuming 1 blank per unit for now)
+        material_per_blank = round(mcmaster_price + tax - scrap_credit, 2)
+        # Amortize shipping across all units
+        shipping_per_unit = round(shipping_total / quantity, 2)
+        # Per-unit direct cost
+        net_cost = round(material_per_blank + shipping_per_unit, 2)
     else:
-        tax = shipping = scrap_credit = net_cost = 0.0
+        tax = shipping_total = scrap_credit = net_cost = 0.0
 
     quote_data.direct_cost_breakdown = DirectCostBreakdown(
         stock_cost=mcmaster_price or 0.0,
         tax=tax,
-        shipping=shipping,
+        shipping=shipping_total,  # Total shipping for all units (job-level cost)
         scrap_credit=scrap_credit,
-        net_material_cost=net_cost
+        net_material_cost=net_cost  # Per-unit cost with amortized shipping
     )
 
     if verbose:
@@ -2376,6 +2383,38 @@ def extract_quote_data_from_cad(
         edm_ops = []
 
         if hole_table:
+            # SANITY CHECK: Validate hole diameters against plate dimensions
+            # A hole diameter cannot exceed the minimum plate dimension
+            plate_min_dimension = min(part_info.length, part_info.width) if (part_info.length > 0 and part_info.width > 0) else 0
+            if plate_min_dimension > 0:
+                # Check for unreasonably large holes (> 90% of min dimension)
+                max_reasonable_diameter = plate_min_dimension * 0.9
+                for hole in hole_table:
+                    try:
+                        hole_id = hole.get('HOLE', 'Unknown')
+                        diameter_str = hole.get('DIA', '0')
+                        # Parse diameter, handling various formats
+                        if isinstance(diameter_str, str):
+                            # Remove any non-numeric characters except decimal point and leading digits
+                            diameter_str = diameter_str.strip().replace('"', '').replace('Ø', '').strip()
+                        diameter = float(diameter_str) if diameter_str else 0.0
+
+                        if diameter > max_reasonable_diameter:
+                            import logging
+                            logging.warning(
+                                f"Hole {hole_id} diameter {diameter:.4f}\" exceeds 90% of plate min dimension "
+                                f"({plate_min_dimension:.3f}\"). Likely a parsing error. "
+                                f"Clamping to {max_reasonable_diameter:.4f}\"."
+                            )
+                            # Clamp the diameter to a reasonable value
+                            hole['DIA'] = f"{max_reasonable_diameter:.4f}"
+                            if verbose:
+                                print(f"  WARNING: Hole {hole_id} diameter clamped from {diameter:.4f}\" to {max_reasonable_diameter:.4f}\"")
+                    except (ValueError, TypeError, AttributeError) as e:
+                        # Skip validation if we can't parse the diameter
+                        if verbose:
+                            print(f"  WARNING: Could not validate hole diameter for {hole.get('HOLE', 'Unknown')}: {e}")
+
             times = estimate_hole_table_times(hole_table, material, part_info.thickness)
 
             # Convert to HoleOperation objects
@@ -2598,6 +2637,38 @@ def extract_quote_data_from_cad(
         edm_ops = []
 
         if hole_table:
+            # SANITY CHECK: Validate hole diameters against plate dimensions
+            # A hole diameter cannot exceed the minimum plate dimension
+            plate_min_dimension = min(part_info.length, part_info.width) if (part_info.length > 0 and part_info.width > 0) else 0
+            if plate_min_dimension > 0:
+                # Check for unreasonably large holes (> 90% of min dimension)
+                max_reasonable_diameter = plate_min_dimension * 0.9
+                for hole in hole_table:
+                    try:
+                        hole_id = hole.get('HOLE', 'Unknown')
+                        diameter_str = hole.get('DIA', '0')
+                        # Parse diameter, handling various formats
+                        if isinstance(diameter_str, str):
+                            # Remove any non-numeric characters except decimal point and leading digits
+                            diameter_str = diameter_str.strip().replace('"', '').replace('Ø', '').strip()
+                        diameter = float(diameter_str) if diameter_str else 0.0
+
+                        if diameter > max_reasonable_diameter:
+                            import logging
+                            logging.warning(
+                                f"Hole {hole_id} diameter {diameter:.4f}\" exceeds 90% of plate min dimension "
+                                f"({plate_min_dimension:.3f}\"). Likely a parsing error. "
+                                f"Clamping to {max_reasonable_diameter:.4f}\"."
+                            )
+                            # Clamp the diameter to a reasonable value
+                            hole['DIA'] = f"{max_reasonable_diameter:.4f}"
+                            if verbose:
+                                print(f"  WARNING: Hole {hole_id} diameter clamped from {diameter:.4f}\" to {max_reasonable_diameter:.4f}\"")
+                    except (ValueError, TypeError, AttributeError) as e:
+                        # Skip validation if we can't parse the diameter
+                        if verbose:
+                            print(f"  WARNING: Could not validate hole diameter for {hole.get('HOLE', 'Unknown')}: {e}")
+
             times = estimate_hole_table_times(hole_table, material, part_info.thickness)
 
             # Convert to HoleOperation objects

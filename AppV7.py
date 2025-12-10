@@ -1721,6 +1721,7 @@ class AppV7:
                 quote_data = self._extract_quote_data()
 
             machine_hours = quote_data.machine_hours
+            quantity = quote_data.quantity
 
             # Check if this is a punch part
             is_punch = quote_data.raw_plan and quote_data.raw_plan.get("is_punch", False)
@@ -2251,14 +2252,34 @@ class AppV7:
             if machine_rate != self.MACHINE_RATE:
                 machine_rate_label += " (OVERRIDDEN)"
 
-            report.append(f"  TOTAL MACHINE TIME:               {machine_hours.total_minutes:>10.2f} min ({machine_hours.total_hours:.2f} hours)")
+            # For qty > 1, show both per-unit and job-level totals for clarity
+            if quantity > 1:
+                # Machine time: all machine operations are per-part, so scale by quantity
+                total_job_machine_min = machine_hours.total_minutes * quantity
+                total_job_machine_hours = total_job_machine_min / 60.0
+                # Calculate job-level cost from total minutes (not by multiplying per-unit cost)
+                total_job_machine_cost = round((total_job_machine_min / 60.0) * machine_rate, 2)
+                machine_cost_per_unit = round((machine_hours.total_minutes / 60.0) * machine_rate, 2)
+
+                report.append(f"  Total Machine Time (job, {quantity} units): {total_job_machine_min:>10.2f} min ({total_job_machine_hours:.2f} hours)")
+                report.append(f"  Machine Time (per unit, averaged):    {machine_hours.total_minutes:>10.2f} min ({machine_hours.total_hours:.2f} hours)")
+            else:
+                total_job_machine_cost = machine_hours.machine_cost
+                machine_cost_per_unit = machine_hours.machine_cost
+
+                report.append(f"  TOTAL MACHINE TIME:               {machine_hours.total_minutes:>10.2f} min ({machine_hours.total_hours:.2f} hours)")
+
             report.append("")
             report.append("=" * 74)
-            report.append(f"TOTAL MACHINE COST: ${machine_hours.machine_cost:.2f} {machine_rate_label}")
+            if quantity > 1:
+                report.append(f"TOTAL MACHINE COST (job, {quantity} units): ${total_job_machine_cost:.2f} {machine_rate_label}")
+                report.append(f"Machine Cost (per unit): ${machine_cost_per_unit:.2f}")
+            else:
+                report.append(f"TOTAL MACHINE COST: ${total_job_machine_cost:.2f} {machine_rate_label}")
             report.append("=" * 74)
             report.append("")
 
-            self.machine_cost_total = machine_hours.machine_cost
+            self.machine_cost_total = machine_cost_per_unit
 
             return "\n".join(report)
 
@@ -2333,8 +2354,6 @@ class AppV7:
             if abs(labor_hours.misc_overhead_minutes) > 0.01:
                 report.append(f"  Misc / Overhead:                 {labor_hours.misc_overhead_minutes:>10.2f} minutes")
             report.append("-" * 74)
-            report.append(f"  TOTAL LABOR TIME:                {labor_hours.total_minutes:>10.2f} minutes")
-            report.append(f"                                   {labor_hours.total_hours:>10.2f} hours")
 
             # Show labor rate with override indicator (read from temp variable set in main thread)
             labor_rate = getattr(self, '_temp_labor_rate', self.LABOR_RATE)
@@ -2342,12 +2361,39 @@ class AppV7:
             if labor_rate != self.LABOR_RATE:
                 labor_rate_label += " (OVERRIDDEN)"
 
-            report.append(f"  TOTAL LABOR COST:                ${labor_hours.labor_cost:>9.2f} {labor_rate_label}")
+            # For qty > 1, show job-level and per-unit totals for clarity
+            if quantity > 1:
+                # Calculate job-level and per-unit components
+                job_level_min = labor_hours.setup_minutes + labor_hours.programming_minutes + labor_hours.inspection_minutes
+                per_unit_min = labor_hours.machining_steps_minutes + labor_hours.finishing_minutes + labor_hours.misc_overhead_minutes
+                total_job_labor_min = job_level_min + (per_unit_min * quantity)
+                total_job_labor_hours = total_job_labor_min / 60.0
+
+                # Calculate AVERAGED per-unit values from job totals (not from labor_hours which may be stale)
+                per_unit_labor_min_avg = total_job_labor_min / quantity
+                per_unit_labor_hours_avg = per_unit_labor_min_avg / 60.0
+
+                # Calculate costs from actual minutes
+                total_job_labor_cost = round((total_job_labor_min / 60.0) * labor_rate, 2)
+                labor_cost_per_unit = round((per_unit_labor_min_avg / 60.0) * labor_rate, 2)
+
+                report.append(f"  Total Labor Time (job, {quantity} units):  {total_job_labor_min:>10.2f} minutes ({total_job_labor_hours:.2f} hours)")
+                report.append(f"  Labor Time (per unit, averaged):    {per_unit_labor_min_avg:>10.2f} minutes ({per_unit_labor_hours_avg:.2f} hours)")
+                report.append("")
+                report.append(f"  TOTAL LABOR COST (job, {quantity} units):   ${total_job_labor_cost:>9.2f} {labor_rate_label}")
+                report.append(f"  Labor Cost (per unit):           ${labor_cost_per_unit:>9.2f}")
+            else:
+                labor_cost_per_unit = round((labor_hours.total_minutes / 60.0) * labor_rate, 2)
+                report.append(f"  TOTAL LABOR TIME:                {labor_hours.total_minutes:>10.2f} minutes")
+                report.append(f"                                   {labor_hours.total_hours:>10.2f} hours")
+                report.append("")
+                report.append(f"  TOTAL LABOR COST:                ${labor_cost_per_unit:>9.2f} {labor_rate_label}")
+
             report.append("")
             report.append("=" * 74)
             report.append("")
 
-            self.labor_cost_total = labor_hours.labor_cost
+            self.labor_cost_total = labor_cost_per_unit
 
             return "\n".join(report)
 
@@ -2889,19 +2935,31 @@ class AppV7:
             summary_lines.append("-" * 74)
             summary_lines.append("PER-UNIT COSTS:")
 
+        # Use quote_data.cost_summary if available for accurate per-unit costs
+        # (especially important for multi-quantity jobs with amortized costs)
+        if quote_data and quote_data.cost_summary:
+            direct_cost = quote_data.cost_summary.direct_cost
+            machine_cost = quote_data.cost_summary.machine_cost
+            labor_cost = quote_data.cost_summary.labor_cost
+        else:
+            # Fall back to report-generated values
+            direct_cost = self.direct_cost_total
+            machine_cost = self.machine_cost_total
+            labor_cost = self.labor_cost_total
+
         summary_lines.extend([
-            self._format_cost_summary_line("Direct Cost", self.direct_cost_total),
-            self._format_cost_summary_line("Machine Cost", self.machine_cost_total),
-            self._format_cost_summary_line("Labor Cost", self.labor_cost_total),
+            self._format_cost_summary_line("Direct Cost", direct_cost),
+            self._format_cost_summary_line("Machine Cost", machine_cost),
+            self._format_cost_summary_line("Labor Cost", labor_cost),
         ])
 
         # Check for missing costs and warn user
         missing_costs = []
-        if self.direct_cost_total is None:
+        if direct_cost is None:
             missing_costs.append("Direct Cost")
-        if self.machine_cost_total is None:
+        if machine_cost is None:
             missing_costs.append("Machine Cost")
-        if self.labor_cost_total is None:
+        if labor_cost is None:
             missing_costs.append("Labor Cost")
 
         if missing_costs:
@@ -2912,25 +2970,24 @@ class AppV7:
             summary_lines.append("Quote may be incomplete - manual review required.")
             summary_lines.append("-" * 74)
 
-        # Calculate total even with missing costs (treat N/A as $0.00)
-        total_cost = (
-            (self.direct_cost_total or 0.0)
-            + (self.machine_cost_total or 0.0)
-            + (self.labor_cost_total or 0.0)
-        )
-
-        if total_cost > 0 or not missing_costs:
-
-            # Use cost summary from quote_data for accurate per-unit and total costs
+        # Calculate total cost - use quote_data.cost_summary if available
+        if quote_data and quote_data.cost_summary:
+            total_cost = quote_data.cost_summary.total_cost
+            margin_amount = quote_data.cost_summary.margin_amount
+            final_cost = quote_data.cost_summary.final_price
+        else:
+            # Fall back to manual calculation
+            total_cost = (
+                (direct_cost or 0.0)
+                + (machine_cost or 0.0)
+                + (labor_cost or 0.0)
+            )
             margin_amount = total_cost * margin_rate
             final_cost = total_cost + margin_amount
 
-            # Use extracted quote data for cost summary
-            if quote_data and quote_data.cost_summary:
-                total_cost = quote_data.cost_summary.total_cost
-                margin_amount = quote_data.cost_summary.margin_amount
-                final_cost = quote_data.cost_summary.final_price
+        if total_cost > 0 or not missing_costs:
 
+            # Build margin slider with correct total_cost
             quick_margin_lines = self._build_quick_margin_section(total_cost, margin_rate)
             summary_lines.append("-" * 74)
             summary_lines.append(self._format_cost_summary_line("Total Estimated Cost", total_cost))
