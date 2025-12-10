@@ -546,8 +546,13 @@ class AppV7:
         self.root.update_idletasks()
 
         added_count = 0
-        for filename in filenames:
+        total_files = len(filenames)
+        for file_idx, filename in enumerate(filenames, 1):
             try:
+                # Update status bar with progress
+                self.status_bar.config(text=f"Adding part {file_idx} of {total_files}...")
+                self.root.update_idletasks()
+
                 # Load this file as a part (lightweight - just store the path initially)
                 # Full extraction happens when user generates the quote
                 from cad_quoter.pricing.QuoteDataHelper import QuoteData
@@ -2430,13 +2435,18 @@ class AppV7:
 
         # Generate report for each part
         all_parts_data = []
+        total_parts = len(self.current_order.parts)
         for part_idx, part in enumerate(self.current_order.parts):
             try:
+                # Update status bar with progress
+                self.status_bar.config(text=f"Processing part {part_idx + 1} of {total_parts}...")
+                self.root.update_idletasks()
+
                 # Part header
                 part_header = [
                     "",
                     "█" * 74,
-                    f"PART {part_idx + 1} OF {len(self.current_order.parts)} – {part.cad_file_name}",
+                    f"PART {part_idx + 1} OF {total_parts} – {part.cad_file_name}",
                     "█" * 74,
                     ""
                 ]
