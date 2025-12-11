@@ -1693,13 +1693,14 @@ class AppV7:
             if stock_info.mcmaster_price is not None:
                 self.direct_cost_total = cost_breakdown.net_material_cost
                 if quantity > 1:
-                    report.append(f"  Total Material Cost (per blank):".ljust(50) + f"${cost_breakdown.net_material_cost:>23.2f}")
-                    report.append(f"  Total Material Cost (job, {quantity} units):".ljust(50) + f"${cost_breakdown.net_material_cost * quantity:>23.2f}")
+                    # Show both per-unit and job total on separate lines
+                    report.append(f"  Total Material Cost (per unit):".ljust(50) + f"${cost_breakdown.net_material_cost:>23.2f}")
+                    report.append(f"  Total Material Cost (job):".ljust(50) + f"${cost_breakdown.net_material_cost * quantity:>23.2f}")
                 else:
-                    report.append(f"  Total Material Cost (per blank):".ljust(50) + f"${cost_breakdown.net_material_cost:>23.2f}")
+                    report.append(f"  Total Material Cost:".ljust(50) + f"${cost_breakdown.net_material_cost:>23.2f}")
             else:
                 self.direct_cost_total = None
-                report.append(f"  Total Material Cost (per blank):".ljust(50) + "Price N/A".rjust(24))
+                report.append(f"  Total Material Cost:".ljust(50) + "Price N/A".rjust(24))
 
             report.append("")
 
@@ -2337,9 +2338,9 @@ class AppV7:
             # Finishing / Deburr with detailed breakdown (per-unit cost)
             if labor_hours.finishing_detail and len(labor_hours.finishing_detail) > 0:
                 if quantity > 1:
-                    report.append(f"  Finishing / Deburr (Total):      {labor_hours.finishing_minutes:>10.2f} minutes  (PER UNIT)")
+                    report.append(f"  Finishing / Deburr (per unit, total): {labor_hours.finishing_minutes:>10.2f} minutes")
                 else:
-                    report.append(f"  Finishing / Deburr (Total):      {labor_hours.finishing_minutes:>10.2f} minutes")
+                    report.append(f"  Finishing / Deburr (Total):            {labor_hours.finishing_minutes:>10.2f} minutes")
                 # Show detail breakdown with indentation - align minutes with main items
                 for detail in labor_hours.finishing_detail:
                     label = detail.get('label', 'Unknown operation')
@@ -2348,9 +2349,9 @@ class AppV7:
                     report.append(f"    • {label:<33} {minutes:>10.1f} minutes")
             else:
                 if quantity > 1:
-                    report.append(f"  Finishing / Deburr:              {labor_hours.finishing_minutes:>10.2f} minutes  (PER UNIT)")
+                    report.append(f"  Finishing / Deburr (per unit):        {labor_hours.finishing_minutes:>10.2f} minutes")
                 else:
-                    report.append(f"  Finishing / Deburr:              {labor_hours.finishing_minutes:>10.2f} minutes")
+                    report.append(f"  Finishing / Deburr:                   {labor_hours.finishing_minutes:>10.2f} minutes")
 
             # Show misc overhead if non-zero
             if abs(labor_hours.misc_overhead_minutes) > 0.01:
@@ -2415,11 +2416,33 @@ class AppV7:
             return f"  {label}:".ljust(30) + "N/A"
         return f"  {label}:".ljust(30) + f"${value:>12,.2f}"
 
-    def _format_cost_summary_line_with_unit(self, label: str, total_value: Optional[float], per_unit_value: Optional[float]) -> str:
-        """Return a formatted cost line showing job total with per-unit in parentheses."""
+    def _format_cost_summary_line_with_unit(self, label: str, total_value: Optional[float], per_unit_value: Optional[float], quantity: int = 1) -> list[str]:
+        """Return formatted cost lines showing job total and per-unit on separate lines.
+
+        Args:
+            label: The cost category label (e.g., "Direct Cost", "Machine Cost")
+            total_value: The total job cost
+            per_unit_value: The per-unit cost
+            quantity: Number of units (default 1)
+
+        Returns:
+            List of formatted strings. For qty=1, returns single line. For qty>1, returns two lines.
+        """
         if total_value is None or per_unit_value is None:
-            return f"  {label}:".ljust(30) + "N/A"
-        return f"  {label}:".ljust(30) + f"${total_value:>12,.2f} (${per_unit_value:.2f} /unit)"
+            return [f"  {label}:".ljust(42) + "N/A"]
+
+        # For single quantity, only show one line
+        if quantity == 1:
+            return [f"  {label}:".ljust(42) + f"${total_value:>15,.2f}"]
+
+        # For multiple quantities, show both job and per-unit on separate lines
+        job_label = f"{label} (job):"
+        per_unit_label = f"{label} (per unit):"
+
+        return [
+            f"  {job_label}".ljust(42) + f"${total_value:>15,.2f}",
+            f"  {per_unit_label}".ljust(42) + f"${per_unit_value:>15,.2f}"
+        ]
 
     def _format_quick_margin_line(
         self, margin: float, total_cost: float, quantity: int, *, is_current: bool = False
@@ -2430,8 +2453,9 @@ class AppV7:
         margin_text = f"{safe_margin:.0%}"
         if is_current:
             margin_text += " (current)"
-        final_price_per_unit = total_cost * (1.0 + safe_margin)
-        final_price_job = final_price_per_unit * quantity
+        # Job-first approach: calculate job total, round it, then derive per-unit
+        final_price_job = round(total_cost * (1.0 + safe_margin), 2)
+        final_price_per_unit = final_price_job / quantity
         price_text = f"${final_price_job:>12,.2f} (${final_price_per_unit:.2f} /unit)"
         return f" {margin_text:<17}{price_text}"
 
@@ -2624,14 +2648,21 @@ class AppV7:
                         "=" * 74,
                         f"PART {part_idx + 1} COST SUMMARY",
                         "=" * 74,
-                        self._format_cost_summary_line_with_unit("Direct Cost", direct_cost_job, part.cost_summary.direct_cost or 0),
-                        self._format_cost_summary_line_with_unit("Machine Cost", machine_cost_job, part.cost_summary.machine_cost or 0),
-                        self._format_cost_summary_line_with_unit("Labor Cost", labor_cost_job, labor_cost_per_unit),
-                        "-" * 74,
-                        self._format_cost_summary_line_with_unit("Total Estimated Cost", total_cost_job, total_cost_per_unit),
-                        self._format_cost_summary_line(f"Margin ({margin_rate:.0%})", margin_amount_job),
-                        self._format_cost_summary_line_with_unit("Final Price", final_price_job, final_price_per_unit),
                     ]
+
+                    # Show quantity at the top for multi-quantity parts
+                    if part.quantity > 1:
+                        part_summary.append(f"Qty: {part.quantity}")
+                        part_summary.append("")
+
+                    # Add cost lines (each returns a list, so extend instead of append)
+                    part_summary.extend(self._format_cost_summary_line_with_unit("Direct Cost", direct_cost_job, part.cost_summary.direct_cost or 0, part.quantity))
+                    part_summary.extend(self._format_cost_summary_line_with_unit("Machine Cost", machine_cost_job, part.cost_summary.machine_cost or 0, part.quantity))
+                    part_summary.extend(self._format_cost_summary_line_with_unit("Labor Cost", labor_cost_job, labor_cost_per_unit, part.quantity))
+                    part_summary.append("-" * 74)
+                    part_summary.extend(self._format_cost_summary_line_with_unit("Total Estimated Cost", total_cost_job, part.cost_summary.total_cost or 0, part.quantity))
+                    part_summary.append(self._format_cost_summary_line(f"Margin ({part.cost_summary.margin_rate:.0%})", margin_amount_job))
+                    part_summary.extend(self._format_cost_summary_line_with_unit("Final Price", final_price_job, part.cost_summary.final_price or 0, part.quantity))
 
                     part_summary.append("")
                     self.output_text.insert(tk.END, "\n".join(part_summary))
@@ -2961,6 +2992,11 @@ class AppV7:
             "=" * 74,
         ]
 
+        # Show quantity at the top for multi-quantity jobs
+        if quantity > 1:
+            summary_lines.append(f"Qty: {quantity}")
+            summary_lines.append("")
+
         # Prioritize freshly calculated values from report generation
         # (These are set by _generate_labor_hours_report, _generate_machine_hours_report, etc.)
         # Only fall back to quote_data.cost_summary if fresh values are unavailable
@@ -2996,12 +3032,14 @@ class AppV7:
             # Fallback: calculate from per-unit if job-level not available
             labor_cost_job = (labor_cost_per_unit or 0.0) * quantity
 
-        # Show costs with job total and per-unit in parentheses
-        summary_lines.extend([
-            self._format_cost_summary_line_with_unit("Direct Cost", direct_cost_job, direct_cost_per_unit),
-            self._format_cost_summary_line_with_unit("Machine Cost", machine_cost_job, machine_cost_per_unit),
-            self._format_cost_summary_line_with_unit("Labor Cost", labor_cost_job, labor_cost_per_unit),
-        ])
+        # Show costs with job total and per-unit on separate lines
+        # Each call returns a list of lines, so we need to flatten them
+        for lines in [
+            self._format_cost_summary_line_with_unit("Direct Cost", direct_cost_job, direct_cost_per_unit, quantity),
+            self._format_cost_summary_line_with_unit("Machine Cost", machine_cost_job, machine_cost_per_unit, quantity),
+            self._format_cost_summary_line_with_unit("Labor Cost", labor_cost_job, labor_cost_per_unit, quantity),
+        ]:
+            summary_lines.extend(lines)
 
         # Check for missing costs and warn user
         missing_costs = []
@@ -3039,7 +3077,7 @@ class AppV7:
             # Build margin slider with correct total_cost (per-unit for calculation)
             quick_margin_lines = self._build_quick_margin_section(total_cost_per_unit, margin_rate, quantity)
             summary_lines.append("-" * 74)
-            summary_lines.append(self._format_cost_summary_line_with_unit("Total Estimated Cost", total_cost_job, total_cost_per_unit))
+            summary_lines.extend(self._format_cost_summary_line_with_unit("Total Estimated Cost", total_cost_job, total_cost_per_unit, quantity))
 
             # Add margin line with override indicator (job total only, as margin is a dollar amount)
             margin_label = f"Margin ({margin_rate:.0%})"
@@ -3048,7 +3086,7 @@ class AppV7:
             summary_lines.append(
                 self._format_cost_summary_line(margin_label, margin_amount_job)
             )
-            summary_lines.append(self._format_cost_summary_line_with_unit("Final Price", final_price_job, final_price_per_unit))
+            summary_lines.extend(self._format_cost_summary_line_with_unit("Final Price", final_price_job, final_price_per_unit, quantity))
 
         if quick_margin_lines:
             self.output_text.insert(tk.END, "\n".join(quick_margin_lines))
