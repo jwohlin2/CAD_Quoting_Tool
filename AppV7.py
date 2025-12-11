@@ -2922,8 +2922,11 @@ class AppV7:
         margin_rate = (margin_percent / 100.0) if margin_percent is not None else 0.15
         margin_overridden = (margin_percent is not None and margin_percent != 15.0)
 
-        # Get quantity for display
-        quantity = self._get_quantity()
+        # Get quantity - prefer quote_data.quantity over UI field for accuracy
+        if quote_data and hasattr(quote_data, 'quantity') and quote_data.quantity >= 1:
+            quantity = quote_data.quantity
+        else:
+            quantity = self._get_quantity()
         quantity_overridden = quantity > 1
 
         quick_margin_lines: list[str] = []
@@ -2932,17 +2935,29 @@ class AppV7:
             "=" * 74,
         ]
 
-        # Use quote_data.cost_summary if available for accurate per-unit costs
-        # (especially important for multi-quantity jobs with amortized costs)
-        if quote_data and quote_data.cost_summary:
+        # Prioritize freshly calculated values from report generation
+        # (These are set by _generate_labor_hours_report, _generate_machine_hours_report, etc.)
+        # Only fall back to quote_data.cost_summary if fresh values are unavailable
+        if self.direct_cost_total is not None:
+            direct_cost_per_unit = self.direct_cost_total
+        elif quote_data and quote_data.cost_summary:
             direct_cost_per_unit = quote_data.cost_summary.direct_cost
+        else:
+            direct_cost_per_unit = 0.0
+
+        if self.machine_cost_total is not None:
+            machine_cost_per_unit = self.machine_cost_total
+        elif quote_data and quote_data.cost_summary:
             machine_cost_per_unit = quote_data.cost_summary.machine_cost
+        else:
+            machine_cost_per_unit = 0.0
+
+        if self.labor_cost_total is not None:
+            labor_cost_per_unit = self.labor_cost_total
+        elif quote_data and quote_data.cost_summary:
             labor_cost_per_unit = quote_data.cost_summary.labor_cost
         else:
-            # Fall back to report-generated values
-            direct_cost_per_unit = self.direct_cost_total
-            machine_cost_per_unit = self.machine_cost_total
-            labor_cost_per_unit = self.labor_cost_total
+            labor_cost_per_unit = 0.0
 
         # Calculate job-level costs
         direct_cost_job = (direct_cost_per_unit or 0.0) * quantity
@@ -2973,20 +2988,14 @@ class AppV7:
             summary_lines.append("Quote may be incomplete - manual review required.")
             summary_lines.append("-" * 74)
 
-        # Calculate total cost - use quote_data.cost_summary if available
-        if quote_data and quote_data.cost_summary:
-            total_cost_per_unit = quote_data.cost_summary.total_cost
-            margin_amount_per_unit = quote_data.cost_summary.margin_amount
-            final_price_per_unit = quote_data.cost_summary.final_price
-        else:
-            # Fall back to manual calculation
-            total_cost_per_unit = (
-                (direct_cost_per_unit or 0.0)
-                + (machine_cost_per_unit or 0.0)
-                + (labor_cost_per_unit or 0.0)
-            )
-            margin_amount_per_unit = total_cost_per_unit * margin_rate
-            final_price_per_unit = total_cost_per_unit + margin_amount_per_unit
+        # Calculate total cost using the fresh per-unit costs we just determined
+        total_cost_per_unit = (
+            (direct_cost_per_unit or 0.0)
+            + (machine_cost_per_unit or 0.0)
+            + (labor_cost_per_unit or 0.0)
+        )
+        margin_amount_per_unit = total_cost_per_unit * margin_rate
+        final_price_per_unit = total_cost_per_unit + margin_amount_per_unit
 
         # Calculate job-level totals
         total_cost_job = total_cost_per_unit * quantity
