@@ -2430,8 +2430,9 @@ class AppV7:
         margin_text = f"{safe_margin:.0%}"
         if is_current:
             margin_text += " (current)"
-        final_price_per_unit = total_cost * (1.0 + safe_margin)
-        final_price_job = final_price_per_unit * quantity
+        # Job-first approach: calculate job total, round it, then derive per-unit
+        final_price_job = round(total_cost * (1.0 + safe_margin), 2)
+        final_price_per_unit = final_price_job / quantity
         price_text = f"${final_price_job:>12,.2f} (${final_price_per_unit:.2f} /unit)"
         return f" {margin_text:<17}{price_text}"
 

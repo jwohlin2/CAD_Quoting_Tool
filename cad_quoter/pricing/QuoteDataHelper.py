@@ -3207,11 +3207,15 @@ def extract_quote_data_from_cad(
     total_total_cost = total_direct_cost + total_machine_cost + total_labor_cost
 
     # Margin and pricing
-    per_unit_margin_amount = round(per_unit_total_cost * margin_rate, 2)
-    per_unit_final_price = round(per_unit_total_cost + per_unit_margin_amount, 2)
-
+    # OPTION A (job-first): Calculate job totals first, round them, then derive per-unit
+    # This ensures per_unit × quantity = job_total exactly, avoiding rounding discrepancies
     total_margin_amount = round(total_total_cost * margin_rate, 2)
     total_final_price = round(total_total_cost + total_margin_amount, 2)
+
+    # Derive per-unit from job totals (exact division, no rounding)
+    # When displayed with 2 decimals, these will show rounded but remain mathematically consistent
+    per_unit_margin_amount = total_margin_amount / quantity
+    per_unit_final_price = total_final_price / quantity
 
     quote_data.cost_summary = CostSummary(
         # Per-unit costs
