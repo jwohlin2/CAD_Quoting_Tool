@@ -1501,8 +1501,16 @@ def convert_punch_to_quote_machine_hours(machine_hours: PunchMachineHours, labor
 
     # Perform additions AFTER converting each value to float
     total_milling = ensure_float(machine_hours.rough_turning_min, "rough_turning_min") + ensure_float(machine_hours.finish_turning_min, "finish_turning_min")
-    total_grinding = ensure_float(machine_hours.od_grinding_min, "od_grinding_min") + ensure_float(machine_hours.id_grinding_min, "id_grinding_min") + ensure_float(machine_hours.face_grinding_min, "face_grinding_min")
-    total_other = ensure_float(machine_hours.sawing_min, "sawing_min") + ensure_float(machine_hours.chamfer_min, "chamfer_min") + ensure_float(machine_hours.polishing_min, "polishing_min")
+    # Fix: Always include critical_od_grinding_min to match PunchMachineHours.calculate_totals()
+    total_grinding = (
+        ensure_float(machine_hours.od_grinding_min, "od_grinding_min") +
+        ensure_float(machine_hours.id_grinding_min, "id_grinding_min") +
+        ensure_float(machine_hours.face_grinding_min, "face_grinding_min") +
+        ensure_float(machine_hours.critical_od_grinding_min, "critical_od_grinding_min")
+    )
+    # Fix: Remove polishing_min from total_other since it's shown separately as total_polish_minutes
+    total_other = ensure_float(machine_hours.sawing_min, "sawing_min") + ensure_float(machine_hours.chamfer_min, "chamfer_min")
+    # Fix: Always include critical_od_inspection_min to match PunchMachineHours.calculate_totals()
     total_inspection = ensure_float(machine_hours.inspection_min, "inspection_min") + ensure_float(machine_hours.critical_od_inspection_min, "critical_od_inspection_min")
 
     result = {
@@ -1516,22 +1524,21 @@ def convert_punch_to_quote_machine_hours(machine_hours: PunchMachineHours, labor
         "total_edm_minutes": ensure_float(machine_hours.edm_min, "edm_min"),
         "total_other_minutes": total_other,
         "total_inspection_minutes": total_inspection,
+        "total_cmm_minutes": total_inspection,  # For display compatibility
         "total_etch_minutes": ensure_float(machine_hours.etch_marking_min, "etch_marking_min"),
         "total_edge_break_minutes": 0.0,  # Edge break is typically in labor for punches
-        "total_polish_minutes": ensure_float(machine_hours.polishing_min, "polishing_min"),  # Already included in polishing_min
+        "total_polish_minutes": ensure_float(machine_hours.polishing_min, "polishing_min"),
         "total_minutes": ensure_float(machine_hours.total_minutes, "total_minutes"),
         "total_hours": ensure_float(machine_hours.total_hours, "total_hours"),
     }
 
-    # Add critical OD tracking for breakdown visibility
+    # Add critical OD tracking for breakdown visibility (if tolerance is specified)
     critical_od_tol = ensure_float(machine_hours.critical_od_tolerance_in, "critical_od_tolerance_in")
     if critical_od_tol > 0:
-        critical_od_grinding = ensure_float(machine_hours.critical_od_grinding_min, "critical_od_grinding_min")
+        # Store detailed breakdown for display (total_grinding already includes these minutes)
         result["critical_od_tolerance_in"] = critical_od_tol
-        result["critical_od_grinding_minutes"] = critical_od_grinding
+        result["critical_od_grinding_minutes"] = ensure_float(machine_hours.critical_od_grinding_min, "critical_od_grinding_min")
         result["critical_od_inspection_minutes"] = ensure_float(machine_hours.critical_od_inspection_min, "critical_od_inspection_min")
-        # Include critical OD grinding in total grinding
-        result["total_grinding_minutes"] += critical_od_grinding
 
     return result
 
