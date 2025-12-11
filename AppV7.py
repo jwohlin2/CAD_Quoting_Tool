@@ -2337,9 +2337,9 @@ class AppV7:
             # Finishing / Deburr with detailed breakdown (per-unit cost)
             if labor_hours.finishing_detail and len(labor_hours.finishing_detail) > 0:
                 if quantity > 1:
-                    report.append(f"  Finishing / Deburr (Total):      {labor_hours.finishing_minutes:>10.2f} minutes  (PER UNIT)")
+                    report.append(f"  Finishing / Deburr (per unit, total): {labor_hours.finishing_minutes:>10.2f} minutes")
                 else:
-                    report.append(f"  Finishing / Deburr (Total):      {labor_hours.finishing_minutes:>10.2f} minutes")
+                    report.append(f"  Finishing / Deburr (Total):            {labor_hours.finishing_minutes:>10.2f} minutes")
                 # Show detail breakdown with indentation - align minutes with main items
                 for detail in labor_hours.finishing_detail:
                     label = detail.get('label', 'Unknown operation')
@@ -2348,9 +2348,9 @@ class AppV7:
                     report.append(f"    • {label:<33} {minutes:>10.1f} minutes")
             else:
                 if quantity > 1:
-                    report.append(f"  Finishing / Deburr:              {labor_hours.finishing_minutes:>10.2f} minutes  (PER UNIT)")
+                    report.append(f"  Finishing / Deburr (per unit):        {labor_hours.finishing_minutes:>10.2f} minutes")
                 else:
-                    report.append(f"  Finishing / Deburr:              {labor_hours.finishing_minutes:>10.2f} minutes")
+                    report.append(f"  Finishing / Deburr:                   {labor_hours.finishing_minutes:>10.2f} minutes")
 
             # Show misc overhead if non-zero
             if abs(labor_hours.misc_overhead_minutes) > 0.01:
