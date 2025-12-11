@@ -211,7 +211,8 @@ class AppV7:
         # Cached totals for summary display
         self.direct_cost_total: Optional[float] = None
         self.machine_cost_total: Optional[float] = None
-        self.labor_cost_total: Optional[float] = None
+        self.labor_cost_total: Optional[float] = None  # Per-unit labor cost
+        self.labor_cost_job: Optional[float] = None  # Job-level labor cost (for qty > 1)
 
         # Default profit margin applied to the final price
         self.margin_rate: float = 0.15
@@ -1755,7 +1756,7 @@ class AppV7:
                     report.append(f"  Etch / marking:                  {machine_hours.total_etch_minutes:>10.2f} minutes")
                 if machine_hours.total_polish_minutes > 0:
                     report.append(f"  Polish contour:                  {machine_hours.total_polish_minutes:>10.2f} minutes")
-                report.append(f"  Other (chamfer/polish/saw):      {machine_hours.total_other_minutes:>10.2f} minutes")
+                report.append(f"  Other (chamfer/saw):             {machine_hours.total_other_minutes:>10.2f} minutes")
                 report.append(f"  Inspection:                      {machine_hours.total_cmm_minutes:>10.2f} minutes")
                 report.append("-" * 74)
                 report.append(f"  TOTAL MACHINE TIME:              {machine_hours.total_minutes:>10.2f} minutes")
@@ -2291,6 +2292,7 @@ class AppV7:
     def _generate_labor_hours_report(self, quote_data=None) -> str:
         """Generate formatted labor hours report using QuoteData."""
         self.labor_cost_total = None
+        self.labor_cost_job = None
         if not self.cad_file_path:
             return "No CAD file loaded. Please load a CAD file first."
 
@@ -2385,6 +2387,7 @@ class AppV7:
                 report.append(f"  Labor Cost (per unit):           ${labor_cost_per_unit:>9.2f}")
             else:
                 labor_cost_per_unit = round((labor_hours.total_minutes / 60.0) * labor_rate, 2)
+                total_job_labor_cost = labor_cost_per_unit  # For qty=1, job and per-unit are the same
                 report.append(f"  TOTAL LABOR TIME:                {labor_hours.total_minutes:>10.2f} minutes")
                 report.append(f"                                   {labor_hours.total_hours:>10.2f} hours")
                 report.append("")
@@ -2394,12 +2397,15 @@ class AppV7:
             report.append("=" * 74)
             report.append("")
 
+            # Store both job-level and per-unit costs for PART COST SUMMARY
             self.labor_cost_total = labor_cost_per_unit
+            self.labor_cost_job = total_job_labor_cost
 
             return "\n".join(report)
 
         except Exception as e:
             self.labor_cost_total = None
+            self.labor_cost_job = None
             import traceback
             return f"Error generating labor hours report:\n{str(e)}\n\n{traceback.format_exc()}"
 
@@ -2586,9 +2592,20 @@ class AppV7:
                 # Part cost summary
                 if part.cost_summary:
                     # Calculate job-level costs
+                    # For direct and machine costs, multiply per-unit by quantity
                     direct_cost_job = (part.cost_summary.direct_cost or 0) * part.quantity
                     machine_cost_job = (part.cost_summary.machine_cost or 0) * part.quantity
-                    labor_cost_job = (part.cost_summary.labor_cost or 0) * part.quantity
+
+                    # For labor cost, use the job-level total from LABOR HOURS block (not per-unit * qty)
+                    # This ensures the PART COST SUMMARY matches the LABOR HOURS block exactly
+                    if self.labor_cost_job is not None:
+                        labor_cost_job = self.labor_cost_job
+                        labor_cost_per_unit = self.labor_cost_total or 0
+                    else:
+                        # Fallback for legacy or missing data
+                        labor_cost_job = (part.cost_summary.labor_cost or 0) * part.quantity
+                        labor_cost_per_unit = part.cost_summary.labor_cost or 0
+
                     total_cost_job = (part.cost_summary.total_cost or 0) * part.quantity
                     margin_amount_job = (part.cost_summary.margin_amount or 0) * part.quantity
                     final_price_job = (part.cost_summary.final_price or 0) * part.quantity
@@ -2601,7 +2618,7 @@ class AppV7:
                         "=" * 74,
                         self._format_cost_summary_line_with_unit("Direct Cost", direct_cost_job, part.cost_summary.direct_cost or 0),
                         self._format_cost_summary_line_with_unit("Machine Cost", machine_cost_job, part.cost_summary.machine_cost or 0),
-                        self._format_cost_summary_line_with_unit("Labor Cost", labor_cost_job, part.cost_summary.labor_cost or 0),
+                        self._format_cost_summary_line_with_unit("Labor Cost", labor_cost_job, labor_cost_per_unit),
                         "-" * 74,
                         self._format_cost_summary_line_with_unit("Total Estimated Cost", total_cost_job, part.cost_summary.total_cost or 0),
                         self._format_cost_summary_line(f"Margin ({part.cost_summary.margin_rate:.0%})", margin_amount_job),
@@ -2963,7 +2980,13 @@ class AppV7:
         # Calculate job-level costs
         direct_cost_job = (direct_cost_per_unit or 0.0) * quantity
         machine_cost_job = (machine_cost_per_unit or 0.0) * quantity
-        labor_cost_job = (labor_cost_per_unit or 0.0) * quantity
+
+        # For labor cost, use the job-level total from LABOR HOURS block (not per-unit * qty)
+        if self.labor_cost_job is not None:
+            labor_cost_job = self.labor_cost_job
+        else:
+            # Fallback: calculate from per-unit if job-level not available
+            labor_cost_job = (labor_cost_per_unit or 0.0) * quantity
 
         # Show costs with job total and per-unit in parentheses
         summary_lines.extend([

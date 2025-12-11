@@ -1261,17 +1261,19 @@ def calculate_total_scrap(
 
     # Calculate percentages
     # Use the same formula for both cylindrical and plate parts:
-    # Scrap % = total_scrap / starting_stock (catalog volume)
-    #
-    # This matches the displayed weights:
     # Scrap % = Scrap Weight / Starting Weight × 100
     #
-    # Previous approach tried to exclude "stock prep scrap" for cylindrical parts,
-    # but this was incorrect because stock prep scrap includes diameter reduction
-    # (which IS machining scrap), not just length waste.
+    # This ensures the percentage matches the displayed weights (rounded to 2 decimal places).
+    # Round to 1 decimal place after calculation to match printed format.
     #
-    scrap_percentage = (total_scrap_volume / mcmaster_volume * 100) if mcmaster_volume > 0 else 0
-    utilization_percentage = (final_part_volume / mcmaster_volume * 100) if mcmaster_volume > 0 else 0
+    # Previous approach used volumes, which could diverge from the displayed weights
+    # due to rounding differences.
+    #
+    scrap_percentage = (total_scrap_weight / mcmaster_weight * 100) if mcmaster_weight > 0 else 0
+    scrap_percentage = round(scrap_percentage, 1)  # Round to 1 decimal place
+
+    utilization_percentage = (final_part_weight / mcmaster_weight * 100) if mcmaster_weight > 0 else 0
+    utilization_percentage = round(utilization_percentage, 1)  # Round to 1 decimal place
 
     # Clamp scrap percentage to [0, 100] to prevent display issues
     scrap_percentage = max(0.0, min(100.0, scrap_percentage))
