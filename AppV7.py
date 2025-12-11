@@ -1572,8 +1572,8 @@ class AppV7:
             scrap_info = quote_data.scrap_info
             cost_breakdown = quote_data.direct_cost_breakdown
 
-            # Get quantity for total cost calculation (from temp variable set in main thread)
-            quantity = getattr(self, '_temp_quantity', 1)
+            # Get quantity for total cost calculation - use quote_data.quantity for consistency
+            quantity = quote_data.quantity
 
             # Check if overrides were used (read from temp variables set in main thread)
             material_override = getattr(self, '_temp_material_override', None)
@@ -1692,13 +1692,13 @@ class AppV7:
             if stock_info.mcmaster_price is not None:
                 self.direct_cost_total = cost_breakdown.net_material_cost
                 if quantity > 1:
-                    report.append(f"  Total Material Cost (per unit):".ljust(50) + f"${cost_breakdown.net_material_cost:>23.2f}")
-                    report.append(f"  Total Material Cost ({quantity} units):".ljust(50) + f"${cost_breakdown.net_material_cost * quantity:>23.2f}")
+                    report.append(f"  Total Material Cost (per blank):".ljust(50) + f"${cost_breakdown.net_material_cost:>23.2f}")
+                    report.append(f"  Total Material Cost (job, {quantity} units):".ljust(50) + f"${cost_breakdown.net_material_cost * quantity:>23.2f}")
                 else:
-                    report.append(f"  Total Material Cost :".ljust(50) + f"${cost_breakdown.net_material_cost:>23.2f}")
+                    report.append(f"  Total Material Cost (per blank):".ljust(50) + f"${cost_breakdown.net_material_cost:>23.2f}")
             else:
                 self.direct_cost_total = None
-                report.append(f"  Total Material Cost :".ljust(50) + "Price N/A".rjust(24))
+                report.append(f"  Total Material Cost (per blank):".ljust(50) + "Price N/A".rjust(24))
 
             report.append("")
 
@@ -2373,9 +2373,10 @@ class AppV7:
                 per_unit_labor_min_avg = total_job_labor_min / quantity
                 per_unit_labor_hours_avg = per_unit_labor_min_avg / 60.0
 
-                # Calculate costs from actual minutes
-                total_job_labor_cost = round((total_job_labor_min / 60.0) * labor_rate, 2)
-                labor_cost_per_unit = round((per_unit_labor_min_avg / 60.0) * labor_rate, 2)
+                # Calculate costs - use single source of truth to avoid rounding mismatches
+                # Job total is calculated first, then per-unit is derived from it
+                total_job_labor_cost = (total_job_labor_min / 60.0) * labor_rate
+                labor_cost_per_unit = total_job_labor_cost / quantity
 
                 report.append(f"  Total Labor Time (job, {quantity} units):  {total_job_labor_min:>10.2f} minutes ({total_job_labor_hours:.2f} hours)")
                 report.append(f"  Labor Time (per unit, averaged):    {per_unit_labor_min_avg:>10.2f} minutes ({per_unit_labor_hours_avg:.2f} hours)")
