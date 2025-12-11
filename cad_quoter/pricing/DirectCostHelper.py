@@ -836,6 +836,9 @@ def calculate_machining_scrap_from_cad(
     total_hole_volume = 0.0
     hole_details = []
 
+    # Get max part dimension for sanity checking
+    max_part_dim = max(part_L, part_W, part_T)
+
     for hole in hole_table:
         hole_id = hole.get('HOLE', '?')
         ref_diam_str = hole.get('REF_DIAM', '')
@@ -844,6 +847,10 @@ def calculate_machining_scrap_from_cad(
 
         # Parse diameter
         s = ref_diam_str.replace("Ø", "").replace("∅", "").strip()
+
+        # Remove brackets like "[Ø.3031"]"
+        s = s.replace("[", "").replace("]", "").replace('"', '').strip()
+
         if "/" in s:
             try:
                 dia = float(Fraction(s))
@@ -855,6 +862,22 @@ def calculate_machining_scrap_from_cad(
             except:
                 dia = 0.0
 
+        # SANITY CHECK: If hole diameter > max part dimension, likely missing decimal point
+        # Example: "7.700" should be "0.7700" for a 2.5" part
+        if dia > max_part_dim and dia >= 1.0:
+            # Check if adding leading decimal point makes more sense
+            potential_dia = dia / 10.0  # Convert 7.7 -> 0.77
+            if potential_dia <= max_part_dim:
+                import logging
+                logger = logging.getLogger(__name__)
+                logger.warning(
+                    f"Hole {hole_id}: Diameter {dia:.3f}\" > part max dimension {max_part_dim:.3f}\". "
+                    f"Likely missing decimal point. Correcting to {potential_dia:.4f}\""
+                )
+                if verbose:
+                    print(f"  WARNING: Hole {hole_id} diameter {dia:.3f}\" > part size. Correcting to {potential_dia:.4f}\"")
+                dia = potential_dia
+
         # Determine depth
         if 'THRU' in description:
             depth = part_T
@@ -864,6 +887,12 @@ def calculate_machining_scrap_from_cad(
                 depth = float(depth_match.group(1))
             else:
                 depth = part_T * 0.5  # Default
+
+        # Sanity check depth
+        if depth > part_T:
+            if verbose:
+                print(f"  WARNING: Hole {hole_id} depth {depth:.3f}\" > part thickness {part_T:.3f}\". Capping to thickness.")
+            depth = part_T
 
         # Calculate volume for this hole group (cylinder)
         radius = dia / 2
@@ -886,6 +915,26 @@ def calculate_machining_scrap_from_cad(
 
     # Calculate final part volume (after holes)
     part_final_volume = part_envelope_volume - total_hole_volume
+
+    # VALIDATION: Prevent negative part volume (impossible!)
+    if part_final_volume < 0:
+        import logging
+        logger = logging.getLogger(__name__)
+        logger.error(
+            f"CRITICAL: Negative part volume detected! "
+            f"Envelope={part_envelope_volume:.4f} in³, Holes={total_hole_volume:.4f} in³, "
+            f"Result={part_final_volume:.4f} in³. "
+            f"Hole extraction likely incorrect. Clamping to 0 and capping holes to envelope volume."
+        )
+        if verbose:
+            print(f"\n*** ERROR: Part volume would be NEGATIVE ({part_final_volume:.4f} in³) ***")
+            print(f"    Part envelope: {part_envelope_volume:.4f} in³")
+            print(f"    Total holes:   {total_hole_volume:.4f} in³")
+            print(f"    Capping hole volume to envelope volume to prevent impossible result.")
+
+        # Cap hole volume to envelope volume
+        total_hole_volume = part_envelope_volume * 0.95  # Leave 5% material
+        part_final_volume = part_envelope_volume - total_hole_volume
 
     # Total machining scrap
     total_machining_scrap = face_milling_scrap + total_hole_volume
@@ -1206,6 +1255,25 @@ def calculate_total_scrap(
     mcmaster_weight = round(mcmaster_volume * density, 2)
     desired_stock_weight = round(desired_volume * density, 2)  # Weight after stock prep, before machining
     final_part_weight = round(final_part_volume * density, 2)
+
+    # VALIDATION: Part weight cannot exceed stock weight (physically impossible!)
+    if final_part_weight > mcmaster_weight:
+        import logging
+        logger = logging.getLogger(__name__)
+        logger.error(
+            f"CRITICAL: Part weight ({final_part_weight:.2f} lbs) > Stock weight ({mcmaster_weight:.2f} lbs)! "
+            f"Part volume: {final_part_volume:.4f} in³, McMaster volume: {mcmaster_volume:.4f} in³. "
+            f"This is impossible - a part cannot weigh more than the starting stock. "
+            f"Capping part weight to stock weight."
+        )
+        if verbose:
+            print(f"\n*** ERROR: Part weight ({final_part_weight:.2f} lbs) > Stock weight ({mcmaster_weight:.2f} lbs) ***")
+            print(f"    This is impossible - capping part weight to stock weight.")
+
+        # Cap part weight to stock weight
+        final_part_weight = mcmaster_weight
+        # Recalculate part volume from capped weight
+        final_part_volume = final_part_weight / density if density > 0 else final_part_volume
 
     VOLUME_TOLERANCE = 0.01  # cubic inches
 

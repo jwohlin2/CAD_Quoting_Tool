@@ -2263,7 +2263,7 @@ class AppV7:
                 machine_cost_per_unit = round((machine_hours.total_minutes / 60.0) * machine_rate, 2)
 
                 report.append(f"  Total Machine Time (job, {quantity} units): {total_job_machine_min:>10.2f} min ({total_job_machine_hours:.2f} hours)")
-                report.append(f"  Machine Time (per unit, averaged):    {machine_hours.total_minutes:>10.2f} min ({machine_hours.total_hours:.2f} hours)")
+                report.append(f"  Machine Time (per unit):        {machine_hours.total_minutes:>10.2f} min ({machine_hours.total_hours:.2f} hours)")
             else:
                 total_job_machine_cost = machine_hours.machine_cost
                 machine_cost_per_unit = machine_hours.machine_cost
@@ -2381,7 +2381,7 @@ class AppV7:
                 labor_cost_per_unit = total_job_labor_cost / quantity
 
                 report.append(f"  Total Labor Time (job, {quantity} units):  {total_job_labor_min:>10.2f} minutes ({total_job_labor_hours:.2f} hours)")
-                report.append(f"  Labor Time (per unit, averaged):    {per_unit_labor_min_avg:>10.2f} minutes ({per_unit_labor_hours_avg:.2f} hours)")
+                report.append(f"  Labor Time (per unit):         {per_unit_labor_min_avg:>10.2f} minutes ({per_unit_labor_hours_avg:.2f} hours)")
                 report.append("")
                 report.append(f"  TOTAL LABOR COST (job, {quantity} units):   ${total_job_labor_cost:>9.2f} {labor_rate_label}")
                 report.append(f"  Labor Cost (per unit):           ${labor_cost_per_unit:>9.2f}")
@@ -2606,9 +2606,17 @@ class AppV7:
                         labor_cost_job = (part.cost_summary.labor_cost or 0) * part.quantity
                         labor_cost_per_unit = part.cost_summary.labor_cost or 0
 
-                    total_cost_job = (part.cost_summary.total_cost or 0) * part.quantity
-                    margin_amount_job = (part.cost_summary.margin_amount or 0) * part.quantity
-                    final_price_job = (part.cost_summary.final_price or 0) * part.quantity
+                    # Calculate total cost by summing the three job-level costs
+                    # (Don't re-multiply by quantity - the components are already job totals)
+                    total_cost_job = direct_cost_job + machine_cost_job + labor_cost_job
+                    total_cost_per_unit = total_cost_job / part.quantity if part.quantity > 0 else 0
+
+                    # Calculate margin and final price from corrected totals
+                    margin_rate = part.cost_summary.margin_rate or 0.15
+                    margin_amount_per_unit = total_cost_per_unit * margin_rate
+                    margin_amount_job = margin_amount_per_unit * part.quantity
+                    final_price_per_unit = total_cost_per_unit + margin_amount_per_unit
+                    final_price_job = final_price_per_unit * part.quantity
 
                     part_summary = [
                         "",
@@ -2620,9 +2628,9 @@ class AppV7:
                         self._format_cost_summary_line_with_unit("Machine Cost", machine_cost_job, part.cost_summary.machine_cost or 0),
                         self._format_cost_summary_line_with_unit("Labor Cost", labor_cost_job, labor_cost_per_unit),
                         "-" * 74,
-                        self._format_cost_summary_line_with_unit("Total Estimated Cost", total_cost_job, part.cost_summary.total_cost or 0),
-                        self._format_cost_summary_line(f"Margin ({part.cost_summary.margin_rate:.0%})", margin_amount_job),
-                        self._format_cost_summary_line_with_unit("Final Price", final_price_job, part.cost_summary.final_price or 0),
+                        self._format_cost_summary_line_with_unit("Total Estimated Cost", total_cost_job, total_cost_per_unit),
+                        self._format_cost_summary_line(f"Margin ({margin_rate:.0%})", margin_amount_job),
+                        self._format_cost_summary_line_with_unit("Final Price", final_price_job, final_price_per_unit),
                     ]
 
                     part_summary.append("")
